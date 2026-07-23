@@ -3,7 +3,9 @@ use crate::event::{build_event_observability, categorize_event, infer_severity};
 use crate::graph::Workflow;
 use crate::intent::OperatingContextSpec;
 use anyhow::{Context, Result};
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
+use rusqlite::{
+    params, params_from_iter, Connection, OptionalExtension, Row, Transaction, TransactionBehavior,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -58,6 +60,40 @@ pub struct GlobalEventWrite<'a> {
     pub origin: &'a str,
     pub status: &'a str,
     pub data: &'a serde_json::Value,
+    pub tenant_context: &'a serde_json::Value,
+}
+
+pub struct RuntimeSecretVaultWrite<'a> {
+    pub vault_reference: &'a str,
+    pub workflow_id: Option<&'a str>,
+    pub scope: &'a str,
+    pub provider: &'a str,
+    pub kind: &'a str,
+    pub classification: &'a str,
+    pub secret_value: &'a str,
+    pub value_sha256: &'a str,
+    pub value_len: usize,
+    pub source: &'a str,
+    pub origin: &'a str,
+    pub tenant_context: &'a serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeSecretVaultResolve {
+    pub vault_reference: String,
+    pub workflow_id: Option<String>,
+    pub secret_value: String,
+    pub value_sha256: String,
+    pub value_len: usize,
+    pub audit_event_id: i64,
+}
+
+pub struct RuntimeSecretVaultAccess<'a> {
+    pub vault_reference: &'a str,
+    pub workflow_id: Option<&'a str>,
+    pub requester: &'a str,
+    pub allowed: bool,
+    pub origin: &'a str,
     pub tenant_context: &'a serde_json::Value,
 }
 
@@ -634,6 +670,21 @@ impl ForgeStore {
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
+    pub fn with_transaction<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        match operation() {
+            Ok(value) => {
+                transaction.commit()?;
+                Ok(value)
+            }
+            Err(error) => {
+                drop(transaction);
+                Err(error)
+            }
+        }
+    }
+
     fn migrate(&self) -> Result<()> {
         self.connection.execute_batch(
             r#"
@@ -681,7 +732,32 @@ impl ForgeStore {
             CREATE INDEX IF NOT EXISTS idx_global_events_tenant
                 ON global_events (organization_id, brand_id, product_id, id);
             CREATE INDEX IF NOT EXISTS idx_global_events_kind
-                ON global_events (kind, id);
+            ON global_events (kind, id);
+            CREATE TABLE IF NOT EXISTS runtime_secret_vault (
+                vault_key TEXT PRIMARY KEY,
+                vault_reference TEXT NOT NULL,
+                workflow_id TEXT NOT NULL DEFAULT '',
+                scope TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                classification TEXT NOT NULL,
+                secret_value TEXT NOT NULL,
+                value_sha256 TEXT NOT NULL,
+                value_len INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                organization_id TEXT NOT NULL,
+                brand_id TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                tenant_context_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_runtime_secret_vault_reference
+            ON runtime_secret_vault (vault_reference, workflow_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_secret_vault_tenant
+            ON runtime_secret_vault (organization_id, brand_id, product_id, vault_reference);
             CREATE TABLE IF NOT EXISTS event_observability_index (
                 global_event_id INTEGER PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
@@ -1029,6 +1105,30 @@ impl ForgeStore {
                 data_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS worktree_states (
+                id TEXT PRIMARY KEY,
+                repository_root TEXT NOT NULL,
+                worktree_root TEXT NOT NULL UNIQUE,
+                branch TEXT,
+                head TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_worktree_states_repository
+                ON worktree_states (repository_root, worktree_root);
+            CREATE INDEX IF NOT EXISTS idx_worktree_states_branch
+                ON worktree_states (branch, updated_at);
+            CREATE TABLE IF NOT EXISTS worktree_sandbox_states (
+                id TEXT PRIMARY KEY,
+                worktree_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_worktree_sandbox_states_worktree
+                ON worktree_sandbox_states (worktree_id, status, updated_at);
             CREATE TABLE IF NOT EXISTS runs (
                 id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
@@ -1947,6 +2047,191 @@ impl ForgeStore {
             )?;
         }
         Ok(())
+    }
+
+    pub fn save_runtime_secret(&self, write: RuntimeSecretVaultWrite<'_>) -> Result<i64> {
+        let workflow_key = write.workflow_id.unwrap_or("");
+        let vault_key = runtime_secret_vault_key(workflow_key, write.vault_reference);
+        let organization_id = tenant_context_identity_id(write.tenant_context, "organization");
+        let brand_id = tenant_context_identity_id(write.tenant_context, "brand");
+        let product_id = tenant_context_identity_id(write.tenant_context, "product");
+        let user_id = tenant_context_identity_id(write.tenant_context, "user");
+        let channel_id = tenant_context_identity_id(write.tenant_context, "channel");
+        self.connection.execute(
+            r#"
+            INSERT INTO runtime_secret_vault (
+                vault_key, vault_reference, workflow_id, scope, provider, kind,
+                classification, secret_value, value_sha256, value_len, source,
+                organization_id, brand_id, product_id, user_id, channel_id,
+                tenant_context_json
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            ON CONFLICT(vault_key) DO UPDATE SET
+                scope=excluded.scope,
+                provider=excluded.provider,
+                kind=excluded.kind,
+                classification=excluded.classification,
+                secret_value=excluded.secret_value,
+                value_sha256=excluded.value_sha256,
+                value_len=excluded.value_len,
+                source=excluded.source,
+                organization_id=excluded.organization_id,
+                brand_id=excluded.brand_id,
+                product_id=excluded.product_id,
+                user_id=excluded.user_id,
+                channel_id=excluded.channel_id,
+                tenant_context_json=excluded.tenant_context_json,
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+            params![
+                vault_key,
+                write.vault_reference,
+                workflow_key,
+                write.scope,
+                write.provider,
+                write.kind,
+                write.classification,
+                write.secret_value,
+                write.value_sha256,
+                write.value_len as i64,
+                write.source,
+                organization_id,
+                brand_id,
+                product_id,
+                user_id,
+                channel_id,
+                serde_json::to_string(write.tenant_context)?,
+            ],
+        )?;
+        let data = serde_json::json!({
+            "schema_version": "forge.runtime.secret_vault.audit.v1",
+            "action": "write",
+            "vault_reference": write.vault_reference,
+            "workflow_id": write.workflow_id,
+            "scope": write.scope,
+            "provider": write.provider,
+            "kind": write.kind,
+            "classification": write.classification,
+            "source": write.source,
+            "value_sha256": write.value_sha256,
+            "value_len": write.value_len,
+            "redaction": "secret_value_redacted",
+        });
+        self.insert_global_event(GlobalEventWrite {
+            source: "runtime_secret_vault",
+            source_id: &vault_key,
+            workflow_id: write.workflow_id,
+            kind: "runtime_secret_vault_write",
+            origin: write.origin,
+            status: "stored",
+            data: &data,
+            tenant_context: write.tenant_context,
+        })
+    }
+
+    pub fn resolve_runtime_secret(
+        &self,
+        access: RuntimeSecretVaultAccess<'_>,
+    ) -> Result<RuntimeSecretVaultResolve> {
+        let workflow_key = access.workflow_id.unwrap_or("");
+        let organization_id = tenant_context_identity_id(access.tenant_context, "organization");
+        let brand_id = tenant_context_identity_id(access.tenant_context, "brand");
+        let product_id = tenant_context_identity_id(access.tenant_context, "product");
+        let record = self
+            .connection
+            .query_row(
+                r#"
+                SELECT workflow_id, secret_value, value_sha256, value_len
+                FROM runtime_secret_vault
+                WHERE vault_reference = ?1
+                  AND workflow_id IN (?2, '')
+                  AND organization_id = ?3
+                  AND brand_id = ?4
+                  AND product_id = ?5
+                ORDER BY CASE WHEN workflow_id = ?2 THEN 0 ELSE 1 END
+                LIMIT 1
+                "#,
+                params![
+                    access.vault_reference,
+                    workflow_key,
+                    organization_id,
+                    brand_id,
+                    product_id,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let status = if record.is_some() {
+            if access.allowed {
+                "allowed"
+            } else {
+                "denied"
+            }
+        } else {
+            "missing"
+        };
+        let (_resolved_workflow_id, value_sha256, value_len) = record
+            .as_ref()
+            .map(|(workflow_id, _secret_value, value_sha256, value_len)| {
+                (
+                    workflow_id.clone(),
+                    value_sha256.clone(),
+                    (*value_len).max(0) as usize,
+                )
+            })
+            .unwrap_or_else(|| (workflow_key.to_string(), String::new(), 0));
+        let data = serde_json::json!({
+            "schema_version": "forge.runtime.secret_vault.audit.v1",
+            "action": "resolve",
+            "vault_reference": access.vault_reference,
+            "workflow_id": access.workflow_id,
+            "requester": access.requester,
+            "result": status,
+            "value_sha256": value_sha256,
+            "value_len": value_len,
+            "redaction": "secret_value_redacted",
+        });
+        let audit_event_id = self.insert_global_event(GlobalEventWrite {
+            source: "runtime_secret_vault",
+            source_id: access.vault_reference,
+            workflow_id: access.workflow_id,
+            kind: "runtime_secret_vault_access",
+            origin: access.origin,
+            status,
+            data: &data,
+            tenant_context: access.tenant_context,
+        })?;
+        let Some((resolved_workflow_id, secret_value, value_sha256, value_len)) = record else {
+            anyhow::bail!(
+                "runtime secret vault reference `{}` was not found for current tenant",
+                access.vault_reference
+            );
+        };
+        if !access.allowed {
+            anyhow::bail!(
+                "runtime secret vault access denied for `{}`",
+                access.vault_reference
+            );
+        }
+        Ok(RuntimeSecretVaultResolve {
+            vault_reference: access.vault_reference.to_string(),
+            workflow_id: if resolved_workflow_id.is_empty() {
+                None
+            } else {
+                Some(resolved_workflow_id)
+            },
+            secret_value,
+            value_sha256,
+            value_len: value_len.max(0) as usize,
+            audit_event_id,
+        })
     }
 
     pub fn load_global_events(&self) -> Result<Vec<StoredGlobalEventRecord>> {
@@ -4506,6 +4791,114 @@ impl ForgeStore {
         Ok(states)
     }
 
+    pub fn save_worktree_state(
+        &self,
+        id: &str,
+        repository_root: &str,
+        worktree_root: &str,
+        branch: Option<&str>,
+        head: &str,
+        data: &serde_json::Value,
+    ) -> Result<()> {
+        self.connection.execute(
+            r#"
+            INSERT INTO worktree_states (
+                id,
+                repository_root,
+                worktree_root,
+                branch,
+                head,
+                data_json,
+                created_at,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                repository_root=excluded.repository_root,
+                worktree_root=excluded.worktree_root,
+                branch=excluded.branch,
+                head=excluded.head,
+                data_json=excluded.data_json,
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+            params![
+                id,
+                repository_root,
+                worktree_root,
+                branch,
+                head,
+                serde_json::to_string(data)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_worktree_states(&self) -> Result<Vec<serde_json::Value>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT data_json FROM worktree_states ORDER BY worktree_root")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut states = Vec::new();
+        for row in rows {
+            states.push(serde_json::from_str(&row?)?);
+        }
+        Ok(states)
+    }
+
+    pub fn save_worktree_sandbox_state(
+        &self,
+        id: &str,
+        worktree_id: &str,
+        status: &str,
+        data: &serde_json::Value,
+    ) -> Result<()> {
+        self.connection.execute(
+            r#"
+            INSERT INTO worktree_sandbox_states (
+                id,
+                worktree_id,
+                status,
+                data_json,
+                created_at,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                worktree_id=excluded.worktree_id,
+                status=excluded.status,
+                data_json=excluded.data_json,
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+            params![id, worktree_id, status, serde_json::to_string(data)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_worktree_sandbox_state(&self, id: &str) -> Result<Option<serde_json::Value>> {
+        let data = self
+            .connection
+            .query_row(
+                "SELECT data_json FROM worktree_sandbox_states WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        data.map(|data| serde_json::from_str(&data).map_err(Into::into))
+            .transpose()
+    }
+
+    pub fn load_worktree_sandbox_states(&self) -> Result<Vec<serde_json::Value>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT data_json FROM worktree_sandbox_states ORDER BY created_at, id")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut states = Vec::new();
+        for row in rows {
+            states.push(serde_json::from_str(&row?)?);
+        }
+        Ok(states)
+    }
+
     pub fn save_run(
         &self,
         id: &str,
@@ -4854,6 +5247,10 @@ impl ForgeStore {
 
 fn default_operating_context_json() -> serde_json::Value {
     serde_json::to_value(OperatingContextSpec::default()).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn runtime_secret_vault_key(workflow_id: &str, vault_reference: &str) -> String {
+    format!("{workflow_id}:{vault_reference}")
 }
 
 struct OperationalTenantColumns {

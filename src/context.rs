@@ -6,10 +6,12 @@ use crate::graph::{
 };
 use crate::intent::OperatingContextSpec;
 use crate::memory::project_memory_governance_report;
+use crate::security::{sanitize_prompt_secrets, SecretSanitizationOptions};
+use crate::worktree::{worktree_context_for_project, WorktreeContextReport};
 use anyhow::{bail, Result};
 use serde::Serialize;
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v30";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
@@ -23,6 +25,7 @@ const CONTEXT_DELTA_SCHEMA_VERSION: &str = "forge.context.delta.v1";
 const ROUTING_ECONOMY_SCHEMA_VERSION: &str = "forge.context.routing_economy.v1";
 const PROMPT_PACKET_SCHEMA_VERSION: &str = "forge.context.prompt_packet.v2";
 const EXECUTOR_PROMPT_PACKET_VERSION: &str = "forge.executor.prompt_packet.v2";
+const CONTEXT_SECRET_GUARDRAIL_SCHEMA_VERSION: &str = "forge.context.secret_guardrail.v1";
 const ORGANIZATION_PROMPT_CONTEXT_SCHEMA_VERSION: &str =
     "forge.context.organization_prompt_context.v1";
 const PERSONALITY_DECISION_SCHEMA_VERSION: &str = "forge.context.personality_decision.v1";
@@ -45,7 +48,7 @@ const ROUTING_POLICY: &str =
     "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_shard_selection_audit_v30";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 4096;
-const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
+const DETERMINISTIC_CONTEXT_BUDGET: usize = 768;
 const ARTIFACT_MANIFEST_CONTEXT_BUDGET: usize = DEFAULT_CONTEXT_BUDGET;
 const FINAL_COMPLETION_AUDIT_CONTEXT_BUDGET: usize = 12000;
 const REWORK_CONTEXT_BUDGET: usize = 4096;
@@ -149,6 +152,8 @@ pub struct ContextPackage {
     pub lineage: ContextLineage,
     pub operating_context: OperatingContextSpec,
     pub memory_policy: ContextMemoryPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeContextReport>,
     pub deferred_discovery: ContextDeferredDiscoveryPlan,
     pub context_router: ContextRouterPlan,
     pub persona: Option<PersonaRoutingSpec>,
@@ -173,6 +178,7 @@ pub struct ContextPackage {
     pub context_sha256: String,
     pub replay_manifest: ContextReplayManifest,
     pub selection_receipt: ContextSelectionReceipt,
+    pub secret_guardrail: ContextSecretGuardrailReport,
     pub prompt_packet: ContextPromptPacket,
     pub routing_fingerprint: ContextRoutingFingerprint,
     pub routing_contract: ContextRoutingContract,
@@ -193,6 +199,19 @@ pub struct ContextPackage {
     pub profile_omitted_sections: Vec<String>,
     pub shards: Vec<ContextShard>,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextSecretGuardrailReport {
+    pub schema_version: String,
+    pub status: String,
+    pub detection_count: usize,
+    pub vault_references: Vec<String>,
+    pub prompt_builder_input: String,
+    pub deterministic_first: bool,
+    pub external_ai_allowed: bool,
+    pub local_ai_fallback_attempted: bool,
+    pub sanitized_context_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1217,6 +1236,20 @@ pub fn build_context_handoff_summary(
     budget: usize,
     checkpoints: &[TaskCheckpoint],
 ) -> Result<ContextHandoffSummary> {
+    build_context_handoff_summary_with_task_projects(
+        workflow,
+        budget,
+        checkpoints,
+        &BTreeMap::new(),
+    )
+}
+
+pub fn build_context_handoff_summary_with_task_projects(
+    workflow: &Workflow,
+    budget: usize,
+    checkpoints: &[TaskCheckpoint],
+    task_project_roots: &BTreeMap<String, PathBuf>,
+) -> Result<ContextHandoffSummary> {
     let mut tasks = Vec::new();
 
     for task in &workflow.tasks {
@@ -1225,8 +1258,13 @@ pub fn build_context_handoff_summary(
             .rev()
             .find(|checkpoint| checkpoint.task_id == task.id)
             .cloned();
-        let package =
-            build_context_package_with_checkpoint(workflow, &task.id, budget, latest_checkpoint)?;
+        let package = build_context_package_with_checkpoint_and_project(
+            workflow,
+            &task.id,
+            budget,
+            latest_checkpoint,
+            task_project_roots.get(&task.id).map(PathBuf::as_path),
+        )?;
         let blocking_refs = package
             .handoff_blockers
             .iter()
@@ -1306,6 +1344,25 @@ pub fn build_context_package_with_checkpoint_and_project(
     latest_checkpoint: Option<TaskCheckpoint>,
     project_root: Option<&Path>,
 ) -> Result<ContextPackage> {
+    let worktree = worktree_context_for_project(project_root)?;
+    build_context_package_with_checkpoint_project_and_worktree(
+        workflow,
+        task_id,
+        budget,
+        latest_checkpoint,
+        project_root,
+        worktree,
+    )
+}
+
+pub fn build_context_package_with_checkpoint_project_and_worktree(
+    workflow: &Workflow,
+    task_id: &str,
+    budget: usize,
+    latest_checkpoint: Option<TaskCheckpoint>,
+    project_root: Option<&Path>,
+    worktree: Option<WorktreeContextReport>,
+) -> Result<ContextPackage> {
     let task = workflow
         .tasks
         .iter()
@@ -1337,6 +1394,10 @@ pub fn build_context_package_with_checkpoint_and_project(
     let operating_context = workflow.intent.operating_context.clone();
     let memory_policy =
         build_context_memory_policy(workflow, task, &operating_context, project_root);
+    let worktree_context = worktree
+        .as_ref()
+        .map(render_worktree_context)
+        .unwrap_or_default();
     let persona = task.persona.clone();
     let persona_profile = persona
         .as_ref()
@@ -1356,8 +1417,11 @@ pub fn build_context_package_with_checkpoint_and_project(
         revision_sources,
         artifact_manifest: &artifact_manifest,
     })?;
-    let (resume_context_status, resume_context_reason) =
-        resume_context_status(latest_checkpoint.as_ref(), workflow_revision);
+    let (resume_context_status, resume_context_reason) = resume_context_status(
+        latest_checkpoint.as_ref(),
+        workflow_revision,
+        worktree.as_ref(),
+    );
     let dependency_refs = build_dependency_refs(workflow, task);
     let dependency_summary = summarize_dependency_refs(&dependency_refs);
     let persona_contract = persona
@@ -1371,12 +1435,13 @@ pub fn build_context_package_with_checkpoint_and_project(
             source: "task",
             priority: priority_for_profile(&profile, "local_objective", 100),
             content: format!(
-                "Task {}: {}\nGoal: {}\nExpected output: {}\nDefinition of ready: {}\n",
+                "Task {}: {}\nGoal: {}\nExpected output: {}\nDefinition of ready: {}\n{}",
                 task.id,
                 task.title,
                 task.goal,
                 task.expected_output,
-                task.work_item.goal_validation.evidence_required.join("; ")
+                task.work_item.goal_validation.evidence_required.join("; "),
+                worktree_context,
             ),
         },
         ContextShardCandidate {
@@ -1486,6 +1551,9 @@ pub fn build_context_package_with_checkpoint_and_project(
     let mut profile_omitted_sections = Vec::new();
     let mut required_sections = Vec::new();
     let mut shards = Vec::new();
+    let mut secret_detection_count = 0usize;
+    let mut secret_vault_references = Vec::new();
+    let mut secret_local_ai_fallback_attempted = false;
 
     candidates.sort_by(|left, right| {
         let left_required = profile.required_sections.contains(&left.section);
@@ -1504,10 +1572,26 @@ pub fn build_context_package_with_checkpoint_and_project(
         if required {
             required_sections.push(candidate.section.to_string());
         }
-        let summary = summarize_shard(&candidate.content);
-        let original_bytes = candidate.content.len();
-        let source_sha256 = hex_sha256(candidate.content.as_bytes());
-        let compressed_content = compress_shard(&candidate, &summary);
+        let secret_report =
+            sanitize_prompt_secrets(&candidate.content, SecretSanitizationOptions::default());
+        secret_detection_count += secret_report.detection_count;
+        secret_local_ai_fallback_attempted |= secret_report.local_ai_fallback_attempted;
+        secret_vault_references.extend(
+            secret_report
+                .detections
+                .iter()
+                .map(|detection| detection.vault_reference.clone()),
+        );
+        let sanitized_candidate = ContextShardCandidate {
+            section: candidate.section,
+            source: candidate.source,
+            priority: candidate.priority,
+            content: secret_report.sanitized_text,
+        };
+        let summary = summarize_shard(&sanitized_candidate.content);
+        let original_bytes = sanitized_candidate.content.len();
+        let source_sha256 = hex_sha256(sanitized_candidate.content.as_bytes());
+        let compressed_content = compress_shard(&sanitized_candidate, &summary);
         let minimum_routable_bytes = original_bytes.min(compressed_content.len());
         let shard_id = build_shard_id(
             &workflow.id,
@@ -1554,11 +1638,11 @@ pub fn build_context_package_with_checkpoint_and_project(
         }
 
         let (included, compressed, selected_content, routing_decision, decision_reason) =
-            if content.len() + candidate.content.len() <= effective_budget {
+            if content.len() + sanitized_candidate.content.len() <= effective_budget {
                 (
                     true,
                     false,
-                    candidate.content.clone(),
+                    sanitized_candidate.content.clone(),
                     "included_full",
                     "full shard fits within remaining effective budget",
                 )
@@ -1630,6 +1714,23 @@ pub fn build_context_package_with_checkpoint_and_project(
     let handoff_ready = handoff_blockers.is_empty();
     let handoff_status = derive_handoff_status(&handoff_blockers);
     let context_sha256 = hex_sha256(content.as_bytes());
+    secret_vault_references.sort();
+    secret_vault_references.dedup();
+    let secret_guardrail = ContextSecretGuardrailReport {
+        schema_version: CONTEXT_SECRET_GUARDRAIL_SCHEMA_VERSION.to_string(),
+        status: if secret_detection_count == 0 {
+            "clean".to_string()
+        } else {
+            "sanitized".to_string()
+        },
+        detection_count: secret_detection_count,
+        vault_references: secret_vault_references,
+        prompt_builder_input: "sanitized_context_shards".to_string(),
+        deterministic_first: true,
+        external_ai_allowed: false,
+        local_ai_fallback_attempted: secret_local_ai_fallback_attempted,
+        sanitized_context_sha256: context_sha256.clone(),
+    };
     let routing_contract =
         build_routing_contract(&profile, budget, effective_budget, &required_sections)?;
     let routing_repair = build_routing_repair(
@@ -1776,6 +1877,7 @@ pub fn build_context_package_with_checkpoint_and_project(
         lineage,
         operating_context,
         memory_policy,
+        worktree,
         deferred_discovery,
         context_router,
         persona,
@@ -1800,6 +1902,7 @@ pub fn build_context_package_with_checkpoint_and_project(
         context_sha256,
         replay_manifest,
         selection_receipt,
+        secret_guardrail,
         prompt_packet,
         routing_fingerprint,
         routing_contract,
@@ -4302,6 +4405,48 @@ fn render_operating_context_context(context: &OperatingContextSpec) -> String {
     )
 }
 
+fn render_worktree_context(context: &WorktreeContextReport) -> String {
+    let configured_environment_keys = context
+        .sandbox
+        .environment
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let settings_keys = context.settings.keys().cloned().collect::<Vec<_>>();
+    let config_fingerprint = &context.config_sha256[..context.config_sha256.len().min(16)];
+    format!(
+        "Execution worktree: {} root={} branch={} config={} sandbox={}/{}/{}\nRepository root: {}\nHEAD: {}\nDirty: {}\nWorktree config: {} sha256={} approved={}\nBinding drifted: {} reasons={}\nWorktree guardrails: {}\nWorktree sandbox: {}\nWorktree setting keys: {}\n",
+        context.id,
+        context.worktree_root,
+        context.branch.as_deref().unwrap_or("detached"),
+        config_fingerprint,
+        context.sandbox.enabled,
+        context.sandbox.runtime,
+        context.sandbox.network,
+        context.repository_root,
+        context.head,
+        context.dirty,
+        context.config_status,
+        context.config_sha256,
+        context.config_approved,
+        context.binding_drifted,
+        join_or_none(&context.binding_drift_reasons),
+        serde_json::to_string(&context.guardrails).unwrap_or_else(|_| "{}".to_string()),
+        serde_json::to_string(&serde_json::json!({
+            "enabled": context.sandbox.enabled,
+            "name": context.sandbox.name,
+            "root": context.sandbox.root,
+            "runtime": context.sandbox.runtime,
+            "working_directory": context.sandbox.working_directory,
+            "purposes": context.sandbox.purposes,
+            "network": context.sandbox.network,
+            "configured_environment_keys": configured_environment_keys,
+        }))
+        .unwrap_or_else(|_| "{}".to_string()),
+        settings_keys.join(", "),
+    )
+}
+
 fn build_context_memory_policy(
     workflow: &Workflow,
     task: &AtomicTask,
@@ -4721,6 +4866,7 @@ fn task_status(status: &TaskStatus) -> &'static str {
 fn resume_context_status(
     checkpoint: Option<&TaskCheckpoint>,
     workflow_revision: u64,
+    worktree: Option<&WorktreeContextReport>,
 ) -> (&'static str, &'static str) {
     let Some(checkpoint) = checkpoint else {
         return (
@@ -4728,6 +4874,12 @@ fn resume_context_status(
             "no checkpoint recorded for this workflow task",
         );
     };
+    if worktree.is_some_and(|worktree| worktree.binding_drifted) {
+        return (
+            "checkpoint_stale",
+            "bound worktree HEAD, configuration or identity differs from its binding fingerprint",
+        );
+    }
     if checkpoint.workflow_revision == workflow_revision {
         return (
             "checkpoint_current",
@@ -4751,6 +4903,19 @@ fn summarize_shard(content: &str) -> String {
 }
 
 fn compress_shard(candidate: &ContextShardCandidate, summary: &str) -> String {
+    if candidate.section == "local_objective" {
+        let worktree = candidate
+            .content
+            .lines()
+            .find(|line| line.starts_with("Execution worktree:"));
+        return match worktree {
+            Some(worktree) => {
+                format!("[compressed local_objective]\n{summary}\n{worktree}\n")
+            }
+            None => format!("[compressed local_objective]\n{summary}\n"),
+        };
+    }
+
     if candidate.section == "checkpoint" {
         let state = candidate
             .content

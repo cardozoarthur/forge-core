@@ -427,6 +427,7 @@ dependencies = [
  "clap",
  "crossterm",
  "ed25519-dalek",
+ "libc",
  "predicates",
  "rusqlite",
  "serde",

@@ -1,0 +1,2 @@
+## 2026-07-04T10:38:58Z
+Investigate how the `forge` CLI parsing is implemented (specifically in `src/main.rs` and any other CLI files). Recommend a design/fix strategy to add the `teamwork` subcommand with `--goal` (string), `--detached` (bool), and `--output` (format, enum) options. Write your findings to `/home/arthur/projects/forge-core/.agents/explorer_i1_3/analysis.md`. Do not make any code changes.

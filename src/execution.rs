@@ -1,6 +1,10 @@
 use crate::graph::{TaskStatus, Workflow};
 use crate::interaction::{blocking_human_interaction, HumanInteractionBlocker};
 use crate::scheduler::{plan_parallel_execution, ParallelSchedulePlan};
+use crate::security::{
+    evaluate_runtime_security_guardrails, RuntimeSecurityGuardrailReport,
+    RuntimeSecurityGuardrailRequest,
+};
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::Value;
@@ -50,6 +54,7 @@ pub struct ExecutionReport {
     #[serde(default)]
     pub concurrent_wave_count: usize,
     pub max_concurrent_tasks: usize,
+    pub runtime_security_guardrails: RuntimeSecurityGuardrailReport,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -59,6 +64,23 @@ pub struct ConcurrentWaveReport {
     pub completed_count: usize,
     pub failed_count: usize,
     pub execution_order: Vec<String>,
+}
+
+fn workflow_runtime_security_guardrails(workflow_id: &str) -> RuntimeSecurityGuardrailReport {
+    let command = vec![
+        "forge-workflow-runtime".to_string(),
+        workflow_id.to_string(),
+    ];
+    evaluate_runtime_security_guardrails(RuntimeSecurityGuardrailRequest {
+        subject_kind: "workflow_execution",
+        subject_id: workflow_id,
+        command: &command,
+        dry_run: false,
+        allow_exec: true,
+        forge_first: true,
+        project_policy_status: "workflow_lineage_available",
+        has_lineage: true,
+    })
 }
 
 pub fn run_simulated(workflow: &mut Workflow) -> ExecutionReport {
@@ -91,6 +113,7 @@ pub fn run_simulated(workflow: &mut Workflow) -> ExecutionReport {
             blocked_interaction: Some(blocker),
             concurrent_wave_count: 0,
             max_concurrent_tasks: 0,
+            runtime_security_guardrails: workflow_runtime_security_guardrails(&workflow.id),
         };
     }
 
@@ -119,6 +142,7 @@ fn run_simulated_parallel(workflow: &mut Workflow) -> ExecutionReport {
             blocked_interaction: None,
             concurrent_wave_count: 0,
             max_concurrent_tasks: 0,
+            runtime_security_guardrails: workflow_runtime_security_guardrails(&workflow.id),
         };
     }
 
@@ -249,5 +273,6 @@ fn run_simulated_parallel(workflow: &mut Workflow) -> ExecutionReport {
         blocked_interaction: None,
         concurrent_wave_count: wave_count,
         max_concurrent_tasks: max_conc,
+        runtime_security_guardrails: workflow_runtime_security_guardrails(&workflow.id),
     }
 }

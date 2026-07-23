@@ -1,5 +1,5 @@
 use crate::artifact::hex_sha256;
-use crate::harness::{inspect_cli_harness_shim_status, CliShimStatusOptions};
+use crate::cli_integration::{inspect_cli_harness_shim_status, CliShimStatusOptions};
 use crate::intent::OperatingContextSpec;
 use crate::storage::{ForgeStore, GlobalEventWrite};
 use anyhow::Result;
@@ -98,6 +98,8 @@ pub struct BrainRouterReport {
     pub parallel_agent_policy: String,
     pub hot_swap_policy: String,
     pub selected_brain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_decision: Option<ExecutorModelDecisionReport>,
     pub forge_controlled_surfaces: Vec<String>,
     pub brain_owned_surfaces: Vec<String>,
     pub brains: Vec<BrainCandidate>,
@@ -530,6 +532,88 @@ pub struct ExecutorQuotaPolicyCandidate {
     pub evidence: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ExecutorModelDecisionOptions {
+    pub task: String,
+    pub task_class: String,
+    pub difficulty: String,
+    pub expected_input_tokens: u64,
+    pub expected_output_tokens: u64,
+    pub configured_decider: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutorModelDecisionReport {
+    pub schema_version: String,
+    pub status: String,
+    pub task: String,
+    pub task_class: String,
+    pub difficulty: String,
+    pub task_explanation: String,
+    pub decision_engine: ExecutorModelDecisionEngine,
+    pub useful_public_benchmarks: Vec<ExecutorPublicBenchmark>,
+    pub candidates: Vec<ExecutorModelDecisionCandidate>,
+    pub selected: Option<ExecutorModelDecisionCandidate>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutorModelDecisionEngine {
+    pub mode: String,
+    pub decider: String,
+    pub local_decider_available: bool,
+    pub fallback_decider: String,
+    pub prompt_contract: String,
+    pub decider_invoked: bool,
+    pub decider_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decider_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutorPublicBenchmark {
+    pub name: String,
+    pub source_url: String,
+    pub dimensions: Vec<String>,
+    pub relevance: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutorTokenCostPerMillion {
+    pub input_usd: f64,
+    pub output_usd: f64,
+    pub source_url: String,
+    pub source_label: String,
+    pub as_of: String,
+    pub configurable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutorModelDecisionCandidate {
+    pub executor: String,
+    pub provider: String,
+    pub model: String,
+    pub local_vs_non_local: String,
+    pub selection_status: String,
+    pub public_benchmark_score: f64,
+    pub public_benchmark: ExecutorPublicBenchmark,
+    pub cost_per_million: ExecutorTokenCostPerMillion,
+    pub estimated_cost_usd: f64,
+    pub difficulty_fit_score: f64,
+    pub value_score: f64,
+    pub rationale: String,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ExecutorLlmDecisionResponse {
+    executor: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecutorQuotaAiLimitsImportReport {
     pub schema_version: String,
@@ -631,6 +715,702 @@ pub fn load_executors(store: &ForgeStore) -> Result<ExecutorSyncReport> {
         .map(serde_json::from_value)
         .collect::<Result<Vec<ExecutorState>, _>>()?;
     Ok(build_report("loaded", &store.base_dir(), states, store))
+}
+
+pub fn decide_executor_model_for_task(
+    store: &ForgeStore,
+    options: ExecutorModelDecisionOptions,
+) -> Result<ExecutorModelDecisionReport> {
+    let sync_report = load_executors(store)?;
+    Ok(executor_model_decision_from_policy(
+        &sync_report.executors,
+        &sync_report.quota_policy,
+        options,
+    ))
+}
+
+fn executor_model_decision_from_policy(
+    executors: &[ExecutorState],
+    quota_policy: &ExecutorQuotaPolicyReport,
+    options: ExecutorModelDecisionOptions,
+) -> ExecutorModelDecisionReport {
+    let mut candidates = quota_policy
+        .candidates
+        .iter()
+        .map(|candidate| model_decision_candidate(candidate, &options))
+        .collect::<Vec<_>>();
+    apply_model_decision_scores(&mut candidates, &options);
+    candidates.sort_by(|left, right| {
+        right
+            .value_score
+            .total_cmp(&left.value_score)
+            .then_with(|| left.estimated_cost_usd.total_cmp(&right.estimated_cost_usd))
+            .then_with(|| left.executor.cmp(&right.executor))
+    });
+
+    let mut selected = candidates
+        .iter()
+        .find(|candidate| candidate.selection_status == "eligible")
+        .cloned();
+    let local_decider_available = executor_local_ollama_decider_available(executors);
+    let configured_decider = options
+        .configured_decider
+        .clone()
+        .or_else(|| env::var("FORGE_EXECUTOR_DECIDER").ok())
+        .unwrap_or_else(|| "codex:default".to_string());
+    let mut decision_engine = if local_decider_available {
+        ExecutorModelDecisionEngine {
+            mode: "local_ollama_decider".to_string(),
+            decider: env::var("FORGE_LOCAL_DECIDER_MODEL")
+                .unwrap_or_else(|_| "ollama:qwen3:14b".to_string()),
+            local_decider_available,
+            fallback_decider: configured_decider,
+            prompt_contract: model_decision_prompt_contract(),
+            decider_invoked: false,
+            decider_status: "not_invoked".to_string(),
+            decider_reason: None,
+        }
+    } else {
+        ExecutorModelDecisionEngine {
+            mode: "configured_llm_decider".to_string(),
+            decider: configured_decider.clone(),
+            local_decider_available,
+            fallback_decider: configured_decider,
+            prompt_contract: model_decision_prompt_contract(),
+            decider_invoked: false,
+            decider_status: "not_invoked".to_string(),
+            decider_reason: None,
+        }
+    };
+
+    let mut notes = vec![
+        "Decision uses configured public benchmark and per-million-token cost metadata before spending executor quota.".to_string(),
+        "Benchmark and price defaults are bootstrap data; operator-provided quota/cost observations and environment overrides can replace them.".to_string(),
+    ];
+    if !local_decider_available {
+        notes.push(
+            "local Ollama decider unavailable; using the configured parameterized LLM decider contract."
+                .to_string(),
+        );
+    }
+    if let Some(decider_outcome) =
+        invoke_model_decider(executors, &decision_engine, &options, &candidates)
+    {
+        decision_engine.decider_invoked = decider_outcome.invoked;
+        decision_engine.decider_status = decider_outcome.status;
+        decision_engine.decider_reason = decider_outcome.reason.clone();
+        if let Some(decider_selected) = decider_outcome.selected {
+            selected = Some(decider_selected);
+            notes.push(
+                "LLM/SLM decider response accepted for executor/model selection.".to_string(),
+            );
+        } else if let Some(reason) = decider_outcome.reason {
+            notes.push(reason);
+        }
+    }
+    if selected.is_none() {
+        notes.push(
+            "no eligible executor/model candidate passed authorization and readiness gates."
+                .to_string(),
+        );
+    }
+
+    ExecutorModelDecisionReport {
+        schema_version: "forge.executor_model_decision.v1".to_string(),
+        status: if selected.is_some() {
+            "selected".to_string()
+        } else {
+            "no_eligible_candidate".to_string()
+        },
+        task: options.task.clone(),
+        task_class: options.task_class.clone(),
+        difficulty: options.difficulty.clone(),
+        task_explanation: format!(
+            "task_class={} difficulty={} expected_input_tokens={} expected_output_tokens={} task={}",
+            options.task_class,
+            options.difficulty,
+            options.expected_input_tokens,
+            options.expected_output_tokens,
+            options.task
+        ),
+        decision_engine,
+        useful_public_benchmarks: useful_public_benchmarks_for_task(&options.task_class),
+        candidates,
+        selected,
+        notes,
+    }
+}
+
+fn model_decision_candidate(
+    candidate: &ExecutorQuotaPolicyCandidate,
+    options: &ExecutorModelDecisionOptions,
+) -> ExecutorModelDecisionCandidate {
+    let model = candidate
+        .model
+        .clone()
+        .unwrap_or_else(|| default_model_for_executor(&candidate.executor).to_string());
+    let benchmark = benchmark_for_candidate(candidate, &model, &options.task_class);
+    let cost_per_million = cost_for_candidate(candidate, &model);
+    let estimated_cost_usd = estimate_model_cost_usd(
+        &cost_per_million,
+        options.expected_input_tokens,
+        options.expected_output_tokens,
+    );
+    let difficulty_fit_score = difficulty_fit_score(
+        benchmark_score_for_difficulty(&options.difficulty),
+        benchmark.0,
+    );
+    ExecutorModelDecisionCandidate {
+        executor: candidate.executor.clone(),
+        provider: candidate.provider.clone(),
+        model,
+        local_vs_non_local: candidate.local_vs_non_local.clone(),
+        selection_status: candidate.selection_status.clone(),
+        public_benchmark_score: round_score(benchmark.0),
+        public_benchmark: benchmark.1,
+        cost_per_million,
+        estimated_cost_usd: round_money(estimated_cost_usd),
+        difficulty_fit_score: round_score(difficulty_fit_score),
+        value_score: 0.0,
+        rationale: format!(
+            "{}; benchmark/cost fit is evaluated against task difficulty {}.",
+            candidate.reason, options.difficulty
+        ),
+        evidence: candidate.evidence.clone(),
+    }
+}
+
+fn apply_model_decision_scores(
+    candidates: &mut [ExecutorModelDecisionCandidate],
+    options: &ExecutorModelDecisionOptions,
+) {
+    let max_cost = candidates
+        .iter()
+        .map(|candidate| candidate.estimated_cost_usd)
+        .fold(0.0_f64, f64::max);
+    let (benchmark_weight, cost_weight, locality_weight) =
+        decision_weights_for_difficulty(&options.difficulty);
+    for candidate in candidates {
+        let cost_score = if max_cost <= f64::EPSILON {
+            1.0
+        } else {
+            1.0 - (candidate.estimated_cost_usd / max_cost).clamp(0.0, 1.0)
+        };
+        let locality_score = if candidate.local_vs_non_local == "local" {
+            1.0
+        } else {
+            0.0
+        };
+        let authorization_multiplier = if candidate.selection_status == "eligible" {
+            1.0
+        } else {
+            0.0
+        };
+        candidate.value_score = round_score(
+            authorization_multiplier
+                * candidate.difficulty_fit_score
+                * ((candidate.public_benchmark_score * benchmark_weight)
+                    + (cost_score * cost_weight)
+                    + (locality_score * locality_weight)),
+        );
+    }
+}
+
+fn executor_local_ollama_decider_available(executors: &[ExecutorState]) -> bool {
+    executor_has_authorized_runtime_path_for_id(executors, "ollama")
+        || executors.iter().any(|executor| {
+            executor.id == "opencode"
+                && executor_has_authorized_runtime_path(executor)
+                && executor
+                    .probe_evidence
+                    .iter()
+                    .any(|evidence| evidence.contains("local models (ollama) detected"))
+        })
+}
+
+struct ModelDeciderOutcome {
+    invoked: bool,
+    status: String,
+    reason: Option<String>,
+    selected: Option<ExecutorModelDecisionCandidate>,
+}
+
+fn invoke_model_decider(
+    executors: &[ExecutorState],
+    engine: &ExecutorModelDecisionEngine,
+    options: &ExecutorModelDecisionOptions,
+    candidates: &[ExecutorModelDecisionCandidate],
+) -> Option<ModelDeciderOutcome> {
+    let prompt = build_model_decider_prompt(options, candidates);
+    if engine.mode == "local_ollama_decider" {
+        let ollama = executors.iter().find(|executor| {
+            executor.id == "ollama" && executor_has_authorized_runtime_path(executor)
+        })?;
+        let path = ollama.command_path.as_deref()?;
+        let model = engine
+            .decider
+            .strip_prefix("ollama:")
+            .unwrap_or(engine.decider.as_str());
+        return Some(run_model_decider_command(
+            Path::new(path),
+            &["run", model],
+            &prompt,
+            candidates,
+        ));
+    }
+
+    let Ok(command) = env::var("FORGE_EXECUTOR_DECIDER_CMD") else {
+        return Some(ModelDeciderOutcome {
+            invoked: false,
+            status: "not_configured".to_string(),
+            reason: Some(
+                "configured LLM decider command not configured; deterministic benchmark/cost scoring used."
+                    .to_string(),
+            ),
+            selected: None,
+        });
+    };
+    let parts = command.split_whitespace().collect::<Vec<_>>();
+    let (path, args) = parts.split_first()?;
+    Some(run_model_decider_command(
+        Path::new(path),
+        args,
+        &prompt,
+        candidates,
+    ))
+}
+
+fn run_model_decider_command(
+    path: &Path,
+    args: &[&str],
+    prompt: &str,
+    candidates: &[ExecutorModelDecisionCandidate],
+) -> ModelDeciderOutcome {
+    let timeout = Duration::from_millis(env_u64("FORGE_EXECUTOR_DECIDER_TIMEOUT_MS", 2_000));
+    let mut child = match Command::new(path)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return ModelDeciderOutcome {
+                invoked: false,
+                status: "spawn_failed".to_string(),
+                reason: Some(format!("model decider command failed to start: {error}")),
+                selected: None,
+            };
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(prompt.as_bytes());
+    }
+
+    let start = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if start.elapsed() >= timeout => {
+                timed_out = true;
+                let _ = child.kill();
+                break child.wait().ok();
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(error) => {
+                return ModelDeciderOutcome {
+                    invoked: true,
+                    status: "wait_failed".to_string(),
+                    reason: Some(format!("model decider wait failed: {error}")),
+                    selected: None,
+                };
+            }
+        }
+    };
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_string(&mut stdout);
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+
+    if timed_out {
+        return ModelDeciderOutcome {
+            invoked: true,
+            status: "timed_out".to_string(),
+            reason: Some(
+                "model decider timed out; deterministic benchmark/cost scoring used.".to_string(),
+            ),
+            selected: None,
+        };
+    }
+    if !status.is_some_and(|status| status.success()) {
+        return ModelDeciderOutcome {
+            invoked: true,
+            status: "failed".to_string(),
+            reason: Some(format!(
+                "model decider exited unsuccessfully; stderr={}",
+                stderr.trim()
+            )),
+            selected: None,
+        };
+    }
+
+    let response = match serde_json::from_str::<ExecutorLlmDecisionResponse>(stdout.trim()) {
+        Ok(response) => response,
+        Err(error) => {
+            return ModelDeciderOutcome {
+                invoked: true,
+                status: "invalid_response".to_string(),
+                reason: Some(format!(
+                    "model decider did not return accepted JSON decision: {error}"
+                )),
+                selected: None,
+            };
+        }
+    };
+
+    let selected = select_candidate_from_llm_response(candidates, &response);
+    let Some(selected) = selected else {
+        return ModelDeciderOutcome {
+            invoked: true,
+            status: "rejected".to_string(),
+            reason: response
+                .reason
+                .or_else(|| Some("model decider selected a non-eligible candidate.".to_string())),
+            selected: None,
+        };
+    };
+
+    ModelDeciderOutcome {
+        invoked: true,
+        status: "accepted".to_string(),
+        reason: response.reason,
+        selected: Some(selected),
+    }
+}
+
+fn select_candidate_from_llm_response(
+    candidates: &[ExecutorModelDecisionCandidate],
+    response: &ExecutorLlmDecisionResponse,
+) -> Option<ExecutorModelDecisionCandidate> {
+    let mut selected = candidates
+        .iter()
+        .find(|candidate| {
+            candidate.selection_status == "eligible"
+                && candidate.executor == response.executor
+                && response
+                    .model
+                    .as_ref()
+                    .is_none_or(|model| model == &candidate.model)
+        })
+        .or_else(|| {
+            candidates.iter().find(|candidate| {
+                candidate.selection_status == "eligible" && candidate.executor == response.executor
+            })
+        })?
+        .clone();
+    if let Some(model) = &response.model {
+        selected.model = model.clone();
+    }
+    selected
+        .evidence
+        .push("llm_decider_response_accepted".to_string());
+    if let Some(reason) = &response.reason {
+        selected.rationale = format!("{} Decider reason: {}", selected.rationale, reason);
+    }
+    Some(selected)
+}
+
+fn build_model_decider_prompt(
+    options: &ExecutorModelDecisionOptions,
+    candidates: &[ExecutorModelDecisionCandidate],
+) -> String {
+    let candidate_summaries = candidates
+        .iter()
+        .map(|candidate| {
+            serde_json::json!({
+                "executor": candidate.executor,
+                "provider": candidate.provider,
+                "model": candidate.model,
+                "selection_status": candidate.selection_status,
+                "local_vs_non_local": candidate.local_vs_non_local,
+                "public_benchmark_score": candidate.public_benchmark_score,
+                "cost_per_million": candidate.cost_per_million,
+                "estimated_cost_usd": candidate.estimated_cost_usd,
+                "difficulty_fit_score": candidate.difficulty_fit_score,
+                "value_score": candidate.value_score,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "instruction": "Choose one eligible executor/model for this Forge task. Return only JSON: {\"executor\":\"...\",\"model\":\"...\",\"reason\":\"...\"}.",
+        "task": options.task,
+        "task_class": options.task_class,
+        "difficulty": options.difficulty,
+        "expected_input_tokens": options.expected_input_tokens,
+        "expected_output_tokens": options.expected_output_tokens,
+        "candidates": candidate_summaries,
+    })
+    .to_string()
+}
+
+fn executor_has_authorized_runtime_path_for_id(executors: &[ExecutorState], id: &str) -> bool {
+    executors
+        .iter()
+        .find(|executor| executor.id == id)
+        .map(executor_has_authorized_runtime_path)
+        .unwrap_or(false)
+}
+
+fn default_model_for_executor(executor: &str) -> &'static str {
+    match executor {
+        "codex" => "gpt-5.4",
+        "agy" | "antigravity" => "agy-default",
+        "opencode" => "google/gemini-2.5-pro",
+        "gemini" => "gemini-2.5-pro",
+        "ollama" => "qwen3:14b",
+        _ => "executor-default",
+    }
+}
+
+fn benchmark_for_candidate(
+    candidate: &ExecutorQuotaPolicyCandidate,
+    model: &str,
+    task_class: &str,
+) -> (f64, ExecutorPublicBenchmark) {
+    let score = env_score_override(&candidate.executor, model).unwrap_or_else(|| {
+        if candidate.local_vs_non_local == "local" {
+            0.62
+        } else {
+            match candidate.expected_quality.as_str() {
+                "high" => 0.9,
+                "medium_high" => 0.78,
+                "medium" => 0.62,
+                _ => 0.55,
+            }
+        }
+    });
+    let benchmark = useful_public_benchmarks_for_task(task_class)
+        .into_iter()
+        .next()
+        .unwrap_or_else(generic_public_benchmark);
+    (score.clamp(0.0, 1.0), benchmark)
+}
+
+fn cost_for_candidate(
+    candidate: &ExecutorQuotaPolicyCandidate,
+    model: &str,
+) -> ExecutorTokenCostPerMillion {
+    let mut cost = default_cost_for_candidate(candidate, model);
+    if let Some(input) = env_cost_override(&candidate.executor, model, "INPUT") {
+        cost.input_usd = input;
+        cost.configurable = true;
+        cost.source_label = "env_override".to_string();
+    }
+    if let Some(output) = env_cost_override(&candidate.executor, model, "OUTPUT") {
+        cost.output_usd = output;
+        cost.configurable = true;
+        cost.source_label = "env_override".to_string();
+    }
+    cost
+}
+
+fn default_cost_for_candidate(
+    candidate: &ExecutorQuotaPolicyCandidate,
+    model: &str,
+) -> ExecutorTokenCostPerMillion {
+    if candidate.local_vs_non_local == "local" || candidate.provider == "ollama" {
+        return ExecutorTokenCostPerMillion {
+            input_usd: 0.0,
+            output_usd: 0.0,
+            source_url: "local_compute".to_string(),
+            source_label: "local_ollama_external_token_cost".to_string(),
+            as_of: "runtime_local".to_string(),
+            configurable: true,
+        };
+    }
+    let (input_usd, output_usd, source_url, source_label) =
+        if candidate.provider == "openai" || candidate.executor == "codex" {
+            (
+                1.25,
+                7.50,
+                "https://developers.openai.com/api/docs/pricing",
+                "openai_public_api_pricing_bootstrap",
+            )
+        } else if candidate.provider == "google"
+            || candidate.provider == "configured_cli"
+            || model.contains("gemini")
+            || candidate.executor == "agy"
+        {
+            (
+                2.70,
+                16.20,
+                "https://ai.google.dev/gemini-api/docs/pricing",
+                "google_gemini_public_api_pricing_bootstrap",
+            )
+        } else {
+            (
+                3.00,
+                15.00,
+                "operator_config_required",
+                "operator_configured_default_pricing",
+            )
+        };
+    ExecutorTokenCostPerMillion {
+        input_usd,
+        output_usd,
+        source_url: source_url.to_string(),
+        source_label: source_label.to_string(),
+        as_of: "2026-07-05".to_string(),
+        configurable: true,
+    }
+}
+
+fn env_cost_override(executor: &str, model: &str, direction: &str) -> Option<f64> {
+    let executor_key = env_key_fragment(executor);
+    let model_key = env_key_fragment(model);
+    [
+        format!("FORGE_COST_{executor_key}_{direction}_USD_PER_MILLION"),
+        format!("FORGE_COST_{model_key}_{direction}_USD_PER_MILLION"),
+    ]
+    .into_iter()
+    .find_map(|key| env::var(key).ok()?.parse::<f64>().ok())
+}
+
+fn env_score_override(executor: &str, model: &str) -> Option<f64> {
+    let executor_key = env_key_fragment(executor);
+    let model_key = env_key_fragment(model);
+    [
+        format!("FORGE_BENCHMARK_{executor_key}_SCORE"),
+        format!("FORGE_BENCHMARK_{model_key}_SCORE"),
+    ]
+    .into_iter()
+    .find_map(|key| env::var(key).ok()?.parse::<f64>().ok())
+}
+
+fn env_key_fragment(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn estimate_model_cost_usd(
+    cost: &ExecutorTokenCostPerMillion,
+    expected_input_tokens: u64,
+    expected_output_tokens: u64,
+) -> f64 {
+    (expected_input_tokens as f64 / 1_000_000.0 * cost.input_usd)
+        + (expected_output_tokens as f64 / 1_000_000.0 * cost.output_usd)
+}
+
+fn difficulty_fit_score(required_score: f64, benchmark_score: f64) -> f64 {
+    if required_score <= f64::EPSILON {
+        1.0
+    } else {
+        (benchmark_score / required_score).clamp(0.0, 1.0)
+    }
+}
+
+fn benchmark_score_for_difficulty(difficulty: &str) -> f64 {
+    match difficulty.to_ascii_lowercase().as_str() {
+        "trivial" | "low" | "simple" => 0.45,
+        "high" | "hard" | "critical" => 0.82,
+        "very_high" | "expert" => 0.9,
+        _ => 0.65,
+    }
+}
+
+fn decision_weights_for_difficulty(difficulty: &str) -> (f64, f64, f64) {
+    match difficulty.to_ascii_lowercase().as_str() {
+        "trivial" | "low" | "simple" => (0.25, 0.6, 0.15),
+        "high" | "hard" | "critical" => (0.7, 0.2, 0.1),
+        "very_high" | "expert" => (0.8, 0.15, 0.05),
+        _ => (0.5, 0.35, 0.15),
+    }
+}
+
+fn useful_public_benchmarks_for_task(task_class: &str) -> Vec<ExecutorPublicBenchmark> {
+    let lower = task_class.to_ascii_lowercase();
+    if lower.contains("code") || lower.contains("validation") || lower.contains("file") {
+        vec![
+            ExecutorPublicBenchmark {
+                name: "SWE-bench Verified".to_string(),
+                source_url: "https://www.swebench.com/".to_string(),
+                dimensions: vec![
+                    "software_engineering_repair".to_string(),
+                    "repo_context_reasoning".to_string(),
+                ],
+                relevance: "Useful for code repair, build failure diagnosis and repository tasks."
+                    .to_string(),
+            },
+            generic_public_benchmark(),
+        ]
+    } else if lower.contains("business") || lower.contains("creative") || lower.contains("pm") {
+        vec![
+            ExecutorPublicBenchmark {
+                name: "Artificial Analysis Intelligence Index".to_string(),
+                source_url: "https://artificialanalysis.ai/".to_string(),
+                dimensions: vec![
+                    "reasoning".to_string(),
+                    "knowledge".to_string(),
+                    "agentic_tasks".to_string(),
+                ],
+                relevance:
+                    "Useful for comparing general reasoning quality before spending non-local quota."
+                        .to_string(),
+            },
+            ExecutorPublicBenchmark {
+                name: "GPQA / MMLU-style public reasoning suites".to_string(),
+                source_url: "https://artificialanalysis.ai/".to_string(),
+                dimensions: vec!["science_reasoning".to_string(), "knowledge".to_string()],
+                relevance: "Useful as a public proxy for hard analytical planning tasks.".to_string(),
+            },
+        ]
+    } else {
+        vec![generic_public_benchmark()]
+    }
+}
+
+fn generic_public_benchmark() -> ExecutorPublicBenchmark {
+    ExecutorPublicBenchmark {
+        name: "Artificial Analysis Intelligence Index".to_string(),
+        source_url: "https://artificialanalysis.ai/".to_string(),
+        dimensions: vec![
+            "reasoning".to_string(),
+            "coding".to_string(),
+            "knowledge".to_string(),
+            "agentic_tasks".to_string(),
+        ],
+        relevance:
+            "General public benchmark used when task-specific benchmark data is not configured."
+                .to_string(),
+    }
+}
+
+fn model_decision_prompt_contract() -> String {
+    "Explain the task class, useful public benchmarks, estimated per-million-token cost, difficulty fit and selected executor; never include secrets or raw private context.".to_string()
+}
+
+fn round_score(value: f64) -> f64 {
+    (value * 10_000.0).round() / 10_000.0
+}
+
+fn round_money(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
 }
 
 pub fn import_ai_limits_observations(
@@ -863,12 +1643,7 @@ fn build_report(
     executors.sort_by(|left, right| left.id.cmp(&right.id));
     let usable = executors
         .iter()
-        .filter(|executor| {
-            executor.allowed
-                && executor.installed
-                && executor.configured
-                && executor.non_interactive_ready
-        })
+        .filter(|executor| executor_has_authorized_runtime_path(executor))
         .map(|executor| executor.id.clone())
         .collect::<Vec<_>>();
     let needs_human_approval = executors.iter().any(|executor| {
@@ -1043,7 +1818,7 @@ fn probe_non_interactive(id: &str, path: &Path) -> (bool, Vec<String>) {
     }
 
     // Probe 2: Model/Provider check for AI executors
-    if ready && (id == "gemini" || id == "opencode") {
+    if ready && matches!(id, "gemini" | "opencode" | "agy" | "antigravity") {
         let (model_ready, model_evidence) = probe_model_availability(id, path);
         ready = model_ready;
         evidence.extend(model_evidence);
@@ -1118,8 +1893,124 @@ fn probe_model_availability(id: &str, path: &Path) -> (bool, Vec<String>) {
                 }
             }
         }
+        "agy" | "antigravity" => {
+            let output = run_probe_command(path, &["models"], Duration::from_secs(3));
+            match output {
+                Ok(output) if output.status.is_some_and(|status| status.success()) => {
+                    let models = parse_executor_model_names(&output.stdout);
+                    if models.is_empty() {
+                        evidence.push("no models detected in agy models output".to_string());
+                        (false, evidence)
+                    } else {
+                        evidence.push("agy models listed successfully".to_string());
+                        for model in models {
+                            evidence.push(format!("agy_model:{model}"));
+                        }
+                        (true, evidence)
+                    }
+                }
+                Ok(output) if output.timed_out => {
+                    evidence.push(
+                        "agy models probe timed out; non-interactive provider/model readiness is not validated"
+                            .to_string(),
+                    );
+                    (false, evidence)
+                }
+                Ok(output) => {
+                    evidence.push(format!(
+                        "failed to list agy models with exit code {:?}; non-interactive provider/model readiness is not validated",
+                        output.status.and_then(|status| status.code())
+                    ));
+                    if !output.stderr.trim().is_empty() {
+                        evidence.push(format!("probe stderr: {}", output.stderr.trim()));
+                    }
+                    (false, evidence)
+                }
+                Err(error) => {
+                    evidence.push(format!(
+                        "failed to run agy models probe: {error}; non-interactive provider/model readiness is not validated"
+                    ));
+                    (false, evidence)
+                }
+            }
+        }
         _ => (true, evidence),
     }
+}
+
+fn parse_executor_model_names(stdout: &str) -> Vec<String> {
+    if let Ok(value) = serde_json::from_str::<Value>(stdout) {
+        let mut models = Vec::new();
+        collect_json_model_names(&value, &mut models);
+        return dedupe_model_names(models);
+    }
+
+    dedupe_model_names(stdout.lines().filter_map(normalize_model_name).collect())
+}
+
+fn collect_json_model_names(value: &Value, models: &mut Vec<String>) {
+    match value {
+        Value::String(model) => {
+            if let Some(model) = normalize_model_name(model) {
+                models.push(model);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_json_model_names(item, models);
+            }
+        }
+        Value::Object(map) => {
+            for key in ["name", "id", "model", "display_name"] {
+                if let Some(model) = map
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .and_then(normalize_model_name)
+                {
+                    models.push(model);
+                }
+            }
+            for key in ["models", "data"] {
+                if let Some(items) = map.get(key) {
+                    collect_json_model_names(items, models);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_model_name(raw: &str) -> Option<String> {
+    let model = raw
+        .trim()
+        .trim_start_matches('-')
+        .trim_start_matches('*')
+        .trim()
+        .trim_matches('"')
+        .trim_matches(',')
+        .trim();
+    if model.is_empty() {
+        return None;
+    }
+    let lower = model.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "models" | "available models" | "available models:"
+    ) {
+        return None;
+    }
+    Some(model.to_string())
+}
+
+fn dedupe_model_names(models: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::new();
+    for model in models {
+        if seen.insert(model.clone()) {
+            deduped.push(model);
+        }
+    }
+    deduped
 }
 
 fn run_probe_command(path: &Path, args: &[&str], timeout: Duration) -> Result<ProbeOutput> {
@@ -1410,13 +2301,23 @@ fn build_brain_router(
     executors: &[ExecutorState],
     quota_policy: &ExecutorQuotaPolicyReport,
 ) -> BrainRouterReport {
-    let selected_brain = preferred_brain_id(executors).or_else(|| {
-        quota_policy
-            .selection_trace
-            .iter()
-            .find(|candidate| candidate.decision == "select")
-            .map(|candidate| candidate.executor.clone())
-    });
+    let model_decision = executor_model_decision_from_policy(
+        executors,
+        quota_policy,
+        default_brain_router_model_decision_options(),
+    );
+    let selected_brain = model_decision
+        .selected
+        .as_ref()
+        .map(|candidate| candidate.executor.clone())
+        .or_else(|| preferred_brain_id(executors))
+        .or_else(|| {
+            quota_policy
+                .selection_trace
+                .iter()
+                .find(|candidate| candidate.decision == "select")
+                .map(|candidate| candidate.executor.clone())
+        });
     let mut brains = executors
         .iter()
         .map(brain_candidate)
@@ -1453,6 +2354,7 @@ fn build_brain_router(
             "A workflow run can switch the active execution brain through forge request switch-executor without changing run id, workflow id, checkpoints or user directives. One AI/mixed workflow node can mutate its own node_brain_routing through forge workflow update-node-brain while the workflow remains active."
                 .to_string(),
         selected_brain,
+        model_decision: Some(model_decision),
         forge_controlled_surfaces: vec![
             "workflow_graph".to_string(),
             "memory".to_string(),
@@ -1515,9 +2417,32 @@ fn preferred_brain_id(executors: &[ExecutorState]) -> Option<String> {
     None
 }
 
+fn default_brain_router_model_decision_options() -> ExecutorModelDecisionOptions {
+    ExecutorModelDecisionOptions {
+        task: env::var("FORGE_EXECUTOR_DEFAULT_TASK").unwrap_or_else(|_| {
+            "Default Forge executor selection for routine workflow planning, validation and handoff"
+                .to_string()
+        }),
+        task_class: env::var("FORGE_EXECUTOR_DEFAULT_TASK_CLASS")
+            .unwrap_or_else(|_| "deterministic_validation_file_inspection_reporting".to_string()),
+        difficulty: env::var("FORGE_EXECUTOR_DEFAULT_DIFFICULTY")
+            .unwrap_or_else(|_| "low".to_string()),
+        expected_input_tokens: env_u64("FORGE_EXECUTOR_DEFAULT_INPUT_TOKENS", 1200),
+        expected_output_tokens: env_u64("FORGE_EXECUTOR_DEFAULT_OUTPUT_TOKENS", 300),
+        configured_decider: env::var("FORGE_EXECUTOR_DECIDER").ok(),
+    }
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
 fn brain_candidate(executor: &ExecutorState) -> BrainCandidate {
     let status = if executor.allowed && executor.installed && executor.configured {
-        if executor.non_interactive_ready {
+        if executor_has_authorized_runtime_path(executor) {
             "ready"
         } else {
             "interactive_or_auth_blocked"
@@ -1532,9 +2457,11 @@ fn brain_candidate(executor: &ExecutorState) -> BrainCandidate {
         "unknown"
     };
     let reason = match status {
-        "ready" => "installed, configured, human-authorized and non-interactive smoke test passed",
+        "ready" => {
+            "installed, configured, human-authorized and Forge-validated execution path is available"
+        }
         "interactive_or_auth_blocked" => {
-            "installed/configured/authorized, but Forge has not validated safe non-interactive execution"
+            "installed/configured/authorized, but Forge has not validated a non-interactive or Forge-first execution path"
         }
         "not_installed" => "command is not available on PATH or configured executor paths",
         "not_configured" => "Forge did not find CLI configuration or required environment evidence",
@@ -1650,7 +2577,7 @@ fn brain_shell_sessions(brains: &[BrainCandidate]) -> Vec<BrainShellSessionSpec>
                 id: format!("{}-shell", brain.id),
                 brain_id: brain.id.clone(),
                 entry_command: entry_command.clone(),
-                attachable: brain.installed,
+                attachable: brain.status == "ready",
                 launch_mode: if brain.forge_first_ready {
                     "forge_first_harness"
                 } else {
@@ -2434,15 +3361,16 @@ fn shell_session_readiness(
     if session.brain_id == "forge" {
         return "ready";
     }
-    if !session.attachable {
+    let Some(brain) = brain else {
+        return "needs_sync_or_authorization";
+    };
+    if !brain.installed {
         return "not_installed";
     }
     if session.forge_first_ready {
         return "ready";
     }
-    if brain
-        .is_some_and(|candidate| candidate.allowed && candidate.installed && candidate.configured)
-    {
+    if session.attachable && brain.status == "ready" {
         return "native_cli_available";
     }
     "needs_sync_or_authorization"
@@ -3000,6 +3928,31 @@ fn build_quota_policy(
             "OpenCode local/Ollama models are efficient when quota should be preserved, work is repetitive, privacy matters or expected value does not justify non-local quota.",
         ),
     ];
+    let agy_models = discovered_agy_model_names(executors);
+    if !agy_models.is_empty() {
+        candidates.retain(|candidate| candidate.executor != "agy");
+        for (index, model) in agy_models.into_iter().enumerate() {
+            candidates.push(quota_candidate(
+                executors,
+                &observations,
+                "agy",
+                "antigravity",
+                Some(model),
+                "non_local",
+                "unknown_or_configured_non_local_quota_bound",
+                "quota_bound",
+                "unknown",
+                "medium",
+                "quota_or_paid",
+                "medium",
+                "high",
+                "strong_for_agentic_workspace_and_visual_or_product_work",
+                "medium",
+                20 + index as u32,
+                "agy model discovered from `agy models`; Antigravity CLI executor used for bounded agentic workspace and visual/product work.",
+            ));
+        }
+    }
     for candidate in &mut candidates {
         if candidate.executor == "gemini" {
             candidate.selection_status = "skipped_legacy_invalidated".to_string();
@@ -3172,6 +4125,22 @@ fn quota_workload_routes() -> Vec<ExecutorQuotaWorkloadRoute> {
     ]
 }
 
+fn discovered_agy_model_names(executors: &[ExecutorState]) -> Vec<String> {
+    let mut models = Vec::new();
+    for executor_id in ["agy", "antigravity"] {
+        if let Some(executor) = executors.iter().find(|executor| executor.id == executor_id) {
+            for evidence in &executor.probe_evidence {
+                if let Some(model) = evidence.strip_prefix("agy_model:") {
+                    if let Some(model) = normalize_model_name(model) {
+                        models.push(model);
+                    }
+                }
+            }
+        }
+    }
+    dedupe_model_names(models)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn quota_candidate(
     executors: &[ExecutorState],
@@ -3193,15 +4162,16 @@ fn quota_candidate(
     reason: &str,
 ) -> ExecutorQuotaPolicyCandidate {
     let state = executors.iter().find(|state| state.id == executor);
+    let observation =
+        matching_quota_observation(observations, executor, provider, model.as_deref());
+    let quota_blocked = observation.is_some_and(|observation| {
+        quota_blocks_executor_selection(&observation.remaining_quota, &observation.rate_limit_risk)
+    });
     let selection_status = match state {
-        Some(state)
-            if state.allowed
-                && state.installed
-                && state.configured
-                && state.non_interactive_ready =>
-        {
-            "eligible"
+        Some(state) if executor_has_authorized_runtime_path(state) && quota_blocked => {
+            "skipped_quota_blocked"
         }
+        Some(state) if executor_has_authorized_runtime_path(state) => "eligible",
         Some(state)
             if state.allowed
                 && state.installed
@@ -3215,8 +4185,6 @@ fn quota_candidate(
         Some(_) => "skipped_not_allowed",
         None => "skipped_unknown_executor",
     };
-    let observation =
-        matching_quota_observation(observations, executor, provider, model.as_deref());
     let mut evidence = state
         .map(|state| {
             let mut ev = state.config_evidence.clone();
@@ -3299,17 +4267,37 @@ fn matching_quota_observation<'a>(
     })
 }
 
+fn quota_blocks_executor_selection(remaining_quota: &str, rate_limit_risk: &str) -> bool {
+    let remaining = remaining_quota.to_lowercase();
+    let risk = rate_limit_risk.to_lowercase();
+    [
+        "exhausted",
+        "depleted",
+        "no_remaining",
+        "zero_remaining",
+        "unavailable",
+    ]
+    .iter()
+    .any(|needle| remaining.contains(needle))
+        || ["blocked", "rate_limited", "quota_exhausted"]
+            .iter()
+            .any(|needle| risk.contains(needle))
+}
+
 fn executor_is_allowed(executors: &[ExecutorState], id: &str) -> bool {
     executors
         .iter()
         .find(|executor| executor.id == id)
-        .map(|executor| {
-            executor.allowed
-                && executor.installed
-                && executor.configured
-                && executor.non_interactive_ready
-        })
+        .map(executor_has_authorized_runtime_path)
         .unwrap_or(false)
+}
+
+fn executor_has_authorized_runtime_path(executor: &ExecutorState) -> bool {
+    executor.allowed
+        && executor.installed
+        && executor.configured
+        && (executor.non_interactive_ready
+            || (executor.forge_first_ready && executor.forge_first_entrypoint.is_some()))
 }
 
 #[cfg(test)]
@@ -3482,6 +4470,147 @@ mod tests {
             .filter(|goal| goal.contains("Repair OpenCode non-interactive readiness"))
             .count();
         assert_eq!(dynamic_opencode_goals, 1);
+    }
+
+    #[test]
+    fn forge_first_ready_codex_and_agy_remain_usable_brains() {
+        let temp = tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+
+        for (id, display_name, command) in [
+            ("codex", "Codex CLI", "codex"),
+            ("agy", "Antigravity agy CLI", "agy"),
+        ] {
+            let state = ExecutorState {
+                id: id.to_string(),
+                display_name: display_name.to_string(),
+                command: command.to_string(),
+                installed: true,
+                configured: true,
+                command_path: Some(format!("/tmp/{command}")),
+                config_evidence: vec![format!("{id} config found")],
+                non_interactive_ready: false,
+                probe_evidence: vec![format!("{id} raw probe needs interactive shell")],
+                forge_first_ready: true,
+                forge_first_entrypoint: Some(vec![
+                    "forge".to_string(),
+                    "harness".to_string(),
+                    "exec".to_string(),
+                    "--executor".to_string(),
+                    id.to_string(),
+                    "--execute".to_string(),
+                    "--allow-exec".to_string(),
+                ]),
+                harness_status: None,
+                allowed: true,
+                decision_source: "human_allow".to_string(),
+                synced_at: "2026-07-04T00:00:00Z".to_string(),
+            };
+            store
+                .save_executor_state(id, &serde_json::to_value(state).unwrap())
+                .unwrap();
+        }
+
+        let report = load_executors(&store).unwrap();
+
+        assert!(report.usable.iter().any(|executor| executor == "codex"));
+        assert!(report.usable.iter().any(|executor| executor == "agy"));
+
+        let codex_integration = report
+            .integrations
+            .iter()
+            .find(|integration| integration.id == "codex_primary_brain")
+            .unwrap();
+        assert!(codex_integration.enabled);
+        let agy_integration = report
+            .integrations
+            .iter()
+            .find(|integration| integration.id == "agy_codex_bridge")
+            .unwrap();
+        assert!(agy_integration.enabled);
+
+        for executor in ["codex", "agy"] {
+            let candidate = report
+                .quota_policy
+                .candidates
+                .iter()
+                .find(|candidate| candidate.executor == executor)
+                .unwrap();
+            assert_eq!(candidate.selection_status, "eligible");
+
+            let brain = report
+                .brain_router
+                .brains
+                .iter()
+                .find(|brain| brain.id == executor)
+                .unwrap();
+            assert_eq!(brain.status, "ready");
+        }
+    }
+
+    #[test]
+    fn shell_launch_plan_only_marks_authorized_codex_and_agy_attachable() {
+        let temp = tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+
+        for (id, display_name, command, allowed) in [
+            ("codex", "Codex CLI", "codex", true),
+            ("agy", "Antigravity agy CLI", "agy", true),
+            (
+                "antigravity",
+                "Antigravity CLI (legacy alias)",
+                "agy",
+                false,
+            ),
+        ] {
+            let state = ExecutorState {
+                id: id.to_string(),
+                display_name: display_name.to_string(),
+                command: command.to_string(),
+                installed: true,
+                configured: true,
+                command_path: Some(format!("/tmp/{command}")),
+                config_evidence: vec![format!("{id} config found")],
+                non_interactive_ready: true,
+                probe_evidence: vec![format!("{id} non-interactive smoke passed")],
+                forge_first_ready: false,
+                forge_first_entrypoint: None,
+                harness_status: None,
+                allowed,
+                decision_source: if allowed {
+                    "human_allow"
+                } else {
+                    "unavailable"
+                }
+                .to_string(),
+                synced_at: "2026-07-04T00:00:00Z".to_string(),
+            };
+            store
+                .save_executor_state(id, &serde_json::to_value(state).unwrap())
+                .unwrap();
+        }
+
+        let report = load_executors(&store).unwrap();
+        let launch_plan =
+            build_shell_launch_plan(&report.brain_router, ShellLaunchPlanOptions::default());
+
+        for executor in ["codex", "agy"] {
+            let plan = launch_plan
+                .launch_plans
+                .iter()
+                .find(|plan| plan.brain_id == executor)
+                .unwrap();
+            assert_eq!(plan.readiness, "native_cli_available");
+            assert!(plan.attachable);
+        }
+
+        let legacy_alias = launch_plan
+            .launch_plans
+            .iter()
+            .find(|plan| plan.brain_id == "antigravity")
+            .unwrap();
+        assert_eq!(legacy_alias.readiness, "needs_sync_or_authorization");
+        assert!(!legacy_alias.attachable);
     }
 
     #[test]

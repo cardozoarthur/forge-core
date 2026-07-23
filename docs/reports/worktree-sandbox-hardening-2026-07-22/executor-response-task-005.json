@@ -1,0 +1,22 @@
+{
+  "schema_version": "forge.executor_response.v1",
+  "task_id": "task-005",
+  "status": "completed",
+  "artifacts": [
+    "docs/reports/worktree-sandbox-hardening-2026-07-22/execution-trace.md"
+  ],
+  "trace_ref": "docs/reports/worktree-sandbox-hardening-2026-07-22/execution-trace.md",
+  "cost": {
+    "estimated_usd": 0.0,
+    "tokens_in": 0,
+    "tokens_out": 0
+  },
+  "validation_evidence": [
+    {
+      "command": "rg -q 'PASS: 735 tests in 12 suites' execution-trace.md",
+      "exit_code": 0,
+      "summary": "Trace persistido registra implementação, comandos de validação, smokes process/Bubblewrap/lifecycle/MCP e resultados replayable; custo local não foi medido."
+    }
+  ],
+  "rework_items": []
+}

@@ -7,18 +7,7 @@ use crate::addon::{
 };
 use crate::artifact::list_workflow_artifacts;
 use crate::checkpoint::TaskCheckpoint;
-use crate::context::{build_context_package_with_checkpoint_and_project, DEFAULT_CONTEXT_BUDGET};
-use crate::cost::{build_cost_ledger, CostLedgerReport};
-use crate::event::{
-    build_global_event_timeline, list_event_services, list_inbound_event_inbox_for_context,
-    GlobalEventTimelineReport, WorkflowEventEnvelope,
-};
-use crate::executor::{
-    build_brain_sessions_report_with_options, load_executors, BrainSessionOperationPlan,
-    BrainSessionState, BrainSessionsReport, BrainSessionsReportOptions,
-};
-use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
-use crate::harness::{
+use crate::cli_integration::{
     analyze_token_headroom, build_harness_activation_profile, build_harness_adoption_plan,
     build_harness_bootstrap_report, build_harness_doctor_report,
     build_harness_executor_compatibility_report, build_harness_headroom_plan,
@@ -35,6 +24,17 @@ use crate::harness::{
     HarnessSessionLifecyclePlan, HeadroomStatsContentKindBucket, HeadroomStatsOptions,
     HeadroomStatsReport, HeadroomStatsSourceBucket, TokenHeadroomReport,
 };
+use crate::context::{build_context_package_with_checkpoint_and_project, DEFAULT_CONTEXT_BUDGET};
+use crate::cost::{build_cost_ledger, CostLedgerReport};
+use crate::event::{
+    build_global_event_timeline, list_event_services, list_inbound_event_inbox_for_context,
+    GlobalEventTimelineReport, WorkflowEventEnvelope,
+};
+use crate::executor::{
+    build_brain_sessions_report_with_options, load_executors, BrainSessionOperationPlan,
+    BrainSessionState, BrainSessionsReport, BrainSessionsReportOptions,
+};
+use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
 use crate::identity::{
     audit_tenant_index, inspect_project_operating_context, list_identity_links,
     list_identity_memberships, list_identity_registry, load_project_operating_context,
@@ -3125,7 +3125,7 @@ pub struct ForgeFirstHarnessSmokeReport {
     pub shim_install: CliShimInstallReport,
     pub shim_status: CliShimStatusReport,
     pub activated_shim_status: CliShimStatusReport,
-    pub exec_receipt: crate::harness::CliHarnessExecReceipt,
+    pub exec_receipt: crate::cli_integration::CliHarnessExecReceipt,
     pub checks: Vec<OperationalTuiSmokeCheck>,
     pub commands: Vec<String>,
 }
@@ -5333,6 +5333,8 @@ pub fn build_forge_first_harness_smoke(
         require_token_headroom_for_forge_first,
         dry_run: true,
         allow_exec: false,
+        secret_env: &[],
+        secret_permissions: &[],
         project_root: Some(&smoke_project_root),
         cwd: Some(&smoke_project_root),
     })?;

@@ -22,6 +22,18 @@ fn forge() -> Command {
     Command::cargo_bin("forge").expect("forge binary should build")
 }
 
+fn assert_forge_store_prefix(command: &Value, store: &Path) {
+    assert!(store.is_absolute(), "test store path must be absolute");
+    let command = command.as_array().expect("command must be an array");
+    assert!(
+        command.len() >= 3,
+        "command must include the Forge store prefix"
+    );
+    assert_eq!(command[0], "forge");
+    assert_eq!(command[1], "--store");
+    assert_eq!(command[2], store.display().to_string());
+}
+
 fn attach_milestone_receipt(
     store: &Path,
     artifact_root: &Path,
@@ -426,6 +438,47 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
     assert_eq!(exec_json["allow_exec"], false);
     assert_eq!(exec_json["executed"], false);
     assert_eq!(exec_json["resolution_status"], "executable_missing");
+    assert_eq!(
+        exec_json["runtime_security_guardrails"]["schema_version"],
+        "forge.runtime.security_guardrails.v1"
+    );
+    assert_eq!(
+        exec_json["runtime_security_guardrails"]["enforcement_owner"],
+        "forge_runtime"
+    );
+    assert_eq!(
+        exec_json["runtime_security_guardrails"]["coverage_scope"],
+        "workflow_agent_cli_mcp_deterministic_process"
+    );
+    assert_eq!(
+        exec_json["runtime_security_guardrails"]["guardrails"]
+            .as_array()
+            .unwrap()
+            .len(),
+        10
+    );
+    for guardrail_id in [
+        "filesystem_permissions",
+        "command_execution_permissions",
+        "network_permissions",
+        "credential_secret_permissions",
+        "tool_usage_permissions",
+        "resource_consumption_limits",
+        "human_approval_gates",
+        "tenant_project_isolation",
+        "audit_traceability",
+        "organizational_policy_engine",
+    ] {
+        assert!(
+            exec_json["runtime_security_guardrails"]["guardrails"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|guardrail| guardrail["id"] == guardrail_id
+                    && guardrail["native_runtime_capability"] == true),
+            "missing native runtime guardrail {guardrail_id}"
+        );
+    }
     assert_eq!(
         exec_json["wrapper_plan"]["schema_version"],
         "forge.harness.cli_wrapper_plan.v1"
@@ -4493,6 +4546,383 @@ fn credential_vault_exec_uses_contract_terminal_env_without_printing_secret_valu
         !args.contains("super-secret"),
         "Forge should only pass env mappings, never resolved secret values"
     );
+}
+
+#[test]
+fn security_secret_scan_sanitizes_prompt_input_without_serializing_secret_values() {
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEF1234567890";
+    let input = format!("OPENAI_API_KEY={secret}");
+    let output = forge()
+        .args([
+            "security",
+            "secret-scan",
+            "--input",
+            &input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        !text.contains(secret),
+        "secret-scan output must not serialize raw secret values"
+    );
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["schema_version"], "forge.runtime.secret_guardrail.v1");
+    assert_eq!(json["status"], "sanitized");
+    assert_eq!(json["detection_count"], 1);
+    assert_eq!(json["detections"][0]["provider"], "openai");
+    assert_eq!(
+        json["sanitized_text"],
+        "OPENAI_API_KEY={{vault:project.openai.default}}"
+    );
+    assert_eq!(
+        json["audit_events"][0]["redaction"],
+        "secret_value_redacted"
+    );
+
+    let tools_output = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tools: Value = serde_json::from_slice(&tools_output).unwrap();
+    assert!(tools["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.security.secret_scan"
+            && tool["output_schema"] == "forge.runtime.secret_guardrail.v1"
+    }));
+
+    let mcp_input = serde_json::json!({
+        "input": input,
+        "scope": "project"
+    });
+    let mcp_output = forge()
+        .args([
+            "mcp",
+            "call",
+            "forge.security.secret_scan",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_text = String::from_utf8(mcp_output).unwrap();
+    assert!(
+        !mcp_text.contains(secret),
+        "MCP secret scan output must not serialize raw secret values"
+    );
+    let mcp_json: Value = serde_json::from_str(&mcp_text).unwrap();
+    assert_eq!(
+        mcp_json["result"]["sanitized_text"],
+        "OPENAI_API_KEY={{vault:project.openai.default}}"
+    );
+}
+
+#[test]
+fn security_secret_scan_persists_runtime_secret_vault_and_redacted_audit() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEF1234567890";
+    let input = format!("OPENAI_API_KEY={secret}");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "security",
+            "secret-scan",
+            "--workflow",
+            "wf_secret",
+            "--origin",
+            "contract_test",
+            "--input",
+            &input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains(secret));
+    let report: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(report["vault_writes"][0]["stored"], true);
+    assert_eq!(
+        report["vault_writes"][0]["storage_backend"],
+        "forge_runtime_secret_vault"
+    );
+
+    let connection = Connection::open(&store).unwrap();
+    let stored_secret: String = connection
+        .query_row(
+            "SELECT secret_value FROM runtime_secret_vault WHERE vault_reference = 'project.openai.default'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_secret, secret);
+
+    let mut statement = connection
+        .prepare("SELECT kind, data_json FROM global_events ORDER BY id ASC")
+        .unwrap();
+    let events = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(events
+        .iter()
+        .any(|(kind, _)| kind == "runtime_secret_vault_write"));
+    let serialized_events = serde_json::to_string(&events).unwrap();
+    assert!(!serialized_events.contains(secret));
+    assert!(serialized_events.contains("secret_value_redacted"));
+}
+
+#[cfg(unix)]
+#[test]
+fn harness_exec_injects_runtime_secret_only_with_explicit_permissions() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEF1234567890";
+    let input = format!("OPENAI_API_KEY={secret}");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "security",
+            "secret-scan",
+            "--workflow",
+            "wf_secret",
+            "--origin",
+            "contract_test",
+            "--input",
+            &input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    write_fake_executor(
+        &bin_dir,
+        "forge-secret-env-check",
+        &format!(
+            r#"#!/bin/sh
+if [ "$FORGE_TEST_SECRET" = "{secret}" ]; then
+  echo secret-env-present
+else
+  echo secret-env-missing
+  exit 7
+fi
+"#
+        ),
+    );
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let denied_output = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "exec",
+            "--executor",
+            "codex",
+            "--forge-first",
+            "--workflow",
+            "wf_secret",
+            "--task",
+            "task_secret",
+            "--run",
+            "run_secret",
+            "--execute",
+            "--allow-exec",
+            "--secret-env",
+            "FORGE_TEST_SECRET=project.openai.default",
+            "--output",
+            "json",
+            "--",
+            "forge-secret-env-check",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let denied_text = String::from_utf8(denied_output).unwrap();
+    assert!(!denied_text.contains(secret));
+    let denied: Value = serde_json::from_str(&denied_text).unwrap();
+    assert_eq!(denied["status"], "harness_exec_blocked_secret_permission");
+    assert_eq!(denied["executed"], false);
+
+    let allowed_output = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "exec",
+            "--executor",
+            "codex",
+            "--forge-first",
+            "--workflow",
+            "wf_secret",
+            "--task",
+            "task_secret",
+            "--run",
+            "run_secret",
+            "--execute",
+            "--allow-exec",
+            "--secret-env",
+            "FORGE_TEST_SECRET=project.openai.default",
+            "--secret-permission",
+            "credential_secret_permissions",
+            "--secret-permission",
+            "tool_usage_permissions",
+            "--output",
+            "json",
+            "--",
+            "forge-secret-env-check",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let allowed_text = String::from_utf8(allowed_output).unwrap();
+    assert!(!allowed_text.contains(secret));
+    let allowed: Value = serde_json::from_str(&allowed_text).unwrap();
+    assert_eq!(allowed["status"], "harness_exec_completed");
+    assert_eq!(allowed["success"], true);
+    assert_eq!(allowed["secret_injections"][0]["env"], "FORGE_TEST_SECRET");
+    assert_eq!(
+        allowed["secret_injections"][0]["vault_reference"],
+        "project.openai.default"
+    );
+    assert_eq!(allowed["stdout_excerpt"], "secret-env-present\n");
+
+    let connection = Connection::open(&store).unwrap();
+    let mut statement = connection
+        .prepare("SELECT kind, data_json FROM global_events ORDER BY id ASC")
+        .unwrap();
+    let events = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(events
+        .iter()
+        .any(|(kind, data)| kind == "runtime_secret_vault_access" && data.contains("allowed")));
+    assert!(events
+        .iter()
+        .any(|(kind, data)| kind == "runtime_secret_vault_access" && data.contains("denied")));
+    assert!(!serde_json::to_string(&events).unwrap().contains(secret));
+}
+
+#[test]
+fn context_package_sanitizes_secrets_before_prompt_packet() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEF1234567890";
+    let goal = format!("Use OPENAI_API_KEY={secret} to prepare a guarded workflow");
+    let plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            &goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan_text = String::from_utf8(plan_output).unwrap();
+    assert!(
+        !plan_text.contains(secret),
+        "plan output must not serialize raw secret values"
+    );
+    assert!(plan_text.contains("{{vault:project.openai.default}}"));
+    let plan: Value = serde_json::from_str(&plan_text).unwrap();
+    let workflow_id = plan["workflow_id"].as_str().unwrap();
+    let task_id = plan["tasks"][0]["id"].as_str().unwrap();
+
+    let connection = Connection::open(&store).unwrap();
+    let stored_workflow: String = connection
+        .query_row(
+            "SELECT data_json FROM workflows WHERE id = ?1",
+            [workflow_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!stored_workflow.contains(secret));
+    assert!(stored_workflow.contains("{{vault:project.openai.default}}"));
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "2000",
+            "--strict",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let context_text = String::from_utf8(context_output).unwrap();
+    assert!(
+        !context_text.contains(secret),
+        "context package must not serialize raw secret values"
+    );
+    let context: Value = serde_json::from_str(&context_text).unwrap();
+    assert_eq!(
+        context["secret_guardrail"]["schema_version"],
+        "forge.context.secret_guardrail.v1"
+    );
+    let stored_secret: String = connection
+        .query_row(
+            "SELECT secret_value FROM runtime_secret_vault WHERE vault_reference = 'project.openai.default'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_secret, secret);
 }
 
 #[test]
@@ -15874,7 +16304,7 @@ fn inspect_exposes_context_route_summary_for_each_terminal_node() {
     assert!(inspection["diagram"]
         .as_str()
         .unwrap()
-        .contains("context no_ai_deterministic blocked_missing_context_and_dependencies"));
+        .contains("context no_ai_deterministic blocked_dependencies"));
 
     let nodes = inspection["nodes"].as_array().unwrap();
     let deterministic = find_task(nodes, "Run deterministic non-AI step");
@@ -15893,17 +16323,15 @@ fn inspect_exposes_context_route_summary_for_each_terminal_node() {
     assert_eq!(route["context_sha256"].as_str().unwrap().len(), 64);
     assert_eq!(route["routing_cache_key"].as_str().unwrap().len(), 64);
     assert_eq!(route["routing_lineage_sha256"].as_str().unwrap().len(), 64);
-    assert_eq!(
-        route["handoff_status"],
-        "blocked_missing_context_and_dependencies"
-    );
+    assert_eq!(route["handoff_status"], "blocked_dependencies");
+    assert_eq!(route["context_ready"], true);
     assert_eq!(route["resume_context_status"], "no_checkpoint");
     assert!(route["routing_summary"]["total_shards"].as_u64().unwrap() >= 7);
     assert!(route["included_sections"]
         .as_array()
         .unwrap()
         .contains(&Value::String("execution_policy".to_string())));
-    assert!(!route["missing_required_sections"]
+    assert!(route["missing_required_sections"]
         .as_array()
         .unwrap()
         .is_empty());
@@ -20070,6 +20498,7 @@ fn packaged_skill_entrypoint_stays_small_and_routes_to_domain_skills() {
     assert!(skill.contains("forge-core-context"));
     assert!(skill.contains("forge-core-artifacts"));
     assert!(skill.contains("forge-core-executors"));
+    assert!(skill.contains("forge-core-workspaces"));
     assert!(skill.contains("forge-core-addons-ui"));
     assert!(
         !skill.contains("## Useful Commands"),
@@ -20153,6 +20582,14 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
             ],
         ),
         (
+            "forge-core-workspaces",
+            [
+                "worktree sandbox plan",
+                "--allow-repository-mutation",
+                "not a security boundary",
+            ],
+        ),
+        (
             "forge-core-addons-ui",
             [
                 "forge ops renderer-event",
@@ -20183,6 +20620,20 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
                 module_skill.contains(snippet),
                 "module skill {module} should mention {snippet}"
             );
+        }
+        if module == "forge-core-workspaces" {
+            for snippet in [
+                "worktree approve-config",
+                "worktree guard check",
+                "worktree guard create-predecessor",
+                "--allow-guardrail-update",
+                "--allow-workflow-mutation",
+            ] {
+                assert!(
+                    module_skill.contains(snippet),
+                    "workspace skill should mention {snippet}"
+                );
+            }
         }
     }
 }
@@ -22621,6 +23072,86 @@ fn sync_detects_configured_clis_and_requires_human_authorization_before_use() {
 }
 
 #[test]
+fn sync_discovers_agy_models_and_feeds_quota_policy() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(temp.path().join(".codex")).unwrap();
+    fs::write(temp.path().join(".codex/config.toml"), "model = \"test\"\n").unwrap();
+    fs::create_dir_all(temp.path().join(".gemini/antigravity-cli")).unwrap();
+    fs::write(
+        temp.path().join(".gemini/antigravity-cli/settings.json"),
+        "{}\n",
+    )
+    .unwrap();
+    write_fake_cli(&bin, "codex");
+    write_fake_cli(&bin, "agy");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "executors",
+            "--home",
+            temp.path().to_str().unwrap(),
+            "--executor-path",
+            bin.to_str().unwrap(),
+            "--allow",
+            "codex",
+            "--allow",
+            "agy",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    let codex = find_executor(&json, "codex");
+    assert_eq!(codex["installed"], true);
+    assert_eq!(codex["configured"], true);
+    assert_eq!(codex["allowed"], true);
+    assert_eq!(codex["non_interactive_ready"], true);
+
+    let agy = find_executor(&json, "agy");
+    assert_eq!(agy["installed"], true);
+    assert_eq!(agy["configured"], true);
+    assert_eq!(agy["allowed"], true);
+    assert_eq!(agy["non_interactive_ready"], true);
+    let evidence = agy["probe_evidence"].as_array().unwrap();
+    assert!(evidence.contains(&serde_json::json!("agy models listed successfully")));
+    assert!(evidence.contains(&serde_json::json!("agy_model:Gemini 3.5 Flash (High)")));
+    assert!(evidence.contains(&serde_json::json!("agy_model:Claude Sonnet 4.6 (Thinking)")));
+
+    let candidates = json["quota_policy"]["candidates"].as_array().unwrap();
+    assert!(candidates.iter().any(|candidate| {
+        candidate["executor"] == "codex"
+            && candidate["provider"] == "openai"
+            && candidate["selection_status"] == "eligible"
+    }));
+    assert!(candidates.iter().any(|candidate| {
+        candidate["executor"] == "agy"
+            && candidate["provider"] == "antigravity"
+            && candidate["model"] == "Gemini 3.5 Flash (High)"
+            && candidate["selection_status"] == "eligible"
+    }));
+    assert!(candidates.iter().any(|candidate| {
+        candidate["executor"] == "agy"
+            && candidate["provider"] == "antigravity"
+            && candidate["model"] == "Claude Sonnet 4.6 (Thinking)"
+            && candidate["selection_status"] == "eligible"
+    }));
+    assert!(!candidates.iter().any(|candidate| {
+        candidate["executor"] == "agy" && candidate["model"] == "agy-default"
+    }));
+}
+
+#[test]
 fn sync_persists_human_allowed_executor_policy() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -24158,7 +24689,19 @@ fn brain_router_keeps_memory_skills_mcp_and_shells_under_forge_control() {
         brains_json["node_brain_role"],
         "per_node_agentic_execution_brain"
     );
-    assert_eq!(brains_json["selected_brain"], "codex");
+    assert_eq!(brains_json["selected_brain"], "opencode");
+    assert_eq!(
+        brains_json["model_decision"]["schema_version"],
+        "forge.executor_model_decision.v1"
+    );
+    assert_eq!(
+        brains_json["model_decision"]["decision_engine"]["mode"],
+        "local_ollama_decider"
+    );
+    assert_eq!(
+        brains_json["model_decision"]["selected"]["executor"],
+        "opencode"
+    );
     let claude = brains_json["brains"]
         .as_array()
         .unwrap()
@@ -29735,7 +30278,7 @@ fn list_aggregates_context_quality_and_recommends_quality_actions_by_lifecycle()
         running_json["tasks"].as_array().unwrap().len()
     );
     assert!(
-        listed_json["summary"]["context_quality"]["budget_pressure"]
+        listed_json["summary"]["context_quality"]["compressed_context"]
             .as_u64()
             .unwrap()
             > 0
@@ -29751,13 +30294,18 @@ fn list_aggregates_context_quality_and_recommends_quality_actions_by_lifecycle()
         row["context_quality"]["total_tasks"],
         row["task_summary"]["total"]
     );
-    assert!(row["context_quality"]["budget_pressure"].as_u64().unwrap() > 0);
+    assert!(
+        row["context_quality"]["compressed_context"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
     assert_eq!(
         row["quality_action"]["schema_version"],
         "forge.registry_quality_action.v1"
     );
-    assert_eq!(row["quality_action"]["action"], "increase_context_budget");
-    assert_eq!(row["quality_action"]["priority"], "warning");
+    assert_eq!(row["quality_action"]["action"], "wait_for_dependencies");
+    assert_eq!(row["quality_action"]["priority"], "blocking");
     assert!(row["quality_action"]["affected_tasks"].as_u64().unwrap() > 0);
 }
 
@@ -29828,7 +30376,7 @@ fn list_filters_workflow_registry_by_quality_action_and_lifecycle() {
             "--lifecycle",
             "running",
             "--quality-action",
-            "increase_context_budget",
+            "wait_for_dependencies",
             "--output",
             "json",
         ])
@@ -29842,14 +30390,14 @@ fn list_filters_workflow_registry_by_quality_action_and_lifecycle() {
     assert_eq!(listed_json["filter"]["lifecycle"], "running");
     assert_eq!(
         listed_json["filter"]["quality_action"],
-        "increase_context_budget"
+        "wait_for_dependencies"
     );
     assert_eq!(listed_json["summary"]["total"], 1);
     assert_eq!(listed_json["summary"]["running"], 1);
     assert_eq!(listed_json["summary"]["non_running"], 0);
     assert_eq!(listed_json["summary"]["context_quality"]["workflows"], 1);
     assert!(
-        listed_json["summary"]["context_quality"]["budget_pressure"]
+        listed_json["summary"]["context_quality"]["compressed_context"]
             .as_u64()
             .unwrap()
             > 0
@@ -29860,7 +30408,7 @@ fn list_filters_workflow_registry_by_quality_action_and_lifecycle() {
     assert_eq!(workflows[0]["workflow_id"], running_workflow_id);
     assert_eq!(
         workflows[0]["quality_action"]["action"],
-        "increase_context_budget"
+        "wait_for_dependencies"
     );
 }
 
@@ -31810,6 +32358,256 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
     assert_eq!(conflict_json["packet"]["lease_status"], "lease_conflict");
     assert_eq!(conflict_json["packet"]["handoff_ready"], true);
     assert_eq!(conflict_json["current_lease"]["executor"], "codex");
+}
+
+#[test]
+fn task_handoff_auto_executor_uses_model_decision_with_public_benchmarks_and_cost() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(temp.path().join(".codex")).unwrap();
+    fs::write(temp.path().join(".codex/config.toml"), "model = \"test\"\n").unwrap();
+    fs::create_dir_all(temp.path().join(".config/opencode")).unwrap();
+    fs::create_dir_all(temp.path().join(".ollama")).unwrap();
+    write_fake_cli(&bin, "codex");
+    write_fake_cli(&bin, "opencode");
+    write_fake_cli(&bin, "ollama");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "all",
+            "--home",
+            temp.path().to_str().unwrap(),
+            "--executor-path",
+            bin.to_str().unwrap(),
+            "--allow",
+            "codex",
+            "--allow",
+            "opencode",
+            "--allow",
+            "ollama",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Summarize deterministic build logs and identify likely failing command",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let task_id = json["tasks"][0]["id"].as_str().unwrap();
+
+    let handoff = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "auto",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
+    assert_eq!(handoff_json["status"], "handoff_ready");
+    assert_eq!(handoff_json["selected_executor"], "opencode");
+    assert_eq!(handoff_json["selected_brain"], "opencode");
+    assert_eq!(
+        handoff_json["model_decision"]["schema_version"],
+        "forge.executor_model_decision.v1"
+    );
+    assert_eq!(
+        handoff_json["model_decision"]["decision_engine"]["mode"],
+        "local_ollama_decider"
+    );
+    assert_eq!(
+        handoff_json["model_decision"]["selected"]["model"],
+        "ollama/qwen3:14b"
+    );
+    assert_eq!(
+        handoff_json["packet"]["model_decision"]["selected"]["cost_per_million"]["input_usd"],
+        serde_json::json!(0.0)
+    );
+    assert!(
+        handoff_json["packet"]["model_decision"]["useful_public_benchmarks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|benchmark| benchmark["source_url"]
+                .as_str()
+                .unwrap()
+                .contains("swebench.com"))
+    );
+}
+
+#[test]
+fn task_handoff_auto_can_select_agy_discovered_model_when_codex_quota_is_blocked() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(temp.path().join(".codex")).unwrap();
+    fs::write(temp.path().join(".codex/config.toml"), "model = \"test\"\n").unwrap();
+    fs::create_dir_all(temp.path().join(".gemini/antigravity-cli")).unwrap();
+    fs::write(
+        temp.path().join(".gemini/antigravity-cli/settings.json"),
+        "{}\n",
+    )
+    .unwrap();
+    write_fake_cli(&bin, "codex");
+    write_fake_cli(&bin, "agy");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "executors",
+            "--home",
+            temp.path().to_str().unwrap(),
+            "--executor-path",
+            bin.to_str().unwrap(),
+            "--allow",
+            "codex",
+            "--allow",
+            "agy",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "executor-quota",
+            "record",
+            "--executor",
+            "codex",
+            "--provider",
+            "openai",
+            "--model",
+            "total",
+            "--locality",
+            "non_local",
+            "--free-vs-paid",
+            "not_free_quota_bound",
+            "--remaining-quota",
+            "exhausted_until_reset",
+            "--rate-limit-risk",
+            "blocked",
+            "--cost",
+            "quota_or_paid_usage",
+            "--latency",
+            "blocked",
+            "--expected-quality",
+            "high",
+            "--suitability",
+            "blocked_until_reset",
+            "--source",
+            "ai-limits",
+            "--observed-at",
+            "2026-06-15T12:00:00Z",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Review agentic workspace implementation and prepare validation notes",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let task_id = json["tasks"][0]["id"].as_str().unwrap();
+
+    let handoff = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "auto",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
+    assert_eq!(handoff_json["status"], "handoff_ready");
+    assert_eq!(handoff_json["selected_executor"], "agy");
+    assert_eq!(handoff_json["selected_brain"], "agy");
+    assert!(handoff_json["model_decision"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| {
+            candidate["executor"] == "codex"
+                && candidate["selection_status"] == "skipped_quota_blocked"
+        }));
+    assert_eq!(
+        handoff_json["model_decision"]["selected"]["model"],
+        "Gemini 3.5 Flash (High)"
+    );
+    assert_eq!(
+        handoff_json["packet"]["model_decision"]["selected"]["provider"],
+        "antigravity"
+    );
 }
 
 #[test]
@@ -36986,6 +37784,17 @@ fn parallel_execution_reports_concurrent_wave_metrics() {
     assert!(run["concurrent_wave_count"].as_u64().unwrap() >= 1);
     assert!(run["max_concurrent_tasks"].as_u64().unwrap() >= 1);
     assert_eq!(run["status"], "completed");
+    assert_eq!(
+        run["runtime_security_guardrails"]["schema_version"],
+        "forge.runtime.security_guardrails.v1"
+    );
+    assert_eq!(
+        run["runtime_security_guardrails"]["guardrails"]
+            .as_array()
+            .unwrap()
+            .len(),
+        10
+    );
     assert!(
         run["cost_report"]["total_estimated_cost_usd"]
             .as_f64()
@@ -37735,7 +38544,9 @@ fn request_heartbeat_marks_async_run_active_and_surfaces_it_in_status_list_and_i
 #[test]
 fn request_step_auto_promotes_ready_deterministic_task_and_advances_drive() {
     let temp = tempdir().unwrap();
-    let store = temp.path().join("forge.sqlite");
+    let store_dir = temp.path().join("store with spaces");
+    fs::create_dir_all(&store_dir).unwrap();
+    let store = store_dir.join("forge.sqlite");
 
     let started = forge()
         .args([
@@ -37803,6 +38614,19 @@ fn request_step_auto_promotes_ready_deterministic_task_and_advances_drive() {
         stepped_json["drive_after"]["handoff_task"]["task_id"],
         "task-002"
     );
+    assert_forge_store_prefix(&stepped_json["drive_before"]["next_command"], &store);
+    assert_forge_store_prefix(&stepped_json["drive_after"]["next_command"], &store);
+
+    let response_path = store
+        .parent()
+        .unwrap()
+        .join(stepped_json["response_artifact_path"].as_str().unwrap());
+    let response_json: Value = serde_json::from_slice(&fs::read(response_path).unwrap()).unwrap();
+    let expected_command_prefix = format!("forge --store '{}' ", store.display());
+    assert!(response_json["validation_evidence"][0]["command"]
+        .as_str()
+        .unwrap()
+        .starts_with(&expected_command_prefix));
 
     let status = forge()
         .args([
@@ -37978,8 +38802,6 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
             "codex",
             "--summary",
             "Codex extracted requirements and recorded a replayable trace.",
-            "--evidence-command",
-            "codex executor evidence",
             "--evidence-summary",
             "requirements trace is present and retryable",
             "--tokens-in",
@@ -38034,6 +38856,27 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
         .position(|part| *part == "--budget")
         .unwrap();
     assert_eq!(drive_before_command[budget_index + 1], "8000");
+    assert_forge_store_prefix(&completed_json["drive_before"]["next_command"], &store);
+    assert_forge_store_prefix(&completed_json["drive_after"]["next_command"], &store);
+
+    let response_path = store
+        .parent()
+        .unwrap()
+        .join(completed_json["response_artifact_path"].as_str().unwrap());
+    let response_json: Value = serde_json::from_slice(&fs::read(response_path).unwrap()).unwrap();
+    let evidence_command = response_json["validation_evidence"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(evidence_command.starts_with(&format!("forge --store {} ", store.display())));
+
+    let trace_path = store.parent().unwrap().join(
+        completed_json["trace_artifact"]["artifact"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let trace_json: Value = serde_json::from_slice(&fs::read(trace_path).unwrap()).unwrap();
+    assert_forge_store_prefix(&trace_json["replay"]["status_command"], &store);
+    assert_forge_store_prefix(&trace_json["replay"]["drive_command"], &store);
 
     let status = forge()
         .args([
@@ -39352,6 +40195,7 @@ fn request_drive_surfaces_needs_retry_as_rework_instead_of_blind_handoff() {
         .as_array()
         .unwrap()
         .contains(&Value::String("handoff".to_string())));
+    assert_forge_store_prefix(&driven_json["next_command"], &store);
 }
 
 #[test]
@@ -40716,7 +41560,21 @@ fn needs_retry_response_with_rework_items_expands_into_runnable_tasks() {
         .iter()
         .find(|task| task["id"] == audit_task_id)
         .unwrap();
-    assert_eq!(audit_task["status"], "completed");
+    assert_eq!(audit_task["status"], "pending");
+    assert_eq!(audit_task["work_item"]["backlog_state"], "rework_required");
+    assert_eq!(
+        audit_task["work_item"]["goal_validation"]["definitively_ready"],
+        false
+    );
+    assert!(audit_task["work_item"]["subtasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|subtask| subtask["status"] == "pending"));
+    assert!(audit_task["validation_rules"][0]["command"]
+        .as_str()
+        .unwrap()
+        .starts_with(&format!("forge --store {} ", store.display())));
     let generated_task = status_json["tasks"]
         .as_array()
         .unwrap()
@@ -40724,6 +41582,43 @@ fn needs_retry_response_with_rework_items_expands_into_runnable_tasks() {
         .find(|task| task["title"] == "Implement integration outcome contracts")
         .unwrap();
     assert_eq!(generated_task["status"], "pending");
+    let generated_task_ids = status_json["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| {
+            matches!(
+                task["title"].as_str(),
+                Some("Implement integration outcome contracts" | "Prepare deployment descriptors")
+            )
+        })
+        .map(|task| task["id"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(generated_task_ids.len(), 2);
+    for generated_task_id in &generated_task_ids {
+        assert!(audit_task["dependencies"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String(generated_task_id.clone())));
+    }
+
+    let store_handle = ForgeStore::open(&store).unwrap();
+    let promotion = store_handle
+        .load_workflow_events(workflow_id)
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find(|event| event.kind == "executor_response_promoted")
+        .unwrap();
+    assert_eq!(
+        promotion.data["generated_rework_task_ids"],
+        serde_json::json!(generated_task_ids)
+    );
+    assert_eq!(promotion.data["rework_items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        promotion.data["rework_items"][0]["title"],
+        "Implement integration outcome contracts"
+    );
 
     let next = forge()
         .args([
@@ -40751,6 +41646,7 @@ fn needs_retry_response_with_rework_items_expands_into_runnable_tasks() {
         next_json["handoff_task"]["title"],
         "Implement integration outcome contracts"
     );
+    assert_forge_store_prefix(&next_json["next_command"], &store);
 }
 
 #[test]
@@ -40827,6 +41723,23 @@ fn improve_candidates_prioritize_generated_rework_tasks_without_driveable_run() 
         ])
         .assert()
         .success();
+
+    let persisted_store = ForgeStore::open(&store_path).unwrap();
+    let persisted_workflow = persisted_store.load_workflow(&workflow_id).unwrap();
+    let original_task = persisted_workflow
+        .tasks
+        .iter()
+        .find(|task| task.id == "task-audit")
+        .unwrap();
+    assert_eq!(original_task.status, forge_core::graph::TaskStatus::Pending);
+    assert_eq!(original_task.work_item.backlog_state, "rework_required");
+    assert!(!original_task.work_item.goal_validation.definitively_ready);
+    assert!(original_task.dependencies.contains(&"task-002".to_string()));
+    assert_eq!(
+        persisted_workflow.tasks[1].status,
+        forge_core::graph::TaskStatus::Pending
+    );
+    drop(persisted_store);
 
     let output = forge()
         .args([
@@ -41390,6 +42303,7 @@ fn mcp_run_drive_tool_surfaces_rework_and_next_command() {
         .as_array()
         .unwrap()
         .contains(&Value::String("handoff".to_string())));
+    assert_forge_store_prefix(&driven_json["result"]["next_command"], &store);
 }
 
 #[test]
@@ -41590,7 +42504,15 @@ fn stale_request_heartbeat_surfaces_recovery_and_transitions_to_needs_attention(
     );
     assert_eq!(
         status_json["activity"]["recovery"]["command"],
-        serde_json::json!(["forge", "request", "recover-stale", "--run", run_id])
+        serde_json::json!([
+            "forge",
+            "--store",
+            store.display().to_string(),
+            "request",
+            "recover-stale",
+            "--run",
+            run_id
+        ])
     );
 
     let stale = forge()
@@ -41615,6 +42537,10 @@ fn stale_request_heartbeat_surfaces_recovery_and_transitions_to_needs_attention(
     assert_eq!(
         stale_json["runs"][0]["activity"]["heartbeat_status"],
         "stale"
+    );
+    assert_forge_store_prefix(
+        &stale_json["runs"][0]["activity"]["recovery"]["command"],
+        &store,
     );
 
     let recovered = forge()
@@ -41647,6 +42573,8 @@ fn stale_request_heartbeat_surfaces_recovery_and_transitions_to_needs_attention(
         recovered_json["recovery"]["reason"],
         "Heartbeat is stale; Forge moved the run to needs_attention so a human or executor can resume, cancel or inspect without losing lineage."
     );
+    assert_forge_store_prefix(&recovered_json["activity"]["recovery"]["command"], &store);
+    assert_forge_store_prefix(&recovered_json["recovery"]["command"], &store);
 
     let needs_attention = forge()
         .args([
@@ -59574,13 +60502,242 @@ fn find_slash_command<'a>(json: &'a Value, name: &str) -> &'a Value {
         .unwrap()
 }
 
+#[test]
+fn executor_quota_decide_uses_public_benchmarks_costs_and_local_ollama_when_available() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(temp.path().join(".codex")).unwrap();
+    fs::write(temp.path().join(".codex/config.toml"), "model = \"test\"\n").unwrap();
+    fs::create_dir_all(temp.path().join(".config/opencode")).unwrap();
+    fs::create_dir_all(temp.path().join(".ollama")).unwrap();
+    write_fake_cli(&bin, "codex");
+    write_fake_cli(&bin, "opencode");
+    write_fake_cli(&bin, "ollama");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "all",
+            "--home",
+            temp.path().to_str().unwrap(),
+            "--executor-path",
+            bin.to_str().unwrap(),
+            "--allow",
+            "codex",
+            "--allow",
+            "opencode",
+            "--allow",
+            "ollama",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "executor-quota",
+            "decide",
+            "--task",
+            "Summarize deterministic build logs and identify likely failing command",
+            "--task-class",
+            "deterministic_validation_file_inspection_reporting",
+            "--difficulty",
+            "low",
+            "--expected-input-tokens",
+            "1200",
+            "--expected-output-tokens",
+            "250",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.executor_model_decision.v1");
+    assert_eq!(json["decision_engine"]["mode"], "local_ollama_decider");
+    assert_eq!(json["decision_engine"]["decider_invoked"], true);
+    assert_eq!(json["decision_engine"]["decider_status"], "accepted");
+    assert_eq!(json["selected"]["local_vs_non_local"], "local");
+    assert_eq!(
+        json["selected"]["cost_per_million"]["input_usd"],
+        serde_json::json!(0.0)
+    );
+    assert!(json["task_explanation"]
+        .as_str()
+        .unwrap()
+        .contains("difficulty=low"));
+    assert!(json["useful_public_benchmarks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|benchmark| benchmark["source_url"]
+            .as_str()
+            .unwrap()
+            .contains("artificialanalysis.ai")));
+    assert!(json["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|candidate| candidate["estimated_cost_usd"].is_number()));
+}
+
+#[test]
+fn sync_brain_router_uses_data_driven_default_model_decision_when_local_ollama_is_available() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(temp.path().join(".codex")).unwrap();
+    fs::write(temp.path().join(".codex/config.toml"), "model = \"test\"\n").unwrap();
+    fs::create_dir_all(temp.path().join(".config/opencode")).unwrap();
+    fs::create_dir_all(temp.path().join(".ollama")).unwrap();
+    write_fake_cli(&bin, "codex");
+    write_fake_cli(&bin, "opencode");
+    write_fake_cli(&bin, "ollama");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "all",
+            "--home",
+            temp.path().to_str().unwrap(),
+            "--executor-path",
+            bin.to_str().unwrap(),
+            "--allow",
+            "codex",
+            "--allow",
+            "opencode",
+            "--allow",
+            "ollama",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let executor_sync = &json["executor_sync"];
+    assert_eq!(executor_sync["brain_router"]["selected_brain"], "opencode");
+    assert_eq!(
+        executor_sync["brain_router"]["model_decision"]["schema_version"],
+        "forge.executor_model_decision.v1"
+    );
+    assert_eq!(
+        executor_sync["brain_router"]["model_decision"]["decision_engine"]["mode"],
+        "local_ollama_decider"
+    );
+    assert_eq!(
+        executor_sync["brain_router"]["model_decision"]["selected"]["cost_per_million"]
+            ["input_usd"],
+        serde_json::json!(0.0)
+    );
+}
+
+#[test]
+fn executor_quota_decide_falls_back_to_parameterized_llm_without_local_decider() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(temp.path().join(".codex")).unwrap();
+    fs::write(temp.path().join(".codex/config.toml"), "model = \"test\"\n").unwrap();
+    write_fake_cli(&bin, "codex");
+    let decider = bin.join("forge-llm-decider");
+    fs::write(
+        &decider,
+        "#!/usr/bin/env sh\necho '{\"executor\":\"codex\",\"model\":\"gpt-5.4-mini\",\"reason\":\"configured fallback accepted\"}'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&decider).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&decider, permissions).unwrap();
+    }
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "executors",
+            "--home",
+            temp.path().to_str().unwrap(),
+            "--executor-path",
+            bin.to_str().unwrap(),
+            "--allow",
+            "codex",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .env("FORGE_EXECUTOR_DECIDER_CMD", decider.to_str().unwrap())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "executor-quota",
+            "decide",
+            "--task",
+            "Design a payment reconciliation workflow with audit gates",
+            "--task-class",
+            "high_value_pm_business_creative_reasoning",
+            "--difficulty",
+            "high",
+            "--expected-input-tokens",
+            "8000",
+            "--expected-output-tokens",
+            "3000",
+            "--configured-decider",
+            "codex:gpt-5.4-mini",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["decision_engine"]["mode"], "configured_llm_decider");
+    assert_eq!(json["decision_engine"]["decider_invoked"], true);
+    assert_eq!(json["decision_engine"]["decider_status"], "accepted");
+    assert_eq!(json["decision_engine"]["decider"], "codex:gpt-5.4-mini");
+    assert_eq!(json["selected"]["executor"], "codex");
+    assert!(json["notes"].as_array().unwrap().iter().any(|note| note
+        .as_str()
+        .unwrap()
+        .contains("local Ollama decider unavailable")));
+}
+
 fn write_fake_cli(bin: &Path, name: &str) {
     fs::create_dir_all(bin).unwrap();
     let path = bin.join(name);
     let content = match name {
         "opencode" => "#!/usr/bin/env sh\nif [ \"$1\" = \"models\" ]; then echo \"google/gemini-2.5-pro\nollama/qwen3:14b\"; else echo \"opencode version 0.1.0\"; fi\nexit 0\n",
+        "agy" => "#!/usr/bin/env sh\nif [ \"$1\" = \"models\" ]; then printf '%s\n' 'Gemini 3.5 Flash (High)' 'Claude Sonnet 4.6 (Thinking)'; else echo \"1.0.16\"; fi\nexit 0\n",
         "gemini" => "#!/usr/bin/env sh\necho \"gemini version 0.1.0\"\nexit 0\n",
         "codex" => "#!/usr/bin/env sh\necho \"codex version 0.1.0\"\nexit 0\n",
+        "ollama" => "#!/usr/bin/env sh\nif [ \"$1\" = \"run\" ]; then echo '{\"executor\":\"opencode\",\"model\":\"ollama/qwen3:14b\",\"reason\":\"local small decision accepted\"}'; else echo \"ollama version 0.1.0\"; fi\nexit 0\n",
         _ => "#!/usr/bin/env sh\nexit 0\n",
     };
     fs::write(&path, content).unwrap();

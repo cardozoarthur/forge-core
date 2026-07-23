@@ -1,16 +1,24 @@
 use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{
-    build_context_package_with_checkpoint_and_project, ContextContinuationPlan,
+    build_context_package_with_checkpoint_and_project,
+    build_context_package_with_checkpoint_project_and_worktree, ContextContinuationPlan,
     ContextDeferredDiscoveryPlan, ContextDelta, ContextHandoffBlocker, ContextMemoryPolicy,
     ContextPackage, ContextPersonaSourceModelSummary, ContextRouterPlan, ContextRoutingQuality,
 };
-use crate::executor::{ExecutorQuotaObservation, ExecutorState};
+use crate::executor::{
+    decide_executor_model_for_task, ExecutorModelDecisionOptions, ExecutorModelDecisionReport,
+    ExecutorQuotaObservation, ExecutorState,
+};
 use crate::graph::{
-    ExecutionPolicySpec, ExecutorKind, NodeBrainRoutingSpec, PersonaRoutingSpec, ValidationRule,
+    AtomicTask, ExecutionPolicySpec, ExecutorKind, NodeBrainRoutingSpec, PersonaRoutingSpec,
+    ValidationRule,
 };
 use crate::identity::ensure_workflow_policy;
 use crate::lease::{acquire_task_lease, TaskLease};
 use crate::storage::ForgeStore;
+use crate::worktree::{
+    bound_worktree_context, resolve_effective_project_root, WorktreeContextReport,
+};
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -33,6 +41,8 @@ pub struct TaskHandoffReport {
     pub current_lease: Option<TaskLease>,
     pub context: ContextPackage,
     pub packet: ExecutorHandoffPacket,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_decision: Option<ExecutorModelDecisionReport>,
     pub reason: Option<String>,
 }
 
@@ -60,8 +70,12 @@ pub struct ExecutorHandoffPacket {
     pub context_routing_quality: ContextRoutingQuality,
     pub context_delta: ContextDelta,
     pub memory_policy: ContextMemoryPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeContextReport>,
     pub deferred_discovery: ContextDeferredDiscoveryPlan,
     pub context_router: ContextRouterPlan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_decision: Option<ExecutorModelDecisionReport>,
     pub executor_capacity_decision: ExecutorCapacityDecision,
     pub handoff_ready: bool,
     pub handoff_status: String,
@@ -112,6 +126,7 @@ struct PacketParts<'a> {
     validation_rules: Vec<ValidationRule>,
     execution_policy: ExecutionPolicySpec,
     persona: Option<PersonaRoutingSpec>,
+    model_decision: Option<ExecutorModelDecisionReport>,
     executor_capacity_decision: ExecutorCapacityDecision,
 }
 
@@ -170,22 +185,46 @@ pub fn build_task_handoff_with_project(
         .iter()
         .find(|candidate| candidate.id == task_id)
         .ok_or_else(|| anyhow::anyhow!("task not found in workflow {workflow_id}: {task_id}"))?;
+    let model_decision = if selected_executor == "auto" {
+        Some(resolve_auto_executor_model_decision(store, task, budget)?)
+    } else {
+        None
+    };
+    let effective_selected_executor = model_decision
+        .as_ref()
+        .and_then(|decision| decision.selected.as_ref())
+        .map(|candidate| candidate.executor.as_str())
+        .unwrap_or(selected_executor);
     let latest_checkpoint = load_latest_task_checkpoint(store, workflow_id, task_id)?;
-    let context = build_context_package_with_checkpoint_and_project(
-        &workflow,
-        task_id,
-        budget,
-        latest_checkpoint,
-        project_root,
-    )?;
+    let effective_project_root =
+        resolve_effective_project_root(store, workflow_id, Some(task_id), project_root)?;
+    let bound_worktree = bound_worktree_context(store, workflow_id, Some(task_id))?;
+    let context = if bound_worktree.is_some() {
+        build_context_package_with_checkpoint_project_and_worktree(
+            &workflow,
+            task_id,
+            budget,
+            latest_checkpoint,
+            effective_project_root.as_deref(),
+            bound_worktree,
+        )?
+    } else {
+        build_context_package_with_checkpoint_and_project(
+            &workflow,
+            task_id,
+            budget,
+            latest_checkpoint,
+            effective_project_root.as_deref(),
+        )?
+    };
     let task_executor = executor_kind(&task.executor).to_string();
     let executor_capacity_decision =
-        build_executor_capacity_decision(store, selected_executor, &task_executor)?;
+        build_executor_capacity_decision(store, effective_selected_executor, &task_executor)?;
 
     if !context.handoff_ready {
         let packet = ExecutorHandoffPacket::from_parts(PacketParts {
             context: &context,
-            selected_executor,
+            selected_executor: effective_selected_executor,
             task_executor: &task_executor,
             node_brain_routing: task.node_brain_routing.clone(),
             lease_status: "not_requested",
@@ -196,6 +235,7 @@ pub fn build_task_handoff_with_project(
             validation_rules: task.validation_rules.clone(),
             execution_policy: task.execution_policy.clone(),
             persona: task.persona.clone(),
+            model_decision: model_decision.clone(),
             executor_capacity_decision,
         });
         return Ok(TaskHandoffReport {
@@ -203,14 +243,15 @@ pub fn build_task_handoff_with_project(
             allowed: false,
             workflow_id: workflow_id.to_string(),
             task_id: task_id.to_string(),
-            selected_executor: selected_executor.to_string(),
-            selected_brain: selected_executor.to_string(),
+            selected_executor: effective_selected_executor.to_string(),
+            selected_brain: effective_selected_executor.to_string(),
             orchestrator_brain: packet.orchestrator_brain.clone(),
             task_executor,
             lease: None,
             current_lease: None,
             context,
             packet,
+            model_decision,
             reason: Some("context handoff is not ready".to_string()),
         });
     }
@@ -218,7 +259,7 @@ pub fn build_task_handoff_with_project(
     if executor_capacity_decision.decision != "use" {
         let packet = ExecutorHandoffPacket::from_parts(PacketParts {
             context: &context,
-            selected_executor,
+            selected_executor: effective_selected_executor,
             task_executor: &task_executor,
             node_brain_routing: task.node_brain_routing.clone(),
             lease_status: "not_requested",
@@ -229,6 +270,7 @@ pub fn build_task_handoff_with_project(
             validation_rules: task.validation_rules.clone(),
             execution_policy: task.execution_policy.clone(),
             persona: task.persona.clone(),
+            model_decision: model_decision.clone(),
             executor_capacity_decision,
         });
         return Ok(TaskHandoffReport {
@@ -236,23 +278,29 @@ pub fn build_task_handoff_with_project(
             allowed: false,
             workflow_id: workflow_id.to_string(),
             task_id: task_id.to_string(),
-            selected_executor: selected_executor.to_string(),
-            selected_brain: selected_executor.to_string(),
+            selected_executor: effective_selected_executor.to_string(),
+            selected_brain: effective_selected_executor.to_string(),
             orchestrator_brain: packet.orchestrator_brain.clone(),
             task_executor,
             lease: None,
             current_lease: None,
             context,
             reason: Some(packet.executor_capacity_decision.reason.clone()),
+            model_decision,
             packet,
         });
     }
 
-    let lease_report =
-        acquire_task_lease(store, workflow_id, task_id, selected_executor, ttl_seconds)?;
+    let lease_report = acquire_task_lease(
+        store,
+        workflow_id,
+        task_id,
+        effective_selected_executor,
+        ttl_seconds,
+    )?;
     let packet = ExecutorHandoffPacket::from_parts(PacketParts {
         context: &context,
-        selected_executor,
+        selected_executor: effective_selected_executor,
         task_executor: &task_executor,
         node_brain_routing: task.node_brain_routing.clone(),
         lease_status: &lease_report.status,
@@ -263,6 +311,7 @@ pub fn build_task_handoff_with_project(
         validation_rules: task.validation_rules.clone(),
         execution_policy: task.execution_policy.clone(),
         persona: task.persona.clone(),
+        model_decision: model_decision.clone(),
         executor_capacity_decision,
     });
     let allowed = lease_report.allowed;
@@ -275,14 +324,15 @@ pub fn build_task_handoff_with_project(
         allowed,
         workflow_id: workflow_id.to_string(),
         task_id: task_id.to_string(),
-        selected_executor: selected_executor.to_string(),
-        selected_brain: selected_executor.to_string(),
+        selected_executor: effective_selected_executor.to_string(),
+        selected_brain: effective_selected_executor.to_string(),
         orchestrator_brain: packet.orchestrator_brain.clone(),
         task_executor,
         lease: lease_report.lease,
         current_lease: lease_report.current_lease,
         context,
         packet,
+        model_decision,
         reason: lease_report.reason,
     })
 }
@@ -336,8 +386,10 @@ impl ExecutorHandoffPacket {
             context_routing_quality: parts.context.routing_quality.clone(),
             context_delta: parts.context.context_delta.clone(),
             memory_policy: parts.context.memory_policy.clone(),
+            worktree: parts.context.worktree.clone(),
             deferred_discovery: parts.context.deferred_discovery.clone(),
             context_router: parts.context.context_router.clone(),
+            model_decision: parts.model_decision,
             executor_capacity_decision: parts.executor_capacity_decision,
             handoff_ready: parts.context.handoff_ready,
             handoff_status: parts.context.handoff_status.clone(),
@@ -355,6 +407,62 @@ impl ExecutorHandoffPacket {
             resume_context_status: parts.context.resume_context_status.clone(),
             resume_plan: parts.context.continuation_plan.clone(),
         }
+    }
+}
+
+fn resolve_auto_executor_model_decision(
+    store: &ForgeStore,
+    task: &AtomicTask,
+    budget: usize,
+) -> Result<ExecutorModelDecisionReport> {
+    let decision = decide_executor_model_for_task(
+        store,
+        ExecutorModelDecisionOptions {
+            task: format!("{}: {}", task.title, task.goal),
+            task_class: task_model_decision_class(task).to_string(),
+            difficulty: task_model_decision_difficulty(task).to_string(),
+            expected_input_tokens: budget as u64,
+            expected_output_tokens: (budget as u64 / 4).max(256),
+            configured_decider: None,
+        },
+    )?;
+    if decision.selected.is_none() {
+        bail!("auto executor selection found no eligible model candidate");
+    }
+    Ok(decision)
+}
+
+fn task_model_decision_class(task: &AtomicTask) -> &'static str {
+    match task.executor {
+        ExecutorKind::Command | ExecutorKind::Wait | ExecutorKind::Notification => {
+            "deterministic_validation_file_inspection_reporting"
+        }
+        ExecutorKind::Ai | ExecutorKind::Mixed => {
+            if task.execution_policy.mode.contains("business")
+                || task.execution_policy.selection_reason.contains("product")
+            {
+                "high_value_pm_business_creative_reasoning"
+            } else {
+                "general_reasoning"
+            }
+        }
+    }
+}
+
+fn task_model_decision_difficulty(task: &AtomicTask) -> &'static str {
+    if task.cost.estimated_cost_usd >= 0.01
+        || matches!(task.executor, ExecutorKind::Ai | ExecutorKind::Mixed)
+    {
+        "high"
+    } else if task.cost.estimated_cost_usd <= 0.0005
+        || matches!(
+            task.executor,
+            ExecutorKind::Command | ExecutorKind::Wait | ExecutorKind::Notification
+        )
+    {
+        "low"
+    } else {
+        "medium"
     }
 }
 

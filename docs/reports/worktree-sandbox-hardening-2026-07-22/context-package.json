@@ -1,0 +1,161 @@
+{
+  "schema_version": "forge.worktree_hardening.context_package.v1",
+  "workflow_id": "wf_cf8a1698f266442981479112786f00b0",
+  "project_root": "/home/arthur/projects/forge-core",
+  "strict": true,
+  "initial_requested_budget_bytes": 1200,
+  "routing_repairs": [
+    {
+      "task_id": "task-004",
+      "attempted_budgets": [1200, 1459, 1618, 1646],
+      "final_budget_bytes": 1646,
+      "reason": "Forge expanded only to each explicitly recommended budget until every required section fit."
+    },
+    {
+      "task_id": "task-005",
+      "attempted_budgets": [1200, 1681, 1745, 2051, 2203],
+      "final_budget_bytes": 2203,
+      "reason": "O executor misto exigiu workflow goal, operating context, policy, requirements, validation e work item; cada retry usou o orçamento recomendado pelo Forge."
+    },
+    {
+      "task_id": "task-007",
+      "attempted_budgets": [1200, 1471, 1645, 1673],
+      "final_budget_bytes": 1673,
+      "reason": "O manifesto determinístico exigiu objetivo local, artefatos, política, validação e requisitos; cada retry usou o orçamento recomendado pelo Forge."
+    }
+  ],
+  "packages": [
+    {
+      "task_id": "task-001",
+      "workflow_revision": 0,
+      "context_sha256": "db6c0e7c6b54d9aa06975708e3510929ee776d6a15d64b1b0d74a979e637b9a8",
+      "context_routing_cache_key": "6d20ae56a43c32585b6102c8d70af7bd91dcf4af71f7a928b192d9669d2ba32e",
+      "effective_budget_bytes": 768,
+      "selected_bytes": 675,
+      "context_ready": true,
+      "dependency_ready": true,
+      "included_sections": [
+        "local_objective",
+        "execution_policy",
+        "validation_rules",
+        "context_requirements",
+        "workflow_goal",
+        "dependencies"
+      ],
+      "omitted_required_sections": []
+    },
+    {
+      "task_id": "task-002",
+      "workflow_revision": 2,
+      "context_sha256": "2b771ad659fdfcf7c04f546f1e8c9f3adf10407f3ee78a08649098be4f5a1894",
+      "context_routing_cache_key": "c54ac918fdcd8a24d69a0ad135088f627617f31873f3df966c2c0f4d63a8c3d6",
+      "effective_budget_bytes": 768,
+      "selected_bytes": 768,
+      "context_ready": true,
+      "dependency_ready": true,
+      "included_sections": [
+        "local_objective",
+        "execution_policy",
+        "validation_rules",
+        "context_requirements",
+        "workflow_goal",
+        "dependencies"
+      ],
+      "omitted_required_sections": []
+    },
+    {
+      "task_id": "task-003",
+      "workflow_revision": 4,
+      "context_sha256": "5c1438edb342ba0afa0b850fec3d7a040931111a920d330240c22b6b1f9ac684",
+      "context_routing_cache_key": "f238afc86f72be2946db4f11ffe26288a66cf96367ffc881545e9b3becd7a8ff",
+      "effective_budget_bytes": 768,
+      "selected_bytes": 768,
+      "context_ready": true,
+      "dependency_ready": true,
+      "included_sections": [
+        "local_objective",
+        "execution_policy",
+        "validation_rules",
+        "context_requirements",
+        "workflow_goal",
+        "dependencies"
+      ],
+      "omitted_required_sections": []
+    },
+    {
+      "task_id": "task-004",
+      "workflow_revision": 6,
+      "context_sha256": "9e22d014993d8b68b5816db00674e4997d04a61859f9d74354cd205f7d78eb94",
+      "context_routing_cache_key": "17f8e0b26c42bbb78dc800f8b13226d20cad9b19526aed0a1efa2eccc6019fa7",
+      "effective_budget_bytes": 1646,
+      "selected_bytes": 1646,
+      "context_ready": true,
+      "dependency_ready": true,
+      "included_sections": [
+        "local_objective",
+        "artifacts",
+        "execution_policy",
+        "validation_rules",
+        "context_requirements"
+      ],
+      "omitted_required_sections": []
+    },
+    {
+      "task_id": "task-005",
+      "workflow_revision": 8,
+      "context_sha256": "0dc1a1e17b49d87fd13bb4a27c6ebc9766c0da61e1c745ee29e3204554b9e3fc",
+      "context_routing_cache_key": "e5b539684d2611cd3bc0e533e49f6e960faa183f3bccf7e19467caa7e3a1c467",
+      "effective_budget_bytes": 2203,
+      "selected_bytes": 2203,
+      "context_ready": true,
+      "dependency_ready": true,
+      "included_sections": [
+        "local_objective",
+        "workflow_goal",
+        "operating_context",
+        "execution_policy",
+        "context_requirements",
+        "validation_rules",
+        "work_item"
+      ],
+      "omitted_required_sections": []
+    },
+    {
+      "task_id": "task-006",
+      "workflow_revision": 10,
+      "context_sha256": "266a73bfef34bc7e91e91938cf78379dd7e18b289ffd73bd03f4cdda2ac4733f",
+      "context_routing_cache_key": "571ea524d06e53e62fd490c882d5ebec90c9ae33eba360f068ca5825d42319b7",
+      "effective_budget_bytes": 768,
+      "selected_bytes": 736,
+      "context_ready": true,
+      "dependency_ready": true,
+      "included_sections": [
+        "local_objective",
+        "execution_policy",
+        "validation_rules",
+        "context_requirements",
+        "workflow_goal",
+        "dependencies"
+      ],
+      "omitted_required_sections": []
+    },
+    {
+      "task_id": "task-007",
+      "workflow_revision": 12,
+      "context_sha256": "4a3df6c9c07aac836baa177fb782f64ca6a2f525908c3fccb3511d13d6a6dd98",
+      "context_routing_cache_key": "454929332d5f041a73f4dab77bff963d855c55c59c0321257cf89d3a47b45d31",
+      "effective_budget_bytes": 1673,
+      "selected_bytes": 1673,
+      "context_ready": true,
+      "dependency_ready": true,
+      "included_sections": [
+        "local_objective",
+        "artifacts",
+        "execution_policy",
+        "validation_rules",
+        "context_requirements"
+      ],
+      "omitted_required_sections": []
+    }
+  ]
+}

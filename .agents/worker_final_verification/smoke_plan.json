@@ -1,0 +1,1537 @@
+{
+  "attached_subflows": 0,
+  "goal": "Create a delivery platform",
+  "intent": {
+    "active_addons": [
+      "forge.core.kernel"
+    ],
+    "capability_resolution": {
+      "active_addons": [
+        "forge.core.kernel"
+      ],
+      "available_capabilities": [
+        "addon_registry",
+        "async_runtime",
+        "context_routing",
+        "daily_goal_research",
+        "dynamic_workflow",
+        "event_engine",
+        "hackathon_factory",
+        "human_collaboration",
+        "identity_routing",
+        "memory_governance",
+        "multimodal_runtime",
+        "observability",
+        "personality_routing",
+        "source_code_patch_lifecycle",
+        "telegram_notification",
+        "visual_workspace",
+        "workflow_automation_research",
+        "workflow_runtime"
+      ],
+      "blocked_capabilities": [],
+      "capability_discovery_plan": {
+        "can_plan": true,
+        "mcp_tools": [],
+        "missing_capability_count": 0,
+        "next_commands": [],
+        "notes": [
+          "Discovery plan is read-only: it does not install, enable, authorize or execute Addons.",
+          "Planning remains capability-first; domain behavior stays in Addons and the Core only orders safe resolution actions."
+        ],
+        "ordered_steps": [],
+        "schema_version": "forge.capability_discovery_plan.v1",
+        "status": "capability_discovery_ready",
+        "suggestion_count": 0
+      },
+      "capability_suggestions": [],
+      "goal": "Create a delivery platform",
+      "intent_overlay": {
+        "constraints": [],
+        "deliverables": [],
+        "risks": [],
+        "unknowns": []
+      },
+      "missing_capabilities": [],
+      "planning_strategy": "capability_first_addon_registry",
+      "registry_syncs": [],
+      "required_capabilities": [
+        {
+          "domains": [
+            "core"
+          ],
+          "id": "workflow_runtime",
+          "matched_keywords": [],
+          "reason": "capacidade universal requerida por qualquer workflow Forge",
+          "required": true,
+          "source_addon": "forge.core.kernel",
+          "source_addon_version": "0.1.0",
+          "title": "Workflow runtime",
+          "workflow_extensions": []
+        },
+        {
+          "domains": [
+            "core"
+          ],
+          "id": "dynamic_workflow",
+          "matched_keywords": [],
+          "reason": "capacidade universal requerida por qualquer workflow Forge",
+          "required": true,
+          "source_addon": "forge.core.kernel",
+          "source_addon_version": "0.1.0",
+          "title": "Dynamic workflow engine",
+          "workflow_extensions": []
+        },
+        {
+          "domains": [
+            "core"
+          ],
+          "id": "event_engine",
+          "matched_keywords": [],
+          "reason": "capacidade universal requerida por qualquer workflow Forge",
+          "required": true,
+          "source_addon": "forge.core.kernel",
+          "source_addon_version": "0.1.0",
+          "title": "Event engine",
+          "workflow_extensions": []
+        },
+        {
+          "domains": [
+            "core"
+          ],
+          "id": "context_routing",
+          "matched_keywords": [],
+          "reason": "capacidade universal requerida por qualquer workflow Forge",
+          "required": true,
+          "source_addon": "forge.core.kernel",
+          "source_addon_version": "0.1.0",
+          "title": "Context routing",
+          "workflow_extensions": []
+        },
+        {
+          "domains": [
+            "core"
+          ],
+          "id": "memory_governance",
+          "matched_keywords": [],
+          "reason": "capacidade universal requerida por qualquer workflow Forge",
+          "required": true,
+          "source_addon": "forge.core.kernel",
+          "source_addon_version": "0.1.0",
+          "title": "Memory governance",
+          "workflow_extensions": []
+        },
+        {
+          "domains": [
+            "core"
+          ],
+          "id": "identity_routing",
+          "matched_keywords": [],
+          "reason": "capacidade universal requerida por qualquer workflow Forge",
+          "required": true,
+          "source_addon": "forge.core.kernel",
+          "source_addon_version": "0.1.0",
+          "title": "Identity routing",
+          "workflow_extensions": []
+        },
+        {
+          "domains": [
+            "core"
+          ],
+          "id": "personality_routing",
+          "matched_keywords": [],
+          "reason": "capacidade universal requerida por qualquer workflow Forge",
+          "required": true,
+          "source_addon": "forge.core.kernel",
+          "source_addon_version": "0.1.0",
+          "title": "Personality routing",
+          "workflow_extensions": []
+        },
+        {
+          "domains": [
+            "core"
+          ],
+          "id": "human_collaboration",
+          "matched_keywords": [],
+          "reason": "capacidade universal requerida por qualquer workflow Forge",
+          "required": true,
+          "source_addon": "forge.core.kernel",
+          "source_addon_version": "0.1.0",
+          "title": "Human collaboration",
+          "workflow_extensions": []
+        },
+        {
+          "domains": [
+            "core"
+          ],
+          "id": "observability",
+          "matched_keywords": [],
+          "reason": "capacidade universal requerida por qualquer workflow Forge",
+          "required": true,
+          "source_addon": "forge.core.kernel",
+          "source_addon_version": "0.1.0",
+          "title": "Observability",
+          "workflow_extensions": []
+        },
+        {
+          "domains": [
+            "core"
+          ],
+          "id": "addon_registry",
+          "matched_keywords": [],
+          "reason": "capacidade universal requerida por qualquer workflow Forge",
+          "required": true,
+          "source_addon": "forge.core.kernel",
+          "source_addon_version": "0.1.0",
+          "title": "Addon registry",
+          "workflow_extensions": []
+        }
+      ],
+      "runtime_contracts": [],
+      "schema_version": "forge.capability_resolution.v1",
+      "status": "resolved",
+      "workflow_extensions": []
+    },
+    "constraints": [
+      "context-bounded execution",
+      "validation before promotion",
+      "persistent operational state"
+    ],
+    "deliverables": [
+      "atomic task graph",
+      "validation plan",
+      "artifact manifest",
+      "interface contract"
+    ],
+    "event_policy": {
+      "accepted_origins": [
+        "chat",
+        "api",
+        "webhook",
+        "cron",
+        "file",
+        "messaging",
+        "telemetry"
+      ],
+      "allowed_actions": [
+        "start_workflow",
+        "continue_workflow",
+        "pause_workflow",
+        "resume_workflow",
+        "modify_workflow",
+        "complete_workflow"
+      ],
+      "runtime": "origin_agnostic_event_engine",
+      "schema_version": "forge.event_policy.v1"
+    },
+    "goal": "Create a delivery platform",
+    "operating_context": {
+      "brand": {
+        "id": "forge",
+        "label": "Forge",
+        "scope": "brand"
+      },
+      "brand_identity": {
+        "audience": [
+          "operadores",
+          "gestores",
+          "agentes de execução"
+        ],
+        "terminology": [
+          "workflow-first",
+          "Core mínimo",
+          "Addons",
+          "handoff",
+          "checkpoint",
+          "resume"
+        ],
+        "tone": "pragmatica",
+        "values": [
+          "clareza",
+          "pragmatismo",
+          "rigor",
+          "operação assistida"
+        ],
+        "voice": "direta"
+      },
+      "channel": {
+        "id": "local_cli",
+        "label": "Local CLI",
+        "scope": "channel"
+      },
+      "design_system": {
+        "component_source": ".forge/design/components",
+        "guidelines": [
+          "interfaces densas e operacionais",
+          "painéis auditáveis por workflow, evento, custo e aprovação",
+          "ações seguras com preview e rollback explícitos"
+        ],
+        "token_source": ".forge/design/tokens.json"
+      },
+      "memory_scope": "organization_project_processing",
+      "operating_policy": {
+        "approval_policy": "risk_based",
+        "data_classification": "internal",
+        "memory_visibility": "organization_project",
+        "sharing_policy": "private_by_default"
+      },
+      "organization": {
+        "id": "digital-directive",
+        "label": "Digital Directive",
+        "scope": "organization"
+      },
+      "personality_scope": "organization_workflow_node",
+      "product": {
+        "id": "core",
+        "label": "Forge Core",
+        "scope": "product"
+      },
+      "schema_version": "forge.operating_context.v1",
+      "tenant_policy_mode": "audit",
+      "user": {
+        "id": "arthur",
+        "label": "Arthur Cardozo",
+        "scope": "user"
+      }
+    },
+    "required_capabilities": [
+      {
+        "domains": [
+          "core"
+        ],
+        "id": "workflow_runtime",
+        "matched_keywords": [],
+        "reason": "capacidade universal requerida por qualquer workflow Forge",
+        "required": true,
+        "source_addon": "forge.core.kernel",
+        "source_addon_version": "0.1.0",
+        "title": "Workflow runtime",
+        "workflow_extensions": []
+      },
+      {
+        "domains": [
+          "core"
+        ],
+        "id": "dynamic_workflow",
+        "matched_keywords": [],
+        "reason": "capacidade universal requerida por qualquer workflow Forge",
+        "required": true,
+        "source_addon": "forge.core.kernel",
+        "source_addon_version": "0.1.0",
+        "title": "Dynamic workflow engine",
+        "workflow_extensions": []
+      },
+      {
+        "domains": [
+          "core"
+        ],
+        "id": "event_engine",
+        "matched_keywords": [],
+        "reason": "capacidade universal requerida por qualquer workflow Forge",
+        "required": true,
+        "source_addon": "forge.core.kernel",
+        "source_addon_version": "0.1.0",
+        "title": "Event engine",
+        "workflow_extensions": []
+      },
+      {
+        "domains": [
+          "core"
+        ],
+        "id": "context_routing",
+        "matched_keywords": [],
+        "reason": "capacidade universal requerida por qualquer workflow Forge",
+        "required": true,
+        "source_addon": "forge.core.kernel",
+        "source_addon_version": "0.1.0",
+        "title": "Context routing",
+        "workflow_extensions": []
+      },
+      {
+        "domains": [
+          "core"
+        ],
+        "id": "memory_governance",
+        "matched_keywords": [],
+        "reason": "capacidade universal requerida por qualquer workflow Forge",
+        "required": true,
+        "source_addon": "forge.core.kernel",
+        "source_addon_version": "0.1.0",
+        "title": "Memory governance",
+        "workflow_extensions": []
+      },
+      {
+        "domains": [
+          "core"
+        ],
+        "id": "identity_routing",
+        "matched_keywords": [],
+        "reason": "capacidade universal requerida por qualquer workflow Forge",
+        "required": true,
+        "source_addon": "forge.core.kernel",
+        "source_addon_version": "0.1.0",
+        "title": "Identity routing",
+        "workflow_extensions": []
+      },
+      {
+        "domains": [
+          "core"
+        ],
+        "id": "personality_routing",
+        "matched_keywords": [],
+        "reason": "capacidade universal requerida por qualquer workflow Forge",
+        "required": true,
+        "source_addon": "forge.core.kernel",
+        "source_addon_version": "0.1.0",
+        "title": "Personality routing",
+        "workflow_extensions": []
+      },
+      {
+        "domains": [
+          "core"
+        ],
+        "id": "human_collaboration",
+        "matched_keywords": [],
+        "reason": "capacidade universal requerida por qualquer workflow Forge",
+        "required": true,
+        "source_addon": "forge.core.kernel",
+        "source_addon_version": "0.1.0",
+        "title": "Human collaboration",
+        "workflow_extensions": []
+      },
+      {
+        "domains": [
+          "core"
+        ],
+        "id": "observability",
+        "matched_keywords": [],
+        "reason": "capacidade universal requerida por qualquer workflow Forge",
+        "required": true,
+        "source_addon": "forge.core.kernel",
+        "source_addon_version": "0.1.0",
+        "title": "Observability",
+        "workflow_extensions": []
+      },
+      {
+        "domains": [
+          "core"
+        ],
+        "id": "addon_registry",
+        "matched_keywords": [],
+        "reason": "capacidade universal requerida por qualquer workflow Forge",
+        "required": true,
+        "source_addon": "forge.core.kernel",
+        "source_addon_version": "0.1.0",
+        "title": "Addon registry",
+        "workflow_extensions": []
+      }
+    ],
+    "risks": [
+      "ambiguous objective can create non-atomic tasks",
+      "invalid outputs must not be promoted"
+    ],
+    "schema_version": "forge.intent.v2",
+    "unknowns": [
+      "provider adapter is selected at execution time",
+      "human approval rules may vary by workflow"
+    ],
+    "workflow_mode": {
+      "can_become_persistent": true,
+      "expected_lifetime": "finite_goal_bound",
+      "kind": "ephemeral_workflow",
+      "scale_to_zero_policy": "scale_to_zero_after_completion"
+    }
+  },
+  "reuse_candidates": [],
+  "runtime": {
+    "can_become_persistent": true,
+    "ephemeral": true,
+    "expected_lifetime": "finite_goal_bound",
+    "lifecycle_kind": "ephemeral_workflow",
+    "persistent": false,
+    "scale_to_zero_policy": "scale_to_zero_after_completion",
+    "schema_version": "forge.workflow_runtime.v1"
+  },
+  "status": "planned",
+  "tasks": [
+    {
+      "async_policy": {
+        "mode": "sync",
+        "resume_strategy": "inline",
+        "run_substrates": []
+      },
+      "child_subflows": [],
+      "context_requirements": [
+        "human goal",
+        "explicit constraints"
+      ],
+      "cost": {
+        "cost_model": "static_v0_estimate",
+        "estimated_cost_usd": 0.0001
+      },
+      "dependencies": [],
+      "execution_policy": {
+        "ai_allowed": false,
+        "code_runtime": null,
+        "deterministic": true,
+        "mode": "deterministic_executor",
+        "reuse_hint": "task_local",
+        "selection_reason": "task can run without a live model call",
+        "validation_gate": "task_validation_rules"
+      },
+      "executor": "command",
+      "expected_output": "IntentSpec JSON",
+      "goal": "Parse intent: produce IntentSpec JSON",
+      "human_required": false,
+      "id": "task-001",
+      "loop_control": null,
+      "native_subflow": null,
+      "node_brain_routing": {
+        "agent_slots": [],
+        "allowed_brains": [],
+        "hot_swappable": false,
+        "max_parallel_agents": 0,
+        "mcp_source": "forge_mcp_router",
+        "memory_source": "forge_memory_router",
+        "orchestrator_brain": "forge",
+        "schema_version": "forge.node_brain_routing.v1",
+        "scope": "non_agentic_node",
+        "selection_owner": "forge",
+        "skills_source": "forge_skill_router",
+        "state_owner": "forge_workflow_state",
+        "supports_multiple_agents_per_brain": false,
+        "supports_parallel_agent_brains": false,
+        "switch_command": [],
+        "workflow_mutation_command": []
+      },
+      "notification": null,
+      "persona": null,
+      "schedule": null,
+      "status": "pending",
+      "title": "Parse intent",
+      "validation_rules": [
+        {
+          "command": null,
+          "expected": "intent contains goal, constraints, deliverables, risks and unknowns",
+          "kind": "schema"
+        }
+      ],
+      "version": 1,
+      "work_item": {
+        "acceptance_criteria": [
+          "Validation rules pass for schema: intent contains goal, constraints, deliverables, risks and unknowns",
+          "Task output is persisted as replayable operational evidence"
+        ],
+        "backlog_state": "ready",
+        "goal_validation": {
+          "definitively_ready": false,
+          "evidence_required": [
+            "completed task status",
+            "completed subtasks",
+            "passing validation rules",
+            "no blocking impediments"
+          ],
+          "goal": "Parse intent: reach a definitively ready state before promotion",
+          "rework_policy": "if goal evidence is missing, return the task to work instead of promoting"
+        },
+        "impediments": [
+          "missing executor authorization",
+          "failed validation gate",
+          "blocked dependency task"
+        ],
+        "item_type": "capability",
+        "owner_role": "forge_runtime",
+        "parent_id": null,
+        "priority": "p1",
+        "subtasks": [
+          {
+            "definition_of_done": [
+              "Context references are task-local",
+              "Context stays within the declared budget"
+            ],
+            "goal": "Gather the minimal context required to complete Parse intent",
+            "id": "task-001-subtask-001",
+            "status": "pending",
+            "title": "Prepare bounded context"
+          },
+          {
+            "definition_of_done": [
+              "Execution trace is recorded",
+              "Output is persisted or attached to the workflow state"
+            ],
+            "goal": "Produce the expected output for Parse intent",
+            "id": "task-001-subtask-002",
+            "status": "pending",
+            "title": "Execute work"
+          },
+          {
+            "definition_of_done": [
+              "Validation rules pass",
+              "No unresolved impediment blocks promotion"
+            ],
+            "goal": "Prove that Parse intent is definitively ready",
+            "id": "task-001-subtask-003",
+            "status": "pending",
+            "title": "Validate readiness"
+          }
+        ]
+      }
+    },
+    {
+      "async_policy": {
+        "mode": "sync",
+        "resume_strategy": "inline",
+        "run_substrates": []
+      },
+      "child_subflows": [],
+      "context_requirements": [
+        "IntentSpec",
+        "product definition"
+      ],
+      "cost": {
+        "cost_model": "static_v0_estimate",
+        "estimated_cost_usd": 0.0002
+      },
+      "dependencies": [
+        "task-001"
+      ],
+      "execution_policy": {
+        "ai_allowed": false,
+        "code_runtime": null,
+        "deterministic": true,
+        "mode": "deterministic_executor",
+        "reuse_hint": "task_local",
+        "selection_reason": "task can run without a live model call",
+        "validation_gate": "task_validation_rules"
+      },
+      "executor": "command",
+      "expected_output": "Requirement summary artifact",
+      "goal": "Extract requirements: produce Requirement summary artifact",
+      "human_required": false,
+      "id": "task-002",
+      "loop_control": null,
+      "native_subflow": null,
+      "node_brain_routing": {
+        "agent_slots": [],
+        "allowed_brains": [],
+        "hot_swappable": false,
+        "max_parallel_agents": 0,
+        "mcp_source": "forge_mcp_router",
+        "memory_source": "forge_memory_router",
+        "orchestrator_brain": "forge",
+        "schema_version": "forge.node_brain_routing.v1",
+        "scope": "non_agentic_node",
+        "selection_owner": "forge",
+        "skills_source": "forge_skill_router",
+        "state_owner": "forge_workflow_state",
+        "supports_multiple_agents_per_brain": false,
+        "supports_parallel_agent_brains": false,
+        "switch_command": [],
+        "workflow_mutation_command": []
+      },
+      "notification": null,
+      "persona": null,
+      "schedule": null,
+      "status": "pending",
+      "title": "Extract requirements",
+      "validation_rules": [
+        {
+          "command": null,
+          "expected": "requirements are normalized and measurable",
+          "kind": "schema"
+        }
+      ],
+      "version": 1,
+      "work_item": {
+        "acceptance_criteria": [
+          "Validation rules pass for schema: requirements are normalized and measurable",
+          "Task output is persisted as replayable operational evidence"
+        ],
+        "backlog_state": "ready",
+        "goal_validation": {
+          "definitively_ready": false,
+          "evidence_required": [
+            "completed task status",
+            "completed subtasks",
+            "passing validation rules",
+            "no blocking impediments"
+          ],
+          "goal": "Extract requirements: reach a definitively ready state before promotion",
+          "rework_policy": "if goal evidence is missing, return the task to work instead of promoting"
+        },
+        "impediments": [
+          "missing executor authorization",
+          "failed validation gate",
+          "blocked dependency task"
+        ],
+        "item_type": "execution_story",
+        "owner_role": "forge_runtime",
+        "parent_id": "task-001",
+        "priority": "p1",
+        "subtasks": [
+          {
+            "definition_of_done": [
+              "Context references are task-local",
+              "Context stays within the declared budget"
+            ],
+            "goal": "Gather the minimal context required to complete Extract requirements",
+            "id": "task-002-subtask-001",
+            "status": "pending",
+            "title": "Prepare bounded context"
+          },
+          {
+            "definition_of_done": [
+              "Execution trace is recorded",
+              "Output is persisted or attached to the workflow state"
+            ],
+            "goal": "Produce the expected output for Extract requirements",
+            "id": "task-002-subtask-002",
+            "status": "pending",
+            "title": "Execute work"
+          },
+          {
+            "definition_of_done": [
+              "Validation rules pass",
+              "No unresolved impediment blocks promotion"
+            ],
+            "goal": "Prove that Extract requirements is definitively ready",
+            "id": "task-002-subtask-003",
+            "status": "pending",
+            "title": "Validate readiness"
+          }
+        ]
+      }
+    },
+    {
+      "async_policy": {
+        "mode": "sync",
+        "resume_strategy": "inline",
+        "run_substrates": []
+      },
+      "child_subflows": [],
+      "context_requirements": [
+        "requirements",
+        "validation policy"
+      ],
+      "cost": {
+        "cost_model": "static_v0_estimate",
+        "estimated_cost_usd": 0.0005
+      },
+      "dependencies": [
+        "task-002"
+      ],
+      "execution_policy": {
+        "ai_allowed": false,
+        "code_runtime": null,
+        "deterministic": true,
+        "mode": "deterministic_executor",
+        "reuse_hint": "task_local",
+        "selection_reason": "task can run without a live model call",
+        "validation_gate": "task_validation_rules"
+      },
+      "executor": "command",
+      "expected_output": "Atomic task graph",
+      "goal": "Build atomic task graph: produce Atomic task graph",
+      "human_required": false,
+      "id": "task-003",
+      "loop_control": null,
+      "native_subflow": null,
+      "node_brain_routing": {
+        "agent_slots": [],
+        "allowed_brains": [],
+        "hot_swappable": false,
+        "max_parallel_agents": 0,
+        "mcp_source": "forge_mcp_router",
+        "memory_source": "forge_memory_router",
+        "orchestrator_brain": "forge",
+        "schema_version": "forge.node_brain_routing.v1",
+        "scope": "non_agentic_node",
+        "selection_owner": "forge",
+        "skills_source": "forge_skill_router",
+        "state_owner": "forge_workflow_state",
+        "supports_multiple_agents_per_brain": false,
+        "supports_parallel_agent_brains": false,
+        "switch_command": [],
+        "workflow_mutation_command": []
+      },
+      "notification": null,
+      "persona": null,
+      "schedule": null,
+      "status": "pending",
+      "title": "Build atomic task graph",
+      "validation_rules": [
+        {
+          "command": null,
+          "expected": "DAG has no missing dependencies",
+          "kind": "graph"
+        }
+      ],
+      "version": 1,
+      "work_item": {
+        "acceptance_criteria": [
+          "Validation rules pass for graph: DAG has no missing dependencies",
+          "Task output is persisted as replayable operational evidence"
+        ],
+        "backlog_state": "ready",
+        "goal_validation": {
+          "definitively_ready": false,
+          "evidence_required": [
+            "completed task status",
+            "completed subtasks",
+            "passing validation rules",
+            "no blocking impediments"
+          ],
+          "goal": "Build atomic task graph: reach a definitively ready state before promotion",
+          "rework_policy": "if goal evidence is missing, return the task to work instead of promoting"
+        },
+        "impediments": [
+          "missing executor authorization",
+          "failed validation gate",
+          "blocked dependency task"
+        ],
+        "item_type": "execution_story",
+        "owner_role": "forge_runtime",
+        "parent_id": "task-002",
+        "priority": "p1",
+        "subtasks": [
+          {
+            "definition_of_done": [
+              "Context references are task-local",
+              "Context stays within the declared budget"
+            ],
+            "goal": "Gather the minimal context required to complete Build atomic task graph",
+            "id": "task-003-subtask-001",
+            "status": "pending",
+            "title": "Prepare bounded context"
+          },
+          {
+            "definition_of_done": [
+              "Execution trace is recorded",
+              "Output is persisted or attached to the workflow state"
+            ],
+            "goal": "Produce the expected output for Build atomic task graph",
+            "id": "task-003-subtask-002",
+            "status": "pending",
+            "title": "Execute work"
+          },
+          {
+            "definition_of_done": [
+              "Validation rules pass",
+              "No unresolved impediment blocks promotion"
+            ],
+            "goal": "Prove that Build atomic task graph is definitively ready",
+            "id": "task-003-subtask-003",
+            "status": "pending",
+            "title": "Validate readiness"
+          }
+        ]
+      }
+    },
+    {
+      "async_policy": {
+        "mode": "sync",
+        "resume_strategy": "inline",
+        "run_substrates": []
+      },
+      "child_subflows": [],
+      "context_requirements": [
+        "task dependencies",
+        "artifact manifest"
+      ],
+      "cost": {
+        "cost_model": "static_v0_estimate",
+        "estimated_cost_usd": 0.0003
+      },
+      "dependencies": [
+        "task-003"
+      ],
+      "execution_policy": {
+        "ai_allowed": false,
+        "code_runtime": null,
+        "deterministic": true,
+        "mode": "deterministic_executor",
+        "reuse_hint": "task_local",
+        "selection_reason": "task can run without a live model call",
+        "validation_gate": "task_validation_rules"
+      },
+      "executor": "command",
+      "expected_output": "Context package",
+      "goal": "Route minimal context: produce Context package",
+      "human_required": false,
+      "id": "task-004",
+      "loop_control": null,
+      "native_subflow": null,
+      "node_brain_routing": {
+        "agent_slots": [],
+        "allowed_brains": [],
+        "hot_swappable": false,
+        "max_parallel_agents": 0,
+        "mcp_source": "forge_mcp_router",
+        "memory_source": "forge_memory_router",
+        "orchestrator_brain": "forge",
+        "schema_version": "forge.node_brain_routing.v1",
+        "scope": "non_agentic_node",
+        "selection_owner": "forge",
+        "skills_source": "forge_skill_router",
+        "state_owner": "forge_workflow_state",
+        "supports_multiple_agents_per_brain": false,
+        "supports_parallel_agent_brains": false,
+        "switch_command": [],
+        "workflow_mutation_command": []
+      },
+      "notification": null,
+      "persona": null,
+      "schedule": null,
+      "status": "pending",
+      "title": "Route minimal context",
+      "validation_rules": [
+        {
+          "command": null,
+          "expected": "context is task-local and bounded",
+          "kind": "context"
+        }
+      ],
+      "version": 1,
+      "work_item": {
+        "acceptance_criteria": [
+          "Validation rules pass for context: context is task-local and bounded",
+          "Task output is persisted as replayable operational evidence"
+        ],
+        "backlog_state": "ready",
+        "goal_validation": {
+          "definitively_ready": false,
+          "evidence_required": [
+            "completed task status",
+            "completed subtasks",
+            "passing validation rules",
+            "no blocking impediments"
+          ],
+          "goal": "Route minimal context: reach a definitively ready state before promotion",
+          "rework_policy": "if goal evidence is missing, return the task to work instead of promoting"
+        },
+        "impediments": [
+          "missing executor authorization",
+          "failed validation gate",
+          "blocked dependency task"
+        ],
+        "item_type": "execution_story",
+        "owner_role": "forge_runtime",
+        "parent_id": "task-003",
+        "priority": "p1",
+        "subtasks": [
+          {
+            "definition_of_done": [
+              "Context references are task-local",
+              "Context stays within the declared budget"
+            ],
+            "goal": "Gather the minimal context required to complete Route minimal context",
+            "id": "task-004-subtask-001",
+            "status": "pending",
+            "title": "Prepare bounded context"
+          },
+          {
+            "definition_of_done": [
+              "Execution trace is recorded",
+              "Output is persisted or attached to the workflow state"
+            ],
+            "goal": "Produce the expected output for Route minimal context",
+            "id": "task-004-subtask-002",
+            "status": "pending",
+            "title": "Execute work"
+          },
+          {
+            "definition_of_done": [
+              "Validation rules pass",
+              "No unresolved impediment blocks promotion"
+            ],
+            "goal": "Prove that Route minimal context is definitively ready",
+            "id": "task-004-subtask-003",
+            "status": "pending",
+            "title": "Validate readiness"
+          }
+        ]
+      }
+    },
+    {
+      "async_policy": {
+        "mode": "sync",
+        "resume_strategy": "inline",
+        "run_substrates": []
+      },
+      "child_subflows": [],
+      "context_requirements": [
+        "context package",
+        "execution target"
+      ],
+      "cost": {
+        "cost_model": "static_v0_estimate",
+        "estimated_cost_usd": 0.01
+      },
+      "dependencies": [
+        "task-004"
+      ],
+      "execution_policy": {
+        "ai_allowed": true,
+        "code_runtime": null,
+        "deterministic": false,
+        "mode": "bounded_mixed_executor",
+        "reuse_hint": "task_local",
+        "selection_reason": "task may combine deterministic work and bounded model reasoning",
+        "validation_gate": "task_validation_rules"
+      },
+      "executor": "mixed",
+      "expected_output": "Execution trace",
+      "goal": "Execute isolated task: produce Execution trace",
+      "human_required": false,
+      "id": "task-005",
+      "loop_control": null,
+      "native_subflow": null,
+      "node_brain_routing": {
+        "agent_slots": [
+          {
+            "parallel_group": "node-default",
+            "role": "primary_node_agent",
+            "slot_id": "agent-001",
+            "state_owner": "forge"
+          }
+        ],
+        "allowed_brains": [
+          "codex",
+          "opencode",
+          "gemini",
+          "claude"
+        ],
+        "hot_swappable": true,
+        "max_parallel_agents": 4,
+        "mcp_source": "forge_mcp_router",
+        "memory_source": "forge_memory_router",
+        "orchestrator_brain": "forge",
+        "schema_version": "forge.node_brain_routing.v1",
+        "scope": "agentic_ai_node",
+        "selection_owner": "forge",
+        "skills_source": "forge_skill_router",
+        "state_owner": "forge_workflow_state",
+        "supports_multiple_agents_per_brain": true,
+        "supports_parallel_agent_brains": true,
+        "switch_command": [
+          "forge",
+          "request",
+          "switch-executor",
+          "--run",
+          "<run-id>",
+          "--executor",
+          "<brain-id>",
+          "--output",
+          "json"
+        ],
+        "workflow_mutation_command": [
+          "forge",
+          "workflow",
+          "update-node-brain",
+          "--workflow",
+          "<workflow-id>",
+          "--task",
+          "<task-id>",
+          "--default-brain",
+          "<brain-id>",
+          "--output",
+          "json"
+        ]
+      },
+      "notification": null,
+      "persona": null,
+      "schedule": null,
+      "status": "pending",
+      "title": "Execute isolated task",
+      "validation_rules": [
+        {
+          "command": null,
+          "expected": "trace is recorded and retryable",
+          "kind": "execution"
+        }
+      ],
+      "version": 1,
+      "work_item": {
+        "acceptance_criteria": [
+          "Validation rules pass for execution: trace is recorded and retryable",
+          "Task output is persisted as replayable operational evidence"
+        ],
+        "backlog_state": "ready",
+        "goal_validation": {
+          "definitively_ready": false,
+          "evidence_required": [
+            "completed task status",
+            "completed subtasks",
+            "passing validation rules",
+            "no blocking impediments"
+          ],
+          "goal": "Execute isolated task: reach a definitively ready state before promotion",
+          "rework_policy": "if goal evidence is missing, return the task to work instead of promoting"
+        },
+        "impediments": [
+          "missing executor authorization",
+          "failed validation gate",
+          "blocked dependency task"
+        ],
+        "item_type": "execution_story",
+        "owner_role": "forge_runtime",
+        "parent_id": "task-004",
+        "priority": "p1",
+        "subtasks": [
+          {
+            "definition_of_done": [
+              "Context references are task-local",
+              "Context stays within the declared budget"
+            ],
+            "goal": "Gather the minimal context required to complete Execute isolated task",
+            "id": "task-005-subtask-001",
+            "status": "pending",
+            "title": "Prepare bounded context"
+          },
+          {
+            "definition_of_done": [
+              "Execution trace is recorded",
+              "Output is persisted or attached to the workflow state"
+            ],
+            "goal": "Produce the expected output for Execute isolated task",
+            "id": "task-005-subtask-002",
+            "status": "pending",
+            "title": "Execute work"
+          },
+          {
+            "definition_of_done": [
+              "Validation rules pass",
+              "No unresolved impediment blocks promotion"
+            ],
+            "goal": "Prove that Execute isolated task is definitively ready",
+            "id": "task-005-subtask-003",
+            "status": "pending",
+            "title": "Validate readiness"
+          }
+        ]
+      }
+    },
+    {
+      "async_policy": {
+        "mode": "sync",
+        "resume_strategy": "inline",
+        "run_substrates": []
+      },
+      "child_subflows": [],
+      "context_requirements": [
+        "execution trace",
+        "validation rules"
+      ],
+      "cost": {
+        "cost_model": "static_v0_estimate",
+        "estimated_cost_usd": 0.0005
+      },
+      "dependencies": [
+        "task-005"
+      ],
+      "execution_policy": {
+        "ai_allowed": false,
+        "code_runtime": null,
+        "deterministic": true,
+        "mode": "deterministic_executor",
+        "reuse_hint": "task_local",
+        "selection_reason": "task can run without a live model call",
+        "validation_gate": "task_validation_rules"
+      },
+      "executor": "command",
+      "expected_output": "Validation report",
+      "goal": "Validate build: produce Validation report",
+      "human_required": false,
+      "id": "task-006",
+      "loop_control": null,
+      "native_subflow": null,
+      "node_brain_routing": {
+        "agent_slots": [],
+        "allowed_brains": [],
+        "hot_swappable": false,
+        "max_parallel_agents": 0,
+        "mcp_source": "forge_mcp_router",
+        "memory_source": "forge_memory_router",
+        "orchestrator_brain": "forge",
+        "schema_version": "forge.node_brain_routing.v1",
+        "scope": "non_agentic_node",
+        "selection_owner": "forge",
+        "skills_source": "forge_skill_router",
+        "state_owner": "forge_workflow_state",
+        "supports_multiple_agents_per_brain": false,
+        "supports_parallel_agent_brains": false,
+        "switch_command": [],
+        "workflow_mutation_command": []
+      },
+      "notification": null,
+      "persona": null,
+      "schedule": null,
+      "status": "pending",
+      "title": "Validate build",
+      "validation_rules": [
+        {
+          "command": "cargo test",
+          "expected": "cargo test exits successfully when this task produces code",
+          "kind": "command"
+        }
+      ],
+      "version": 1,
+      "work_item": {
+        "acceptance_criteria": [
+          "Validation rules pass for command: cargo test exits successfully when this task produces code",
+          "Task output is persisted as replayable operational evidence"
+        ],
+        "backlog_state": "ready",
+        "goal_validation": {
+          "definitively_ready": false,
+          "evidence_required": [
+            "completed task status",
+            "completed subtasks",
+            "passing validation rules",
+            "no blocking impediments"
+          ],
+          "goal": "Validate build: reach a definitively ready state before promotion",
+          "rework_policy": "if goal evidence is missing, return the task to work instead of promoting"
+        },
+        "impediments": [
+          "missing executor authorization",
+          "failed validation gate",
+          "blocked dependency task"
+        ],
+        "item_type": "validation_story",
+        "owner_role": "forge_runtime",
+        "parent_id": "task-005",
+        "priority": "p1",
+        "subtasks": [
+          {
+            "definition_of_done": [
+              "Context references are task-local",
+              "Context stays within the declared budget"
+            ],
+            "goal": "Gather the minimal context required to complete Validate build",
+            "id": "task-006-subtask-001",
+            "status": "pending",
+            "title": "Prepare bounded context"
+          },
+          {
+            "definition_of_done": [
+              "Execution trace is recorded",
+              "Output is persisted or attached to the workflow state"
+            ],
+            "goal": "Produce the expected output for Validate build",
+            "id": "task-006-subtask-002",
+            "status": "pending",
+            "title": "Execute work"
+          },
+          {
+            "definition_of_done": [
+              "Validation rules pass",
+              "No unresolved impediment blocks promotion"
+            ],
+            "goal": "Prove that Validate build is definitively ready",
+            "id": "task-006-subtask-003",
+            "status": "pending",
+            "title": "Validate readiness"
+          }
+        ]
+      }
+    },
+    {
+      "async_policy": {
+        "mode": "sync",
+        "resume_strategy": "inline",
+        "run_substrates": []
+      },
+      "child_subflows": [],
+      "context_requirements": [
+        "validation report",
+        "artifact outputs"
+      ],
+      "cost": {
+        "cost_model": "static_v0_estimate",
+        "estimated_cost_usd": 0.0004
+      },
+      "dependencies": [
+        "task-006"
+      ],
+      "execution_policy": {
+        "ai_allowed": false,
+        "code_runtime": null,
+        "deterministic": true,
+        "mode": "deterministic_executor",
+        "reuse_hint": "task_local",
+        "selection_reason": "task can run without a live model call",
+        "validation_gate": "task_validation_rules"
+      },
+      "executor": "command",
+      "expected_output": "Artifact manifest",
+      "goal": "Integrate artifacts: produce Artifact manifest",
+      "human_required": false,
+      "id": "task-007",
+      "loop_control": null,
+      "native_subflow": null,
+      "node_brain_routing": {
+        "agent_slots": [],
+        "allowed_brains": [],
+        "hot_swappable": false,
+        "max_parallel_agents": 0,
+        "mcp_source": "forge_mcp_router",
+        "memory_source": "forge_memory_router",
+        "orchestrator_brain": "forge",
+        "schema_version": "forge.node_brain_routing.v1",
+        "scope": "non_agentic_node",
+        "selection_owner": "forge",
+        "skills_source": "forge_skill_router",
+        "state_owner": "forge_workflow_state",
+        "supports_multiple_agents_per_brain": false,
+        "supports_parallel_agent_brains": false,
+        "switch_command": [],
+        "workflow_mutation_command": []
+      },
+      "notification": null,
+      "persona": null,
+      "schedule": null,
+      "status": "pending",
+      "title": "Integrate artifacts",
+      "validation_rules": [
+        {
+          "command": null,
+          "expected": "artifact manifest has stable paths and hashes",
+          "kind": "artifact"
+        }
+      ],
+      "version": 1,
+      "work_item": {
+        "acceptance_criteria": [
+          "Validation rules pass for artifact: artifact manifest has stable paths and hashes",
+          "Task output is persisted as replayable operational evidence"
+        ],
+        "backlog_state": "ready",
+        "goal_validation": {
+          "definitively_ready": false,
+          "evidence_required": [
+            "completed task status",
+            "completed subtasks",
+            "passing validation rules",
+            "no blocking impediments"
+          ],
+          "goal": "Integrate artifacts: reach a definitively ready state before promotion",
+          "rework_policy": "if goal evidence is missing, return the task to work instead of promoting"
+        },
+        "impediments": [
+          "missing executor authorization",
+          "failed validation gate",
+          "blocked dependency task"
+        ],
+        "item_type": "execution_story",
+        "owner_role": "forge_runtime",
+        "parent_id": "task-006",
+        "priority": "p1",
+        "subtasks": [
+          {
+            "definition_of_done": [
+              "Context references are task-local",
+              "Context stays within the declared budget"
+            ],
+            "goal": "Gather the minimal context required to complete Integrate artifacts",
+            "id": "task-007-subtask-001",
+            "status": "pending",
+            "title": "Prepare bounded context"
+          },
+          {
+            "definition_of_done": [
+              "Execution trace is recorded",
+              "Output is persisted or attached to the workflow state"
+            ],
+            "goal": "Produce the expected output for Integrate artifacts",
+            "id": "task-007-subtask-002",
+            "status": "pending",
+            "title": "Execute work"
+          },
+          {
+            "definition_of_done": [
+              "Validation rules pass",
+              "No unresolved impediment blocks promotion"
+            ],
+            "goal": "Prove that Integrate artifacts is definitively ready",
+            "id": "task-007-subtask-003",
+            "status": "pending",
+            "title": "Validate readiness"
+          }
+        ]
+      }
+    },
+    {
+      "async_policy": {
+        "mode": "sync",
+        "resume_strategy": "inline",
+        "run_substrates": []
+      },
+      "child_subflows": [],
+      "context_requirements": [
+        "artifact manifest",
+        "workflow summary"
+      ],
+      "cost": {
+        "cost_model": "static_v0_estimate",
+        "estimated_cost_usd": 0.015
+      },
+      "dependencies": [
+        "task-007"
+      ],
+      "execution_policy": {
+        "ai_allowed": true,
+        "code_runtime": null,
+        "deterministic": false,
+        "mode": "model_executor",
+        "reuse_hint": "task_local",
+        "selection_reason": "task requires model reasoning",
+        "validation_gate": "task_validation_rules"
+      },
+      "executor": "ai",
+      "expected_output": "Operational report",
+      "goal": "Generate documentation: produce Operational report",
+      "human_required": false,
+      "id": "task-008",
+      "loop_control": null,
+      "native_subflow": null,
+      "node_brain_routing": {
+        "agent_slots": [
+          {
+            "parallel_group": "node-default",
+            "role": "primary_node_agent",
+            "slot_id": "agent-001",
+            "state_owner": "forge"
+          }
+        ],
+        "allowed_brains": [
+          "codex",
+          "opencode",
+          "gemini",
+          "claude"
+        ],
+        "hot_swappable": true,
+        "max_parallel_agents": 4,
+        "mcp_source": "forge_mcp_router",
+        "memory_source": "forge_memory_router",
+        "orchestrator_brain": "forge",
+        "schema_version": "forge.node_brain_routing.v1",
+        "scope": "agentic_ai_node",
+        "selection_owner": "forge",
+        "skills_source": "forge_skill_router",
+        "state_owner": "forge_workflow_state",
+        "supports_multiple_agents_per_brain": true,
+        "supports_parallel_agent_brains": true,
+        "switch_command": [
+          "forge",
+          "request",
+          "switch-executor",
+          "--run",
+          "<run-id>",
+          "--executor",
+          "<brain-id>",
+          "--output",
+          "json"
+        ],
+        "workflow_mutation_command": [
+          "forge",
+          "workflow",
+          "update-node-brain",
+          "--workflow",
+          "<workflow-id>",
+          "--task",
+          "<task-id>",
+          "--default-brain",
+          "<brain-id>",
+          "--output",
+          "json"
+        ]
+      },
+      "notification": null,
+      "persona": {
+        "auditable": true,
+        "instruction_source": "forge_personality_soul_routing_v1",
+        "mode": "operator_report",
+        "scope": "node",
+        "source_models": [
+          "codex_developer_personality_instructions",
+          "paperclip_soul_voice_tone_persona"
+        ],
+        "tone": "direct, auditable and evidence-bound",
+        "validation_gate": "persona_routing_required",
+        "voice": "operational reporter"
+      },
+      "schedule": null,
+      "status": "pending",
+      "title": "Generate documentation",
+      "validation_rules": [
+        {
+          "command": null,
+          "expected": "operator can replay the workflow from documented state",
+          "kind": "documentation"
+        }
+      ],
+      "version": 1,
+      "work_item": {
+        "acceptance_criteria": [
+          "Validation rules pass for documentation: operator can replay the workflow from documented state",
+          "Task output is persisted as replayable operational evidence"
+        ],
+        "backlog_state": "ready",
+        "goal_validation": {
+          "definitively_ready": false,
+          "evidence_required": [
+            "completed task status",
+            "completed subtasks",
+            "passing validation rules",
+            "no blocking impediments"
+          ],
+          "goal": "Generate documentation: reach a definitively ready state before promotion",
+          "rework_policy": "if goal evidence is missing, return the task to work instead of promoting"
+        },
+        "impediments": [
+          "missing executor authorization",
+          "failed validation gate",
+          "blocked dependency task"
+        ],
+        "item_type": "execution_story",
+        "owner_role": "forge_runtime",
+        "parent_id": "task-007",
+        "priority": "p1",
+        "subtasks": [
+          {
+            "definition_of_done": [
+              "Context references are task-local",
+              "Context stays within the declared budget"
+            ],
+            "goal": "Gather the minimal context required to complete Generate documentation",
+            "id": "task-008-subtask-001",
+            "status": "pending",
+            "title": "Prepare bounded context"
+          },
+          {
+            "definition_of_done": [
+              "Execution trace is recorded",
+              "Output is persisted or attached to the workflow state"
+            ],
+            "goal": "Produce the expected output for Generate documentation",
+            "id": "task-008-subtask-002",
+            "status": "pending",
+            "title": "Execute work"
+          },
+          {
+            "definition_of_done": [
+              "Validation rules pass",
+              "No unresolved impediment blocks promotion"
+            ],
+            "goal": "Prove that Generate documentation is definitively ready",
+            "id": "task-008-subtask-003",
+            "status": "pending",
+            "title": "Validate readiness"
+          }
+        ]
+      }
+    }
+  ],
+  "workflow_id": "wf_3de52a21dc464daca61ab02ad5e421ca"
+}

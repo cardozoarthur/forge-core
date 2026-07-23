@@ -1,4 +1,10 @@
 use crate::artifact::hex_sha256;
+use crate::cli_integration::{
+    build_cli_wrapper_plan, build_harness_bootstrap_report, build_headroom_stats_report,
+    run_cli_harness_exec, CliHarnessExecOptions, CliWrapperPlanOptions, CliWrapperPlanReport,
+    HarnessBootstrapOptions, HeadroomStatsOptions, HeadroomStatsReport,
+    CLI_HARNESS_HEADROOM_RUNTIME_PLAN_SCHEMA_VERSION, CLI_WRAPPER_PLAN_SCHEMA_VERSION,
+};
 use crate::executor::{
     load_executors, record_brain_session_lifecycle, record_shell_session_plan, BrainCandidate,
     BrainRouterReport, BrainSessionLifecycleOptions, BrainShellSessionSpec, ShellLaunchPlanOptions,
@@ -7,12 +13,6 @@ use crate::graph::{
     create_workflow, task, ExecutorKind, NodeBrainAgentSlotSpec, NodeBrainRoutingSpec,
 };
 use crate::handoff::build_task_handoff_with_project;
-use crate::harness::{
-    build_cli_wrapper_plan, build_harness_bootstrap_report, build_headroom_stats_report,
-    run_cli_harness_exec, CliHarnessExecOptions, CliWrapperPlanOptions, CliWrapperPlanReport,
-    HarnessBootstrapOptions, HeadroomStatsOptions, HeadroomStatsReport,
-    CLI_HARNESS_HEADROOM_RUNTIME_PLAN_SCHEMA_VERSION, CLI_WRAPPER_PLAN_SCHEMA_VERSION,
-};
 use crate::intent::parse_intent;
 use crate::interactive::{build_interactive_harness, InteractiveHarnessOptions};
 use crate::ir::{
@@ -3967,6 +3967,8 @@ grep -q 'research artifacts' docs/research/findings.md
         require_token_headroom_for_forge_first: true,
         dry_run: false,
         allow_exec: true,
+        secret_env: &[],
+        secret_permissions: &[],
         project_root: Some(&project_root),
         cwd: Some(&project_root),
     })?;
@@ -4350,6 +4352,8 @@ printf 'connected_external_brain_stub_ok\n'
         require_token_headroom_for_forge_first: true,
         dry_run: false,
         allow_exec: true,
+        secret_env: &[],
+        secret_permissions: &[],
         project_root: Some(&project_root),
         cwd: Some(&project_root),
     })?;
@@ -4663,6 +4667,7 @@ fn rehearsal_brain_router() -> BrainRouterReport {
             "A workflow run can switch the active execution brain through Forge-owned routing without losing workflow lineage."
                 .to_string(),
         selected_brain: Some("codex".to_string()),
+        model_decision: None,
         forge_controlled_surfaces: vec![
             "workflow_graph".to_string(),
             "memory".to_string(),
@@ -4947,6 +4952,8 @@ fn build_replacement_cli_executor_project_demo(
         require_token_headroom_for_forge_first: true,
         dry_run: false,
         allow_exec: true,
+        secret_env: &[],
+        secret_permissions: &[],
         project_root: Some(&project_root),
         cwd: Some(&project_root),
     })?;

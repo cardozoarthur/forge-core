@@ -3,6 +3,10 @@ use crate::identity::ensure_workflow_policy;
 use crate::storage::ForgeStore;
 use crate::workflow::attach_workflow_artifact;
 use crate::workflow::ArtifactAttachReport;
+use crate::worktree::{
+    evaluate_worktree_modification_guard, resolve_bound_worktree_root,
+    WorktreeModificationGuardReport, WorktreeModificationGuardRequest,
+};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::fs;
@@ -25,6 +29,8 @@ pub struct PatchPlanReport {
     pub external_resources_mutated: bool,
     pub requires_human_approval: bool,
     pub permission_gate: PatchPermissionGate,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_guard: Option<WorktreeModificationGuardReport>,
     pub context_contract: PatchContextContract,
     pub diff_review: PatchDiffReview,
     pub file_snapshots: Vec<PatchFileSnapshot>,
@@ -113,19 +119,45 @@ pub fn build_patch_plan(
     blocked_paths.sort();
     blocked_paths.dedup();
 
+    let bound_worktree_root = resolve_bound_worktree_root(store, workflow_id, Some(task_id))?;
+    let worktree_guard = bound_worktree_root
+        .as_ref()
+        .map(|root| {
+            evaluate_worktree_modification_guard(
+                store,
+                WorktreeModificationGuardRequest {
+                    worktree: root.display().to_string(),
+                    operation: "modify".to_string(),
+                    paths: allowed_paths.clone(),
+                    reason: intent.to_string(),
+                    workflow_id: Some(workflow_id.to_string()),
+                    task_id: Some(task_id.to_string()),
+                },
+            )
+        })
+        .transpose()?;
+    if let Some(guard) = worktree_guard.as_ref().filter(|guard| !guard.allowed) {
+        let denied = guard.blocked_paths.to_vec();
+        allowed_paths.retain(|path| !denied.contains(path));
+        blocked_paths.extend(denied);
+        blocked_paths.sort();
+        blocked_paths.dedup();
+    }
+
+    let allowed_root = bound_worktree_root
+        .clone()
+        .unwrap_or(std::env::current_dir()?);
     let file_snapshots = allowed_paths
         .iter()
-        .map(|path| snapshot_file(path))
+        .map(|path| snapshot_file_at(&allowed_root, path))
         .collect::<Result<Vec<_>>>()?;
 
-    let status = if allowed_paths.is_empty() {
+    let status = if allowed_paths.is_empty() || !blocked_paths.is_empty() {
         "patch_plan_blocked"
     } else {
         "patch_plan_ready"
     };
-    let cwd = std::env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| ".".to_string());
+    let cwd = allowed_root.display().to_string();
     let mut report = PatchPlanReport {
         schema_version: PATCH_PLAN_SCHEMA_VERSION.to_string(),
         status: status.to_string(),
@@ -149,6 +181,7 @@ pub fn build_patch_plan(
             blocked_paths: blocked_paths.clone(),
             requires_explicit_allow_before_apply: true,
         },
+        worktree_guard,
         context_contract: PatchContextContract {
             required: true,
             strict: true,
@@ -186,7 +219,7 @@ pub fn build_patch_plan(
         ],
     };
 
-    if !allowed_paths.is_empty() {
+    if !allowed_paths.is_empty() && blocked_paths.is_empty() {
         let payload = serde_json::to_value(&report)?;
         let relative_path = format!("tmp/{workflow_id}-{task_id}-patch-plan.json");
         let (path, _) = write_json_artifact(&store.base_dir(), &relative_path, &payload)?;
@@ -214,7 +247,11 @@ fn is_repo_relative_path(path: &str) -> bool {
 }
 
 fn snapshot_file(path: &str) -> Result<PatchFileSnapshot> {
-    let path_buf = PathBuf::from(path);
+    snapshot_file_at(Path::new("."), path)
+}
+
+fn snapshot_file_at(root: &Path, path: &str) -> Result<PatchFileSnapshot> {
+    let path_buf = root.join(path);
     if !path_buf.exists() {
         return Ok(PatchFileSnapshot {
             path: path.to_string(),

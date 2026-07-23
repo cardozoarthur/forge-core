@@ -33,12 +33,25 @@ use forge_core::checkpoint::{
     load_latest_task_checkpoint, record_task_checkpoint, TaskCheckpointRequest,
 };
 use forge_core::cli_factory::{create_cli_factory_plan, CliFactoryCreateInput};
+use forge_core::cli_integration::{
+    analyze_token_headroom, build_cli_wrapper_plan, build_harness_activation_profile,
+    build_harness_adoption_plan, build_harness_bootstrap_report, build_harness_doctor_report,
+    build_harness_headroom_plan, build_harness_mode_report, build_headroom_stats_report,
+    inspect_cli_harness_shim_status, install_cli_harness_shim, install_cli_provider_adapter,
+    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
+    resolve_harness_runtime_policy, retrieve_headroom_blob, run_cli_harness_exec,
+    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
+    HarnessActivationProfileOptions, HarnessAdoptionPlanOptions, HarnessBootstrapOptions,
+    HarnessDoctorOptions, HarnessHeadroomPlanOptions, HarnessModeOptions,
+    HarnessRuntimePolicyOptions, HeadroomStatsOptions, ProviderAdapterInstallOptions,
+};
 use forge_core::cluster::{
     build_cluster_task_handoff, list_cluster_node_leases, list_cluster_nodes,
     place_task_on_cluster, register_cluster_node, ClusterNodeInput,
 };
 use forge_core::context::{
-    build_context_package_with_checkpoint_and_project, DEFAULT_CONTEXT_BUDGET,
+    build_context_package_with_checkpoint_and_project,
+    build_context_package_with_checkpoint_project_and_worktree, DEFAULT_CONTEXT_BUDGET,
 };
 use forge_core::cost::{
     apply_cost_ledger_retention_for_context, build_cost_ledger_for_context,
@@ -66,25 +79,13 @@ use forge_core::event::{
 use forge_core::execution::run_simulated;
 use forge_core::executor::{
     build_brain_session_history_report, build_brain_sessions_report_with_options,
-    build_shell_launch_plan, import_ai_limits_observations, load_executors,
-    record_brain_session_lifecycle, record_shell_session_plan, sync_executors,
-    BrainSessionLifecycleOptions, BrainSessionsReportOptions, ExecutorQuotaObservation,
-    ExecutorSyncOptions, ShellLaunchPlanOptions,
+    build_shell_launch_plan, decide_executor_model_for_task, import_ai_limits_observations,
+    load_executors, record_brain_session_lifecycle, record_shell_session_plan, sync_executors,
+    BrainSessionLifecycleOptions, BrainSessionsReportOptions, ExecutorModelDecisionOptions,
+    ExecutorQuotaObservation, ExecutorSyncOptions, ShellLaunchPlanOptions,
 };
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff_with_project;
-use forge_core::harness::{
-    analyze_token_headroom, build_cli_wrapper_plan, build_harness_activation_profile,
-    build_harness_adoption_plan, build_harness_bootstrap_report, build_harness_doctor_report,
-    build_harness_headroom_plan, build_harness_mode_report, build_headroom_stats_report,
-    inspect_cli_harness_shim_status, install_cli_harness_shim, install_cli_provider_adapter,
-    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
-    resolve_harness_runtime_policy, retrieve_headroom_blob, run_cli_harness_exec,
-    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
-    HarnessActivationProfileOptions, HarnessAdoptionPlanOptions, HarnessBootstrapOptions,
-    HarnessDoctorOptions, HarnessHeadroomPlanOptions, HarnessModeOptions,
-    HarnessRuntimePolicyOptions, HeadroomStatsOptions, ProviderAdapterInstallOptions,
-};
 use forge_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
     evaluate_tenant_policy_for_action, inspect_project_operating_context, link_identity,
@@ -99,7 +100,7 @@ use forge_core::improve::{
     ImprovementCandidateFilter,
 };
 use forge_core::inspection::inspect_workflow_with_focus;
-use forge_core::intent::parse_intent_with_catalog_and_context;
+use forge_core::intent::{parse_intent_with_catalog_and_context, OperatingContextSpec};
 use forge_core::interaction::{
     answer_human_interaction, create_choice_interaction, create_form_interaction,
     expire_human_interaction, list_human_interactions, summarize_human_interactions,
@@ -187,8 +188,9 @@ use forge_core::registry::{
 use forge_core::request::{
     cancel_request, complete_ready_task, create_final_delivery_package, drive_request,
     ensure_final_audit, heartbeat_request, list_requests, load_request_status,
-    recover_stale_request, resume_async_request, start_async_request, step_request,
-    switch_request_executor, RequestExecutorSwitchInput, RequestTaskCompletionInput,
+    recover_stale_request, resume_async_request, start_async_request,
+    start_async_request_with_project, step_request, switch_request_executor,
+    RequestExecutorSwitchInput, RequestTaskCompletionInput,
 };
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
@@ -198,6 +200,10 @@ use forge_core::schedule::{
     run_daily_goal_research_smoke, run_due_workflow, scan_due_workflows,
     scan_due_workflows_parallel, update_loop_state, update_workflow_schedule,
     ScheduleUpdateOptions,
+};
+use forge_core::security::{
+    sanitize_prompt_secrets_with_vault, sanitize_workflow_secrets_for_storage,
+    SecretSanitizationOptions, SecretVaultPersistOptions,
 };
 use forge_core::self_evolve::{run_self_evolution, SelfRunOptions};
 use forge_core::skill::install_skill;
@@ -210,6 +216,16 @@ use forge_core::workflow::{
     resolve_workflow_tokens, set_workflow_token_collection, update_workflow_goal,
     update_workflow_node_brain_routing, validate_child_subflow_binding,
     CreativeCollaborationEventRequest, ProductDecisionInput, WorkflowNodeBrainRoutingUpdateInput,
+};
+use forge_core::worktree::{
+    approve_worktree_config, bind_worktree, bound_worktree_context, create_worktree,
+    create_worktree_guard_predecessor_task, discover_worktrees,
+    evaluate_worktree_modification_guard, initialize_worktree, inspect_registered_worktree,
+    inspect_worktree_sandbox_lifecycle, list_registered_worktrees, plan_worktree_sandbox,
+    register_worktree, resolve_effective_project_root, resolve_worktree_selector_root,
+    run_worktree_sandbox, start_worktree_sandbox, stop_worktree_sandbox,
+    supervise_worktree_sandbox, WorktreeCreateOptions, WorktreeModificationGuardRequest,
+    WorktreeRegisterOptions, WorktreeSandboxRequest,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -231,6 +247,8 @@ enum Commands {
     Plan {
         #[arg(long)]
         goal: String,
+        #[arg(long)]
+        worktree: Option<String>,
         #[arg(long = "addon-dir")]
         addon_dirs: Vec<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -394,6 +412,14 @@ enum Commands {
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommands,
+    },
+    Worktree {
+        #[command(subcommand)]
+        command: WorktreeCommands,
+    },
+    Security {
+        #[command(subcommand)]
+        command: SecurityCommands,
     },
     Schedule {
         #[command(subcommand)]
@@ -999,6 +1025,10 @@ enum HarnessCommands {
         execute: bool,
         #[arg(long = "allow-exec", default_value_t = false)]
         allow_exec: bool,
+        #[arg(long = "secret-env")]
+        secret_env: Vec<String>,
+        #[arg(long = "secret-permission")]
+        secret_permissions: Vec<String>,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
         #[arg(long)]
@@ -2420,6 +2450,25 @@ enum ExecutorQuotaCommands {
         output: OutputFormat,
     },
     Record(Box<ExecutorQuotaRecordArgs>),
+    Decide(Box<ExecutorModelDecisionArgs>),
+}
+
+#[derive(Debug, Args)]
+struct ExecutorModelDecisionArgs {
+    #[arg(long)]
+    task: String,
+    #[arg(long = "task-class", default_value = "general_reasoning")]
+    task_class: String,
+    #[arg(long, default_value = "medium")]
+    difficulty: String,
+    #[arg(long = "expected-input-tokens", default_value_t = 4000)]
+    expected_input_tokens: u64,
+    #[arg(long = "expected-output-tokens", default_value_t = 1000)]
+    expected_output_tokens: u64,
+    #[arg(long = "configured-decider")]
+    configured_decider: Option<String>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    output: OutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -2469,6 +2518,239 @@ enum RuntimeCommands {
         owner: String,
         #[arg(long)]
         allow_external: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorktreeCommands {
+    Discover {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Create {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        branch: String,
+        #[arg(long = "start-point")]
+        start_point: Option<String>,
+        #[arg(long = "allow-repository-mutation", default_value_t = false)]
+        allow_repository_mutation: bool,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Register {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long, requires = "workflow")]
+        task: Option<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Bind {
+        #[arg(long)]
+        worktree: String,
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Init {
+        #[arg(long)]
+        worktree: String,
+        #[arg(long = "allow-worktree-write", default_value_t = false)]
+        allow_worktree_write: bool,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ApproveConfig {
+        #[arg(long)]
+        worktree: String,
+        #[arg(long = "allow-guardrail-update", default_value_t = false)]
+        allow_guardrail_update: bool,
+        #[arg(long = "approved-by")]
+        approved_by: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    List {
+        #[arg(long)]
+        repository: Option<PathBuf>,
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Inspect {
+        #[arg(long)]
+        worktree: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Sandbox {
+        #[command(subcommand)]
+        command: WorktreeSandboxCommands,
+    },
+    Guard {
+        #[command(subcommand)]
+        command: WorktreeGuardCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorktreeGuardCommands {
+    Check {
+        #[arg(long)]
+        worktree: String,
+        #[arg(long, default_value = "modify", value_parser = ["modify"])]
+        operation: String,
+        #[arg(long = "path", required = true)]
+        paths: Vec<String>,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long, requires = "workflow")]
+        task: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    CreatePredecessor {
+        #[arg(long)]
+        worktree: String,
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "path", required = true)]
+        paths: Vec<String>,
+        #[arg(long)]
+        goal: String,
+        #[arg(long = "allow-workflow-mutation", default_value_t = false)]
+        allow_workflow_mutation: bool,
+        #[arg(long = "approved-by")]
+        approved_by: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorktreeSandboxCommands {
+    Plan {
+        #[arg(long)]
+        worktree: String,
+        #[arg(long, value_parser = ["preview", "test"])]
+        purpose: String,
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long, requires = "workflow")]
+        task: Option<String>,
+        #[arg(last = true)]
+        command: Vec<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Run {
+        #[arg(long)]
+        worktree: String,
+        #[arg(long, value_parser = ["preview", "test"])]
+        purpose: String,
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long, requires = "workflow")]
+        task: Option<String>,
+        #[arg(long = "allow-exec", default_value_t = false)]
+        allow_exec: bool,
+        #[arg(last = true)]
+        command: Vec<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Start {
+        #[arg(long)]
+        worktree: String,
+        #[arg(long, value_parser = ["preview", "test"])]
+        purpose: String,
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long, requires = "workflow")]
+        task: Option<String>,
+        #[arg(long = "allow-exec", default_value_t = false)]
+        allow_exec: bool,
+        #[arg(last = true)]
+        command: Vec<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Status {
+        #[arg(long)]
+        sandbox: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Stop {
+        #[arg(long)]
+        sandbox: String,
+        #[arg(long = "allow-stop", default_value_t = false)]
+        allow_stop: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    #[command(hide = true)]
+    Supervise {
+        #[arg(long)]
+        sandbox: String,
+        #[arg(long = "allow-supervisor-exec", default_value_t = false)]
+        allow_supervisor_exec: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SecurityCommands {
+    SecretScan {
+        #[arg(long, conflicts_with = "input_file")]
+        input: Option<String>,
+        #[arg(long = "input-file", conflicts_with = "input")]
+        input_file: Option<PathBuf>,
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, default_value = "project")]
+        scope: String,
+        #[arg(long = "no-entropy", default_value_t = false)]
+        no_entropy: bool,
+        #[arg(long = "no-local-ai-fallback", default_value_t = false)]
+        no_local_ai_fallback: bool,
+        #[arg(long = "allow-external-ai", default_value_t = false)]
+        allow_external_ai: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -3026,6 +3308,8 @@ enum RequestCommands {
     Start {
         #[arg(long)]
         goal: String,
+        #[arg(long)]
+        worktree: Option<String>,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -4257,20 +4541,34 @@ fn run() -> Result<i32> {
         }
         Commands::Plan {
             goal,
+            worktree,
             addon_dirs,
             output,
             detached,
         } => {
             let store_path = cli.store.clone();
             let store = ForgeStore::open(store_path.clone())?;
-            let project_root = std::env::current_dir()?;
-            let dirs = addon_dirs_or_default(addon_dirs);
+            let project_root = match worktree.as_deref() {
+                Some(selector) => resolve_worktree_selector_root(&store, selector)?,
+                None => std::env::current_dir()?,
+            };
+            let dirs = addon_dirs_or_default(addon_dirs)
+                .into_iter()
+                .map(|path| {
+                    if path.is_absolute() {
+                        path
+                    } else {
+                        project_root.join(path)
+                    }
+                })
+                .collect::<Vec<_>>();
             let addon_catalog = load_addon_catalog_from_store(&store, &dirs)?;
             let operating_context = load_project_operating_context(&project_root)?;
             ensure_operating_context_policy(&store, &operating_context, "plan")?;
             let intent =
                 parse_intent_with_catalog_and_context(&goal, &addon_catalog, operating_context);
             let mut workflow = create_workflow(intent);
+            let _ = sanitize_workflow_secrets_for_storage(&store, &mut workflow, "forge_plan")?;
             let reuse_candidates = find_reuse_candidates(&store, &workflow)?;
             let attached_subflows =
                 attach_reuse_candidates_as_child_subflows(&mut workflow, &reuse_candidates);
@@ -4280,6 +4578,32 @@ fn run() -> Result<i32> {
                 "workflow_planned",
                 &serde_json::to_value(&workflow)?,
             )?;
+            let worktree_report = if let Some(selector) = worktree {
+                if PathBuf::from(&selector).exists() {
+                    Some(register_worktree(
+                        &store,
+                        WorktreeRegisterOptions {
+                            path: PathBuf::from(selector),
+                            id: None,
+                            workflow_id: Some(workflow.id.clone()),
+                            task_id: None,
+                            origin: "forge_plan".to_string(),
+                            created_by_forge: false,
+                        },
+                    )?)
+                } else {
+                    Some(bind_worktree(
+                        &store,
+                        &selector,
+                        &workflow.id,
+                        None,
+                        "forge_plan",
+                    )?)
+                }
+            } else {
+                None
+            };
+            let workflow = store.load_workflow(&workflow.id)?;
             let mut run_id = None;
             if detached {
                 let run =
@@ -4296,6 +4620,7 @@ fn run() -> Result<i32> {
                 "intent": workflow.intent,
                 "reuse_candidates": reuse_candidates,
                 "attached_subflows": attached_subflows,
+                "worktree": worktree_report,
                 "run_id": run_id,
             });
             print_response(output, &response)?;
@@ -4367,6 +4692,8 @@ fn run() -> Result<i32> {
         Commands::Status { workflow, output } => {
             let store = ForgeStore::open(cli.store)?;
             let workflow = store.load_workflow(&workflow)?;
+            let worktree = bound_worktree_context(&store, &workflow.id, None)?;
+            let worktrees = list_registered_worktrees(&store, None, Some(&workflow.id))?;
             let creative_summaries: Vec<serde_json::Value> = workflow
                 .creative_artifacts
                 .iter()
@@ -4395,6 +4722,8 @@ fn run() -> Result<i32> {
                 "status": workflow.status,
                 "goal": workflow.goal,
                 "runtime": workflow.runtime,
+                "worktree": worktree,
+                "worktrees": worktrees,
                 "tasks": workflow.tasks,
                 "artifacts": workflow.artifacts,
                 "creative_artifacts": creative_summaries,
@@ -4418,13 +4747,43 @@ fn run() -> Result<i32> {
             ensure_workflow_policy(&store, &workflow, "context request")?;
             let workflow = store.load_workflow(&workflow)?;
             let latest_checkpoint = load_latest_task_checkpoint(&store, &workflow.id, &task)?;
-            let context = build_context_package_with_checkpoint_and_project(
-                &workflow,
-                &task,
-                budget,
-                latest_checkpoint,
+            let workflow_secret_scan_input = serde_json::to_string(&workflow)?;
+            let tenant_context = serde_json::to_value(&workflow.intent.operating_context)?;
+            let _ = sanitize_prompt_secrets_with_vault(
+                &workflow_secret_scan_input,
+                SecretSanitizationOptions::default(),
+                SecretVaultPersistOptions {
+                    store: &store,
+                    workflow_id: Some(&workflow.id),
+                    origin: "forge_context",
+                    tenant_context: &tenant_context,
+                },
+            )?;
+            let effective_project_root = resolve_effective_project_root(
+                &store,
+                &workflow.id,
+                Some(&task),
                 project_root.as_deref(),
             )?;
+            let bound_worktree = bound_worktree_context(&store, &workflow.id, Some(&task))?;
+            let context = if bound_worktree.is_some() {
+                build_context_package_with_checkpoint_project_and_worktree(
+                    &workflow,
+                    &task,
+                    budget,
+                    latest_checkpoint,
+                    effective_project_root.as_deref(),
+                    bound_worktree,
+                )?
+            } else {
+                build_context_package_with_checkpoint_and_project(
+                    &workflow,
+                    &task,
+                    budget,
+                    latest_checkpoint,
+                    effective_project_root.as_deref(),
+                )?
+            };
             print_response(output, &context)?;
             Ok(if strict && !context.handoff_ready {
                 1
@@ -6954,21 +7313,62 @@ fn run() -> Result<i32> {
                 no_token_headroom,
                 execute,
                 allow_exec,
+                secret_env,
+                secret_permissions,
                 project_root,
                 cwd,
                 command,
                 output,
             } => {
+                let store = ForgeStore::open(cli.store)?;
+                let effective_project_root = if let Some(workflow_id) = workflow_id.as_deref() {
+                    resolve_effective_project_root(
+                        &store,
+                        workflow_id,
+                        task_id.as_deref(),
+                        project_root.as_deref(),
+                    )?
+                } else {
+                    project_root.clone()
+                };
+                let bound_root = workflow_id
+                    .as_deref()
+                    .map(|workflow_id| {
+                        resolve_effective_project_root(
+                            &store,
+                            workflow_id,
+                            task_id.as_deref(),
+                            None,
+                        )
+                    })
+                    .transpose()?
+                    .flatten();
+                let effective_cwd = if let Some(bound_root) = bound_root.as_ref() {
+                    if let Some(explicit_cwd) = cwd.as_deref() {
+                        let explicit_cwd = std::fs::canonicalize(explicit_cwd)?;
+                        let canonical_bound = std::fs::canonicalize(bound_root)?;
+                        if explicit_cwd != canonical_bound {
+                            anyhow::bail!(
+                                "explicit cwd {} conflicts with bound worktree {}",
+                                explicit_cwd.display(),
+                                canonical_bound.display()
+                            );
+                        }
+                    }
+                    Some(bound_root.clone())
+                } else {
+                    cwd.clone()
+                };
                 let (forge_first, forge_first_source) =
                     resolve_harness_forge_first_source_for_project(
                         forge_first,
                         observe_only,
-                        project_root.as_deref(),
+                        effective_project_root.as_deref(),
                     );
                 let (token_headroom_input, token_headroom_source) =
                     harness_cli_token_headroom_input(token_headroom, no_token_headroom);
                 let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
-                    project_root: project_root.as_deref(),
+                    project_root: effective_project_root.as_deref(),
                     context_budget,
                     context_budget_source: "explicit_flag",
                     token_headroom: token_headroom_input,
@@ -6976,7 +7376,6 @@ fn run() -> Result<i32> {
                     forge_first,
                     default_context_budget: DEFAULT_CONTEXT_BUDGET,
                 });
-                let store = ForgeStore::open(cli.store)?;
                 let report = run_cli_harness_exec(CliHarnessExecOptions {
                     store: Some(&store),
                     executor: &executor,
@@ -6994,8 +7393,10 @@ fn run() -> Result<i32> {
                         .require_token_headroom_for_forge_first,
                     dry_run: !execute,
                     allow_exec,
-                    project_root: project_root.as_deref(),
-                    cwd: cwd.as_deref(),
+                    secret_env: &secret_env,
+                    secret_permissions: &secret_permissions,
+                    project_root: effective_project_root.as_deref(),
+                    cwd: effective_cwd.as_deref(),
                 })?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -7471,6 +7872,22 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
+            ExecutorQuotaCommands::Decide(args) => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = decide_executor_model_for_task(
+                    &store,
+                    ExecutorModelDecisionOptions {
+                        task: args.task,
+                        task_class: args.task_class,
+                        difficulty: args.difficulty,
+                        expected_input_tokens: args.expected_input_tokens,
+                        expected_output_tokens: args.expected_output_tokens,
+                        configured_decider: args.configured_decider,
+                    },
+                )?;
+                print_response(args.output, &report)?;
+                Ok(0)
+            }
             ExecutorQuotaCommands::Record(args) => {
                 let store = ForgeStore::open(cli.store)?;
                 let observation = build_executor_quota_observation(
@@ -7535,6 +7952,343 @@ fn run() -> Result<i32> {
                 let exit_code = if report.allowed { 0 } else { 1 };
                 print_response(output, &report)?;
                 Ok(exit_code)
+            }
+        },
+        Commands::Worktree { command } => match command {
+            WorktreeCommands::Discover { repository, output } => {
+                let report = discover_worktrees(&repository)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorktreeCommands::Create {
+                repository,
+                path,
+                branch,
+                start_point,
+                allow_repository_mutation,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = create_worktree(
+                    &store,
+                    WorktreeCreateOptions {
+                        repository,
+                        path,
+                        branch,
+                        start_point,
+                        allow_repository_mutation,
+                        origin,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorktreeCommands::Register {
+                path,
+                id,
+                workflow,
+                task,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = register_worktree(
+                    &store,
+                    WorktreeRegisterOptions {
+                        path,
+                        id,
+                        workflow_id: workflow,
+                        task_id: task,
+                        origin,
+                        created_by_forge: false,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorktreeCommands::Bind {
+                worktree,
+                workflow,
+                task,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = bind_worktree(&store, &worktree, &workflow, task.as_deref(), &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorktreeCommands::Init {
+                worktree,
+                allow_worktree_write,
+                force,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report =
+                    initialize_worktree(&store, &worktree, allow_worktree_write, force, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorktreeCommands::ApproveConfig {
+                worktree,
+                allow_guardrail_update,
+                approved_by,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = approve_worktree_config(
+                    &store,
+                    &worktree,
+                    allow_guardrail_update,
+                    &approved_by,
+                    &origin,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorktreeCommands::List {
+                repository,
+                workflow,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report =
+                    list_registered_worktrees(&store, repository.as_deref(), workflow.as_deref())?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorktreeCommands::Inspect { worktree, output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = inspect_registered_worktree(&store, &worktree)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorktreeCommands::Sandbox { command } => match command {
+                WorktreeSandboxCommands::Plan {
+                    worktree,
+                    purpose,
+                    workflow,
+                    task,
+                    command,
+                    output,
+                } => {
+                    let store = ForgeStore::open(cli.store)?;
+                    let report = plan_worktree_sandbox(
+                        &store,
+                        WorktreeSandboxRequest {
+                            worktree,
+                            purpose,
+                            workflow_id: workflow,
+                            task_id: task,
+                            command,
+                        },
+                    )?;
+                    let exit_code = if report.allowed { 0 } else { 1 };
+                    print_response(output, &report)?;
+                    Ok(exit_code)
+                }
+                WorktreeSandboxCommands::Run {
+                    worktree,
+                    purpose,
+                    workflow,
+                    task,
+                    allow_exec,
+                    command,
+                    output,
+                } => {
+                    let store = ForgeStore::open(cli.store)?;
+                    let report = run_worktree_sandbox(
+                        &store,
+                        WorktreeSandboxRequest {
+                            worktree,
+                            purpose,
+                            workflow_id: workflow,
+                            task_id: task,
+                            command,
+                        },
+                        allow_exec,
+                    )?;
+                    let exit_code = if report.status == "sandbox_completed"
+                        && report.executed
+                        && report.exit_code == Some(0)
+                        && !report.timed_out
+                        && report.error.is_none()
+                    {
+                        0
+                    } else {
+                        1
+                    };
+                    print_response(output, &report)?;
+                    Ok(exit_code)
+                }
+                WorktreeSandboxCommands::Start {
+                    worktree,
+                    purpose,
+                    workflow,
+                    task,
+                    allow_exec,
+                    command,
+                    output,
+                } => {
+                    let store = ForgeStore::open(cli.store)?;
+                    let report = start_worktree_sandbox(
+                        &store,
+                        WorktreeSandboxRequest {
+                            worktree,
+                            purpose,
+                            workflow_id: workflow,
+                            task_id: task,
+                            command,
+                        },
+                        allow_exec,
+                    )?;
+                    let exit_code = if matches!(
+                        report.status.as_str(),
+                        "sandbox_starting" | "sandbox_running" | "sandbox_completed"
+                    ) {
+                        0
+                    } else {
+                        1
+                    };
+                    print_response(output, &report)?;
+                    Ok(exit_code)
+                }
+                WorktreeSandboxCommands::Status { sandbox, output } => {
+                    let store = ForgeStore::open(cli.store)?;
+                    let report = inspect_worktree_sandbox_lifecycle(&store, &sandbox)?;
+                    print_response(output, &report)?;
+                    Ok(0)
+                }
+                WorktreeSandboxCommands::Stop {
+                    sandbox,
+                    allow_stop,
+                    output,
+                } => {
+                    let store = ForgeStore::open(cli.store)?;
+                    let report = stop_worktree_sandbox(&store, &sandbox, allow_stop)?;
+                    let exit_code = if report.status == "sandbox_stop_failed" {
+                        1
+                    } else {
+                        0
+                    };
+                    print_response(output, &report)?;
+                    Ok(exit_code)
+                }
+                WorktreeSandboxCommands::Supervise {
+                    sandbox,
+                    allow_supervisor_exec,
+                } => {
+                    let store = ForgeStore::open(cli.store)?;
+                    let _ = supervise_worktree_sandbox(&store, &sandbox, allow_supervisor_exec)?;
+                    Ok(0)
+                }
+            },
+            WorktreeCommands::Guard { command } => match command {
+                WorktreeGuardCommands::Check {
+                    worktree,
+                    operation,
+                    paths,
+                    reason,
+                    workflow,
+                    task,
+                    output,
+                } => {
+                    let store = ForgeStore::open(cli.store)?;
+                    let report = evaluate_worktree_modification_guard(
+                        &store,
+                        WorktreeModificationGuardRequest {
+                            worktree,
+                            operation,
+                            paths,
+                            reason,
+                            workflow_id: workflow,
+                            task_id: task,
+                        },
+                    )?;
+                    let exit_code = if report.allowed { 0 } else { 1 };
+                    print_response(output, &report)?;
+                    Ok(exit_code)
+                }
+                WorktreeGuardCommands::CreatePredecessor {
+                    worktree,
+                    workflow,
+                    task,
+                    paths,
+                    goal,
+                    allow_workflow_mutation,
+                    approved_by,
+                    origin,
+                    output,
+                } => {
+                    let store = ForgeStore::open(cli.store)?;
+                    let report = create_worktree_guard_predecessor_task(
+                        &store,
+                        &worktree,
+                        &workflow,
+                        &task,
+                        paths,
+                        &goal,
+                        allow_workflow_mutation,
+                        &approved_by,
+                        &origin,
+                    )?;
+                    print_response(output, &report)?;
+                    Ok(0)
+                }
+            },
+        },
+        Commands::Security { command } => match command {
+            SecurityCommands::SecretScan {
+                input,
+                input_file,
+                workflow_id,
+                origin,
+                scope,
+                no_entropy,
+                no_local_ai_fallback,
+                allow_external_ai,
+                output,
+            } => {
+                let text = if let Some(input) = input {
+                    input
+                } else if let Some(input_file) = input_file {
+                    std::fs::read_to_string(&input_file)?
+                } else {
+                    String::new()
+                };
+                let options = SecretSanitizationOptions {
+                    scope,
+                    enable_entropy: !no_entropy,
+                    enable_local_ai_fallback: !no_local_ai_fallback,
+                    allow_external_ai,
+                    ..SecretSanitizationOptions::default()
+                };
+                let store = ForgeStore::open(cli.store)?;
+                let tenant_context = workflow_id
+                    .as_deref()
+                    .and_then(|workflow_id| store.load_workflow(workflow_id).ok())
+                    .map(|workflow| serde_json::to_value(&workflow.intent.operating_context))
+                    .transpose()?
+                    .unwrap_or_else(|| {
+                        serde_json::to_value(OperatingContextSpec::default())
+                            .unwrap_or_else(|_| serde_json::json!({}))
+                    });
+                let report = sanitize_prompt_secrets_with_vault(
+                    &text,
+                    options,
+                    SecretVaultPersistOptions {
+                        store: &store,
+                        workflow_id: workflow_id.as_deref(),
+                        origin: &origin,
+                        tenant_context: &tenant_context,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
             }
         },
         Commands::Schedule { command } => match command {
@@ -8190,13 +8944,40 @@ fn run() -> Result<i32> {
         Commands::Request { command } => match command {
             RequestCommands::Start {
                 goal,
+                worktree,
                 origin,
                 output,
                 detached,
             } => {
                 let store_path = cli.store.clone();
                 let store = ForgeStore::open(store_path.clone())?;
-                let report = start_async_request(&store, &goal, &origin)?;
+                let selected_project_root = worktree
+                    .as_deref()
+                    .map(|selector| resolve_worktree_selector_root(&store, selector))
+                    .transpose()?;
+                let mut report = if let Some(project_root) = selected_project_root.as_deref() {
+                    start_async_request_with_project(&store, &goal, &origin, project_root)?
+                } else {
+                    start_async_request(&store, &goal, &origin)?
+                };
+                if let Some(selector) = worktree {
+                    if PathBuf::from(&selector).exists() {
+                        register_worktree(
+                            &store,
+                            WorktreeRegisterOptions {
+                                path: PathBuf::from(selector),
+                                id: None,
+                                workflow_id: Some(report.workflow_id.clone()),
+                                task_id: None,
+                                origin: origin.clone(),
+                                created_by_forge: false,
+                            },
+                        )?;
+                    } else {
+                        bind_worktree(&store, &selector, &report.workflow_id, None, &origin)?;
+                    }
+                    report.worktree = bound_worktree_context(&store, &report.workflow_id, None)?;
+                }
                 print_response(output, &report)?;
                 if detached {
                     let current_exe = std::env::current_exe()?;

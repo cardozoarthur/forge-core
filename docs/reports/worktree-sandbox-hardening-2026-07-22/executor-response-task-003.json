@@ -1,0 +1,22 @@
+{
+  "schema_version": "forge.executor_response.v1",
+  "task_id": "task-003",
+  "status": "completed",
+  "artifacts": [
+    "docs/reports/worktree-sandbox-hardening-2026-07-22/task-graph.json"
+  ],
+  "trace_ref": "docs/reports/worktree-sandbox-hardening-2026-07-22/execution-trace.md",
+  "cost": {
+    "estimated_usd": 0.0,
+    "tokens_in": 0,
+    "tokens_out": 0
+  },
+  "validation_evidence": [
+    {
+      "command": "jq -e '.acyclic == true and (.missing_dependencies | length == 0) and (.nodes | length == 8) and (([.nodes[].dependencies[]] - [.nodes[].id]) | length == 0)' task-graph.json",
+      "exit_code": 0,
+      "summary": "DAG com oito nós está marcado como acíclico e não possui dependências ausentes; gate local determinístico sem custo de modelo medido."
+    }
+  ],
+  "rework_items": []
+}

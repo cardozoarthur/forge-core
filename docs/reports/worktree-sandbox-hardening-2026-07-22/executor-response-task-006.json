@@ -1,0 +1,22 @@
+{
+  "schema_version": "forge.executor_response.v1",
+  "task_id": "task-006",
+  "status": "completed",
+  "artifacts": [
+    "docs/reports/worktree-sandbox-hardening-2026-07-22/validation-report.md"
+  ],
+  "trace_ref": "docs/reports/worktree-sandbox-hardening-2026-07-22/execution-trace.md",
+  "cost": {
+    "estimated_usd": 0.0,
+    "tokens_in": 0,
+    "tokens_out": 0
+  },
+  "validation_evidence": [
+    {
+      "command": "cargo test",
+      "exit_code": 0,
+      "summary": "735 testes passaram em 12 suites após o último ajuste de lifecycle; fmt, Clippy -D warnings e release também passaram."
+    }
+  ],
+  "rework_items": []
+}

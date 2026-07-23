@@ -3,7 +3,7 @@ use crate::addon::{default_addon_dirs, load_addon_catalog_from_store};
 use crate::artifact::{list_workflow_artifacts, write_json_artifact};
 use crate::checkpoint::{load_workflow_checkpoints, TaskCheckpoint};
 use crate::context::{
-    build_context_handoff_summary, ContextHandoffSummary, ContextHandoffTask,
+    build_context_handoff_summary_with_task_projects, ContextHandoffSummary, ContextHandoffTask,
     DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
@@ -23,12 +23,14 @@ use crate::outcome::{
 use crate::registry::{
     attach_reuse_candidates_as_child_subflows, find_reuse_candidates, WorkflowReuseCandidate,
 };
+use crate::security::sanitize_workflow_secrets_for_storage;
 use crate::storage::ForgeStore;
 use crate::workflow::ArtifactAttachReport;
+use crate::worktree::{resolve_bound_worktree_root, WorktreeContextReport};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -78,6 +80,8 @@ pub struct RequestStartReport {
     pub handoff_contract: AgentHandoffContract,
     pub reuse_candidates: Vec<WorkflowReuseCandidate>,
     pub attached_subflows: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeContextReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -641,6 +645,7 @@ pub fn start_pm_session(
 
     let reuse_candidates = Vec::new(); // PM sessions are unique
     let attached_subflows = 0;
+    let _ = sanitize_workflow_secrets_for_storage(store, &mut workflow, origin)?;
     let flow_resolution =
         build_flow_resolution_report(&workflow, &reuse_candidates, attached_subflows);
     let run = create_run_record(&workflow, origin, "accepted");
@@ -654,7 +659,7 @@ pub fn start_pm_session(
             "objective": objective,
         }),
     )?;
-    let handoff_contract = build_agent_handoff_contract(&run, flow_resolution.clone());
+    let handoff_contract = build_agent_handoff_contract(store, &run, flow_resolution.clone());
     Ok(RequestStartReport {
         status: run.status,
         run_id: run.run_id,
@@ -666,6 +671,7 @@ pub fn start_pm_session(
         handoff_contract,
         reuse_candidates,
         attached_subflows,
+        worktree: None,
     })
 }
 
@@ -675,11 +681,21 @@ pub fn start_async_request(
     origin: &str,
 ) -> Result<RequestStartReport> {
     let project_root = std::env::current_dir()?;
+    start_async_request_with_project(store, goal, origin, &project_root)
+}
+
+pub fn start_async_request_with_project(
+    store: &ForgeStore,
+    goal: &str,
+    origin: &str,
+    project_root: &Path,
+) -> Result<RequestStartReport> {
     let addon_catalog = load_addon_catalog_from_store(store, &default_addon_dirs())?;
-    let operating_context = load_project_operating_context(&project_root)?;
+    let operating_context = load_project_operating_context(project_root)?;
     ensure_operating_context_policy(store, &operating_context, "request start")?;
     let intent = parse_intent_with_catalog_and_context(goal, &addon_catalog, operating_context);
     let mut workflow = create_workflow(intent);
+    let _ = sanitize_workflow_secrets_for_storage(store, &mut workflow, origin)?;
     let reuse_candidates = find_reuse_candidates(store, &workflow)?;
     let attached_subflows =
         attach_reuse_candidates_as_child_subflows(&mut workflow, &reuse_candidates);
@@ -696,7 +712,7 @@ pub fn start_async_request(
             "flow_resolution": flow_resolution,
         }),
     )?;
-    let handoff_contract = build_agent_handoff_contract(&run, flow_resolution.clone());
+    let handoff_contract = build_agent_handoff_contract(store, &run, flow_resolution.clone());
     Ok(RequestStartReport {
         status: run.status,
         run_id: run.run_id,
@@ -708,6 +724,7 @@ pub fn start_async_request(
         handoff_contract,
         reuse_candidates,
         attached_subflows,
+        worktree: None,
     })
 }
 
@@ -897,7 +914,7 @@ pub fn heartbeat_request(
             store.save_workflow(&workflow)?;
         }
     }
-    let activity = build_run_activity_at(&run, heartbeat_at);
+    let activity = build_run_activity_at_with_store(store, &run, heartbeat_at);
     store.record_event(
         &run.workflow_id,
         "async_request_heartbeat",
@@ -950,7 +967,13 @@ fn drive_request_with_context_budget(
         context_budget_override.unwrap_or_else(|| request_drive_context_budget(&workflow));
     let latest_checkpoint = latest_actionable_checkpoint(&workflow, &checkpoints);
     let task_summary = summarize_tasks(&workflow);
-    let handoff_summary = build_context_handoff_summary(&workflow, context_budget, &checkpoints)?;
+    let project_roots = worktree_project_roots(store, &workflow)?;
+    let handoff_summary = build_context_handoff_summary_with_task_projects(
+        &workflow,
+        context_budget,
+        &checkpoints,
+        &project_roots,
+    )?;
     let outcome_status = request_outcome_status(store, &workflow)?;
 
     if let Some(rework) = latest_open_rework(store, &workflow)? {
@@ -963,23 +986,14 @@ fn drive_request_with_context_budget(
             None,
             origin,
         )?;
-        let next_command = vec![
-            "forge".to_string(),
-            "task".to_string(),
-            "handoff".to_string(),
-            "--workflow".to_string(),
-            workflow.id.clone(),
-            "--task".to_string(),
-            rework.task_id.clone(),
-            "--executor".to_string(),
-            executor.to_string(),
-            "--ttl-seconds".to_string(),
-            ttl_seconds.max(1).to_string(),
-            "--budget".to_string(),
-            REWORK_HANDOFF_CONTEXT_BUDGET.to_string(),
-            "--output".to_string(),
-            "json".to_string(),
-        ];
+        let next_command = handoff_command(
+            store,
+            &workflow.id,
+            &rework.task_id,
+            executor,
+            ttl_seconds,
+            REWORK_HANDOFF_CONTEXT_BUDGET,
+        );
         return Ok(RequestDriveReport {
             schema_version: "forge.request_drive.v1".to_string(),
             status: "rework_required".to_string(),
@@ -1019,9 +1033,9 @@ fn drive_request_with_context_budget(
             origin,
             attention_reason,
         )?;
-        let activity = build_run_activity(&attention_run);
-        let next_command = vec![
-            "forge".to_string(),
+        let activity = build_run_activity_with_store(store, &attention_run);
+        let mut next_command = forge_command_prefix(store);
+        next_command.extend([
             "workflow".to_string(),
             "update-goal".to_string(),
             "--workflow".to_string(),
@@ -1032,7 +1046,7 @@ fn drive_request_with_context_budget(
             origin.to_string(),
             "--output".to_string(),
             "json".to_string(),
-        ];
+        ]);
         return Ok(RequestDriveReport {
             schema_version: "forge.request_drive.v1".to_string(),
             status: "blocked".to_string(),
@@ -1074,8 +1088,13 @@ fn drive_request_with_context_budget(
         context_budget_override.unwrap_or_else(|| request_drive_context_budget(&workflow));
     let latest_checkpoint = latest_actionable_checkpoint(&workflow, &checkpoints);
     let mut task_summary = summarize_tasks(&workflow);
-    let mut handoff_summary =
-        build_context_handoff_summary(&workflow, context_budget, &checkpoints)?;
+    let mut project_roots = worktree_project_roots(store, &workflow)?;
+    let mut handoff_summary = build_context_handoff_summary_with_task_projects(
+        &workflow,
+        context_budget,
+        &checkpoints,
+        &project_roots,
+    )?;
     let mut outcome_status = request_outcome_status(store, &workflow)?;
 
     if task_summary.completed == task_summary.total && task_summary.total > 0 {
@@ -1087,25 +1106,17 @@ fn drive_request_with_context_budget(
                 context_budget = context_budget_override
                     .unwrap_or_else(|| request_drive_context_budget(&workflow));
                 task_summary = summarize_tasks(&workflow);
-                handoff_summary =
-                    build_context_handoff_summary(&workflow, context_budget, &checkpoints)?;
+                project_roots = worktree_project_roots(store, &workflow)?;
+                handoff_summary = build_context_handoff_summary_with_task_projects(
+                    &workflow,
+                    context_budget,
+                    &checkpoints,
+                    &project_roots,
+                )?;
                 outcome_status = request_outcome_status(store, &workflow)?;
             } else {
-                let next_command = vec![
-                    "forge".to_string(),
-                    "workflow".to_string(),
-                    "attach-artifact".to_string(),
-                    "--workflow".to_string(),
-                    workflow.id.clone(),
-                    "--path".to_string(),
-                    "<final-completion-audit.json>".to_string(),
-                    "--kind".to_string(),
-                    FINAL_COMPLETION_AUDIT_KIND.to_string(),
-                    "--origin".to_string(),
-                    origin.to_string(),
-                    "--output".to_string(),
-                    "json".to_string(),
-                ];
+                let next_command =
+                    final_completion_audit_attach_command(store, &workflow.id, origin);
                 store.record_event(
                     &workflow.id,
                     "completion_audit_required",
@@ -1170,7 +1181,7 @@ fn drive_request_with_context_budget(
                 "completed_at": completed_at,
             }),
         )?;
-        let activity = build_run_activity_at(&completed_run, completed_at);
+        let activity = build_run_activity_at_with_store(store, &completed_run, completed_at);
         let completion_reason = if workflow_requires_final_completion_audit(&completed_workflow) {
             "All workflow tasks are completed and final completion audit passed.".to_string()
         } else {
@@ -1211,6 +1222,7 @@ fn drive_request_with_context_budget(
         let handoff_budget = context_budget_override
             .unwrap_or_else(|| handoff_context_budget_for_task(&workflow, &task.task_id));
         let next_command = handoff_command(
+            store,
             &workflow.id,
             &task.task_id,
             executor,
@@ -1221,6 +1233,7 @@ fn drive_request_with_context_budget(
             .iter()
             .map(|task| {
                 handoff_command(
+                    store,
                     &workflow.id,
                     &task.task_id,
                     executor,
@@ -1286,15 +1299,18 @@ fn drive_request_with_context_budget(
         handoff_task: None,
         parallel_handoff_tasks: Vec::new(),
         blocked_tasks: drive_blocked_tasks(&handoff_summary.tasks),
-        next_command: vec![
-            "forge".to_string(),
-            "request".to_string(),
-            "status".to_string(),
-            "--run".to_string(),
-            run_id.to_string(),
-            "--output".to_string(),
-            "json".to_string(),
-        ],
+        next_command: {
+            let mut command = forge_command_prefix(store);
+            command.extend([
+                "request".to_string(),
+                "status".to_string(),
+                "--run".to_string(),
+                run_id.to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]);
+            command
+        },
         parallel_next_commands: Vec::new(),
         final_delivery_package: None,
         reason: "No pending task is currently ready for handoff.".to_string(),
@@ -1385,6 +1401,18 @@ pub fn step_request(
         origin,
     )?;
 
+    let mut auto_step_evidence_command = forge_command_prefix(store);
+    auto_step_evidence_command.extend([
+        "request".to_string(),
+        "step".to_string(),
+        "--run".to_string(),
+        run_id.to_string(),
+        "--executor".to_string(),
+        executor.to_string(),
+        "--ttl-seconds".to_string(),
+        ttl_seconds.max(1).to_string(),
+    ]);
+    let auto_step_evidence_command = render_forge_command(&auto_step_evidence_command);
     let response_payload = serde_json::json!({
         "schema_version": "forge.executor_response.v1",
         "task_id": task.id,
@@ -1398,7 +1426,7 @@ pub fn step_request(
         },
         "validation_evidence": [
             {
-                "command": format!("forge request step --run {run_id} --executor {executor} --ttl-seconds {}", ttl_seconds.max(1)),
+                "command": auto_step_evidence_command,
                 "exit_code": 0,
                 "summary": format!("Forge auto-stepped deterministic task {} and attached replayable output artifact {}.", task.id, output_artifact.artifact.path)
             }
@@ -1548,6 +1576,7 @@ pub fn complete_ready_task(
     let generated_at = Utc::now();
     let timestamp = generated_at.format("%Y%m%dT%H%M%SZ");
     let trace_payload = build_execution_trace_payload(ExecutionTracePayloadInput {
+        store,
         workflow: &workflow,
         task,
         handoff_task: &handoff_task,
@@ -1579,16 +1608,31 @@ pub fn complete_ready_task(
             .map(|artifact| artifact.artifact.path.clone()),
     );
 
-    let evidence_command = input.evidence_command.map(str::to_string).unwrap_or_else(|| {
-        let budget_arg = input
-            .context_budget
-            .map(|budget| format!(" --budget {budget}"))
-            .unwrap_or_default();
-        format!(
-            "forge request complete-task --run {run_id} --task {} --executor {} --summary <executor-summary> --ttl-seconds {}{} --output json",
-            input.task_id, input.executor, input.ttl_seconds, budget_arg
-        )
-    });
+    let evidence_command = input
+        .evidence_command
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let mut command = forge_command_prefix(store);
+            command.extend([
+                "request".to_string(),
+                "complete-task".to_string(),
+                "--run".to_string(),
+                run_id.to_string(),
+                "--task".to_string(),
+                input.task_id.to_string(),
+                "--executor".to_string(),
+                input.executor.to_string(),
+                "--summary".to_string(),
+                "<executor-summary>".to_string(),
+                "--ttl-seconds".to_string(),
+                input.ttl_seconds.to_string(),
+            ]);
+            if let Some(budget) = input.context_budget {
+                command.extend(["--budget".to_string(), budget.to_string()]);
+            }
+            command.extend(["--output".to_string(), "json".to_string()]);
+            render_forge_command(&command)
+        });
     let evidence_summary = input
         .evidence_summary
         .filter(|summary| !summary.trim().is_empty())
@@ -1821,9 +1865,10 @@ pub fn ensure_final_audit(
             .map(|task| task.status == TaskStatus::Completed)
             .unwrap_or(false);
         if audit_task_is_completed {
-            final_completion_audit_attach_command(&active_workflow.id, origin)
+            final_completion_audit_attach_command(store, &active_workflow.id, origin)
         } else if final_completion_audit_dependencies_completed(active_workflow, task_id) {
             final_completion_audit_handoff_command(
+                store,
                 &active_workflow.id,
                 task_id,
                 executor,
@@ -1833,7 +1878,7 @@ pub fn ensure_final_audit(
             Vec::new()
         }
     } else {
-        final_completion_audit_attach_command(&active_workflow.id, origin)
+        final_completion_audit_attach_command(store, &active_workflow.id, origin)
     };
     let audit_waits_for_dependencies = audit_task_id.as_deref().is_some_and(|task_id| {
         !final_completion_audit_dependencies_completed(active_workflow, task_id)
@@ -2209,6 +2254,7 @@ fn build_auto_step_output_payload(
 }
 
 struct ExecutionTracePayloadInput<'a> {
+    store: &'a ForgeStore,
     workflow: &'a Workflow,
     task: &'a AtomicTask,
     handoff_task: &'a RequestDriveTask,
@@ -2225,6 +2271,26 @@ fn build_execution_trace_payload(input: ExecutionTracePayloadInput<'_>) -> serde
     let handoff_task = input.handoff_task;
     let completion = input.completion;
     let drive_before = input.drive_before;
+    let mut status_command = forge_command_prefix(input.store);
+    status_command.extend([
+        "request".to_string(),
+        "status".to_string(),
+        "--run".to_string(),
+        input.run_id.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]);
+    let mut drive_command = forge_command_prefix(input.store);
+    drive_command.extend([
+        "request".to_string(),
+        "drive".to_string(),
+        "--run".to_string(),
+        input.run_id.to_string(),
+        "--executor".to_string(),
+        completion.executor.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]);
     serde_json::json!({
         "schema_version": "forge.execution_trace.v1",
         "run_id": input.run_id,
@@ -2266,8 +2332,8 @@ fn build_execution_trace_payload(input: ExecutionTracePayloadInput<'_>) -> serde
             })
         }).collect::<Vec<_>>(),
         "replay": {
-            "status_command": ["forge", "request", "status", "--run", input.run_id, "--output", "json"],
-            "drive_command": ["forge", "request", "drive", "--run", input.run_id, "--executor", completion.executor, "--output", "json"],
+            "status_command": status_command,
+            "drive_command": drive_command,
             "response_path_kind": "executor_response"
         },
         "completion_policy": {
@@ -2293,6 +2359,14 @@ fn latest_open_rework(
             .and_then(|value| value.as_str())
             .unwrap_or_default();
         if response_status != "needs_retry" {
+            return Ok(None);
+        }
+        let has_structured_rework_tasks = event
+            .data
+            .get("generated_rework_task_ids")
+            .and_then(|value| value.as_array())
+            .is_some_and(|task_ids| !task_ids.is_empty());
+        if has_structured_rework_tasks {
             return Ok(None);
         }
         let task_id = event
@@ -2354,15 +2428,29 @@ fn ready_handoff_tasks(
         .collect()
 }
 
+fn worktree_project_roots(
+    store: &ForgeStore,
+    workflow: &Workflow,
+) -> Result<BTreeMap<String, PathBuf>> {
+    let mut roots = BTreeMap::new();
+    for task in &workflow.tasks {
+        if let Some(root) = resolve_bound_worktree_root(store, &workflow.id, Some(&task.id))? {
+            roots.insert(task.id.clone(), root);
+        }
+    }
+    Ok(roots)
+}
+
 fn handoff_command(
+    store: &ForgeStore,
     workflow_id: &str,
     task_id: &str,
     executor: &str,
     ttl_seconds: u64,
     budget: usize,
 ) -> Vec<String> {
-    vec![
-        "forge".to_string(),
+    let mut command = forge_command_prefix(store);
+    command.extend([
         "task".to_string(),
         "handoff".to_string(),
         "--workflow".to_string(),
@@ -2377,7 +2465,8 @@ fn handoff_command(
         budget.to_string(),
         "--output".to_string(),
         "json".to_string(),
-    ]
+    ]);
+    command
 }
 
 fn drive_blocked_tasks(handoff_tasks: &[ContextHandoffTask]) -> Vec<RequestDriveBlockedTask> {
@@ -2449,9 +2538,14 @@ pub fn switch_request_executor(
 
     let checkpoints = load_workflow_checkpoints(store, &run.workflow_id)?;
     let latest_checkpoint = checkpoints.last().cloned();
-    let handoff_summary =
-        build_context_handoff_summary(&workflow, DEFAULT_CONTEXT_BUDGET, &checkpoints)?;
-    let activity = build_run_activity_at(&run, switched_at);
+    let project_roots = worktree_project_roots(store, &workflow)?;
+    let handoff_summary = build_context_handoff_summary_with_task_projects(
+        &workflow,
+        DEFAULT_CONTEXT_BUDGET,
+        &checkpoints,
+        &project_roots,
+    )?;
+    let activity = build_run_activity_at_with_store(store, &run, switched_at);
     store.record_event(
         &run.workflow_id,
         "async_request_executor_switched",
@@ -2497,19 +2591,22 @@ pub fn switch_request_executor(
                 .continuity_policy
                 .user_directives_remain_authoritative,
             node_brain_routing_source: "workflow.tasks[].node_brain_routing".to_string(),
-            node_brain_routing_mutation_command: vec![
-                "forge".to_string(),
-                "workflow".to_string(),
-                "update-node-brain".to_string(),
-                "--workflow".to_string(),
-                "<workflow-id>".to_string(),
-                "--task".to_string(),
-                "<task-id>".to_string(),
-                "--default-brain".to_string(),
-                "<brain-id>".to_string(),
-                "--output".to_string(),
-                "json".to_string(),
-            ],
+            node_brain_routing_mutation_command: {
+                let mut command = forge_command_prefix(store);
+                command.extend([
+                    "workflow".to_string(),
+                    "update-node-brain".to_string(),
+                    "--workflow".to_string(),
+                    "<workflow-id>".to_string(),
+                    "--task".to_string(),
+                    "<task-id>".to_string(),
+                    "--default-brain".to_string(),
+                    "<brain-id>".to_string(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ]);
+                command
+            },
         },
         fallback_executors,
         activity,
@@ -2545,6 +2642,26 @@ pub fn build_run_activity(run: &RunRecord) -> RunActivity {
 }
 
 fn build_run_activity_at(run: &RunRecord, now: DateTime<Utc>) -> RunActivity {
+    build_run_activity_at_optional_store(None, run, now)
+}
+
+fn build_run_activity_with_store(store: &ForgeStore, run: &RunRecord) -> RunActivity {
+    build_run_activity_at_with_store(store, run, Utc::now())
+}
+
+fn build_run_activity_at_with_store(
+    store: &ForgeStore,
+    run: &RunRecord,
+    now: DateTime<Utc>,
+) -> RunActivity {
+    build_run_activity_at_optional_store(Some(store), run, now)
+}
+
+fn build_run_activity_at_optional_store(
+    store: Option<&ForgeStore>,
+    run: &RunRecord,
+    now: DateTime<Utc>,
+) -> RunActivity {
     let process_alive = run.executor_pid.and_then(process_alive);
     let process_status = match (run.executor_pid, process_alive) {
         (None, _) => "not_recorded",
@@ -2574,7 +2691,7 @@ fn build_run_activity_at(run: &RunRecord, now: DateTime<Utc>) -> RunActivity {
     } else {
         None
     };
-    let recovery = recovery_recommendation(run, heartbeat_status);
+    let recovery = recovery_recommendation(store, run, heartbeat_status);
     RunActivity {
         schema_version: "forge.run_activity.v1".to_string(),
         active,
@@ -2609,43 +2726,60 @@ fn process_alive(pid: u32) -> Option<bool> {
     }
 }
 
-fn recovery_recommendation(run: &RunRecord, heartbeat_status: &str) -> RunRecoveryRecommendation {
+fn recovery_recommendation(
+    store: Option<&ForgeStore>,
+    run: &RunRecord,
+    heartbeat_status: &str,
+) -> RunRecoveryRecommendation {
     match heartbeat_status {
-        "stale" => RunRecoveryRecommendation {
-            schema_version: "forge.run_recovery_recommendation.v1".to_string(),
-            action: "mark_needs_attention".to_string(),
-            target_status: "needs_attention".to_string(),
-            reason: "Heartbeat is stale; Forge should stop presenting this run as active and require resume, cancel or inspect before more executor work.".to_string(),
-            confidence: 0.91,
-            requires_human_approval: false,
-            command: vec![
-                "forge".to_string(),
-                "request".to_string(),
-                "recover-stale".to_string(),
-                "--run".to_string(),
-                run.run_id.clone(),
-            ],
-        },
-        "needs_attention" => RunRecoveryRecommendation {
-            schema_version: "forge.run_recovery_recommendation.v1".to_string(),
-            action: "resume_cancel_or_inspect".to_string(),
-            target_status: "needs_attention".to_string(),
-            reason: "Run already needs attention; preserve lineage while a human or executor chooses resume, cancel or inspect.".to_string(),
-            confidence: 0.88,
-            requires_human_approval: false,
-            command: vec![
-                "forge".to_string(),
-                "request".to_string(),
-                "status".to_string(),
-                "--run".to_string(),
-                run.run_id.clone(),
-            ],
-        },
+        "stale" => {
+            let command = store.map_or_else(Vec::new, |store| {
+                let mut command = forge_command_prefix(store);
+                command.extend([
+                    "request".to_string(),
+                    "recover-stale".to_string(),
+                    "--run".to_string(),
+                    run.run_id.clone(),
+                ]);
+                command
+            });
+            RunRecoveryRecommendation {
+                schema_version: "forge.run_recovery_recommendation.v1".to_string(),
+                action: "mark_needs_attention".to_string(),
+                target_status: "needs_attention".to_string(),
+                reason: "Heartbeat is stale; Forge should stop presenting this run as active and require resume, cancel or inspect before more executor work.".to_string(),
+                confidence: 0.91,
+                requires_human_approval: false,
+                command,
+            }
+        }
+        "needs_attention" => {
+            let command = store.map_or_else(Vec::new, |store| {
+                let mut command = forge_command_prefix(store);
+                command.extend([
+                    "request".to_string(),
+                    "status".to_string(),
+                    "--run".to_string(),
+                    run.run_id.clone(),
+                ]);
+                command
+            });
+            RunRecoveryRecommendation {
+                schema_version: "forge.run_recovery_recommendation.v1".to_string(),
+                action: "resume_cancel_or_inspect".to_string(),
+                target_status: "needs_attention".to_string(),
+                reason: "Run already needs attention; preserve lineage while a human or executor chooses resume, cancel or inspect.".to_string(),
+                confidence: 0.88,
+                requires_human_approval: false,
+                command,
+            }
+        }
         _ => RunRecoveryRecommendation {
             schema_version: "forge.run_recovery_recommendation.v1".to_string(),
             action: "none".to_string(),
             target_status: run.status.clone(),
-            reason: "No stale heartbeat recovery is required for the current run state.".to_string(),
+            reason: "No stale heartbeat recovery is required for the current run state."
+                .to_string(),
             confidence: 1.0,
             requires_human_approval: false,
             command: Vec::new(),
@@ -2672,14 +2806,19 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
     let latest_executor_policy = load_latest_executor_policy_summary(store, &workflow.id)?;
     let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
     let latest_checkpoint = latest_actionable_checkpoint(&workflow, &checkpoints);
-    let handoff_summary =
-        build_context_handoff_summary(&workflow, DEFAULT_CONTEXT_BUDGET, &checkpoints)?;
+    let project_roots = worktree_project_roots(store, &workflow)?;
+    let handoff_summary = build_context_handoff_summary_with_task_projects(
+        &workflow,
+        DEFAULT_CONTEXT_BUDGET,
+        &checkpoints,
+        &project_roots,
+    )?;
     let workflow_revision = workflow
         .revisions
         .last()
         .map(|revision| revision.revision)
         .unwrap_or(0);
-    let activity = build_run_activity(&run);
+    let activity = build_run_activity_with_store(store, &run);
     Ok(RequestStatusReport {
         status: run.status,
         run_id: run.run_id,
@@ -2908,6 +3047,20 @@ fn ensure_final_completion_audit_task(
     let task_id = format!("task-{:03}", updated.tasks.len() + 1);
     let dependency_ids = expected_dependency_ids;
     let dependency_refs: Vec<&str> = dependency_ids.iter().map(String::as_str).collect();
+    let mut audit_validation_command = forge_command_prefix(store);
+    audit_validation_command.extend([
+        "workflow".to_string(),
+        "attach-artifact".to_string(),
+        "--workflow".to_string(),
+        updated.id.clone(),
+        "--path".to_string(),
+        "<final-completion-audit.json>".to_string(),
+        "--kind".to_string(),
+        FINAL_COMPLETION_AUDIT_KIND.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]);
+    let audit_validation_command = render_forge_command(&audit_validation_command);
     let mut audit_task = task(
         &task_id,
         "Audit final completion criteria",
@@ -2920,10 +3073,7 @@ fn ensure_final_completion_audit_task(
         ],
         vec![ValidationRule {
             kind: "artifact".to_string(),
-            command: Some(format!(
-                "forge workflow attach-artifact --workflow {} --path <final-completion-audit.json> --kind {FINAL_COMPLETION_AUDIT_KIND} --output json",
-                updated.id
-            )),
+            command: Some(audit_validation_command),
             expected: "Attach a JSON final completion audit with status passed, goal_fully_satisfied true, non-empty evidence and no open_items or missing_criteria."
                 .to_string(),
         }],
@@ -3041,13 +3191,14 @@ fn is_final_completion_audit_task(task: &AtomicTask) -> bool {
 }
 
 fn final_completion_audit_handoff_command(
+    store: &ForgeStore,
     workflow_id: &str,
     task_id: &str,
     executor: &str,
     budget: usize,
 ) -> Vec<String> {
-    vec![
-        "forge".to_string(),
+    let mut command = forge_command_prefix(store);
+    command.extend([
         "task".to_string(),
         "handoff".to_string(),
         "--workflow".to_string(),
@@ -3060,12 +3211,17 @@ fn final_completion_audit_handoff_command(
         budget.to_string(),
         "--output".to_string(),
         "json".to_string(),
-    ]
+    ]);
+    command
 }
 
-fn final_completion_audit_attach_command(workflow_id: &str, origin: &str) -> Vec<String> {
-    vec![
-        "forge".to_string(),
+fn final_completion_audit_attach_command(
+    store: &ForgeStore,
+    workflow_id: &str,
+    origin: &str,
+) -> Vec<String> {
+    let mut command = forge_command_prefix(store);
+    command.extend([
         "workflow".to_string(),
         "attach-artifact".to_string(),
         "--workflow".to_string(),
@@ -3078,7 +3234,47 @@ fn final_completion_audit_attach_command(workflow_id: &str, origin: &str) -> Vec
         origin.to_string(),
         "--output".to_string(),
         "json".to_string(),
+    ]);
+    command
+}
+
+fn forge_command_prefix(store: &ForgeStore) -> Vec<String> {
+    let store_path = if store.path().is_absolute() {
+        store.path().to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|directory| directory.join(store.path()))
+            .unwrap_or_else(|_| store.path().to_path_buf())
+    };
+    vec![
+        "forge".to_string(),
+        "--store".to_string(),
+        store_path.display().to_string(),
     ]
+}
+
+fn render_forge_command(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|argument| shell_quote_command_argument(argument))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote_command_argument(argument: &str) -> String {
+    if !argument.is_empty()
+        && argument.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '_' | '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '-'
+                )
+        })
+    {
+        argument.to_string()
+    } else {
+        format!("'{}'", argument.replace('\'', "'\"'\"'"))
+    }
 }
 
 pub(crate) fn final_completion_audit_block_reason(
@@ -3224,7 +3420,7 @@ pub fn list_requests(store: &ForgeStore, status_filter: Option<&str>) -> Result<
             if let Some(filter) = status_filter {
                 let normalized = filter.trim().to_ascii_lowercase();
                 if normalized == "stale" {
-                    return build_run_activity(run).heartbeat_status == "stale";
+                    return build_run_activity_with_store(store, run).heartbeat_status == "stale";
                 }
                 matches!(
                     normalized.as_str(),
@@ -3244,7 +3440,7 @@ pub fn list_requests(store: &ForgeStore, status_filter: Option<&str>) -> Result<
             }
         })
         .map(|run| RequestListRow {
-            activity: build_run_activity(&run),
+            activity: build_run_activity_with_store(store, &run),
             run_id: run.run_id,
             workflow_id: run.workflow_id,
             status: run.status,
@@ -3339,7 +3535,7 @@ pub fn recover_stale_request(
     origin: &str,
 ) -> Result<RequestStaleRecoveryReport> {
     let mut run = load_run_record_for_action(store, run_id, "request recover stale")?;
-    let before_activity = build_run_activity(&run);
+    let before_activity = build_run_activity_with_store(store, &run);
     if run.status != "running" || before_activity.heartbeat_status != "stale" {
         anyhow::bail!(
             "run {run_id} is not a stale running request; heartbeat_status={} status={}",
@@ -3359,7 +3555,7 @@ pub fn recover_stale_request(
     workflow.status = "needs_attention".to_string();
     store.save_workflow(&workflow)?;
 
-    let activity = build_run_activity_at(&run, updated_at);
+    let activity = build_run_activity_at_with_store(store, &run, updated_at);
     let recovery = RunRecoveryRecommendation {
         schema_version: "forge.run_recovery_recommendation.v1".to_string(),
         action: "resume_cancel_or_inspect".to_string(),
@@ -3367,13 +3563,16 @@ pub fn recover_stale_request(
         reason: "Heartbeat is stale; Forge moved the run to needs_attention so a human or executor can resume, cancel or inspect without losing lineage.".to_string(),
         confidence: 0.93,
         requires_human_approval: false,
-        command: vec![
-            "forge".to_string(),
+        command: {
+            let mut command = forge_command_prefix(store);
+            command.extend([
             "request".to_string(),
             "status".to_string(),
             "--run".to_string(),
             run.run_id.clone(),
-        ],
+            ]);
+            command
+        },
     };
     store.record_event(
         &run.workflow_id,
@@ -3405,6 +3604,7 @@ pub fn recover_stale_request(
 }
 
 fn build_agent_handoff_contract(
+    store: &ForgeStore,
     run: &RunRecord,
     flow_resolution: FlowResolutionReport,
 ) -> AgentHandoffContract {
@@ -3425,18 +3625,21 @@ fn build_agent_handoff_contract(
         },
         allowed_context: AgentAllowedContext {
             tool: "forge.context.request".to_string(),
-            command: vec![
-                "forge".to_string(),
-                "context".to_string(),
-                "--workflow".to_string(),
-                run.workflow_id.clone(),
-                "--task".to_string(),
-                "<task-id>".to_string(),
-                "--budget".to_string(),
-                DEFAULT_CONTEXT_BUDGET.to_string(),
-                "--output".to_string(),
-                "json".to_string(),
-            ],
+            command: {
+                let mut command = forge_command_prefix(store);
+                command.extend([
+                    "context".to_string(),
+                    "--workflow".to_string(),
+                    run.workflow_id.clone(),
+                    "--task".to_string(),
+                    "<task-id>".to_string(),
+                    "--budget".to_string(),
+                    DEFAULT_CONTEXT_BUDGET.to_string(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ]);
+                command
+            },
             default_budget: DEFAULT_CONTEXT_BUDGET,
             strict_by_default: false,
             allowed_scope: "task_local_bounded_context".to_string(),
@@ -3454,15 +3657,18 @@ fn build_agent_handoff_contract(
         artifact_refs: Vec::new(),
         status_poll: AgentStatusPoll {
             tool: "forge.run.status".to_string(),
-            command: vec![
-                "forge".to_string(),
-                "request".to_string(),
-                "status".to_string(),
-                "--run".to_string(),
-                run.run_id.clone(),
-                "--output".to_string(),
-                "json".to_string(),
-            ],
+            command: {
+                let mut command = forge_command_prefix(store);
+                command.extend([
+                    "request".to_string(),
+                    "status".to_string(),
+                    "--run".to_string(),
+                    run.run_id.clone(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ]);
+                command
+            },
             returns: vec![
                 "workflow_status".to_string(),
                 "workflow_revision".to_string(),

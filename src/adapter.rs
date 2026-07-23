@@ -49,7 +49,7 @@ pub struct ExecutorValidationEvidence {
     pub summary: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ExecutorReworkItem {
     #[serde(default)]
     pub title: String,
@@ -170,7 +170,8 @@ pub fn validate_executor_response_file(
                 "artifact_count": response.artifacts.len(),
                 "trace_ref": response.trace_ref,
                 "revision": promotion.revision,
-                "generated_rework_task_ids": promotion.generated_rework_task_ids
+                "generated_rework_task_ids": promotion.generated_rework_task_ids,
+                "rework_items": response.rework_items
             }),
         )?;
     }
@@ -216,12 +217,9 @@ fn promote_validated_task(
             }
             "needs_retry" => {
                 if expands_needs_retry {
-                    task.status = TaskStatus::Completed;
-                    task.work_item.backlog_state = "done".to_string();
-                    task.work_item.goal_validation.definitively_ready = true;
-                    for subtask in &mut task.work_item.subtasks {
-                        subtask.status = TaskStatus::Completed;
-                    }
+                    task.status = TaskStatus::Pending;
+                    task.work_item.backlog_state = "rework_required".to_string();
+                    task.work_item.goal_validation.definitively_ready = false;
                 } else {
                     task.status = TaskStatus::Pending;
                     task.work_item.backlog_state = "ready".to_string();
@@ -236,11 +234,23 @@ fn promote_validated_task(
     if expands_needs_retry {
         generated_rework_task_ids =
             append_rework_items_as_tasks(workflow, &base_dependencies, &response.rework_items);
+        let task = &mut workflow.tasks[task_index];
+        for generated_task_id in &generated_rework_task_ids {
+            if !task.dependencies.contains(generated_task_id) {
+                task.dependencies.push(generated_task_id.clone());
+            }
+        }
+    }
+
+    if response.status == "completed" {
+        unblock_satisfied_worktree_guard_dependents(workflow, task_id);
     }
 
     let new_task_status = task_status_slug(&workflow.tasks[task_index].status);
 
-    if workflow
+    if response.status == "needs_retry" {
+        workflow.status = "running".to_string();
+    } else if workflow
         .tasks
         .iter()
         .all(|task| task.status == TaskStatus::Completed)
@@ -280,6 +290,36 @@ fn promote_validated_task(
     PromotionResult {
         revision,
         generated_rework_task_ids,
+    }
+}
+
+fn unblock_satisfied_worktree_guard_dependents(workflow: &mut Workflow, completed_task_id: &str) {
+    let completed = workflow
+        .tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Completed)
+        .map(|task| task.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for task in &mut workflow.tasks {
+        if task.status != TaskStatus::Blocked
+            || task.work_item.backlog_state != "blocked_by_worktree_guardrail"
+            || !task
+                .dependencies
+                .iter()
+                .any(|dependency| dependency == completed_task_id)
+            || !task
+                .dependencies
+                .iter()
+                .all(|dependency| completed.contains(dependency))
+        {
+            continue;
+        }
+        task.status = TaskStatus::Pending;
+        task.work_item.backlog_state = "ready_after_worktree_guard_predecessor".to_string();
+        task.work_item
+            .impediments
+            .retain(|impediment| !impediment.starts_with("worktree guard predecessor "));
+        task.version = task.version.saturating_add(1);
     }
 }
 
