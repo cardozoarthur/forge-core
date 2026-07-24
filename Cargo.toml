@@ -1,10 +1,37 @@
 [package]
 name = "forge-core"
-version = "0.4.177"
+version = "0.5.0"
 edition = "2021"
+rust-version = "1.94.1"
 license = "MIT"
 description = "High-performance AI-native workflow runtime for validated atomic execution graphs."
 repository = "https://github.com/cardozoarthur/forge-core"
+homepage = "https://github.com/cardozoarthur/forge-core"
+readme = "README.md"
+keywords = ["workflow", "orchestration", "automation", "runtime", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+include = [
+    "/.agents/skills/forge-core/SKILL.md",
+    "/.agents/skills/forge-core-agent/SKILL.md",
+    "/.agents/skills/forge-core-context/SKILL.md",
+    "/.agents/skills/forge-core-documentation/SKILL.md",
+    "/.agents/skills/forge-core-workflow/SKILL.md",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/README.md",
+    "/SECURITY.md",
+    "/deny.toml",
+    "/rust-toolchain.toml",
+    "/docs/production-single-host.md",
+    "/examples/**",
+    "/installer/**",
+    "/packaging/**",
+    "/skills/**",
+    "/src/**",
+    "/tests/**",
+]
 
 [[bin]]
 name = "forge"
@@ -12,12 +39,14 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
+chacha20poly1305 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.28"
 ed25519-dalek = "2.1"
+getrandom = "0.3"
 libc = "0.2"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["backup", "bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
@@ -25,8 +54,14 @@ sha2 = "0.10"
 thiserror = "2.0"
 toml = "0.8"
 uuid = { version = "1.11", features = ["v4", "serde"] }
+zeroize = "1.8"
 
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.14"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

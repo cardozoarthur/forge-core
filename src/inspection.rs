@@ -307,6 +307,8 @@ fn handoff_task(task: &AtomicTask, package: &ContextPackage) -> ContextHandoffTa
         blocking_refs,
         context_sha256: package.context_sha256.clone(),
         resume_context_status: package.resume_context_status.clone(),
+        routing_action: package.next_action.action.clone(),
+        recommended_budget_bytes: package.routing_repair.recommended_budget_bytes,
         routing_quality: package.routing_quality.clone(),
     }
 }

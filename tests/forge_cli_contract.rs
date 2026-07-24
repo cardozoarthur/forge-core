@@ -3,10 +3,15 @@ use forge_core::artifact::hex_sha256;
 use forge_core::storage::{ForgeStore, GlobalEventWrite};
 use rusqlite::Connection;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::process::Command as StdCommand;
+use std::sync::{mpsc, Arc, Barrier, Mutex, MutexGuard, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 /// Helper: create a workflow via ForgeStore and return its id.
@@ -20,6 +25,13 @@ fn setup_test_workflow(store: &ForgeStore) -> String {
 
 fn forge() -> Command {
     Command::cargo_bin("forge").expect("forge binary should build")
+}
+
+fn forge_tui_test_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn assert_forge_store_prefix(command: &Value, store: &Path) {
@@ -4673,7 +4685,8 @@ fn security_secret_scan_persists_runtime_secret_vault_and_redacted_audit() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(stored_secret, secret);
+    assert!(stored_secret.starts_with("forge:vault:v1:"));
+    assert!(!stored_secret.contains(secret));
 
     let mut statement = connection
         .prepare("SELECT kind, data_json FROM global_events ORDER BY id ASC")
@@ -4897,6 +4910,8 @@ fn context_package_sanitizes_secrets_before_prompt_packet() {
             "--budget",
             "2000",
             "--strict",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -4922,7 +4937,8 @@ fn context_package_sanitizes_secrets_before_prompt_packet() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(stored_secret, secret);
+    assert!(stored_secret.starts_with("forge:vault:v1:"));
+    assert!(!stored_secret.contains(secret));
 }
 
 #[test]
@@ -5090,11 +5106,10 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
             "blocked"
         ])
     );
-    assert_eq!(json["promotion_decision"]["decision"], "fail");
-    assert_eq!(json["promotion_decision"]["promotable"], false);
+    assert_eq!(json["promotion_decision"]["decision"], "promote");
+    assert_eq!(json["promotion_decision"]["promotable"], true);
     let blocked_by = json["promotion_decision"]["blocked_by"].as_array().unwrap();
-    assert!(blocked_by.contains(&serde_json::json!("replacement_grade_cli")));
-    assert!(blocked_by.contains(&serde_json::json!("experimental_multimodal_runtime")));
+    assert!(blocked_by.is_empty());
     assert!(
         !blocked_by.contains(&serde_json::json!("creative_artifact_ir")),
         "creative_artifact_ir is now validated and should not block"
@@ -5105,6 +5120,18 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
     );
 
     let capabilities = json["capabilities"].as_array().unwrap();
+    let replacement_cli = capabilities
+        .iter()
+        .find(|capability| capability["id"] == "replacement_grade_cli")
+        .unwrap();
+    assert_eq!(replacement_cli["status"], "groundwork");
+    assert_eq!(replacement_cli["required_for_promotion"], false);
+    let multimodal = capabilities
+        .iter()
+        .find(|capability| capability["id"] == "experimental_multimodal_runtime")
+        .unwrap();
+    assert_eq!(multimodal["status"], "groundwork");
+    assert_eq!(multimodal["required_for_promotion"], false);
     let scheduler = capabilities
         .iter()
         .find(|capability| capability["id"] == "scheduler_loop_subflow_foundation")
@@ -5276,11 +5303,11 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
         "forge.milestone.status.v1"
     );
     assert_eq!(json["result"]["milestone"], "0.5");
-    assert_eq!(json["result"]["promotion_decision"]["decision"], "fail");
+    assert_eq!(json["result"]["promotion_decision"]["decision"], "promote");
     assert!(json["result"]["promotion_decision"]["blocked_by"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!("replacement_grade_cli")));
+        .is_empty());
     assert!(json["result"]["capabilities"]
         .as_array()
         .unwrap()
@@ -5418,7 +5445,7 @@ fn milestone_manifest_surfaces_requirements_evidence_gaps_and_promotion_decision
     assert!(json["release_line_boundary"]
         .as_str()
         .unwrap()
-        .contains("0.4.x"));
+        .contains("production-supported single-host"));
     assert!(json["requirements"].as_array().unwrap().len() >= 11);
     assert!(json["completed_capabilities"]
         .as_array()
@@ -5471,14 +5498,14 @@ fn milestone_manifest_surfaces_requirements_evidence_gaps_and_promotion_decision
             |capability| capability["id"] == "experimental_multimodal_runtime"
                 && capability["promotion_ready"] == false
         ));
-    assert_eq!(json["promotion_decision"]["decision"], "fail");
-    assert_eq!(json["promotion_decision"]["promotable"], false);
+    assert_eq!(json["promotion_decision"]["decision"], "promote");
+    assert_eq!(json["promotion_decision"]["promotable"], true);
     assert!(
         json["promotion_decision"]["blocked_by"]
             .as_array()
             .unwrap()
-            .contains(&serde_json::json!("replacement_grade_cli")),
-        "replacement-grade CLI is new 0.5 scope and must block promotion until it has demo evidence"
+            .is_empty(),
+        "optional adoption capabilities must not block the production core"
     );
 }
 
@@ -5623,15 +5650,11 @@ fn milestone_attach_evidence_persists_receipts_without_auto_promotion() {
             && evidence["kind"] == "external_brain_provider_execution"
             && evidence["artifact_sha256"] == mcp_receipt_sha
     }));
-    assert_eq!(manifest_json["promotion_decision"]["decision"], "fail");
+    assert_eq!(manifest_json["promotion_decision"]["decision"], "promote");
     assert!(manifest_json["promotion_decision"]["blocked_by"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!("replacement_grade_cli")));
-    assert!(manifest_json["promotion_decision"]["blocked_by"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!("experimental_multimodal_runtime")));
+        .is_empty());
     assert!(manifest_json["validation_evidence"]
         .as_array()
         .unwrap()
@@ -5643,7 +5666,7 @@ fn milestone_attach_evidence_persists_receipts_without_auto_promotion() {
 }
 
 #[test]
-fn milestone_manifest_does_not_promote_when_required_attached_evidence_payloads_are_weak() {
+fn milestone_manifest_keeps_weak_optional_evidence_visible_without_blocking_core() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
     let receipts = [
@@ -5719,16 +5742,12 @@ fn milestone_manifest_does_not_promote_when_required_attached_evidence_payloads_
         .clone();
 
     let manifest_json: Value = serde_json::from_slice(&manifest_output).unwrap();
-    assert_eq!(manifest_json["promotion_decision"]["decision"], "fail");
-    assert_eq!(manifest_json["promotion_decision"]["promotable"], false);
+    assert_eq!(manifest_json["promotion_decision"]["decision"], "promote");
+    assert_eq!(manifest_json["promotion_decision"]["promotable"], true);
     assert!(manifest_json["promotion_decision"]["blocked_by"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!("replacement_grade_cli")));
-    assert!(manifest_json["promotion_decision"]["blocked_by"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!("experimental_multimodal_runtime")));
+        .is_empty());
     assert!(manifest_json["missing_capabilities"]
         .as_array()
         .unwrap()
@@ -7323,7 +7342,7 @@ printf 'real_provider_ok\n'
         evidence["capability_id"] == "experimental_multimodal_runtime"
             && evidence["kind"] == "production_runtime_benchmark"
     }));
-    assert_eq!(manifest_json["promotion_decision"]["decision"], "fail");
+    assert_eq!(manifest_json["promotion_decision"]["decision"], "promote");
 }
 
 #[test]
@@ -7444,7 +7463,7 @@ fn milestone_collect_evidence_selects_replacement_cli_demo_evidence_kinds() {
         evidence["capability_id"] == "replacement_grade_cli"
             && evidence["kind"] == "terminal_file_editing_ux"
     }));
-    assert_eq!(manifest_json["promotion_decision"]["decision"], "fail");
+    assert_eq!(manifest_json["promotion_decision"]["decision"], "promote");
 }
 
 #[test]
@@ -7493,10 +7512,10 @@ fn milestone_collect_ready_evidence_collects_ready_receipts_and_reports_skips() 
     assert_eq!(json["collected_count"], 2);
     assert_eq!(json["skipped_count"], 2);
     assert_eq!(json["failed_count"], 0);
-    assert_eq!(json["promotion_ready_after_collection"], false);
+    assert_eq!(json["promotion_ready_after_collection"], true);
     assert_eq!(
         json["promotion_decision_after_collection"]["decision"],
-        "fail"
+        "promote"
     );
 
     let collected = json["collected_evidence"].as_array().unwrap();
@@ -7559,7 +7578,7 @@ fn milestone_collect_ready_evidence_collects_ready_receipts_and_reports_skips() 
         evidence["capability_id"] == "replacement_grade_cli"
             && evidence["kind"] == "terminal_file_editing_ux"
     }));
-    assert_eq!(manifest_json["promotion_decision"]["decision"], "fail");
+    assert_eq!(manifest_json["promotion_decision"]["decision"], "promote");
 }
 
 #[test]
@@ -9147,7 +9166,11 @@ fn mcp_exposes_milestone_manifest_for_agent_release_gates() {
         .unwrap()
         .iter()
         .any(|capability| capability["id"] == "experimental_multimodal_runtime"));
-    assert_eq!(json["result"]["promotion_decision"]["decision"], "fail");
+    assert_eq!(json["result"]["promotion_decision"]["decision"], "promote");
+    assert!(json["result"]["promotion_decision"]["blocked_by"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -9520,7 +9543,7 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!(
-            "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --output json"
+            "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --view compact --output json"
         )));
 
     let research = flows
@@ -9729,7 +9752,7 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!(
-            "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --output json"
+            "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --view compact --output json"
         )));
     assert!(real_project["commands"]
         .as_array()
@@ -9927,7 +9950,7 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!(
-            "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --output json"
+            "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --view compact --output json"
         )));
 }
 
@@ -12654,6 +12677,8 @@ fn context_package_exposes_deferred_discovery_plan_for_node_scoped_routing() {
             task["id"].as_str().unwrap(),
             "--budget",
             "1400",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -12748,7 +12773,7 @@ fn context_package_exposes_deferred_discovery_plan_for_node_scoped_routing() {
     let expand_commands = deferred["expand_commands"].as_array().unwrap();
     assert!(expand_commands.iter().any(|command| {
         command.as_str().unwrap().contains(
-            "forge context --workflow {workflow_id} --task {task_id} --budget {budget} --output json"
+            "forge context --workflow {workflow_id} --task {task_id} --budget {budget} --view compact --output json"
         )
     }));
     assert!(
@@ -12994,6 +13019,8 @@ fn context_controller_returns_versioned_shard_manifest() {
             task_id,
             "--budget",
             "360",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -13070,6 +13097,8 @@ fn context_package_routes_dependency_readiness_as_structured_context() {
             documentation_task["id"].as_str().unwrap(),
             "--budget",
             "1100",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -13162,27 +13191,20 @@ fn strict_context_blocks_executor_handoff_when_dependencies_are_not_ready() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v30");
-    assert_eq!(
-        context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_shard_selection_audit_v30"
-    );
+    assert_eq!(context["schema_version"], "forge.context.compact.v2");
     assert_eq!(context["context_ready"], true);
-    assert_eq!(context["dependency_summary"]["ready"], false);
     assert_eq!(context["handoff_ready"], false);
     assert_eq!(context["handoff_status"], "blocked_dependencies");
-    assert!(context["handoff_blockers"]
+    assert_eq!(context["guardrail"]["status"], "blocked");
+    assert_eq!(context["guardrail"]["action"], "wait_for_dependencies");
+    assert!(context["guardrail"]["blocking_refs"]
         .as_array()
         .unwrap()
-        .iter()
-        .any(|blocker| {
-            blocker["kind"] == "dependency_not_ready"
-                && blocker["refs"] == serde_json::json!(["task-001"])
-                && blocker["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("dependency tasks are not ready")
-        }));
+        .contains(&Value::String("task-001".to_string())));
+    assert!(context["guardrail"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("dependency tasks must complete"));
 }
 
 #[test]
@@ -13224,6 +13246,8 @@ fn context_package_summarizes_routing_decisions_for_executor_cost_audit() {
             ai_task["id"].as_str().unwrap(),
             "--budget",
             &budget.to_string(),
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -13316,6 +13340,8 @@ fn context_package_exposes_routing_economy_for_cost_audit() {
             requirements_task["id"].as_str().unwrap(),
             "--budget",
             "420",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -13416,6 +13442,8 @@ fn deterministic_context_economy_marks_model_call_avoided() {
             deterministic_task["id"].as_str().unwrap(),
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -13510,6 +13538,8 @@ fn context_package_exposes_versioned_prompt_packet_for_executor_adapters() {
             documentation_task["id"].as_str().unwrap(),
             "--budget",
             "4096",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -13658,6 +13688,8 @@ fn context_package_exposes_replay_manifest_for_resumable_executor_context() {
             task_id,
             "--budget",
             "4096",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -13684,7 +13716,7 @@ fn context_package_exposes_replay_manifest_for_resumable_executor_context() {
         context["schema_version"]
     );
     assert_eq!(manifest["routing_policy"], context["routing_policy"]);
-    assert_eq!(manifest["selector_version"], "forge.context.selector.v1");
+    assert_eq!(manifest["selector_version"], "forge.context.selector.v2");
     assert_eq!(manifest["workflow_id"], workflow_id);
     assert_eq!(manifest["task_id"], task_id);
     assert_eq!(manifest["workflow_revision"], context["workflow_revision"]);
@@ -13708,6 +13740,8 @@ fn context_package_exposes_replay_manifest_for_resumable_executor_context() {
             task_id,
             "--budget",
             "4096",
+            "--view",
+            "full",
             "--output",
             "json"
         ])
@@ -13809,7 +13843,7 @@ fn strict_context_blocks_executor_when_required_sections_are_missing() {
             "--task",
             ai_task["id"].as_str().unwrap(),
             "--budget",
-            "360",
+            "240",
             "--strict",
             "--output",
             "json",
@@ -13821,29 +13855,22 @@ fn strict_context_blocks_executor_when_required_sections_are_missing() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v30");
-    assert_eq!(
-        context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_shard_selection_audit_v30"
-    );
+    assert_eq!(context["schema_version"], "forge.context.compact.v2");
     assert_eq!(context["context_ready"], false);
-    assert!(!context["missing_required_sections"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    assert!(context["required_sections"]
-        .as_array()
-        .unwrap()
-        .contains(&Value::String("validation_rules".to_string())));
+    assert_eq!(context["handoff_ready"], false);
+    assert_eq!(context["guardrail"]["status"], "blocked");
+    let missing_required_sections = context["missing_required_sections"].as_array().unwrap();
+    assert!(!missing_required_sections.is_empty());
+    let blocking_refs = context["guardrail"]["blocking_refs"].as_array().unwrap();
+    assert!(missing_required_sections
+        .iter()
+        .all(|section| blocking_refs.contains(section)));
     assert!(
-        context["routing_summary"]["required_omitted_shards"]
+        context["guardrail"]["recommended_budget_bytes"]
             .as_u64()
             .unwrap()
-            > 0
+            > 240
     );
-    assert!(context["shards"].as_array().unwrap().iter().any(|shard| {
-        shard["required"] == true && shard["included"] == false && shard["missing_required"] == true
-    }));
 }
 
 #[test]
@@ -13886,6 +13913,8 @@ fn context_controller_compresses_oversized_shards_before_omitting() {
             task_id,
             "--budget",
             "420",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -13971,6 +14000,8 @@ fn context_shards_explain_selection_decisions_for_budget_and_profile_routing() {
             deterministic_task["id"].as_str().unwrap(),
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -14060,6 +14091,8 @@ fn context_package_applies_no_ai_profile_to_deterministic_executor_nodes() {
             task_id,
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -14160,6 +14193,8 @@ fn deterministic_code_nodes_carry_no_ai_execution_policy_in_context() {
             code_task["id"].as_str().unwrap(),
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -14251,6 +14286,8 @@ fn frequent_local_code_goals_select_deterministic_node_without_schedule_scaffold
             code_task["id"].as_str().unwrap(),
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -14307,6 +14344,8 @@ fn context_package_exposes_execution_policy_decision_for_adapter_routing() {
             task_id,
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -14474,6 +14513,8 @@ fn context_package_tracks_runtime_mutation_lineage_and_current_goal() {
             task_id,
             "--budget",
             "900",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -14547,6 +14588,8 @@ fn context_package_exposes_stable_routing_fingerprint_for_executor_cache_keys() 
             task_id,
             "--budget",
             "1100",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -14559,11 +14602,13 @@ fn context_package_exposes_stable_routing_fingerprint_for_executor_cache_keys() 
     let fingerprint = &first_context["routing_fingerprint"];
     assert_eq!(
         fingerprint["schema_version"],
-        "forge.context.routing_fingerprint.v1"
+        "forge.context.routing_fingerprint.v2"
     );
     assert_eq!(fingerprint["executor_profile_id"], "no_ai_deterministic");
     assert_eq!(fingerprint["workflow_revision"], 0);
     assert_eq!(fingerprint["cache_key"].as_str().unwrap().len(), 64);
+    assert_eq!(fingerprint["audit_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(fingerprint["cache_key"], fingerprint["audit_sha256"]);
     assert_eq!(
         fingerprint["context_sha256"],
         first_context["context_sha256"]
@@ -14572,6 +14617,7 @@ fn context_package_exposes_stable_routing_fingerprint_for_executor_cache_keys() 
     let components = fingerprint["components"].as_array().unwrap();
     for component_name in [
         "routing_policy",
+        "cache_key_scope",
         "executor_profile",
         "lineage",
         "budget",
@@ -14587,6 +14633,14 @@ fn context_package_exposes_stable_routing_fingerprint_for_executor_cache_keys() 
             "missing routing fingerprint component {component_name}"
         );
     }
+    let cache_key_scope = components
+        .iter()
+        .find(|component| component["name"] == "cache_key_scope")
+        .expect("cache_key_scope fingerprint component should be present");
+    assert_eq!(
+        cache_key_scope["value"],
+        "execution route excludes checkpoint payload and resume state; full packet remains covered by audit_sha256"
+    );
 
     let repeated_context_output = forge()
         .args([
@@ -14599,6 +14653,8 @@ fn context_package_exposes_stable_routing_fingerprint_for_executor_cache_keys() 
             task_id,
             "--budget",
             "1100",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -14642,6 +14698,8 @@ fn context_package_exposes_stable_routing_fingerprint_for_executor_cache_keys() 
             task_id,
             "--budget",
             "1100",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -14700,6 +14758,8 @@ fn context_package_addresses_each_shard_by_source_content_for_routing_reuse() {
             task_id,
             "--budget",
             "420",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -14751,6 +14811,8 @@ fn context_package_addresses_each_shard_by_source_content_for_routing_reuse() {
             task_id,
             "--budget",
             "420",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -14805,6 +14867,8 @@ fn context_shards_include_remaining_budget_ledger_for_replayable_selection() {
             task["id"].as_str().unwrap(),
             "--budget",
             "420",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -14892,6 +14956,8 @@ fn context_shards_expose_selection_cost_audit_for_compression_and_omission() {
             task["id"].as_str().unwrap(),
             "--budget",
             "420",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -14998,6 +15064,8 @@ fn context_package_exposes_versioned_routing_contract_for_executor_adapters() {
             task["id"].as_str().unwrap(),
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -15019,7 +15087,7 @@ fn context_package_exposes_versioned_routing_contract_for_executor_adapters() {
         contract["schema_version"],
         "forge.context.routing_contract.v1"
     );
-    assert_eq!(contract["selector_version"], "forge.context.selector.v1");
+    assert_eq!(contract["selector_version"], "forge.context.selector.v2");
     assert_eq!(
         contract["profile_version"],
         "forge.context.executor_profile.v1"
@@ -15027,7 +15095,7 @@ fn context_package_exposes_versioned_routing_contract_for_executor_adapters() {
     assert_eq!(contract["profile_id"], "no_ai_deterministic");
     assert_eq!(
         contract["selection_strategy"],
-        "required_first_priority_budgeted_compression"
+        "monotonic_required_minimum_then_optional"
     );
     assert_eq!(contract["requested_budget"], 1600);
     assert_eq!(contract["effective_budget"], context["effective_budget"]);
@@ -15094,6 +15162,8 @@ fn context_package_exposes_selection_receipt_for_auditable_context_routing() {
             task["id"].as_str().unwrap(),
             "--budget",
             "420",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -15109,7 +15179,7 @@ fn context_package_exposes_selection_receipt_for_auditable_context_routing() {
         receipt["schema_version"],
         "forge.context.selection_receipt.v1"
     );
-    assert_eq!(receipt["selector_version"], "forge.context.selector.v1");
+    assert_eq!(receipt["selector_version"], "forge.context.selector.v2");
     assert_eq!(receipt["workflow_id"], workflow_id);
     assert_eq!(receipt["task_id"], task["id"]);
     assert_eq!(receipt["workflow_revision"], context["workflow_revision"]);
@@ -15217,7 +15287,9 @@ fn context_package_scores_routing_quality_for_budget_pressure() {
             "--task",
             task["id"].as_str().unwrap(),
             "--budget",
-            "360",
+            "128",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -15300,7 +15372,9 @@ fn context_package_recommends_budget_repair_for_missing_required_sections() {
             "--task",
             task["id"].as_str().unwrap(),
             "--budget",
-            "360",
+            "128",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -15325,19 +15399,19 @@ fn context_package_recommends_budget_repair_for_missing_required_sections() {
         context["routing_repair"]["action"],
         "increase_context_budget"
     );
-    assert_eq!(context["routing_repair"]["current_effective_budget"], 360);
+    assert_eq!(context["routing_repair"]["current_effective_budget"], 128);
     assert!(
         context["routing_repair"]["recommended_budget_bytes"]
             .as_u64()
             .unwrap()
-            > 360
+            > 128
     );
     assert_eq!(
         context["routing_repair"]["required_budget_deficit_bytes"],
         context["routing_repair"]["recommended_budget_bytes"]
             .as_u64()
             .unwrap()
-            - 360
+            - 128
     );
     assert_eq!(
         context["routing_repair"]["missing_required_sections"],
@@ -15397,7 +15471,9 @@ fn context_package_exposes_versioned_budget_plan_for_minimum_correct_context() {
             "--task",
             task["id"].as_str().unwrap(),
             "--budget",
-            "360",
+            "128",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -15413,7 +15489,7 @@ fn context_package_exposes_versioned_budget_plan_for_minimum_correct_context() {
         budget_plan["schema_version"],
         "forge.context.budget_plan.v1"
     );
-    assert_eq!(budget_plan["requested_budget"], 360);
+    assert_eq!(budget_plan["requested_budget"], 128);
     assert_eq!(budget_plan["effective_budget"], context["effective_budget"]);
     assert_eq!(
         budget_plan["selected_bytes"],
@@ -15434,7 +15510,7 @@ fn context_package_exposes_versioned_budget_plan_for_minimum_correct_context() {
             .unwrap()
             <= budget_plan["recommended_budget_bytes"].as_u64().unwrap()
     );
-    assert!(budget_plan["recommended_budget_bytes"].as_u64().unwrap() > 360);
+    assert!(budget_plan["recommended_budget_bytes"].as_u64().unwrap() > 128);
     assert_eq!(budget_plan["status"], "repair_required");
     assert!(budget_plan["reason"]
         .as_str()
@@ -15485,7 +15561,9 @@ fn context_package_exposes_minimum_correct_set_for_required_sections() {
             "--task",
             task["id"].as_str().unwrap(),
             "--budget",
-            "360",
+            "128",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -15501,7 +15579,7 @@ fn context_package_exposes_minimum_correct_set_for_required_sections() {
         minimum["schema_version"],
         "forge.context.minimum_correct_set.v1"
     );
-    assert_eq!(minimum["selector_version"], "forge.context.selector.v1");
+    assert_eq!(minimum["selector_version"], "forge.context.selector.v2");
     assert_eq!(minimum["workflow_id"], workflow_id);
     assert_eq!(minimum["task_id"], task["id"]);
     assert_eq!(minimum["workflow_revision"], context["workflow_revision"]);
@@ -15542,6 +15620,1111 @@ fn context_package_exposes_minimum_correct_set_for_required_sections() {
         .any(|component| component["name"] == "minimum_correct_set"
             && component["value"] == minimum["set_sha256"]
             && component["sha256"].as_str().unwrap().len() == 64));
+}
+
+#[test]
+fn context_selection_is_monotonic_and_repair_budget_is_sufficient() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let goal = format!(
+        "Route required context monotonically before optional context {}",
+        "with dense executor requirements and validation evidence ".repeat(36)
+    );
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            &goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let workflow: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = workflow["workflow_id"].as_str().unwrap();
+    let task_id = find_task(
+        workflow["tasks"].as_array().unwrap(),
+        "Execute isolated task",
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let context_at = |budget: u64| -> Value {
+        let output = forge()
+            .arg("--store")
+            .arg(&store)
+            .args([
+                "context",
+                "--workflow",
+                workflow_id,
+                "--task",
+                &task_id,
+                "--budget",
+                &budget.to_string(),
+                "--view",
+                "full",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&output).unwrap()
+    };
+
+    let full = context_at(20_000);
+    let minimum = full["budget_plan"]["minimum_correct_budget_bytes"]
+        .as_u64()
+        .unwrap();
+    let required_original = full["budget_plan"]["required_original_bytes"]
+        .as_u64()
+        .unwrap();
+    let original = full["routing_summary"]["original_bytes"].as_u64().unwrap();
+    assert!(minimum > 128);
+    assert!(required_original >= minimum);
+    assert!(original >= required_original);
+
+    let mut budgets = vec![
+        128,
+        256,
+        360,
+        420,
+        minimum.saturating_sub(1),
+        minimum,
+        minimum + 1,
+        required_original.saturating_sub(1),
+        required_original,
+        original,
+    ];
+    budgets.retain(|budget| *budget >= 128);
+    budgets.sort_unstable();
+    budgets.dedup();
+
+    let mut previous: Option<(BTreeSet<String>, BTreeSet<String>, u64, bool)> = None;
+    for budget in budgets {
+        let context = context_at(budget);
+        let included = context["included_sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|section| section.as_str().unwrap().to_string())
+            .collect::<BTreeSet<_>>();
+        let missing = context["missing_required_sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|section| section.as_str().unwrap().to_string())
+            .collect::<BTreeSet<_>>();
+        let selected_bytes = context["routing_summary"]["selected_bytes"]
+            .as_u64()
+            .unwrap();
+        let ready = context["context_ready"].as_bool().unwrap();
+
+        let mut optional_seen = false;
+        for shard in context["shards"].as_array().unwrap() {
+            if shard["required"] == false {
+                optional_seen = true;
+            } else {
+                assert!(
+                    !optional_seen,
+                    "budget {budget} routed a required shard after an optional shard"
+                );
+            }
+        }
+        if !ready {
+            assert!(context["shards"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|shard| { shard["required"] == true || shard["included"] == false }));
+        }
+
+        if let Some((previous_included, previous_missing, previous_bytes, previous_ready)) =
+            &previous
+        {
+            assert!(
+                previous_included.is_subset(&included),
+                "included sections regressed at budget {budget}"
+            );
+            assert!(
+                missing.is_subset(previous_missing),
+                "required sections regressed at budget {budget}"
+            );
+            assert!(selected_bytes >= *previous_bytes);
+            if *previous_ready {
+                assert!(ready, "context readiness regressed at budget {budget}");
+            }
+        }
+        previous = Some((included, missing, selected_bytes, ready));
+    }
+
+    let exact_minimum = context_at(minimum);
+    assert_eq!(exact_minimum["context_ready"], true);
+    assert!(exact_minimum["missing_required_sections"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(exact_minimum["routing_summary"]["selected_bytes"], minimum);
+    assert!(exact_minimum["shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|shard| { shard["required"] == false || shard["included"] == true }));
+    assert!(exact_minimum["shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|shard| { shard["required"] == true || shard["included"] == false }));
+
+    let low = context_at(128);
+    let recommended = low["routing_repair"]["recommended_budget_bytes"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(recommended, minimum);
+    let repaired = context_at(recommended);
+    assert_eq!(repaired["context_ready"], true);
+    assert_ne!(repaired["routing_repair"]["status"], "repair_required");
+    assert_ne!(
+        repaired["routing_repair"]["action"],
+        "increase_context_budget"
+    );
+    assert_eq!(
+        repaired["routing_repair"]["required_budget_deficit_bytes"],
+        0
+    );
+
+    let repeated = context_at(recommended);
+    for key in [
+        "context_sha256",
+        "included_sections",
+        "missing_required_sections",
+        "shards",
+        "budget_plan",
+        "routing_repair",
+        "minimum_correct_set",
+    ] {
+        assert_eq!(repaired[key], repeated[key], "unstable context field {key}");
+    }
+    assert_eq!(
+        repaired["routing_fingerprint"]["cache_key"],
+        repeated["routing_fingerprint"]["cache_key"]
+    );
+}
+
+#[test]
+fn compact_context_view_preserves_executor_contract_with_bounded_response_size() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Optimize an executor context lifecycle with deferred discovery and guarded continuation",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let workflow: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = workflow["workflow_id"].as_str().unwrap();
+    let task_id = find_task(
+        workflow["tasks"].as_array().unwrap(),
+        "Execute isolated task",
+    )["id"]
+        .as_str()
+        .unwrap();
+    let root_task_id = find_task(workflow["tasks"].as_array().unwrap(), "Parse intent")["id"]
+        .as_str()
+        .unwrap();
+
+    let full_output = forge()
+        .arg("--store")
+        .arg(&store)
+        .args([
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "1200",
+            "--view",
+            "full",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let full: Value = serde_json::from_slice(&full_output).unwrap();
+
+    let compact_output = forge()
+        .arg("--store")
+        .arg(&store)
+        .args([
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "1200",
+            "--view",
+            "compact",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let compact: Value = serde_json::from_slice(&compact_output).unwrap();
+
+    assert_eq!(compact["schema_version"], "forge.context.compact.v2");
+    assert_eq!(compact["content"], full["content"]);
+    assert_eq!(compact["context_sha256"], full["context_sha256"]);
+    assert_eq!(
+        compact["routing_cache_key"],
+        full["routing_fingerprint"]["cache_key"]
+    );
+    assert_eq!(
+        compact["selected_source_ids"],
+        full["context_router"]["selected_source_ids"]
+    );
+    assert_eq!(
+        compact["deferred_source_ids"],
+        full["context_router"]["deferred_source_ids"]
+    );
+    assert_eq!(
+        compact["instruction_contract"]["organization_id"],
+        full["prompt_packet"]["organization_context"]["organization_id"]
+    );
+    assert_eq!(
+        compact["instruction_contract"]["validation_gates"],
+        full["prompt_packet"]["validation_gates"]
+    );
+    assert_eq!(compact["economy"]["selected_bytes"], full["context_bytes"]);
+    assert_eq!(
+        compact["economy"]["canonical_envelope_bytes"],
+        serde_json::to_vec(&compact).unwrap().len()
+    );
+    assert_eq!(
+        compact["economy"]["envelope_overhead_bytes"],
+        serde_json::to_vec(&compact).unwrap().len() - compact["content"].as_str().unwrap().len()
+    );
+    assert!(
+        compact_output.len() * 3 < full_output.len(),
+        "compact response should be at least 3x smaller: compact={} full={}",
+        compact_output.len(),
+        full_output.len()
+    );
+    assert_eq!(compact["guardrail"]["status"], "blocked");
+    assert!(!compact["guardrail"]["predecessor_tasks"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(compact["guardrail"]["predecessor_tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|task| task["goal"].as_str().is_some_and(|goal| !goal.is_empty())));
+    for command in compact["guardrail"]["next_commands"].as_array().unwrap() {
+        assert_forge_store_prefix(command, &store);
+    }
+    for command in compact["expand_commands"].as_array().unwrap() {
+        assert_forge_store_prefix(command, &store);
+        assert!(!command.as_array().unwrap().iter().any(|argument| argument
+            .as_str()
+            .is_some_and(|argument| argument.contains('{'))));
+    }
+    assert!(compact["expand_commands"][0]
+        .as_array()
+        .unwrap()
+        .windows(2)
+        .any(|pair| pair[0] == "--view" && pair[1] == "full"));
+    let first_expand_command = compact["expand_commands"][0]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|argument| argument.as_str().unwrap())
+        .collect::<Vec<_>>();
+    let expanded_output = forge()
+        .args(first_expand_command.iter().skip(1))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let expanded: Value = serde_json::from_slice(&expanded_output).unwrap();
+    assert_eq!(expanded["schema_version"], "forge.context.v30");
+    assert_eq!(expanded["context_sha256"], full["context_sha256"]);
+
+    let default_compact_output = forge()
+        .arg("--store")
+        .arg(&store)
+        .args([
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_compact: Value = serde_json::from_slice(&default_compact_output).unwrap();
+    assert_eq!(default_compact, compact);
+
+    let low_output = forge()
+        .arg("--store")
+        .arg(&store)
+        .args([
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            root_task_id,
+            "--budget",
+            "128",
+            "--view",
+            "compact",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let low: Value = serde_json::from_slice(&low_output).unwrap();
+    assert_eq!(low["context_ready"], false);
+    let repair_command = &low["guardrail"]["next_commands"][0];
+    assert_forge_store_prefix(repair_command, &store);
+    assert!(repair_command
+        .as_array()
+        .unwrap()
+        .windows(2)
+        .any(|pair| pair[0] == "--view" && pair[1] == "compact"));
+    let recommended_budget = low["guardrail"]["recommended_budget_bytes"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    assert!(repair_command
+        .as_array()
+        .unwrap()
+        .windows(2)
+        .any(|pair| { pair[0] == "--budget" && pair[1] == recommended_budget }));
+
+    let mcp_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_id": task_id,
+        "budget": 1200,
+        "view": "compact"
+    });
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(&store)
+        .args([
+            "mcp",
+            "call",
+            "forge.context.request",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp["result"]["schema_version"], "forge.context.compact.v2");
+    assert_eq!(mcp["result"]["content"], compact["content"]);
+    assert_eq!(
+        mcp["result"]["guardrail"]["next_commands"], compact["guardrail"]["next_commands"],
+        "MCP compact context must use the same predecessor handoff plans as the CLI",
+    );
+
+    let default_mcp_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_id": task_id,
+        "budget": 1200
+    });
+    let default_mcp_output = forge()
+        .arg("--store")
+        .arg(&store)
+        .args([
+            "mcp",
+            "call",
+            "forge.context.request",
+            "--input",
+            &default_mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_mcp: Value = serde_json::from_slice(&default_mcp_output).unwrap();
+    assert_eq!(default_mcp["result"], compact);
+
+    let full_mcp_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_id": task_id,
+        "budget": 1200,
+        "view": "full"
+    });
+    let full_mcp_output = forge()
+        .arg("--store")
+        .arg(&store)
+        .args([
+            "mcp",
+            "call",
+            "forge.context.request",
+            "--input",
+            &full_mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let full_mcp: Value = serde_json::from_slice(&full_mcp_output).unwrap();
+    assert_eq!(full_mcp["result"], full);
+
+    let tools_output = forge()
+        .arg("--store")
+        .arg(&store)
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tools: Value = serde_json::from_slice(&tools_output).unwrap();
+    let context_tool = find_mcp_tool(&tools, "forge.context.request");
+    assert_eq!(
+        context_tool["input_schema"]["properties"]["view"]["type"],
+        "string"
+    );
+    assert_eq!(
+        context_tool["input_schema"]["properties"]["view"]["enum"],
+        serde_json::json!(["full", "compact"])
+    );
+    assert_eq!(
+        context_tool["input_schema"]["properties"]["view"]["default"],
+        "compact"
+    );
+    let selector = &context_tool["output_schema_selector"];
+    assert_eq!(selector["input_field"], "view");
+    assert_eq!(selector["default_value"], "compact");
+    assert_eq!(
+        context_tool["output_schema"],
+        selector["mapping"]["compact"]
+    );
+    assert_eq!(
+        default_mcp["result"]["schema_version"],
+        selector["mapping"][selector["default_value"].as_str().unwrap()]
+    );
+    assert_eq!(
+        mcp["result"]["schema_version"],
+        selector["mapping"]["compact"]
+    );
+    assert_eq!(
+        find_mcp_tool(&tools, "forge.workflow.list")["output_schema_selector"],
+        Value::Null
+    );
+}
+
+#[test]
+fn compact_context_bounds_adversarial_unicode_metadata_and_reports_omissions() {
+    use forge_core::context::{build_compact_context_view, build_context_package};
+    use forge_core::graph::{self, ValidationRule};
+    use forge_core::intent::parse_intent;
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let mut workflow = graph::create_workflow(parse_intent(
+        "Bound every variable compact-context field under adversarial metadata",
+    ));
+    let task_id = workflow.tasks[0].id.clone();
+    workflow.tasks[0].validation_rules = (0..200)
+        .map(|index| ValidationRule {
+            kind: format!("validação-{index}-{}", "çã🚀".repeat(80)),
+            command: Some(format!(
+                "verificar-regra-{index} --entrada {}",
+                "ação🧪".repeat(160)
+            )),
+            expected: format!("evidência-{index}-{}", "áéíóú✅".repeat(160)),
+        })
+        .collect();
+
+    let package = build_context_package(&workflow, &task_id, 1200).unwrap();
+    let compact = build_compact_context_view(&package, &workflow, &store_path, Some(temp.path()));
+    let json = serde_json::to_value(&compact).unwrap();
+    let canonical_bytes = serde_json::to_vec(&compact).unwrap().len();
+
+    assert_eq!(json["schema_version"], "forge.context.compact.v2");
+    assert_eq!(json["economy"]["canonical_envelope_bytes"], canonical_bytes);
+    assert!(
+        canonical_bytes < 20_000,
+        "bounded compact envelope grew unexpectedly: {canonical_bytes} bytes"
+    );
+    assert!(
+        json["instruction_contract"]["validation_gates"]
+            .as_array()
+            .unwrap()
+            .len()
+            <= 16
+    );
+    assert!(json["instruction_contract"]["validation_gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|gate| gate.as_str().unwrap().len() <= 192));
+    assert!(json["omissions"]["omitted_items"].as_u64().unwrap() > 0);
+    assert!(json["omissions"]["omitted_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(
+        json["omissions"]["omitted_sha256"].as_str().unwrap().len(),
+        64
+    );
+    assert!(json["omissions"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field["field"] == "instruction_contract.validation_gates"));
+}
+
+#[test]
+fn compact_context_bounds_actionable_predecessor_frontier() {
+    use forge_core::context::{build_compact_context_view, build_context_package};
+    use forge_core::graph::{self, ExecutorKind, ValidationRule};
+    use forge_core::intent::parse_intent;
+
+    let mut workflow = graph::create_workflow(parse_intent(
+        "Build a bounded compact context guardrail for a wide dependency frontier",
+    ));
+    let long_text =
+        "Evidência detalhada do predecessor e contexto operacional válido 🧪 ".repeat(40);
+    let validation_rules = (0..8)
+        .map(|index| ValidationRule {
+            kind: format!("validação_{index}_{}", "ç🧪".repeat(80)),
+            command: Some(format!("verificar-{index} {}", "ação 🧪 ".repeat(80))),
+            expected: format!("saída validada {index} {}", "evidência 🧪 ".repeat(80)),
+        })
+        .collect::<Vec<_>>();
+    let dependency_ids = (0..12)
+        .map(|index| format!("task-predecessor-{index:02}"))
+        .collect::<Vec<_>>();
+    workflow.tasks = dependency_ids
+        .iter()
+        .map(|task_id| {
+            let mut task = graph::task(
+                task_id,
+                &long_text,
+                &[],
+                &["bounded predecessor context"],
+                validation_rules.clone(),
+                &long_text,
+                (ExecutorKind::Ai, 0.01),
+            );
+            task.goal = long_text.clone();
+            task
+        })
+        .collect();
+    let dependency_refs = dependency_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    workflow.tasks.push(graph::task(
+        "task-target",
+        "Execute target only after the dependency frontier",
+        &dependency_refs,
+        &["bounded target context"],
+        vec![ValidationRule {
+            kind: "execution".to_string(),
+            command: None,
+            expected: "target remains blocked until predecessors complete".to_string(),
+        }],
+        "bounded target output",
+        (ExecutorKind::Ai, 0.01),
+    ));
+
+    let package = build_context_package(&workflow, "task-target", 1200).unwrap();
+    let compact = build_compact_context_view(
+        &package,
+        &workflow,
+        Path::new("/tmp/forge-compact-frontier.sqlite"),
+        None,
+    );
+    let compact_json = serde_json::to_value(&compact).unwrap();
+    let compact_bytes = serde_json::to_vec(&compact).unwrap();
+    let predecessors = compact_json["guardrail"]["predecessor_tasks"]
+        .as_array()
+        .unwrap();
+
+    assert_eq!(compact_json["handoff_ready"], false);
+    assert_eq!(predecessors.len(), 4);
+    assert_eq!(compact_json["guardrail"]["predecessor_tasks_total"], 12);
+    assert_eq!(compact_json["guardrail"]["predecessor_tasks_included"], 4);
+    assert_eq!(compact_json["guardrail"]["predecessor_tasks_omitted"], 8);
+    assert_eq!(
+        compact_json["guardrail"]["predecessor_validation_rules_omitted"],
+        88
+    );
+    assert!(predecessors.iter().all(|task| {
+        task["title"].as_str().unwrap().len() <= 128
+            && task["goal"].as_str().unwrap().len() <= 256
+            && task["expected_output"].as_str().unwrap().len() <= 192
+            && task["validation_rules"].as_array().unwrap().len() == 2
+            && task["validation_rules_omitted"] == 6
+            && task["validation_rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|rule| {
+                    rule["kind"].as_str().unwrap().len() <= 48
+                        && rule["command"].as_str().unwrap().len() <= 192
+                        && rule["expected"].as_str().unwrap().len() <= 192
+                })
+    }));
+    let next_commands = compact_json["guardrail"]["next_commands"]
+        .as_array()
+        .unwrap();
+    assert_eq!(next_commands.len(), 4);
+    assert!(next_commands.iter().all(|command| {
+        let command = command.as_array().unwrap();
+        command
+            .windows(2)
+            .any(|pair| pair[0] == "task" && pair[1] == "handoff")
+            && command
+                .windows(2)
+                .any(|pair| pair[0] == "--output" && pair[1] == "json")
+            && !command.contains(&Value::String("task-target".to_string()))
+    }));
+    let command_task_ids = next_commands
+        .iter()
+        .map(|command| {
+            command
+                .as_array()
+                .unwrap()
+                .windows(2)
+                .find(|pair| pair[0] == "--task")
+                .and_then(|pair| pair[1].as_str())
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let expected_task_ids = dependency_ids[..4]
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(command_task_ids, expected_task_ids);
+    assert!(
+        compact_bytes.len() < 16_384,
+        "bounded compact response grew to {} bytes",
+        compact_bytes.len()
+    );
+
+    for task in workflow
+        .tasks
+        .iter_mut()
+        .filter(|task| task.id != "task-target")
+    {
+        task.status = forge_core::graph::TaskStatus::Completed;
+    }
+    let ready_package = build_context_package(&workflow, "task-target", 1200).unwrap();
+    let ready_compact = build_compact_context_view(
+        &ready_package,
+        &workflow,
+        Path::new("/tmp/forge-compact-frontier.sqlite"),
+        None,
+    );
+    let ready_json = serde_json::to_value(ready_compact).unwrap();
+    assert_eq!(ready_json["handoff_ready"], true);
+    assert_eq!(ready_json["guardrail"]["predecessor_tasks_total"], 0);
+    assert_eq!(
+        ready_json["guardrail"]["next_commands"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(ready_json["guardrail"]["next_commands"][0]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("task-target".to_string())));
+}
+
+#[test]
+fn completed_task_context_stays_auditable_without_reopening_handoff_or_lease() {
+    use forge_core::graph::{self, TaskStatus};
+    use forge_core::intent::parse_intent;
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(parse_intent(
+        "Keep completed task context available only for audit",
+    ));
+    let task_id = workflow.tasks[0].id.clone();
+    workflow.tasks[0].status = TaskStatus::Completed;
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let full_output = forge()
+        .arg("--store")
+        .arg(&store_path)
+        .args([
+            "context",
+            "--workflow",
+            &workflow.id,
+            "--task",
+            &task_id,
+            "--budget",
+            "1200",
+            "--view",
+            "full",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let full: Value = serde_json::from_slice(&full_output).unwrap();
+    assert_eq!(full["context_ready"], true);
+    assert_eq!(full["handoff_ready"], false);
+    assert_eq!(full["handoff_status"], "blocked_task_status");
+    assert_eq!(full["next_action"]["ready_for_handoff"], false);
+    assert_eq!(full["next_action"]["action"], "inspect_completed_task");
+    assert!(full["handoff_blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|blocker| blocker["kind"] == "task_not_pending"));
+
+    let compact_output = forge()
+        .arg("--store")
+        .arg(&store_path)
+        .args([
+            "context",
+            "--workflow",
+            &workflow.id,
+            "--task",
+            &task_id,
+            "--budget",
+            "1200",
+            "--view",
+            "compact",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let compact: Value = serde_json::from_slice(&compact_output).unwrap();
+    assert_eq!(compact["context_ready"], true);
+    assert_eq!(compact["handoff_ready"], false);
+    assert_eq!(compact["guardrail"]["status"], "blocked");
+    assert_eq!(compact["guardrail"]["action"], "inspect_completed_task");
+    assert!(compact["guardrail"]["next_commands"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let handoff_output = forge()
+        .arg("--store")
+        .arg(&store_path)
+        .args([
+            "task",
+            "handoff",
+            "--workflow",
+            &workflow.id,
+            "--task",
+            &task_id,
+            "--executor",
+            "codex",
+            "--budget",
+            "1200",
+            "--view",
+            "full",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff: Value = serde_json::from_slice(&handoff_output).unwrap();
+    assert_eq!(handoff["status"], "handoff_blocked_task_status");
+    assert_eq!(handoff["allowed"], false);
+    assert_eq!(handoff["lease"], Value::Null);
+    assert!(handoff["reason"].as_str().unwrap().contains("completed"));
+
+    let lease_output = forge()
+        .arg("--store")
+        .arg(&store_path)
+        .args([
+            "task",
+            "acquire",
+            "--workflow",
+            &workflow.id,
+            "--task",
+            &task_id,
+            "--executor",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let lease: Value = serde_json::from_slice(&lease_output).unwrap();
+    assert_eq!(lease["status"], "lease_blocked_task_status");
+    assert_eq!(lease["allowed"], false);
+    assert_eq!(lease["lease"], Value::Null);
+    assert!(ForgeStore::open(&store_path)
+        .unwrap()
+        .load_task_lease(&workflow.id, &task_id)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn compact_guardrail_command_executes_deterministic_predecessor_with_forge_cli() {
+    use forge_core::context::{build_compact_context_view, build_context_package};
+    use forge_core::graph::{self, ExecutorKind, ValidationRule};
+    use forge_core::intent::parse_intent;
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(parse_intent(
+        "Execute the deterministic predecessor suggested by compact context",
+    ));
+    let predecessor = graph::task(
+        "task-command",
+        "Generate deterministic evidence",
+        &[],
+        &["bounded deterministic inputs"],
+        vec![ValidationRule {
+            kind: "schema".to_string(),
+            command: None,
+            expected: "deterministic evidence is valid".to_string(),
+        }],
+        "DeterministicEvidence",
+        (ExecutorKind::Command, 0.0),
+    );
+    let target = graph::task(
+        "task-target",
+        "Review deterministic evidence",
+        &["task-command"],
+        &["deterministic evidence"],
+        vec![ValidationRule {
+            kind: "review".to_string(),
+            command: None,
+            expected: "review references deterministic evidence".to_string(),
+        }],
+        "ReviewReport",
+        (ExecutorKind::Ai, 0.0),
+    );
+    workflow.tasks = vec![predecessor, target];
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let package = build_context_package(&workflow, "task-target", 1200).unwrap();
+    let compact = build_compact_context_view(&package, &workflow, &store_path, None);
+    let compact_json = serde_json::to_value(compact).unwrap();
+    let command = compact_json["guardrail"]["next_commands"][0]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|argument| argument.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(command[0], "forge");
+    assert!(command
+        .windows(2)
+        .any(|pair| pair[0] == "--task" && pair[1] == "task-command"));
+    assert!(command
+        .windows(2)
+        .any(|pair| pair[0] == "--executor" && pair[1] == "forge_cli"));
+
+    let handoff_output = forge()
+        .args(command.iter().skip(1))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff: Value = serde_json::from_slice(&handoff_output).unwrap();
+    assert_eq!(handoff["status"], "handoff_ready");
+    assert_eq!(handoff["allowed"], true);
+    assert_eq!(handoff["task_id"], "task-command");
+    assert_eq!(handoff["selected_executor"], "forge_cli");
+    assert!(handoff["lease"]["lease_id"].is_string());
+}
+
+#[test]
+fn concurrent_context_requests_remain_read_only_on_a_busy_wal_store() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let planned = forge()
+        .arg("--store")
+        .arg(&store)
+        .args([
+            "plan",
+            "--goal",
+            "Build concurrent read-only context packets",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned["workflow_id"].as_str().unwrap().to_owned();
+    let task_id = find_task(planned["tasks"].as_array().unwrap(), "Extract requirements")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    drop(ForgeStore::open(&store).unwrap());
+    let blocker = Connection::open(&store).unwrap();
+    let mode: String = blocker
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode.to_ascii_lowercase(), "wal");
+    let schema_version: i64 = blocker
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert!(schema_version > 0, "plan must leave the store migrated");
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let barrier = Arc::new(Barrier::new(3));
+    let (sender, receiver) = mpsc::channel();
+    let binary = assert_cmd::cargo::cargo_bin("forge");
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let barrier = Arc::clone(&barrier);
+        let sender = sender.clone();
+        let binary = binary.clone();
+        let store = store.clone();
+        let workflow_id = workflow_id.clone();
+        let task_id = task_id.clone();
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            let output = StdCommand::new(binary)
+                .arg("--store")
+                .arg(store)
+                .args([
+                    "context",
+                    "--workflow",
+                    &workflow_id,
+                    "--task",
+                    &task_id,
+                    "--budget",
+                    "1200",
+                    "--view",
+                    "compact",
+                    "--output",
+                    "json",
+                ])
+                .output();
+            sender.send(output).unwrap();
+        }));
+    }
+    drop(sender);
+    barrier.wait();
+
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut outputs = Vec::new();
+    while outputs.len() < 2 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match receiver.recv_timeout(remaining) {
+            Ok(output) => outputs.push(output),
+            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let completed_while_writer_held = outputs.len() == 2;
+    blocker.execute_batch("ROLLBACK").unwrap();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    while let Ok(output) = receiver.try_recv() {
+        outputs.push(output);
+    }
+
+    let diagnostics = outputs
+        .iter()
+        .map(|output| match output {
+            Ok(output) => format!(
+                "status={} stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            Err(error) => format!("spawn_error={error}"),
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        completed_while_writer_held,
+        "forge context attempted startup migration or reconciliation writes while a WAL writer was active: {diagnostics:?}"
+    );
+    assert_eq!(outputs.len(), 2);
+    let mut contexts = Vec::new();
+    for output in outputs {
+        let output = output.unwrap();
+        assert!(
+            output.status.success(),
+            "context failed\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("database is locked"));
+        contexts.push(serde_json::from_slice::<Value>(&output.stdout).unwrap());
+    }
+    assert_eq!(contexts[0]["context_sha256"], contexts[1]["context_sha256"]);
+    assert_eq!(
+        contexts[0]["routing_cache_key"],
+        contexts[1]["routing_cache_key"]
+    );
 }
 
 #[test]
@@ -15804,6 +16987,8 @@ fn context_package_includes_persona_routing_lineage_for_human_facing_task() {
             task_id,
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -15875,6 +17060,8 @@ fn context_package_exposes_versioned_persona_contract_for_human_facing_nodes() {
             documentation_task["id"].as_str().unwrap(),
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -15979,6 +17166,8 @@ fn context_package_derives_persona_profile_for_human_facing_nodes() {
             documentation_task["id"].as_str().unwrap(),
             "--budget",
             "2200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -16313,7 +17502,7 @@ fn inspect_exposes_context_route_summary_for_each_terminal_node() {
     assert_eq!(route["routing_policy"], "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_shard_selection_audit_v30");
     assert_eq!(
         route["routing_fingerprint_schema_version"],
-        "forge.context.routing_fingerprint.v1"
+        "forge.context.routing_fingerprint.v2"
     );
     assert_eq!(route["profile_id"], "no_ai_deterministic");
     assert_eq!(route["reasoning_allowed"], false);
@@ -16491,6 +17680,8 @@ fn inspect_projects_next_context_action_for_handoff_and_resume() {
             "task-001",
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -16604,6 +17795,8 @@ fn context_package_exposes_next_action_for_executor_resume_decisions() {
             "task-001",
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -16678,6 +17871,8 @@ fn context_package_exposes_next_action_for_executor_resume_decisions() {
             "task-001",
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -16689,11 +17884,11 @@ fn context_package_exposes_next_action_for_executor_resume_decisions() {
     let resumed_context: Value = serde_json::from_slice(&resumed_context_output).unwrap();
     assert_eq!(
         resumed_context["next_action"]["action"],
-        "partial_retry_with_fresh_context"
+        "resume_from_checkpoint"
     );
     assert_eq!(
         resumed_context["next_action"]["partial_retry_recommended"],
-        true
+        false
     );
     assert_eq!(
         resumed_context["next_action"]["checkpoint_context_routing_cache_key"],
@@ -16703,6 +17898,340 @@ fn context_package_exposes_next_action_for_executor_resume_decisions() {
         resumed_context["next_action"]["current_context_routing_cache_key"],
         resumed_context["routing_fingerprint"]["cache_key"]
     );
+}
+
+#[test]
+fn unchanged_execution_route_is_reusable_across_two_checkpoint_cycles() {
+    use forge_core::checkpoint::{record_task_checkpoint, TaskCheckpointRequest};
+    use forge_core::context::{
+        build_compact_context_view, build_context_package_with_checkpoint_project_and_worktree,
+    };
+    use forge_core::graph::{self, ExecutorKind, ValidationRule};
+    use forge_core::intent::parse_intent;
+    use forge_core::worktree::{WorktreeContextReport, WorktreeGuardrails, WorktreeSandboxConfig};
+    use std::collections::BTreeMap;
+
+    fn worktree_context(head: &str) -> WorktreeContextReport {
+        WorktreeContextReport {
+            schema_version: "forge.worktree.context.v1".to_string(),
+            id: "wt-checkpoint-reuse".to_string(),
+            identity_sha256: hex_sha256(b"checkpoint-reuse-worktree"),
+            repository_root: "/tmp/checkpoint-reuse-repository".to_string(),
+            worktree_root: "/tmp/checkpoint-reuse-worktree".to_string(),
+            branch: Some("main".to_string()),
+            head: head.to_string(),
+            dirty: false,
+            config_status: "configured".to_string(),
+            config_path: "/tmp/checkpoint-reuse-worktree/.forge/worktree.toml".to_string(),
+            config_sha256: hex_sha256(b"checkpoint-reuse-config"),
+            config_approved: true,
+            approved_config_sha256: Some(hex_sha256(b"checkpoint-reuse-config")),
+            guardrails: WorktreeGuardrails::default(),
+            sandbox: WorktreeSandboxConfig::default(),
+            settings: BTreeMap::new(),
+            bindings: Vec::new(),
+            binding_drifted: false,
+            binding_drift_reasons: Vec::new(),
+        }
+    }
+
+    let temp = tempdir().unwrap();
+    let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+    let mut workflow = graph::create_workflow(parse_intent(
+        "Reuse an unchanged execution route across checkpoint cycles",
+    ));
+    let task_id = "task-checkpoint-reuse";
+    workflow.tasks = vec![graph::task(
+        task_id,
+        "Continue unchanged execution",
+        &[],
+        &[
+            "stable workflow",
+            "stable dependency state",
+            "stable worktree",
+        ],
+        vec![ValidationRule {
+            kind: "resume".to_string(),
+            command: None,
+            expected: "unchanged route reuses checkpoint context".to_string(),
+        }],
+        "CheckpointReuseEvidence",
+        (ExecutorKind::Ai, 0.0),
+    )];
+    store.save_workflow(&workflow).unwrap();
+    let worktree = worktree_context("head-stable");
+    let budget = 4096;
+    let initial = build_context_package_with_checkpoint_project_and_worktree(
+        &workflow,
+        task_id,
+        budget,
+        None,
+        None,
+        Some(worktree.clone()),
+    )
+    .unwrap();
+    let first_checkpoint = record_task_checkpoint(
+        &store,
+        TaskCheckpointRequest {
+            workflow_id: &workflow.id,
+            task_id,
+            executor: "codex",
+            state: "paused",
+            summary: "paused after the first stable execution packet",
+            context_sha256: &initial.context_sha256,
+            context_routing_cache_key: Some(&initial.routing_fingerprint.cache_key),
+            workflow_revision: initial.workflow_revision,
+        },
+    )
+    .unwrap()
+    .checkpoint;
+
+    let first_resume = build_context_package_with_checkpoint_project_and_worktree(
+        &workflow,
+        task_id,
+        budget,
+        Some(first_checkpoint),
+        None,
+        Some(worktree.clone()),
+    )
+    .unwrap();
+    assert_ne!(first_resume.context_sha256, initial.context_sha256);
+    assert_eq!(
+        first_resume.routing_fingerprint.schema_version,
+        "forge.context.routing_fingerprint.v2"
+    );
+    assert_ne!(
+        first_resume.routing_fingerprint.audit_sha256,
+        initial.routing_fingerprint.audit_sha256
+    );
+    assert_eq!(
+        first_resume.routing_fingerprint.cache_key,
+        initial.routing_fingerprint.cache_key
+    );
+    let cache_key_scope = first_resume
+        .routing_fingerprint
+        .components
+        .iter()
+        .find(|component| component.name == "cache_key_scope")
+        .expect("cache_key_scope fingerprint component should be present");
+    assert_eq!(
+        cache_key_scope.value,
+        "execution route excludes checkpoint payload and resume state; full packet remains covered by audit_sha256"
+    );
+    assert_eq!(
+        first_resume.context_delta.current_context_routing_cache_key,
+        first_resume.routing_fingerprint.cache_key
+    );
+    let compact = build_compact_context_view(&first_resume, &workflow, store.path(), None);
+    assert_eq!(
+        compact.routing_cache_key,
+        first_resume.routing_fingerprint.cache_key
+    );
+    assert_eq!(first_resume.context_delta.status, "unchanged");
+    assert!(first_resume.context_delta.can_reuse_checkpoint_context);
+    assert!(first_resume.continuation_plan.checkpoint_reusable);
+    assert!(!first_resume.continuation_plan.requires_fresh_context);
+
+    let second_checkpoint = record_task_checkpoint(
+        &store,
+        TaskCheckpointRequest {
+            workflow_id: &workflow.id,
+            task_id,
+            executor: "codex",
+            state: "paused",
+            summary: "paused again after reusing the stable execution route",
+            context_sha256: &first_resume.context_sha256,
+            context_routing_cache_key: Some(&first_resume.routing_fingerprint.cache_key),
+            workflow_revision: first_resume.workflow_revision,
+        },
+    )
+    .unwrap()
+    .checkpoint;
+    let second_resume = build_context_package_with_checkpoint_project_and_worktree(
+        &workflow,
+        task_id,
+        budget,
+        Some(second_checkpoint),
+        None,
+        Some(worktree),
+    )
+    .unwrap();
+
+    assert_ne!(second_resume.context_sha256, first_resume.context_sha256);
+    assert_ne!(
+        second_resume.routing_fingerprint.audit_sha256,
+        first_resume.routing_fingerprint.audit_sha256
+    );
+    assert_eq!(
+        second_resume.routing_fingerprint.cache_key,
+        initial.routing_fingerprint.cache_key
+    );
+    assert_eq!(second_resume.context_delta.status, "unchanged");
+    assert!(second_resume.context_delta.can_reuse_checkpoint_context);
+    assert!(second_resume.continuation_plan.checkpoint_reusable);
+    assert!(!second_resume.continuation_plan.requires_fresh_context);
+}
+
+#[test]
+fn workflow_dependency_budget_and_worktree_mutations_invalidate_checkpoint_reuse() {
+    use forge_core::checkpoint::{record_task_checkpoint, TaskCheckpointRequest};
+    use forge_core::context::build_context_package_with_checkpoint_project_and_worktree;
+    use forge_core::graph::{self, ExecutorKind, TaskStatus, ValidationRule};
+    use forge_core::intent::parse_intent;
+    use forge_core::worktree::{WorktreeContextReport, WorktreeGuardrails, WorktreeSandboxConfig};
+    use std::collections::BTreeMap;
+
+    fn worktree_context(head: &str) -> WorktreeContextReport {
+        WorktreeContextReport {
+            schema_version: "forge.worktree.context.v1".to_string(),
+            id: "wt-checkpoint-mutation".to_string(),
+            identity_sha256: hex_sha256(b"checkpoint-mutation-worktree"),
+            repository_root: "/tmp/checkpoint-mutation-repository".to_string(),
+            worktree_root: "/tmp/checkpoint-mutation-worktree".to_string(),
+            branch: Some("main".to_string()),
+            head: head.to_string(),
+            dirty: false,
+            config_status: "configured".to_string(),
+            config_path: "/tmp/checkpoint-mutation-worktree/.forge/worktree.toml".to_string(),
+            config_sha256: hex_sha256(b"checkpoint-mutation-config"),
+            config_approved: true,
+            approved_config_sha256: Some(hex_sha256(b"checkpoint-mutation-config")),
+            guardrails: WorktreeGuardrails::default(),
+            sandbox: WorktreeSandboxConfig::default(),
+            settings: BTreeMap::new(),
+            bindings: Vec::new(),
+            binding_drifted: false,
+            binding_drift_reasons: Vec::new(),
+        }
+    }
+
+    let temp = tempdir().unwrap();
+    let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+    let mut workflow = graph::create_workflow(parse_intent(
+        "Invalidate checkpoint reuse whenever an execution route input changes",
+    ));
+    let dependency_id = "task-reuse-dependency";
+    let task_id = "task-reuse-target";
+    workflow.tasks = vec![
+        graph::task(
+            dependency_id,
+            "Prepare reusable input",
+            &[],
+            &["stable input"],
+            vec![ValidationRule {
+                kind: "input".to_string(),
+                command: None,
+                expected: "input is ready".to_string(),
+            }],
+            "ReusableInput",
+            (ExecutorKind::Ai, 0.0),
+        ),
+        graph::task(
+            task_id,
+            "Consume reusable input",
+            &[dependency_id],
+            &["dependency output", "bound worktree"],
+            vec![ValidationRule {
+                kind: "resume".to_string(),
+                command: None,
+                expected: "only an unchanged route reuses context".to_string(),
+            }],
+            "RouteMutationEvidence",
+            (ExecutorKind::Ai, 0.0),
+        ),
+    ];
+    store.save_workflow(&workflow).unwrap();
+    let worktree = worktree_context("head-before");
+    let budget = 4096;
+    let initial = build_context_package_with_checkpoint_project_and_worktree(
+        &workflow,
+        task_id,
+        budget,
+        None,
+        None,
+        Some(worktree.clone()),
+    )
+    .unwrap();
+    let checkpoint = record_task_checkpoint(
+        &store,
+        TaskCheckpointRequest {
+            workflow_id: &workflow.id,
+            task_id,
+            executor: "codex",
+            state: "paused",
+            summary: "paused before route mutation checks",
+            context_sha256: &initial.context_sha256,
+            context_routing_cache_key: Some(&initial.routing_fingerprint.cache_key),
+            workflow_revision: initial.workflow_revision,
+        },
+    )
+    .unwrap()
+    .checkpoint;
+
+    let budget_mutated = build_context_package_with_checkpoint_project_and_worktree(
+        &workflow,
+        task_id,
+        budget - 256,
+        Some(checkpoint.clone()),
+        None,
+        Some(worktree.clone()),
+    )
+    .unwrap();
+    let mut workflow_mutated = workflow.clone();
+    workflow_mutated.goal = "A materially different workflow goal".to_string();
+    let workflow_mutated = build_context_package_with_checkpoint_project_and_worktree(
+        &workflow_mutated,
+        task_id,
+        budget,
+        Some(checkpoint.clone()),
+        None,
+        Some(worktree.clone()),
+    )
+    .unwrap();
+    let mut dependency_mutated_workflow = workflow.clone();
+    dependency_mutated_workflow
+        .tasks
+        .iter_mut()
+        .find(|task| task.id == dependency_id)
+        .unwrap()
+        .status = TaskStatus::Completed;
+    let dependency_mutated = build_context_package_with_checkpoint_project_and_worktree(
+        &dependency_mutated_workflow,
+        task_id,
+        budget,
+        Some(checkpoint.clone()),
+        None,
+        Some(worktree.clone()),
+    )
+    .unwrap();
+    let worktree_mutated = build_context_package_with_checkpoint_project_and_worktree(
+        &workflow,
+        task_id,
+        budget,
+        Some(checkpoint),
+        None,
+        Some(worktree_context("head-after")),
+    )
+    .unwrap();
+
+    for (mutation, package) in [
+        ("budget", budget_mutated),
+        ("workflow", workflow_mutated),
+        ("dependency", dependency_mutated),
+        ("worktree", worktree_mutated),
+    ] {
+        assert_ne!(
+            package.routing_fingerprint.cache_key, initial.routing_fingerprint.cache_key,
+            "{mutation} mutation must change the public execution route cache key"
+        );
+        assert_eq!(
+            package.context_delta.status, "route_changed",
+            "{mutation} mutation must be classified as a route change"
+        );
+        assert!(!package.context_delta.can_reuse_checkpoint_context);
+        assert!(!package.continuation_plan.checkpoint_reusable);
+        assert!(package.continuation_plan.requires_fresh_context);
+    }
 }
 
 #[test]
@@ -16738,6 +18267,8 @@ fn context_package_exposes_versioned_context_delta_for_resumable_reuse() {
             "task-001",
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -16815,6 +18346,8 @@ fn context_package_exposes_versioned_context_delta_for_resumable_reuse() {
             "task-001",
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -16826,7 +18359,7 @@ fn context_package_exposes_versioned_context_delta_for_resumable_reuse() {
     let resumed_context: Value = serde_json::from_slice(&resumed_context_output).unwrap();
     let delta = &resumed_context["context_delta"];
     assert_eq!(delta["schema_version"], "forge.context.delta.v1");
-    assert_eq!(delta["status"], "route_changed");
+    assert_eq!(delta["status"], "unchanged");
     assert_eq!(
         delta["checkpoint_id"],
         resumed_context["latest_checkpoint"]["checkpoint_id"]
@@ -16843,13 +18376,13 @@ fn context_package_exposes_versioned_context_delta_for_resumable_reuse() {
         delta["current_context_routing_cache_key"],
         resumed_context["routing_fingerprint"]["cache_key"]
     );
-    assert_eq!(delta["can_reuse_checkpoint_context"], false);
-    assert_eq!(delta["partial_retry_recommended"], true);
+    assert_eq!(delta["can_reuse_checkpoint_context"], true);
+    assert_eq!(delta["partial_retry_recommended"], false);
     assert!(delta["changed_components"]
         .as_array()
         .unwrap()
         .contains(&Value::String("context_payload".to_string())));
-    assert!(delta["changed_components"]
+    assert!(!delta["changed_components"]
         .as_array()
         .unwrap()
         .contains(&Value::String("routing_cache_key".to_string())));
@@ -16888,6 +18421,8 @@ fn context_package_exposes_versioned_continuation_plan_for_executor_adapters() {
             "task-001",
             "--budget",
             "4096",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -16976,6 +18511,8 @@ fn context_package_exposes_versioned_continuation_plan_for_executor_adapters() {
             "task-001",
             "--budget",
             "4096",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -16990,11 +18527,11 @@ fn context_package_exposes_versioned_continuation_plan_for_executor_adapters() {
         resumed_plan["checkpoint_id"],
         checkpoint_json["checkpoint"]["checkpoint_id"]
     );
-    assert_eq!(resumed_plan["status"], "checkpoint_route_changed");
-    assert_eq!(resumed_plan["action"], "partial_retry_with_fresh_context");
-    assert_eq!(resumed_plan["checkpoint_reusable"], false);
-    assert_eq!(resumed_plan["requires_fresh_context"], true);
-    assert_eq!(resumed_plan["partial_retry_recommended"], true);
+    assert_eq!(resumed_plan["status"], "checkpoint_route_current");
+    assert_eq!(resumed_plan["action"], "resume_from_checkpoint");
+    assert_eq!(resumed_plan["checkpoint_reusable"], true);
+    assert_eq!(resumed_plan["requires_fresh_context"], false);
+    assert_eq!(resumed_plan["partial_retry_recommended"], false);
     assert_eq!(
         resumed_plan["checkpoint_context_routing_cache_key"],
         initial_context["routing_fingerprint"]["cache_key"]
@@ -17005,7 +18542,7 @@ fn context_package_exposes_versioned_continuation_plan_for_executor_adapters() {
     );
     assert_eq!(
         resumed_plan["validation_gate"],
-        "partial_retry_requires_fresh_context_validation"
+        "resume_checkpoint_validation_required"
     );
 
     let inspect_output = forge()
@@ -17028,7 +18565,7 @@ fn context_package_exposes_versioned_continuation_plan_for_executor_adapters() {
     assert!(inspection["diagram"]
         .as_str()
         .unwrap()
-        .contains("continue partial_retry_with_fresh_context checkpoint_route_changed"));
+        .contains("continue resume_from_checkpoint checkpoint_route_current"));
     assert_eq!(
         inspection["nodes"][0]["context_route"]["continuation_plan"],
         *resumed_plan
@@ -17050,6 +18587,8 @@ fn context_package_exposes_versioned_continuation_plan_for_executor_adapters() {
             "600",
             "--budget",
             "4096",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -20009,6 +21548,8 @@ fn improve_candidates_suggest_task_handoffs_for_parallel_workflow_without_drivea
                             Value::String(task_id.to_string()),
                             Value::String("--executor".to_string()),
                             Value::String("codex".to_string()),
+                            Value::String("--view".to_string()),
+                            Value::String("compact".to_string()),
                             Value::String("--output".to_string()),
                             Value::String("json".to_string()),
                         ]
@@ -20084,6 +21625,8 @@ fn improve_candidates_suggest_forge_cli_for_no_ai_ready_handoffs() {
                 Value::String("task-json".to_string()),
                 Value::String("--executor".to_string()),
                 Value::String("forge_cli".to_string()),
+                Value::String("--view".to_string()),
+                Value::String("compact".to_string()),
                 Value::String("--output".to_string()),
                 Value::String("json".to_string()),
             ]
@@ -20100,6 +21643,8 @@ fn improve_candidates_suggest_forge_cli_for_no_ai_ready_handoffs() {
                 Value::String("task-review".to_string()),
                 Value::String("--executor".to_string()),
                 Value::String("codex".to_string()),
+                Value::String("--view".to_string()),
+                Value::String("compact".to_string()),
                 Value::String("--output".to_string()),
                 Value::String("json".to_string()),
             ]
@@ -20488,6 +22033,7 @@ fn simulated_run_completes_graph_then_validation_allows_improvement_cycle() {
 fn packaged_skill_entrypoint_stays_small_and_routes_to_domain_skills() {
     let skill = forge_core::skill::SKILL_MD;
 
+    assert_eq!(skill, include_str!("../.agents/skills/forge-core/SKILL.md"));
     assert!(
         skill.len() < 4_000,
         "Forge skill entrypoint must stay small; split broad behavior into domain or single-function skills instead"
@@ -20500,6 +22046,9 @@ fn packaged_skill_entrypoint_stays_small_and_routes_to_domain_skills() {
     assert!(skill.contains("forge-core-executors"));
     assert!(skill.contains("forge-core-workspaces"));
     assert!(skill.contains("forge-core-addons-ui"));
+    assert!(skill.contains("forge-core-documentation"));
+    assert!(skill.contains("forge-core-agent"));
+    assert!(skill.contains("forge-core-workflow"));
     assert!(
         !skill.contains("## Useful Commands"),
         "the entrypoint must route to smaller skills instead of becoming a command encyclopedia"
@@ -20530,16 +22079,24 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
         .success()
         .stdout(predicates::str::contains("\"forge-core\""));
 
-    let codex_skill = temp.path().join(".codex/skills/forge-core/SKILL.md");
-    let opencode_skill = temp
-        .path()
-        .join(".config/opencode/skills/forge-core/SKILL.md");
-    let shared_skill = temp.path().join(".agents/skills/forge-core/SKILL.md");
-    assert!(codex_skill.exists());
-    assert!(opencode_skill.exists());
-    assert!(shared_skill.exists());
+    let skill_roots = [
+        temp.path().join(".codex/skills"),
+        temp.path().join(".config/opencode/skills"),
+        temp.path().join(".agents/skills"),
+    ];
+    let versioned_router = include_str!("../.agents/skills/forge-core/SKILL.md");
+    for skill_root in &skill_roots {
+        let installed_router = skill_root.join("forge-core/SKILL.md");
+        assert!(installed_router.exists());
+        assert_eq!(
+            fs::read_to_string(&installed_router).unwrap(),
+            versioned_router,
+            "installed router should match the versioned router at {}",
+            installed_router.display()
+        );
+    }
 
-    let skill = fs::read_to_string(opencode_skill).unwrap();
+    let skill = fs::read_to_string(skill_roots[1].join("forge-core/SKILL.md")).unwrap();
     assert!(skill.starts_with("---\nname: forge-core\n"));
     assert!(skill.contains("description:"));
     assert!(skill.contains("forge plan"));
@@ -20597,6 +22154,30 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
                 "forge interactive action-dispatch",
             ],
         ),
+        (
+            "forge-core-documentation",
+            [
+                "## Documentation Contract",
+                "## Documenting Tasks and Subtasks",
+                "forge workflow status",
+            ],
+        ),
+        (
+            "forge-core-agent",
+            [
+                "## Agent and Executor Contract",
+                "forge executor register-profile",
+                "## Adapter Credentials and Quotas",
+            ],
+        ),
+        (
+            "forge-core-workflow",
+            [
+                "## Workflow Contract",
+                "forge workflow add-task",
+                "forge workflow add-dependency",
+            ],
+        ),
     ];
 
     for (module, snippets) in module_expectations {
@@ -20604,35 +22185,37 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
             skill.contains(module),
             "main skill should route users to {module}"
         );
-        let module_path = temp
-            .path()
-            .join(".config/opencode/skills")
-            .join(module)
-            .join("SKILL.md");
-        assert!(module_path.exists(), "missing module skill {module}");
-        let module_skill = fs::read_to_string(&module_path).unwrap();
-        assert!(
-            module_skill.len() < 4_000,
-            "module skill {module} should stay small enough for node-scoped loading"
-        );
-        for snippet in snippets {
+        for skill_root in &skill_roots {
+            let module_path = skill_root.join(module).join("SKILL.md");
             assert!(
-                module_skill.contains(snippet),
-                "module skill {module} should mention {snippet}"
+                module_path.exists(),
+                "missing module skill {module} under {}",
+                skill_root.display()
             );
-        }
-        if module == "forge-core-workspaces" {
-            for snippet in [
-                "worktree approve-config",
-                "worktree guard check",
-                "worktree guard create-predecessor",
-                "--allow-guardrail-update",
-                "--allow-workflow-mutation",
-            ] {
+            let module_skill = fs::read_to_string(&module_path).unwrap();
+            assert!(
+                module_skill.len() < 4_000,
+                "module skill {module} should stay small enough for node-scoped loading"
+            );
+            for snippet in snippets {
                 assert!(
                     module_skill.contains(snippet),
-                    "workspace skill should mention {snippet}"
+                    "module skill {module} should mention {snippet}"
                 );
+            }
+            if module == "forge-core-workspaces" {
+                for snippet in [
+                    "worktree approve-config",
+                    "worktree guard check",
+                    "worktree guard create-predecessor",
+                    "--allow-guardrail-update",
+                    "--allow-workflow-mutation",
+                ] {
+                    assert!(
+                        module_skill.contains(snippet),
+                        "workspace skill should mention {snippet}"
+                    );
+                }
             }
         }
     }
@@ -20855,7 +22438,10 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
     let task_handoff = find_mcp_tool(&json, "forge.task.handoff");
     assert_eq!(task_handoff["async_safe"], true);
     assert_eq!(task_handoff["mutates_workflow"], true);
-    assert_eq!(task_handoff["output_schema"], "forge.executor_handoff.v9");
+    assert_eq!(
+        task_handoff["output_schema"],
+        "forge.executor_handoff.compact.v1"
+    );
     assert!(task_handoff["description"]
         .as_str()
         .unwrap()
@@ -22978,40 +24564,86 @@ fn mcp_call_acquires_bounded_task_handoff_packet_for_agent_executor() {
     assert_eq!(handoff_json["result"]["task_id"], task_id);
     assert_eq!(handoff_json["result"]["selected_executor"], "codex");
     assert_eq!(
-        handoff_json["result"]["packet"]["schema_version"],
+        handoff_json["result"]["schema_version"],
+        "forge.executor_handoff.compact.v1"
+    );
+    assert_eq!(
+        handoff_json["result"]["context"]["schema_version"],
+        "forge.context.compact.v2"
+    );
+    assert!(handoff_json["result"]["lease"]["lease_id"].is_string());
+    assert_eq!(handoff_json["result"]["execution"]["handoff_ready"], true);
+    assert!(handoff_json["result"]["packet"].is_null());
+    assert!(handoff_json["result"]["context"]["context_router"].is_null());
+    assert!(handoff_json["result"]["context"]["deferred_discovery"].is_null());
+    assert!(handoff_json["result"]["context"]["memory_policy"].is_null());
+    assert!(handoff_json["result"]["context"]["context_delta"].is_null());
+    assert!(handoff_json["result"]["context"]["deferred_source_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("mcp_servers_and_tools".to_string())));
+    assert!(handoff_json["result"]["context"]["deferred_source_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("skills_catalog".to_string())));
+
+    let full_handoff_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_id": task_id,
+        "executor": "codex",
+        "budget": 1200,
+        "ttl_seconds": 600,
+        "view": "full"
+    })
+    .to_string();
+    let full_handoff = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.task.handoff"])
+        .arg("--input")
+        .arg(&full_handoff_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let full_handoff_json: Value = serde_json::from_slice(&full_handoff).unwrap();
+    assert_eq!(
+        full_handoff_json["result"]["packet"]["schema_version"],
         "forge.executor_handoff.v9"
     );
     assert_eq!(
-        handoff_json["result"]["packet"]["lease_id"],
-        handoff_json["result"]["lease"]["lease_id"]
+        full_handoff_json["result"]["context"]["schema_version"],
+        "forge.context.v30"
     );
-    assert_eq!(
-        handoff_json["result"]["packet"]["context_sha256"],
-        handoff_json["result"]["context"]["context_sha256"]
-    );
-    assert_eq!(
-        handoff_json["result"]["packet"]["deferred_discovery"],
-        handoff_json["result"]["context"]["deferred_discovery"]
-    );
-    assert_eq!(
-        handoff_json["result"]["packet"]["context_router"],
-        handoff_json["result"]["context"]["context_router"]
-    );
-    assert_eq!(
-        handoff_json["result"]["packet"]["deferred_discovery"]["global_discovery_allowed"],
-        false
-    );
+    assert!(full_handoff_json["result"]["context"]["context_router"].is_object());
     assert!(
-        handoff_json["result"]["packet"]["context_router"]["deferred_source_ids"]
-            .as_array()
-            .unwrap()
-            .contains(&Value::String("mcp_servers_and_tools".to_string()))
+        handoff.len() * 2 < full_handoff.len(),
+        "default compact handoff should be at least 2x smaller: compact={} full={}",
+        handoff.len(),
+        full_handoff.len()
     );
-    assert!(
-        handoff_json["result"]["packet"]["context_router"]["deferred_source_ids"]
-            .as_array()
-            .unwrap()
-            .contains(&Value::String("skills_catalog".to_string()))
+
+    let tools = forge()
+        .arg("--store")
+        .arg(&store)
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tools_json: Value = serde_json::from_slice(&tools).unwrap();
+    let tool = find_mcp_tool(&tools_json, "forge.task.handoff");
+    assert_eq!(
+        tool["input_schema"]["properties"]["view"]["default"],
+        "compact"
+    );
+    assert_eq!(tool["output_schema_selector"]["default_value"], "compact");
+    assert_eq!(
+        tool["output_schema"],
+        tool["output_schema_selector"]["mapping"]["compact"]
     );
 }
 
@@ -23661,6 +25293,8 @@ fn shells_launch_plan_selects_forge_first_entrypoint_without_running_brain() {
             "--budget",
             "900",
             "--strict",
+            "--view",
+            "compact",
             "--output",
             "json"
         ])
@@ -23681,6 +25315,8 @@ fn shells_launch_plan_selects_forge_first_entrypoint_without_running_brain() {
             "900",
             "--ttl-seconds",
             "600",
+            "--view",
+            "compact",
             "--output",
             "json"
         ])
@@ -24039,6 +25675,8 @@ fn brain_sessions_report_aggregates_providers_shell_specs_and_planned_events() {
             "--budget",
             "1200",
             "--strict",
+            "--view",
+            "compact",
             "--output",
             "json"
         ])
@@ -24059,6 +25697,8 @@ fn brain_sessions_report_aggregates_providers_shell_specs_and_planned_events() {
             "1200",
             "--ttl-seconds",
             "900",
+            "--view",
+            "compact",
             "--output",
             "json"
         ])
@@ -26078,6 +27718,87 @@ fn self_run_falls_back_to_agy_before_opencode_if_previous_executor_fails() {
 }
 
 #[test]
+fn self_run_keeps_request_active_between_multiple_cycles() {
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .arg(&repo)
+        .status()
+        .expect("git init should succeed");
+    assert!(status.success());
+    fs::write(repo.join("README.md"), "# repo\n").unwrap();
+
+    let executors_dir = temp.path().join("bin");
+    fs::create_dir_all(&executors_dir).unwrap();
+    write_fake_executor(
+        &executors_dir,
+        "codex",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'codex 1.0\\n'; exit 0; fi\nprintf 'ok from codex\\n'\nexit 0\n",
+    );
+
+    let old_path = std::env::var("PATH").unwrap_or_else(|_| "".to_string());
+    let path = format!("{}:{}", executors_dir.display(), old_path);
+    let output = forge()
+        .env("PATH", path)
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2999-01-01T00:00:00-03:00",
+            "--max-cycles",
+            "2",
+            "--sleep-seconds",
+            "0",
+            "--executor",
+            "codex",
+            "--validation-command",
+            "true",
+            "--skip-self-update",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "completed");
+    assert_eq!(json["cycle_reports"].as_array().unwrap().len(), 2);
+    assert_eq!(json["cycle_reports"][0]["cycle"], 1);
+    assert_eq!(json["cycle_reports"][1]["cycle"], 2);
+    assert!(json["cycle_reports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|cycle| cycle["validation_passed"] == true));
+
+    let store = ForgeStore::open(&store_path).unwrap();
+    let run_id = json["run_id"].as_str().unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let status = forge_core::request::load_request_status(&store, run_id).unwrap();
+    assert_eq!(status.status, "completed");
+    assert_eq!(status.workflow_status, "completed");
+    assert_eq!(
+        store
+            .load_workflow_events(workflow_id)
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == "async_request_heartbeat")
+            .count(),
+        4
+    );
+}
+
+#[test]
 fn self_run_reports_quota_aware_executor_policy_for_cycle() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -27420,6 +29141,8 @@ tenant_policy_mode: audit
             "600",
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -29955,6 +31678,8 @@ fn list_aggregates_context_next_actions_for_registry_rows() {
             "task-001",
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -31257,6 +32982,8 @@ fn context_package_carries_proposed_child_subflow_routing_for_reused_nodes() {
             deterministic_task["id"].as_str().unwrap(),
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -31623,6 +33350,8 @@ fn context_package_includes_latest_checkpoint_and_marks_stale_after_goal_mutatio
             "task-002",
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -31670,6 +33399,8 @@ fn context_package_includes_latest_checkpoint_and_marks_stale_after_goal_mutatio
             "task-002",
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -31739,6 +33470,8 @@ fn context_package_includes_latest_checkpoint_and_marks_stale_after_goal_mutatio
             "task-002",
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -31865,6 +33598,8 @@ fn rework_handoff_preserves_failure_summary_and_artifact_manifest_for_delivery()
             task_id,
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -31931,11 +33666,16 @@ fn rework_handoff_preserves_failure_summary_and_artifact_manifest_for_delivery()
     let rework_context: Value = serde_json::from_slice(&rework_context_output).unwrap();
     let content = rework_context["content"].as_str().unwrap();
 
-    assert_eq!(rework_context["latest_checkpoint"]["state"], "needs_retry");
-    assert!(
-        rework_context["effective_budget"].as_u64().unwrap() >= 1200,
-        "rework context must not be capped to the tiny deterministic budget"
-    );
+    assert_eq!(rework_context["schema_version"], "forge.context.compact.v2");
+    assert_eq!(rework_context["context_ready"], true);
+    assert!(rework_context["missing_required_sections"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(rework_context["included_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("checkpoint".to_string())));
     assert!(
         rework_context["included_sections"]
             .as_array()
@@ -32025,6 +33765,8 @@ fn artifact_manifest_command_context_requires_artifact_section_under_default_han
             task_id,
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -32263,6 +34005,8 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
             "600",
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -32300,7 +34044,7 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
     );
     assert_eq!(
         packet["context_routing_fingerprint_schema_version"],
-        "forge.context.routing_fingerprint.v1"
+        "forge.context.routing_fingerprint.v2"
     );
     assert_eq!(
         packet["context_routing_cache_key"],
@@ -32344,6 +34088,8 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
             "600",
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -32431,6 +34177,8 @@ fn task_handoff_auto_executor_uses_model_decision_with_public_benchmarks_and_cos
             "600",
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -32580,6 +34328,8 @@ fn task_handoff_auto_can_select_agy_discovered_model_when_codex_quota_is_blocked
             "600",
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -32715,6 +34465,8 @@ fn task_handoff_blocks_quota_exhausted_executor_and_suggests_fallback_before_lea
             "600",
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -32799,6 +34551,8 @@ fn task_handoff_packet_carries_full_execution_policy_for_deterministic_code_node
             "600",
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -32903,6 +34657,8 @@ fn task_handoff_packet_carries_per_node_brain_routing_for_ai_agents() {
             "600",
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -33090,6 +34846,8 @@ fn context_and_handoff_include_project_memory_governance_when_project_root_is_su
             "task-memory-aware",
             "--project-root",
             project_root.to_str().unwrap(),
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -33139,6 +34897,8 @@ fn context_and_handoff_include_project_memory_governance_when_project_root_is_su
             "codex",
             "--project-root",
             project_root.to_str().unwrap(),
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -33186,7 +34946,8 @@ fn context_and_handoff_include_project_memory_governance_when_project_root_is_su
     let mcp_context_input = serde_json::json!({
         "workflow_id": workflow.id,
         "task_id": "task-memory-aware",
-        "project_root": project_root
+        "project_root": project_root,
+        "view": "full"
     });
     let mcp_context = forge()
         .args([
@@ -33328,6 +35089,8 @@ fn workflow_update_node_brain_hot_swaps_node_routing_without_stopping_workflow()
             "gemini",
             "--budget",
             "1600",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -33438,6 +35201,8 @@ fn task_handoff_packet_exposes_resume_plan_from_checkpoint_route_key() {
             "600",
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -33528,6 +35293,8 @@ fn task_handoff_packet_exposes_resume_plan_from_checkpoint_route_key() {
             "600",
             "--budget",
             "1200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -33564,28 +35331,37 @@ fn task_handoff_packet_exposes_resume_plan_from_checkpoint_route_key() {
     );
     assert_eq!(
         resumed_packet["resume_plan"]["status"],
-        "checkpoint_route_changed"
+        "checkpoint_route_current"
     );
     assert_eq!(
         resumed_packet["resume_plan"]["action"],
-        "partial_retry_with_fresh_context"
+        "resume_from_checkpoint"
+    );
+    assert_eq!(resumed_packet["resume_plan"]["checkpoint_reusable"], true);
+    assert_eq!(
+        resumed_packet["resume_plan"]["requires_fresh_context"],
+        false
     );
     assert_eq!(
         resumed_packet["resume_plan"]["partial_retry_recommended"],
-        true
+        false
     );
     assert_eq!(
         resumed_packet["resume_plan"]["reason"],
-        "checkpoint route differs from current context route"
+        "checkpoint route matches current context route"
     );
     assert_eq!(
         resumed_packet["context_delta"]["schema_version"],
         "forge.context.delta.v1"
     );
-    assert_eq!(resumed_packet["context_delta"]["status"], "route_changed");
+    assert_eq!(resumed_packet["context_delta"]["status"], "unchanged");
+    assert_eq!(
+        resumed_packet["context_delta"]["can_reuse_checkpoint_context"],
+        true
+    );
     assert_eq!(
         resumed_packet["context_delta"]["partial_retry_recommended"],
-        true
+        false
     );
 }
 
@@ -33638,6 +35414,8 @@ fn task_handoff_packet_carries_node_scoped_persona_contract() {
             "600",
             "--budget",
             "2400",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -33746,6 +35524,8 @@ fn task_handoff_does_not_acquire_lease_when_strict_context_is_blocked() {
             "600",
             "--budget",
             "128",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -41117,21 +42897,7 @@ fn improve_candidates_suggest_final_audit_for_completed_workflow_without_active_
     set_all_task_statuses_in_stored_workflow(&store, workflow_id, "completed");
     set_workflow_status_in_stored_workflow(&store, workflow_id, "completed");
 
-    forge()
-        .args([
-            "--store",
-            store.to_str().unwrap(),
-            "request",
-            "cancel",
-            "--run",
-            run_id,
-            "--origin",
-            "codex",
-            "--output",
-            "json",
-        ])
-        .assert()
-        .success();
+    set_run_status_in_stored_run(&store, run_id, "completed");
 
     let outcome_path = temp.path().join("verified-user-facing-outcome.md");
     fs::write(
@@ -41387,6 +43153,8 @@ fn final_completion_audit_handoff_honors_explicit_large_context_budget() {
             "600",
             "--budget",
             "12000",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -41776,6 +43544,8 @@ fn improve_candidates_prioritize_generated_rework_tasks_without_driveable_run() 
             "task-002",
             "--executor",
             "codex",
+            "--view",
+            "compact",
             "--output",
             "json"
         ])
@@ -54478,13 +56248,10 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
     assert_eq!(json["schema_version"], "forge.interactive.release_gates.v1");
     assert_eq!(json["status"], "interactive_release_gates_ready");
     assert_eq!(json["milestone"], "0.5");
-    assert_eq!(json["promotion_decision"]["decision"], "fail");
-    assert_eq!(json["promotion_ready"], false);
+    assert_eq!(json["promotion_decision"]["decision"], "promote");
+    assert_eq!(json["promotion_ready"], true);
     assert_eq!(json["attached_evidence_count"], 1);
-    assert!(json["blocked_by"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!("replacement_grade_cli")));
+    assert!(json["blocked_by"].as_array().unwrap().is_empty());
     assert!(json["gate_cards"].as_array().unwrap().iter().any(|gate| {
         gate["capability_id"] == "replacement_grade_cli"
             && gate["status"] == "groundwork"
@@ -54736,16 +56503,12 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
         mcp_json["result"]["schema_version"],
         "forge.interactive.release_gates.v1"
     );
-    assert_eq!(mcp_json["result"]["promotion_ready"], false);
+    assert_eq!(mcp_json["result"]["promotion_ready"], true);
     assert_eq!(mcp_json["result"]["attached_evidence_count"], 1);
     assert!(mcp_json["result"]["blocked_by"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!("replacement_grade_cli")));
-    assert!(mcp_json["result"]["blocked_by"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!("experimental_multimodal_runtime")));
+        .is_empty());
 }
 
 #[test]
@@ -55706,6 +57469,7 @@ fn no_args_non_tty_renders_operational_dashboard_and_exits_for_scripts() {
 
 #[test]
 fn no_args_tty_enters_repl_and_shows_dashboard_when_pseudo_terminal_is_available() {
+    let _tui_guard = forge_tui_test_guard();
     let script = if Path::new("/usr/bin/script").exists() {
         "/usr/bin/script"
     } else if Path::new("/bin/script").exists() {
@@ -55757,6 +57521,7 @@ fn no_args_tty_enters_repl_and_shows_dashboard_when_pseudo_terminal_is_available
 
 #[test]
 fn forge_tui_status_command_surfaces_running_workflows_and_info() {
+    let _tui_guard = forge_tui_test_guard();
     let script = if Path::new("/usr/bin/script").exists() {
         "/usr/bin/script"
     } else if Path::new("/bin/script").exists() {
@@ -55801,6 +57566,7 @@ fn forge_tui_status_command_surfaces_running_workflows_and_info() {
 
 #[test]
 fn forge_tui_simple_chat_questions_answer_directly_without_workflow() {
+    let _tui_guard = forge_tui_test_guard();
     let script = if Path::new("/usr/bin/script").exists() {
         "/usr/bin/script"
     } else if Path::new("/bin/script").exists() {
@@ -55887,6 +57653,7 @@ fn forge_tui_simple_chat_questions_answer_directly_without_workflow() {
 
 #[test]
 fn forge_tui_tab_enters_shell_mode_and_can_return_cleanly() {
+    let _tui_guard = forge_tui_test_guard();
     let script = if Path::new("/usr/bin/script").exists() {
         "/usr/bin/script"
     } else if Path::new("/bin/script").exists() {
@@ -56821,7 +58588,7 @@ fn replacement_cli_evidence_smoke_collects_ready_receipts_and_reports_manifest_g
     assert_eq!(json["collect_ready"]["failed_count"], 0);
     assert_eq!(
         json["collect_ready"]["promotion_ready_after_collection"],
-        false
+        true
     );
 
     let collected = json["collect_ready"]["collected_evidence"]
@@ -56958,7 +58725,7 @@ fn replacement_cli_evidence_smoke_collects_ready_receipts_and_reports_manifest_g
         "external_provider_evidence_manifest_state",
         "skips_multimodal_until_runtime_ready",
         "release_gate_tracks_replacement_cli_evidence_state",
-        "does_not_auto_promote",
+        "preserves_core_promotion_decision",
     ] {
         let check = json["checks"]
             .as_array()
@@ -57109,10 +58876,7 @@ printf 'smoke_provider_ok\n'
         .as_array()
         .unwrap()
         .is_empty());
-    assert_eq!(
-        json["release_gates"]["blocked_by"],
-        serde_json::json!(["experimental_multimodal_runtime"])
-    );
+    assert_eq!(json["release_gates"]["blocked_by"], serde_json::json!([]));
 
     for check_id in [
         "collects_broader_project_coding_research_workflow",
@@ -57120,7 +58884,7 @@ printf 'smoke_provider_ok\n'
         "external_provider_evidence_manifest_state",
         "skips_multimodal_until_runtime_ready",
         "release_gate_tracks_replacement_cli_evidence_state",
-        "does_not_auto_promote",
+        "preserves_core_promotion_decision",
     ] {
         let check = json["checks"]
             .as_array()
@@ -57406,6 +59170,7 @@ fn readme_explains_forge_in_five_minutes_and_names_operational_smoke() {
 
 #[test]
 fn interactive_repl_slash_commands_render_operational_panels_in_place() {
+    let _tui_guard = forge_tui_test_guard();
     let script = if Path::new("/usr/bin/script").exists() {
         "/usr/bin/script"
     } else if Path::new("/bin/script").exists() {
@@ -57454,6 +59219,7 @@ fn interactive_repl_slash_commands_render_operational_panels_in_place() {
 
 #[test]
 fn forge_tui_shows_autocomplete_suggestions_for_trigger_prefix() {
+    let _tui_guard = forge_tui_test_guard();
     let script = if Path::new("/usr/bin/script").exists() {
         "/usr/bin/script"
     } else if Path::new("/bin/script").exists() {
@@ -57494,6 +59260,7 @@ fn forge_tui_shows_autocomplete_suggestions_for_trigger_prefix() {
 
 #[test]
 fn forge_tui_prompt_commands_keep_the_default_surface_simple() {
+    let _tui_guard = forge_tui_test_guard();
     let script = if Path::new("/usr/bin/script").exists() {
         "/usr/bin/script"
     } else if Path::new("/bin/script").exists() {
@@ -57537,6 +59304,7 @@ fn forge_tui_prompt_commands_keep_the_default_surface_simple() {
 
 #[test]
 fn forge_tui_benchmark_command_surfaces_local_cli_comparison() {
+    let _tui_guard = forge_tui_test_guard();
     let script = if Path::new("/usr/bin/script").exists() {
         "/usr/bin/script"
     } else if Path::new("/bin/script").exists() {
@@ -57581,6 +59349,7 @@ fn forge_tui_benchmark_command_surfaces_local_cli_comparison() {
 
 #[test]
 fn forge_tui_shell_first_executes_bang_commands_without_creating_workflow() {
+    let _tui_guard = forge_tui_test_guard();
     let script = if Path::new("/usr/bin/script").exists() {
         "/usr/bin/script"
     } else if Path::new("/bin/script").exists() {
@@ -57631,6 +59400,7 @@ fn forge_tui_shell_first_executes_bang_commands_without_creating_workflow() {
 
 #[test]
 fn interactive_repl_q_exits_without_routing_a_workflow() {
+    let _tui_guard = forge_tui_test_guard();
     let script = if Path::new("/usr/bin/script").exists() {
         "/usr/bin/script"
     } else if Path::new("/bin/script").exists() {
@@ -63259,6 +65029,1124 @@ fn validation_blocks_promotion_when_ai_executor_has_ai_disabled_in_execution_pol
 }
 
 #[test]
+fn request_drive_matches_compact_bounded_recursive_predecessor_frontier() {
+    use forge_core::context::{
+        build_compact_context_view, build_context_package, DEFAULT_CONTEXT_BUDGET,
+    };
+    use forge_core::graph::{self, ExecutorKind, TaskStatus, ValidationRule};
+    use forge_core::request::{create_run_record, drive_request, save_run_record};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Keep request drive aligned with the compact recursive dependency guardrail",
+    ));
+    let long_text = "ação-recursiva-".repeat(48);
+    let validation_rules = (0..3)
+        .map(|index| ValidationRule {
+            kind: format!("schema-{index}-{}", "é".repeat(48)),
+            command: Some(format!("verify-{index}-{}", "ç".repeat(220))),
+            expected: format!("expected-{index}-{}", "á".repeat(220)),
+        })
+        .collect::<Vec<_>>();
+    let leaf_ids = (1..=6)
+        .map(|index| format!("leaf-{index:02}"))
+        .collect::<Vec<_>>();
+    let mut leaves = leaf_ids
+        .iter()
+        .enumerate()
+        .map(|(index, task_id)| {
+            let mut task = graph::task(
+                task_id,
+                &format!("Leaf {index} {long_text}"),
+                &[],
+                &["bounded dependency evidence"],
+                validation_rules.clone(),
+                &format!("LeafOutput{index}-{long_text}"),
+                (ExecutorKind::Ai, 0.0),
+            );
+            task.goal = format!("Resolve leaf {index}: {long_text}");
+            task
+        })
+        .collect::<Vec<_>>();
+    leaves[1].status = TaskStatus::Running;
+    let leaf_refs = leaf_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let predecessor = graph::task(
+        "intermediate-predecessor",
+        "Intermediate predecessor",
+        &leaf_refs,
+        &["all leaf outputs"],
+        vec![ValidationRule {
+            kind: "schema".to_string(),
+            command: None,
+            expected: "all leaves completed".to_string(),
+        }],
+        "IntermediateOutput",
+        (ExecutorKind::Ai, 0.0),
+    );
+    let blocked_target = graph::task(
+        "blocked-target",
+        "Blocked target",
+        &["intermediate-predecessor"],
+        &["intermediate output"],
+        vec![ValidationRule {
+            kind: "schema".to_string(),
+            command: None,
+            expected: "target output is valid".to_string(),
+        }],
+        "TargetOutput",
+        (ExecutorKind::Ai, 0.0),
+    );
+    workflow.tasks = leaves;
+    workflow.tasks.push(predecessor);
+    workflow.tasks.push(blocked_target);
+    store.save_workflow(&workflow).unwrap();
+
+    let package =
+        build_context_package(&workflow, "blocked-target", DEFAULT_CONTEXT_BUDGET).unwrap();
+    let compact = build_compact_context_view(&package, &workflow, &store_path, None);
+    let compact_json = serde_json::to_value(compact).unwrap();
+    let run = create_run_record(&workflow, "test", "accepted");
+    save_run_record(&store, &run).unwrap();
+    let driven = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap();
+    let driven_json = serde_json::to_value(driven).unwrap();
+    let compact_guardrail = &compact_json["guardrail"];
+
+    assert_eq!(compact_guardrail["predecessor_tasks_total"], 6);
+    assert_eq!(compact_guardrail["predecessor_tasks_included"], 4);
+    assert_eq!(compact_guardrail["predecessor_tasks_omitted"], 2);
+    assert_eq!(
+        compact_guardrail["predecessor_validation_rules_omitted"],
+        10
+    );
+    assert_eq!(
+        driven_json["parallel_handoff_tasks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+
+    let command_targets = |commands: &Value| {
+        commands
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|command| {
+                let command = command.as_array().unwrap();
+                let task_flag = command
+                    .iter()
+                    .position(|argument| argument == "--task")
+                    .unwrap();
+                let budget_flag = command
+                    .iter()
+                    .position(|argument| argument == "--budget")
+                    .unwrap();
+                (
+                    command[task_flag + 1].as_str().unwrap().to_string(),
+                    command[budget_flag + 1].as_str().unwrap().to_string(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let drive_command_targets = command_targets(&driven_json["parallel_next_commands"]);
+    let compact_command_targets = command_targets(&compact_guardrail["next_commands"]);
+    assert_eq!(drive_command_targets, compact_command_targets);
+    let command_task_ids = drive_command_targets
+        .iter()
+        .map(|(task_id, _)| task_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        command_task_ids,
+        vec!["leaf-01", "leaf-03", "leaf-04", "leaf-05"]
+    );
+    assert!(!command_task_ids
+        .iter()
+        .any(|task_id| { matches!(*task_id, "intermediate-predecessor" | "blocked-target") }));
+    for predecessor in compact_guardrail["predecessor_tasks"].as_array().unwrap() {
+        assert!(predecessor["title"].as_str().unwrap().len() <= 128);
+        assert!(predecessor["goal"].as_str().unwrap().len() <= 256);
+        assert!(predecessor["expected_output"].as_str().unwrap().len() <= 192);
+        assert_eq!(predecessor["validation_rules"].as_array().unwrap().len(), 2);
+        assert_eq!(predecessor["validation_rules_omitted"], 1);
+    }
+}
+
+#[test]
+fn request_drive_emits_context_repair_for_a_context_starved_root_task() {
+    use forge_core::graph::{self, ExecutorKind};
+    use forge_core::request::{
+        complete_ready_task, create_run_record, save_run_record, RequestTaskCompletionInput,
+    };
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Repair missing root context without entering a status polling loop",
+    ));
+    let mut root = graph::task(
+        "context-starved-root",
+        "Context-starved root",
+        &[],
+        &[],
+        vec![],
+        "bounded root output",
+        (ExecutorKind::Ai, 0.0),
+    );
+    root.goal = "Load the minimum required root context before executor handoff".repeat(12);
+    workflow.tasks = vec![root];
+    store.save_workflow(&workflow).unwrap();
+    let run = create_run_record(&workflow, "test", "accepted");
+    save_run_record(&store, &run).unwrap();
+
+    let completion = complete_ready_task(
+        &store,
+        &run.run_id,
+        RequestTaskCompletionInput {
+            task_id: "context-starved-root",
+            executor: "codex",
+            summary: "root context must be repaired first",
+            artifact_paths: &[],
+            evidence_command: None,
+            evidence_summary: None,
+            estimated_usd: 0.0,
+            tokens_in: 0,
+            tokens_out: 0,
+            ttl_seconds: 300,
+            context_budget: Some(128),
+            origin: "test",
+        },
+    )
+    .unwrap();
+
+    assert_eq!(completion.status, "not_ready");
+    assert_eq!(completion.drive_before.status, "blocked");
+    let blocked = completion
+        .drive_before
+        .blocked_tasks
+        .iter()
+        .find(|task| task.task_id == "context-starved-root")
+        .unwrap();
+    assert_eq!(blocked.routing_action, "increase_context_budget");
+    assert!(blocked.predecessor_tasks.is_empty());
+    assert_eq!(blocked.next_commands.len(), 1);
+    let command = &blocked.next_commands[0];
+    assert_forge_store_prefix(&serde_json::to_value(command).unwrap(), &store_path);
+    assert!(command
+        .windows(2)
+        .any(|pair| pair == ["--task", "context-starved-root"]));
+    assert!(command.windows(2).any(|pair| {
+        pair[0] == "--budget" && pair[1] == blocked.recommended_budget_bytes.to_string()
+    }));
+    assert!(command.iter().any(|argument| argument == "--strict"));
+    assert!(command.windows(2).any(|pair| pair == ["--view", "compact"]));
+    assert_eq!(completion.drive_before.next_command, *command);
+    assert!(!command.iter().any(|argument| argument == "status"));
+}
+
+#[test]
+fn request_drive_materializes_only_a_bounded_ready_context_frontier_per_cycle() {
+    use forge_core::graph::{self, TaskStatus};
+    use forge_core::request::{create_run_record, drive_request, save_run_record};
+
+    let temp = tempdir().unwrap();
+    let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Bound context construction to the runnable request frontier",
+    ));
+    let template = workflow.tasks[0].clone();
+    workflow.tasks = (0..12)
+        .map(|index| {
+            let mut task = template.clone();
+            task.id = format!("ready-{index:02}");
+            task.title = format!("Ready task {index:02}");
+            task.goal = format!("Execute bounded ready task {index:02}");
+            task.dependencies.clear();
+            task.status = TaskStatus::Pending;
+            task
+        })
+        .collect();
+    store.save_workflow(&workflow).unwrap();
+    let run = create_run_record(&workflow, "test", "accepted");
+    save_run_record(&store, &run).unwrap();
+
+    let first = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap();
+    assert_eq!(first.status, "ready_for_handoff");
+    assert_eq!(first.action, "start_parallel_handoffs");
+    assert_eq!(first.parallel_handoff_tasks.len(), 4);
+    assert_eq!(first.parallel_next_commands.len(), 4);
+    assert_eq!(
+        first
+            .parallel_handoff_tasks
+            .iter()
+            .map(|task| task.task_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ready-00", "ready-01", "ready-02", "ready-03"]
+    );
+
+    let mut next_workflow = store.load_workflow(&workflow.id).unwrap();
+    for task in next_workflow.tasks.iter_mut().take(4) {
+        task.status = TaskStatus::Completed;
+    }
+    store.save_workflow(&next_workflow).unwrap();
+
+    let second = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap();
+    assert_eq!(second.status, "ready_for_handoff");
+    assert_eq!(second.parallel_handoff_tasks.len(), 4);
+    assert_eq!(
+        second
+            .parallel_handoff_tasks
+            .iter()
+            .map(|task| task.task_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ready-04", "ready-05", "ready-06", "ready-07"]
+    );
+}
+
+#[test]
+fn drive_loop_stops_on_structured_blockers_and_never_resurrects_terminal_runs() {
+    use forge_core::graph::{self, TaskStatus};
+    use forge_core::request::{
+        cancel_request, create_run_record, drive_request, heartbeat_request, save_run_record,
+        step_request, update_run_status,
+    };
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Keep a blocked request observable without polling or context churn",
+    ));
+    for task in &mut workflow.tasks {
+        task.status = TaskStatus::Blocked;
+    }
+    store.save_workflow(&workflow).unwrap();
+    let run = create_run_record(&workflow, "test", "accepted");
+    save_run_record(&store, &run).unwrap();
+
+    let step = step_request(&store, &run.run_id, "codex", 300, "test").unwrap();
+    assert_eq!(step.status, "blocked");
+    assert_eq!(step.action, "wait_or_repair_dependencies");
+    assert_eq!(step.drive_before.status, "blocked");
+    assert!(step.drive_before.blocked_tasks.is_empty());
+    assert_eq!(
+        step.drive_before.task_summary.blocked,
+        step.drive_before.task_summary.total
+    );
+    let blocked_json = serde_json::to_value(&step).unwrap();
+    assert!(blocked_json["drive_before"]["next_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("status".to_string())));
+
+    let blocked_run = forge_core::request::load_request_status(&store, &run.run_id).unwrap();
+    assert_eq!(blocked_run.status, "blocked");
+    assert!(blocked_run.activity.executor.is_none());
+    assert!(blocked_run.activity.pid.is_none());
+    assert!(blocked_run.activity.last_heartbeat_at.is_none());
+    assert!(blocked_run.activity.heartbeat_expires_at.is_none());
+
+    forge()
+        .arg("--store")
+        .arg(&store_path)
+        .args(["request", "drive-loop", "--run", &run.run_id])
+        .timeout(std::time::Duration::from_secs(3))
+        .assert()
+        .success();
+
+    let events = store.load_workflow_events(&workflow.id).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "async_request_blocked")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "async_request_heartbeat")
+            .count(),
+        0
+    );
+
+    let cancelled_workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "A cancelled request must remain terminal",
+    ));
+    store.save_workflow(&cancelled_workflow).unwrap();
+    let cancelled_run = create_run_record(&cancelled_workflow, "test", "accepted");
+    save_run_record(&store, &cancelled_run).unwrap();
+    cancel_request(&store, &cancelled_run.run_id, "test").unwrap();
+    let repeated_cancel = cancel_request(&store, &cancelled_run.run_id, "test").unwrap();
+    assert_eq!(repeated_cancel.status, "cancelled");
+    assert_eq!(repeated_cancel.previous_status, "cancelled");
+    assert_eq!(
+        store
+            .load_workflow_events(&cancelled_workflow.id)
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == "async_request_cancelled")
+            .count(),
+        1
+    );
+    let cancelled_drive =
+        drive_request(&store, &cancelled_run.run_id, "codex", 300, "test").unwrap();
+    assert_eq!(cancelled_drive.status, "cancelled");
+    let cancelled_step = step_request(&store, &cancelled_run.run_id, "codex", 300, "test").unwrap();
+    assert_eq!(cancelled_step.status, "cancelled");
+    assert!(heartbeat_request(
+        &store,
+        &cancelled_run.run_id,
+        "codex",
+        "must not revive",
+        300,
+        None,
+        "test"
+    )
+    .is_err());
+    assert_eq!(
+        forge_core::request::load_request_status(&store, &cancelled_run.run_id)
+            .unwrap()
+            .status,
+        "cancelled"
+    );
+
+    let mut failed_workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "A heartbeat must not revive a terminal workflow",
+    ));
+    failed_workflow.status = "failed".to_string();
+    store.save_workflow(&failed_workflow).unwrap();
+    let active_run = create_run_record(&failed_workflow, "test", "accepted");
+    save_run_record(&store, &active_run).unwrap();
+    let heartbeat_error = heartbeat_request(
+        &store,
+        &active_run.run_id,
+        "codex",
+        "must not revive failed workflow",
+        300,
+        None,
+        "test",
+    )
+    .unwrap_err();
+    assert!(
+        heartbeat_error.to_string().contains("workflow")
+            && heartbeat_error.to_string().contains("terminal")
+    );
+    let failed_status =
+        forge_core::request::load_request_status(&store, &active_run.run_id).unwrap();
+    assert_eq!(failed_status.status, "accepted");
+    assert_eq!(failed_status.workflow_status, "failed");
+
+    let completed_workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "A completed request must not regenerate delivery context",
+    ));
+    store.save_workflow(&completed_workflow).unwrap();
+    let completed_run = create_run_record(&completed_workflow, "test", "accepted");
+    save_run_record(&store, &completed_run).unwrap();
+    update_run_status(&store, &completed_run.run_id, "completed", "test").unwrap();
+    let completed_task_id = completed_workflow.tasks[0].id.clone();
+    let connection = Connection::open(&store_path).unwrap();
+    let checkpoint_id = "checkpoint-terminal-context-stable";
+    let checkpoint_json = serde_json::json!({
+        "checkpoint_id": checkpoint_id,
+        "workflow_id": completed_workflow.id,
+        "task_id": completed_task_id,
+        "executor": "codex",
+        "state": "paused",
+        "summary": "Terminal drive must report existing checkpoint metadata without rebuilding context",
+        "context_sha256": "0".repeat(64),
+        "context_routing_cache_key": null,
+        "workflow_revision": 0,
+        "created_at": "2026-07-23T00:00:00Z"
+    });
+    connection
+        .execute(
+            r#"
+            INSERT INTO task_checkpoints (
+                id, workflow_id, task_id, executor, state, created_at, data_json
+            )
+            VALUES (?1, ?2, ?3, 'codex', 'paused', '2026-07-23T00:00:00Z', ?4)
+            "#,
+            rusqlite::params![
+                checkpoint_id,
+                completed_workflow.id,
+                completed_task_id,
+                checkpoint_json.to_string()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            r#"
+            INSERT INTO worktree_states (
+                id, repository_root, worktree_root, head, data_json
+            )
+            VALUES (?1, ?2, ?3, 'terminal-context-poison', '{')
+            "#,
+            rusqlite::params![
+                "worktree-terminal-context-poison",
+                temp.path().join("repository").display().to_string(),
+                temp.path().join("worktree").display().to_string()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    for _ in 0..2 {
+        let completed = drive_request(&store, &completed_run.run_id, "codex", 300, "test").unwrap();
+        assert_eq!(completed.status, "complete");
+        assert!(completed.final_delivery_package.is_none());
+        assert_eq!(completed.checkpoint_count, 1);
+        assert_eq!(
+            completed
+                .latest_checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.checkpoint_id.as_str()),
+            Some(checkpoint_id)
+        );
+    }
+    let completed_events = store.load_workflow_events(&completed_workflow.id).unwrap();
+    assert_eq!(
+        completed_events
+            .iter()
+            .filter(|event| event.kind == "async_request_heartbeat")
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn terminal_request_mutators_reject_before_changing_state_or_events() {
+    use forge_core::graph;
+    use forge_core::request::{
+        cancel_request, create_run_record, load_run_record, resume_async_request, save_run_record,
+        switch_request_executor, update_run_status, RequestExecutorSwitchInput,
+    };
+
+    let temp = tempdir().unwrap();
+    let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+
+    let completed_workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Keep a completed request terminal across explicit mutators",
+    ));
+    store.save_workflow(&completed_workflow).unwrap();
+    let completed_run = create_run_record(&completed_workflow, "test", "accepted");
+    save_run_record(&store, &completed_run).unwrap();
+    update_run_status(&store, &completed_run.run_id, "completed", "test").unwrap();
+
+    let completed_run_before =
+        serde_json::to_value(load_run_record(&store, &completed_run.run_id).unwrap()).unwrap();
+    let completed_workflow_before =
+        serde_json::to_value(store.load_workflow(&completed_workflow.id).unwrap()).unwrap();
+    let completed_events_before = store
+        .load_workflow_events(&completed_workflow.id)
+        .unwrap()
+        .into_iter()
+        .map(|event| (event.id, event.kind, event.data, event.created_at))
+        .collect::<Vec<_>>();
+
+    let resume_error = resume_async_request(&store, &completed_run.run_id, "test").unwrap_err();
+    assert!(resume_error.to_string().contains("terminal request"));
+    let cancel_error = cancel_request(&store, &completed_run.run_id, "test").unwrap_err();
+    assert!(cancel_error.to_string().contains("terminal request"));
+    let switch_error = switch_request_executor(
+        &store,
+        &completed_run.run_id,
+        RequestExecutorSwitchInput {
+            executor: "codex".to_string(),
+            fallback_executors: vec![],
+            summary: "must not revive completion".to_string(),
+            ttl_seconds: 300,
+            pid: None,
+            origin: "test".to_string(),
+            reason: "terminal regression test".to_string(),
+        },
+    )
+    .unwrap_err();
+    assert!(switch_error.to_string().contains("terminal request"));
+    assert_eq!(
+        serde_json::to_value(load_run_record(&store, &completed_run.run_id).unwrap()).unwrap(),
+        completed_run_before
+    );
+    assert_eq!(
+        serde_json::to_value(store.load_workflow(&completed_workflow.id).unwrap()).unwrap(),
+        completed_workflow_before
+    );
+    assert_eq!(
+        store
+            .load_workflow_events(&completed_workflow.id)
+            .unwrap()
+            .into_iter()
+            .map(|event| (event.id, event.kind, event.data, event.created_at))
+            .collect::<Vec<_>>(),
+        completed_events_before
+    );
+
+    let mut failed_workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Keep an active request bound to a failed workflow terminal",
+    ));
+    failed_workflow.status = "failed".to_string();
+    store.save_workflow(&failed_workflow).unwrap();
+    let active_run = create_run_record(&failed_workflow, "test", "accepted");
+    save_run_record(&store, &active_run).unwrap();
+    let active_run_before =
+        serde_json::to_value(load_run_record(&store, &active_run.run_id).unwrap()).unwrap();
+    let failed_workflow_before =
+        serde_json::to_value(store.load_workflow(&failed_workflow.id).unwrap()).unwrap();
+    let failed_events_before = store
+        .load_workflow_events(&failed_workflow.id)
+        .unwrap()
+        .into_iter()
+        .map(|event| (event.id, event.kind, event.data, event.created_at))
+        .collect::<Vec<_>>();
+
+    let resume_error = resume_async_request(&store, &active_run.run_id, "test").unwrap_err();
+    assert!(resume_error.to_string().contains("workflow"));
+    assert!(resume_error.to_string().contains("terminal"));
+    let switch_error = switch_request_executor(
+        &store,
+        &active_run.run_id,
+        RequestExecutorSwitchInput {
+            executor: "codex".to_string(),
+            fallback_executors: vec![],
+            summary: "must not revive failed workflow".to_string(),
+            ttl_seconds: 300,
+            pid: None,
+            origin: "test".to_string(),
+            reason: "terminal workflow regression test".to_string(),
+        },
+    )
+    .unwrap_err();
+    assert!(switch_error.to_string().contains("workflow"));
+    assert!(switch_error.to_string().contains("terminal"));
+    let cancel_error = cancel_request(&store, &active_run.run_id, "test").unwrap_err();
+    assert!(cancel_error.to_string().contains("workflow"));
+    assert!(cancel_error.to_string().contains("terminal"));
+    let update_error =
+        update_run_status(&store, &active_run.run_id, "completed", "test").unwrap_err();
+    assert!(update_error.to_string().contains("workflow"));
+    assert!(update_error.to_string().contains("terminal"));
+    assert_eq!(
+        serde_json::to_value(load_run_record(&store, &active_run.run_id).unwrap()).unwrap(),
+        active_run_before
+    );
+    assert_eq!(
+        serde_json::to_value(store.load_workflow(&failed_workflow.id).unwrap()).unwrap(),
+        failed_workflow_before
+    );
+    assert_eq!(
+        store
+            .load_workflow_events(&failed_workflow.id)
+            .unwrap()
+            .into_iter()
+            .map(|event| (event.id, event.kind, event.data, event.created_at))
+            .collect::<Vec<_>>(),
+        failed_events_before
+    );
+}
+
+#[test]
+fn blocked_request_transition_rolls_back_and_retries_its_event_atomically() {
+    use forge_core::graph::{self, TaskStatus};
+    use forge_core::request::{create_run_record, drive_request, load_run_record, save_run_record};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Persist blocked request state and its transition event atomically",
+    ));
+    for task in &mut workflow.tasks {
+        task.status = TaskStatus::Blocked;
+    }
+    store.save_workflow(&workflow).unwrap();
+    let run = create_run_record(&workflow, "test", "accepted");
+    save_run_record(&store, &run).unwrap();
+
+    let fault_connection = Connection::open(&store_path).unwrap();
+    fault_connection
+        .execute_batch(
+            r#"
+            CREATE TRIGGER reject_blocked_transition_event
+            BEFORE INSERT ON events
+            WHEN NEW.kind = 'async_request_blocked'
+            BEGIN
+                SELECT RAISE(ABORT, 'blocked transition event rejected');
+            END;
+            "#,
+        )
+        .unwrap();
+
+    let error = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("blocked transition event rejected"));
+    assert_eq!(
+        load_run_record(&store, &run.run_id).unwrap().status,
+        "accepted"
+    );
+    assert!(store.load_workflow_events(&workflow.id).unwrap().is_empty());
+
+    fault_connection
+        .execute_batch("DROP TRIGGER reject_blocked_transition_event")
+        .unwrap();
+    let blocked = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap();
+    assert_eq!(blocked.status, "blocked");
+    let repeated = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap();
+    assert_eq!(repeated.status, "blocked");
+    assert_eq!(
+        store
+            .load_workflow_events(&workflow.id)
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == "async_request_blocked")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn request_completion_rolls_back_terminal_state_when_final_package_creation_fails() {
+    use forge_core::graph::{self, TaskStatus};
+    use forge_core::request::{
+        create_run_record, drive_request, load_request_status, save_run_record,
+    };
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Finish run state when every task is already validated",
+    ));
+    for task in &mut workflow.tasks {
+        task.status = TaskStatus::Completed;
+    }
+    let initial_workflow_status = workflow.status.clone();
+    store.save_workflow(&workflow).unwrap();
+    let run = create_run_record(&workflow, "test", "accepted");
+    save_run_record(&store, &run).unwrap();
+
+    fs::write(temp.path().join("tmp"), "block final package directory").unwrap();
+    let package_error = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap_err();
+    assert!(package_error
+        .to_string()
+        .contains("failed to create final delivery staging directory"));
+
+    let rolled_back = load_request_status(&store, &run.run_id).unwrap();
+    assert_eq!(rolled_back.status, "accepted");
+    assert_eq!(rolled_back.workflow_status, initial_workflow_status);
+    let rolled_back_workflow = store.load_workflow(&workflow.id).unwrap();
+    assert!(rolled_back_workflow
+        .artifacts
+        .iter()
+        .all(|artifact| !artifact.kind.starts_with("final_delivery_package")));
+    let rolled_back_events = store.load_workflow_events(&workflow.id).unwrap();
+    assert_eq!(
+        rolled_back_events
+            .iter()
+            .filter(|event| event.kind == "async_request_completed")
+            .count(),
+        0
+    );
+    assert_eq!(
+        rolled_back_events
+            .iter()
+            .filter(|event| event.kind == "final_delivery_package_created")
+            .count(),
+        0
+    );
+
+    fs::remove_file(temp.path().join("tmp")).unwrap();
+    let completed = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap();
+    assert_eq!(completed.status, "complete");
+    assert!(completed.final_delivery_package.is_some());
+    let completed_status = load_request_status(&store, &run.run_id).unwrap();
+    assert_eq!(completed_status.status, "completed");
+    assert_eq!(completed_status.workflow_status, "completed");
+    let completed_events = store.load_workflow_events(&workflow.id).unwrap();
+    assert_eq!(
+        completed_events
+            .iter()
+            .filter(|event| event.kind == "async_request_completed")
+            .count(),
+        1
+    );
+    assert_eq!(
+        completed_events
+            .iter()
+            .filter(|event| event.kind == "final_delivery_package_created")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn request_complete_task_finishes_run_after_adapter_completes_workflow() {
+    use forge_core::graph::{self, ExecutorKind, ValidationRule};
+    use forge_core::request::{
+        complete_ready_task, create_run_record, load_request_status, save_run_record,
+        RequestTaskCompletionInput,
+    };
+
+    let temp = tempdir().unwrap();
+    let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Complete the final bounded workflow task",
+    ));
+    workflow.tasks = vec![graph::task(
+        "final-task",
+        "Complete final task",
+        &[],
+        &["bounded execution context"],
+        vec![ValidationRule {
+            kind: "execution".to_string(),
+            command: None,
+            expected: "final task evidence is recorded and validated".to_string(),
+        }],
+        "FinalTaskEvidence",
+        (ExecutorKind::Ai, 0.0),
+    )];
+    store.save_workflow(&workflow).unwrap();
+    let run = create_run_record(&workflow, "test", "accepted");
+    save_run_record(&store, &run).unwrap();
+
+    let completed = complete_ready_task(
+        &store,
+        &run.run_id,
+        RequestTaskCompletionInput {
+            task_id: "final-task",
+            executor: "codex",
+            summary: "final task evidence is recorded and validated",
+            artifact_paths: &[],
+            evidence_command: None,
+            evidence_summary: None,
+            estimated_usd: 0.0,
+            tokens_in: 0,
+            tokens_out: 0,
+            ttl_seconds: 300,
+            context_budget: Some(8000),
+            origin: "test",
+        },
+    )
+    .unwrap();
+
+    assert_eq!(completed.status, "completed");
+    assert_eq!(
+        completed
+            .drive_after
+            .as_ref()
+            .map(|drive| drive.status.as_str()),
+        Some("complete")
+    );
+    assert!(completed
+        .drive_after
+        .as_ref()
+        .and_then(|drive| drive.final_delivery_package.as_ref())
+        .is_some());
+    let status = load_request_status(&store, &run.run_id).unwrap();
+    assert_eq!(status.status, "completed");
+    assert_eq!(status.workflow_status, "completed");
+    let events = store.load_workflow_events(&workflow.id).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "async_request_completed")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "final_delivery_package_created")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn request_completion_cleans_promoted_package_files_when_sqlite_rolls_back() {
+    use forge_core::graph::{self, TaskStatus};
+    use forge_core::request::{
+        create_run_record, drive_request, load_request_status, save_run_record,
+    };
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Complete validated work atomically",
+    ));
+    for task in &mut workflow.tasks {
+        task.status = TaskStatus::Completed;
+    }
+    let initial_workflow_status = workflow.status.clone();
+    store.save_workflow(&workflow).unwrap();
+    let run = create_run_record(&workflow, "test", "accepted");
+    save_run_record(&store, &run).unwrap();
+
+    let fault_connection = Connection::open(&store_path).unwrap();
+    fault_connection
+        .execute_batch(
+            r#"
+            CREATE TRIGGER reject_final_delivery_package_event
+            BEFORE INSERT ON events
+            WHEN NEW.kind = 'final_delivery_package_created'
+            BEGIN
+                SELECT RAISE(ABORT, 'final delivery package event rejected');
+            END;
+            "#,
+        )
+        .unwrap();
+
+    let error = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("final delivery package event rejected"));
+    let rolled_back = load_request_status(&store, &run.run_id).unwrap();
+    assert_eq!(rolled_back.status, "accepted");
+    assert_eq!(rolled_back.workflow_status, initial_workflow_status);
+    let rolled_back_workflow = store.load_workflow(&workflow.id).unwrap();
+    assert!(rolled_back_workflow
+        .artifacts
+        .iter()
+        .all(|artifact| !artifact.kind.starts_with("final_delivery_package")));
+    let artifact_dir = temp.path().join("artifacts").join(&workflow.id);
+    assert!(
+        !artifact_dir.exists() || fs::read_dir(&artifact_dir).unwrap().next().is_none(),
+        "rolled-back final package files must be removed"
+    );
+    let staging_root = temp
+        .path()
+        .join("tmp")
+        .join(&workflow.id)
+        .join(".final-delivery-staging");
+    assert!(
+        !staging_root.exists() || fs::read_dir(&staging_root).unwrap().next().is_none(),
+        "rolled-back final package staging must be removed"
+    );
+    let rolled_back_events = store.load_workflow_events(&workflow.id).unwrap();
+    assert!(rolled_back_events.iter().all(|event| {
+        event.kind != "async_request_completed"
+            && event.kind != "artifact_attached"
+            && event.kind != "final_delivery_package_created"
+    }));
+
+    fault_connection
+        .execute_batch("DROP TRIGGER reject_final_delivery_package_event")
+        .unwrap();
+    let completed = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap();
+    assert_eq!(completed.status, "complete");
+    assert!(completed.final_delivery_package.is_some());
+}
+
+#[test]
+fn standalone_final_package_creation_is_atomic_across_both_artifact_records() {
+    use forge_core::graph;
+    use forge_core::request::{create_final_delivery_package, create_run_record, save_run_record};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Prepare an auditable delivery summary",
+    ));
+    store.save_workflow(&workflow).unwrap();
+    let run = create_run_record(&workflow, "test", "accepted");
+    save_run_record(&store, &run).unwrap();
+
+    let fault_connection = Connection::open(&store_path).unwrap();
+    fault_connection
+        .execute_batch(
+            r#"
+            CREATE TRIGGER reject_standalone_final_package_event
+            BEFORE INSERT ON events
+            WHEN NEW.kind = 'final_delivery_package_created'
+            BEGIN
+                SELECT RAISE(ABORT, 'standalone final package event rejected');
+            END;
+            "#,
+        )
+        .unwrap();
+
+    let error = create_final_delivery_package(&store, &run.run_id, "test").unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("standalone final package event rejected"));
+    let rolled_back_workflow = store.load_workflow(&workflow.id).unwrap();
+    assert!(rolled_back_workflow
+        .artifacts
+        .iter()
+        .all(|artifact| !artifact.kind.starts_with("final_delivery_package")));
+    assert!(store
+        .load_workflow_events(&workflow.id)
+        .unwrap()
+        .iter()
+        .all(|event| {
+            event.kind != "artifact_attached" && event.kind != "final_delivery_package_created"
+        }));
+    let artifact_dir = temp.path().join("artifacts").join(&workflow.id);
+    assert!(!artifact_dir.exists() || fs::read_dir(&artifact_dir).unwrap().next().is_none());
+
+    fault_connection
+        .execute_batch("DROP TRIGGER reject_standalone_final_package_event")
+        .unwrap();
+    let package = create_final_delivery_package(&store, &run.run_id, "test").unwrap();
+    assert_eq!(package.status, "final_delivery_package_created");
+    assert_eq!(
+        store
+            .load_workflow(&workflow.id)
+            .unwrap()
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.kind.starts_with("final_delivery_package"))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn request_list_filters_persisted_blocked_runs() {
+    use forge_core::graph::{self, TaskStatus};
+    use forge_core::request::{create_run_record, drive_request, list_requests, save_run_record};
+
+    let temp = tempdir().unwrap();
+    let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+    let mut blocked_workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Persist a blocked async request for filtering",
+    ));
+    for task in &mut blocked_workflow.tasks {
+        task.status = TaskStatus::Blocked;
+    }
+    store.save_workflow(&blocked_workflow).unwrap();
+    let blocked_run = create_run_record(&blocked_workflow, "test", "accepted");
+    save_run_record(&store, &blocked_run).unwrap();
+    let blocked = drive_request(&store, &blocked_run.run_id, "codex", 300, "test").unwrap();
+    assert_eq!(blocked.status, "blocked");
+
+    let accepted_workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Keep a second async request accepted",
+    ));
+    store.save_workflow(&accepted_workflow).unwrap();
+    let accepted_run = create_run_record(&accepted_workflow, "test", "accepted");
+    save_run_record(&store, &accepted_run).unwrap();
+
+    let filtered = list_requests(&store, Some("blocked")).unwrap();
+    assert_eq!(filtered.total, 1);
+    assert_eq!(filtered.runs[0].run_id, blocked_run.run_id);
+    assert_eq!(filtered.runs[0].status, "blocked");
+}
+
+#[test]
+fn request_blocked_actions_exclude_non_pending_tasks_and_find_pending_repair() {
+    use forge_core::graph::{self, ExecutorKind, TaskStatus};
+    use forge_core::request::{
+        complete_ready_task, create_run_record, save_run_record, RequestTaskCompletionInput,
+    };
+
+    let temp = tempdir().unwrap();
+    let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Route blocked actions only through pending tasks",
+    ));
+    let mut completed = graph::task(
+        "completed-task",
+        "Completed task",
+        &[],
+        &[],
+        vec![],
+        "completed output",
+        (ExecutorKind::Ai, 0.0),
+    );
+    completed.status = TaskStatus::Completed;
+    let mut running = graph::task(
+        "running-task",
+        "Running task",
+        &[],
+        &[],
+        vec![],
+        "running output",
+        (ExecutorKind::Ai, 0.0),
+    );
+    running.status = TaskStatus::Running;
+    let mut failed = graph::task(
+        "failed-task",
+        "Failed task",
+        &[],
+        &[],
+        vec![],
+        "failed output",
+        (ExecutorKind::Ai, 0.0),
+    );
+    failed.status = TaskStatus::Failed;
+    let mut predecessor = graph::task(
+        "repair-predecessor",
+        "Repair predecessor",
+        &[],
+        &[],
+        vec![],
+        "bounded predecessor output",
+        (ExecutorKind::Ai, 0.0),
+    );
+    predecessor.goal = "Collect the required predecessor context before handoff".repeat(8);
+    let target = graph::task(
+        "blocked-target",
+        "Blocked target",
+        &["repair-predecessor"],
+        &[],
+        vec![],
+        "target output",
+        (ExecutorKind::Ai, 0.0),
+    );
+    workflow.tasks = vec![completed, running, failed, predecessor, target];
+    store.save_workflow(&workflow).unwrap();
+    let run = create_run_record(&workflow, "test", "accepted");
+    save_run_record(&store, &run).unwrap();
+
+    let completion = complete_ready_task(
+        &store,
+        &run.run_id,
+        RequestTaskCompletionInput {
+            task_id: "blocked-target",
+            executor: "codex",
+            summary: "target remains blocked until its predecessor is runnable",
+            artifact_paths: &[],
+            evidence_command: None,
+            evidence_summary: None,
+            estimated_usd: 0.0,
+            tokens_in: 0,
+            tokens_out: 0,
+            ttl_seconds: 300,
+            context_budget: Some(128),
+            origin: "test",
+        },
+    )
+    .unwrap();
+    assert_eq!(completion.status, "not_ready");
+    assert_eq!(completion.drive_before.status, "blocked");
+    let blocked_ids = completion
+        .drive_before
+        .blocked_tasks
+        .iter()
+        .map(|task| task.task_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(blocked_ids, vec!["repair-predecessor"]);
+    assert_eq!(completion.drive_before.task_summary.completed, 1);
+    assert_eq!(completion.drive_before.task_summary.running, 1);
+    assert_eq!(completion.drive_before.task_summary.failed, 1);
+    let task_flag = completion
+        .drive_before
+        .next_command
+        .iter()
+        .position(|argument| argument == "--task")
+        .unwrap();
+    assert_eq!(
+        completion.drive_before.next_command[task_flag + 1],
+        "repair-predecessor"
+    );
+}
+
+#[test]
 fn test_detached_execution_plan_and_start() {
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("forge.sqlite");
@@ -63321,4 +66209,913 @@ fn test_detached_execution_plan_and_start() {
     // 4. Verify that the start run record exists in the store
     let start_run = forge_core::request::load_request_status(&store, start_run_id).unwrap();
     assert_eq!(start_run.status, "accepted");
+}
+
+#[test]
+fn context_minimum_above_profile_cap_is_not_budget_repairable_or_retried() {
+    use chrono::Utc;
+    use forge_core::checkpoint::TaskCheckpoint;
+    use forge_core::context::{build_compact_context_view, build_context_package_with_checkpoint};
+    use forge_core::graph::{self, ExecutorKind, ValidationRule};
+    use forge_core::intent::parse_intent;
+
+    let mut workflow = graph::create_workflow(parse_intent(
+        "Reject context budget retries that cannot exceed an executor profile cap",
+    ));
+    workflow.tasks = vec![graph::task(
+        "task-profile-capped",
+        "Resume a failed task from bounded context",
+        &[],
+        &["failed checkpoint", "bounded executor profile"],
+        vec![ValidationRule {
+            kind: "profile_budget".to_string(),
+            command: None,
+            expected: "profile changes instead of retrying an impossible budget".to_string(),
+        }],
+        "ProfileBudgetDecision",
+        (ExecutorKind::Ai, 0.0),
+    )];
+    let checkpoint = TaskCheckpoint {
+        checkpoint_id: "ckpt_profile_cap_adversarial".to_string(),
+        workflow_id: workflow.id.clone(),
+        task_id: "task-profile-capped".to_string(),
+        executor: "codex".to_string(),
+        state: "failed".to_string(),
+        summary: "failed checkpoint evidence that must remain in the minimum route ".repeat(100),
+        context_sha256: hex_sha256(b"profile-cap-prior-context"),
+        context_routing_cache_key: None,
+        workflow_revision: 0,
+        created_at: Utc::now(),
+    };
+
+    let package = build_context_package_with_checkpoint(
+        &workflow,
+        "task-profile-capped",
+        128,
+        Some(checkpoint.clone()),
+    )
+    .unwrap();
+    let profile_max = package.executor_profile.max_context_bytes.unwrap();
+
+    assert_eq!(package.executor_profile.id, "no_ai_rework");
+    assert_eq!(package.effective_budget, 128);
+    assert!(package.routing_repair.minimum_correct_budget_bytes > profile_max);
+    assert!(!package.routing_repair.budget_repairable);
+    assert_eq!(
+        package.routing_repair.action,
+        "change_executor_profile_budget"
+    );
+    assert_eq!(package.next_action.action, "change_executor_profile_budget");
+    assert_eq!(
+        package.routing_repair.recommended_budget_bytes, profile_max,
+        "an impossible route must diagnose the maximum budget attainable by the fixed profile",
+    );
+    assert!(package.routing_repair.recommended_budget_bytes > package.effective_budget);
+
+    let compact = build_compact_context_view(
+        &package,
+        &workflow,
+        Path::new("/tmp/forge-profile-cap-adversarial.sqlite"),
+        None,
+    );
+    assert_eq!(compact.guardrail.action, "change_executor_profile_budget");
+    assert!(
+        compact.guardrail.next_commands.is_empty(),
+        "compact context must not emit a budget rerun that cannot become ready",
+    );
+
+    let repeated = build_context_package_with_checkpoint(
+        &workflow,
+        "task-profile-capped",
+        package.routing_repair.recommended_budget_bytes,
+        Some(checkpoint),
+    )
+    .unwrap();
+    assert_eq!(repeated.effective_budget, profile_max);
+    assert!(!repeated.routing_repair.budget_repairable);
+    assert_eq!(
+        repeated.routing_repair.action,
+        "change_executor_profile_budget"
+    );
+    assert_eq!(
+        repeated.routing_repair.recommended_budget_bytes,
+        package.routing_repair.recommended_budget_bytes,
+        "re-requesting the recommendation must not create an increasing retry loop",
+    );
+}
+
+#[test]
+fn compact_frontier_prioritizes_fifth_pending_task_over_four_non_actionable_tasks() {
+    use forge_core::context::{build_compact_context_view, build_context_package};
+    use forge_core::graph::{self, ExecutorKind, TaskStatus, ValidationRule};
+    use forge_core::intent::parse_intent;
+
+    let mut workflow = graph::create_workflow(parse_intent(
+        "Expose the actionable predecessor even when non-actionable tasks occur first",
+    ));
+    let mut predecessor_ids = Vec::new();
+    for index in 0..4 {
+        let task_id = format!("task-non-actionable-{index:02}");
+        let mut task = graph::task(
+            &task_id,
+            "Observe a non-actionable predecessor",
+            &[],
+            &["existing execution state"],
+            vec![ValidationRule {
+                kind: "state".to_string(),
+                command: None,
+                expected: "running or blocked state remains auditable".to_string(),
+            }],
+            "StateObservation",
+            (ExecutorKind::Ai, 0.0),
+        );
+        task.status = if index % 2 == 0 {
+            TaskStatus::Running
+        } else {
+            TaskStatus::Blocked
+        };
+        predecessor_ids.push(task_id);
+        workflow.tasks.push(task);
+    }
+    let actionable_id = "task-actionable-04";
+    predecessor_ids.push(actionable_id.to_string());
+    workflow.tasks.push(graph::task(
+        actionable_id,
+        "Execute the only pending predecessor",
+        &[],
+        &["bounded actionable input"],
+        vec![ValidationRule {
+            kind: "handoff".to_string(),
+            command: None,
+            expected: "pending predecessor receives a handoff command".to_string(),
+        }],
+        "ActionableEvidence",
+        (ExecutorKind::Ai, 0.0),
+    ));
+    let dependency_refs = predecessor_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    workflow.tasks.push(graph::task(
+        "task-frontier-target",
+        "Wait for the bounded predecessor frontier",
+        &dependency_refs,
+        &["predecessor evidence"],
+        vec![ValidationRule {
+            kind: "dependency".to_string(),
+            command: None,
+            expected: "all predecessors complete before target handoff".to_string(),
+        }],
+        "TargetEvidence",
+        (ExecutorKind::Ai, 0.0),
+    ));
+
+    let package = build_context_package(&workflow, "task-frontier-target", 1200).unwrap();
+    let compact = build_compact_context_view(
+        &package,
+        &workflow,
+        Path::new("/tmp/forge-pending-first-adversarial.sqlite"),
+        None,
+    );
+
+    assert_eq!(compact.guardrail.predecessor_tasks_total, 5);
+    assert_eq!(compact.guardrail.predecessor_tasks_included, 4);
+    assert_eq!(
+        compact.guardrail.predecessor_tasks[0].task_id, actionable_id,
+        "Pending predecessors must be ordered before Running/Blocked tasks and before truncation",
+    );
+    assert!(compact.guardrail.next_commands.iter().any(|command| command
+        .windows(2)
+        .any(|pair| pair[0] == "--task" && pair[1] == actionable_id)));
+}
+
+#[test]
+fn predecessor_plan_uses_checkpoint_and_worktree_budget_in_executable_handoff_command() {
+    use forge_core::checkpoint::{record_task_checkpoint, TaskCheckpointRequest};
+    use forge_core::context::{
+        build_compact_context_view_with_predecessor_plans, build_context_package,
+    };
+    use forge_core::graph::{self, ExecutorKind, ValidationRule};
+    use forge_core::handoff::build_predecessor_handoff_plans;
+    use forge_core::intent::parse_intent;
+    use forge_core::worktree::{register_worktree, WorktreeRegisterOptions};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let repository = temp.path().join("bound-predecessor");
+    fs::create_dir_all(&repository).unwrap();
+    fs::write(repository.join("README.md"), "# Bound predecessor\n").unwrap();
+    assert!(StdCommand::new("git")
+        .arg("init")
+        .current_dir(&repository)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(StdCommand::new("git")
+        .args(["add", "README.md"])
+        .current_dir(&repository)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(StdCommand::new("git")
+        .args([
+            "-c",
+            "user.email=forge-context-test@example.com",
+            "-c",
+            "user.name=Forge Context Test",
+            "commit",
+            "-m",
+            "initial",
+        ])
+        .current_dir(&repository)
+        .output()
+        .unwrap()
+        .status
+        .success());
+
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(parse_intent(
+        "Use predecessor-specific checkpoint and worktree context for handoff",
+    ));
+    let predecessor_id = "task-bound-predecessor";
+    workflow.tasks = vec![
+        graph::task(
+            predecessor_id,
+            "Resume predecessor in its bound worktree",
+            &[],
+            &["checkpoint evidence", "bound worktree"],
+            vec![ValidationRule {
+                kind: "resume".to_string(),
+                command: None,
+                expected: "handoff uses the checkpoint-derived minimum budget".to_string(),
+            }],
+            "BoundPredecessorEvidence",
+            (ExecutorKind::Ai, 0.0),
+        ),
+        graph::task(
+            "task-bound-target",
+            "Consume bound predecessor evidence",
+            &[predecessor_id],
+            &["bound predecessor evidence"],
+            vec![ValidationRule {
+                kind: "dependency".to_string(),
+                command: None,
+                expected: "target waits for predecessor completion".to_string(),
+            }],
+            "TargetEvidence",
+            (ExecutorKind::Ai, 0.0),
+        ),
+    ];
+    store.save_workflow(&workflow).unwrap();
+    register_worktree(
+        &store,
+        WorktreeRegisterOptions {
+            path: repository.clone(),
+            id: Some("wt-bound-predecessor".to_string()),
+            workflow_id: Some(workflow.id.clone()),
+            task_id: Some(predecessor_id.to_string()),
+            origin: "context-adversarial-test".to_string(),
+            created_by_forge: false,
+        },
+    )
+    .unwrap();
+    workflow = store.load_workflow(&workflow.id).unwrap();
+    let baseline = build_context_package(&workflow, predecessor_id, 128).unwrap();
+    let workflow_revision = workflow.revisions.last().unwrap().revision;
+    let checkpoint_report = record_task_checkpoint(
+        &store,
+        TaskCheckpointRequest {
+            workflow_id: &workflow.id,
+            task_id: predecessor_id,
+            executor: "codex",
+            state: "failed",
+            summary: &"checkpoint resume evidence required by the rework profile ".repeat(35),
+            context_sha256: &hex_sha256(b"bound-predecessor-prior-context"),
+            context_routing_cache_key: None,
+            workflow_revision,
+        },
+    )
+    .unwrap();
+
+    let plans =
+        build_predecessor_handoff_plans(&store, &workflow, "task-bound-target", 128, None).unwrap();
+    let plan = plans.get(predecessor_id).unwrap();
+    let canonical_repository = fs::canonicalize(&repository).unwrap();
+    assert_eq!(
+        plan.project_root.as_deref(),
+        Some(canonical_repository.as_path())
+    );
+    assert!(
+        plan.recommended_budget_bytes > baseline.routing_repair.recommended_budget_bytes,
+        "checkpoint/worktree context must change the predecessor-specific budget in this fixture",
+    );
+
+    let target_package = build_context_package(&workflow, "task-bound-target", 1200).unwrap();
+    let compact = build_compact_context_view_with_predecessor_plans(
+        &target_package,
+        &workflow,
+        &store_path,
+        None,
+        &plans,
+    );
+    let command = compact
+        .guardrail
+        .next_commands
+        .iter()
+        .find(|command| {
+            command
+                .windows(2)
+                .any(|pair| pair[0] == "--task" && pair[1] == predecessor_id)
+        })
+        .unwrap()
+        .clone();
+    let command_value = |flag: &str| {
+        command
+            .windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].as_str())
+            .unwrap()
+    };
+    assert_eq!(
+        command_value("--budget"),
+        plan.recommended_budget_bytes.to_string()
+    );
+    assert_eq!(
+        command_value("--project-root"),
+        canonical_repository.to_str().unwrap()
+    );
+    assert_eq!(
+        command
+            .iter()
+            .filter(|argument| *argument == "--budget")
+            .count(),
+        1
+    );
+    assert_eq!(
+        command
+            .iter()
+            .filter(|argument| *argument == "--project-root")
+            .count(),
+        1
+    );
+    let expected_budget = plan.recommended_budget_bytes;
+    let checkpoint_id = checkpoint_report.checkpoint.checkpoint_id;
+    drop(store);
+
+    let handoff_output = forge()
+        .args(command.iter().skip(1))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff: Value = serde_json::from_slice(&handoff_output).unwrap();
+    assert_eq!(
+        handoff["schema_version"],
+        "forge.executor_handoff.compact.v1"
+    );
+    assert_eq!(handoff["status"], "handoff_ready");
+    assert_eq!(handoff["allowed"], true);
+    assert_eq!(handoff["context"]["context_ready"], true);
+    assert_eq!(handoff["context"]["handoff_ready"], true);
+    assert_eq!(handoff["context"]["guardrail"]["status"], "ready");
+    assert!(handoff["context"]["context_bytes"].as_u64().unwrap() <= expected_budget as u64);
+    let compact_content = handoff["context"]["content"].as_str().unwrap();
+    assert_eq!(
+        handoff["execution"]["resume_context_status"], "checkpoint_current",
+        "checkpoint {checkpoint_id} should remain current in the compact handoff"
+    );
+    assert!(compact_content.contains(canonical_repository.to_str().unwrap()));
+}
+
+#[test]
+fn predecessor_executable_handoff_uses_its_bound_worktree_over_target_explicit_root() {
+    use forge_core::context::{
+        build_compact_context_view_with_predecessor_plans, build_context_package,
+    };
+    use forge_core::graph::{self, ExecutorKind, ValidationRule};
+    use forge_core::handoff::build_predecessor_handoff_plans;
+    use forge_core::intent::parse_intent;
+    use forge_core::worktree::{
+        register_worktree, resolve_effective_project_root, WorktreeRegisterOptions,
+    };
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let target_repository = temp.path().join("target-root-a");
+    let predecessor_repository = temp.path().join("predecessor-root-b");
+    let initialize_repository = |repository: &Path, title: &str| {
+        fs::create_dir_all(repository).unwrap();
+        fs::write(repository.join("README.md"), format!("# {title}\n")).unwrap();
+        assert!(StdCommand::new("git")
+            .arg("init")
+            .current_dir(repository)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(StdCommand::new("git")
+            .args(["add", "README.md"])
+            .current_dir(repository)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(StdCommand::new("git")
+            .args([
+                "-c",
+                "user.email=forge-context-test@example.com",
+                "-c",
+                "user.name=Forge Context Test",
+                "commit",
+                "-m",
+                "initial",
+            ])
+            .current_dir(repository)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    };
+    initialize_repository(&target_repository, "Target root A");
+    initialize_repository(&predecessor_repository, "Predecessor root B");
+
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(parse_intent(
+        "Keep predecessor handoff rooted in its own bound worktree",
+    ));
+    let predecessor_id = "task-predecessor-root-b";
+    let target_id = "task-target-root-a";
+    workflow.tasks = vec![
+        graph::task(
+            predecessor_id,
+            "Produce evidence from predecessor root B",
+            &[],
+            &["predecessor worktree"],
+            vec![ValidationRule {
+                kind: "worktree".to_string(),
+                command: None,
+                expected: "handoff runs from predecessor root B".to_string(),
+            }],
+            "PredecessorEvidence",
+            (ExecutorKind::Ai, 0.0),
+        ),
+        graph::task(
+            target_id,
+            "Consume evidence from target root A",
+            &[predecessor_id],
+            &["predecessor evidence"],
+            vec![ValidationRule {
+                kind: "dependency".to_string(),
+                command: None,
+                expected: "target waits for predecessor completion".to_string(),
+            }],
+            "TargetEvidence",
+            (ExecutorKind::Ai, 0.0),
+        ),
+    ];
+    store.save_workflow(&workflow).unwrap();
+    register_worktree(
+        &store,
+        WorktreeRegisterOptions {
+            path: target_repository.clone(),
+            id: Some("wt-target-root-a".to_string()),
+            workflow_id: Some(workflow.id.clone()),
+            task_id: Some(target_id.to_string()),
+            origin: "context-multi-worktree-regression".to_string(),
+            created_by_forge: false,
+        },
+    )
+    .unwrap();
+    register_worktree(
+        &store,
+        WorktreeRegisterOptions {
+            path: predecessor_repository.clone(),
+            id: Some("wt-predecessor-root-b".to_string()),
+            workflow_id: Some(workflow.id.clone()),
+            task_id: Some(predecessor_id.to_string()),
+            origin: "context-multi-worktree-regression".to_string(),
+            created_by_forge: false,
+        },
+    )
+    .unwrap();
+    workflow = store.load_workflow(&workflow.id).unwrap();
+
+    let canonical_target = fs::canonicalize(&target_repository).unwrap();
+    let canonical_predecessor = fs::canonicalize(&predecessor_repository).unwrap();
+    assert_ne!(canonical_target, canonical_predecessor);
+    assert_eq!(
+        resolve_effective_project_root(
+            &store,
+            &workflow.id,
+            Some(target_id),
+            Some(&canonical_target),
+        )
+        .unwrap()
+        .as_deref(),
+        Some(canonical_target.as_path()),
+    );
+
+    let plans = build_predecessor_handoff_plans(
+        &store,
+        &workflow,
+        target_id,
+        1200,
+        Some(&canonical_target),
+    )
+    .unwrap();
+    let plan = plans.get(predecessor_id).unwrap();
+    assert_eq!(
+        plan.project_root.as_deref(),
+        Some(canonical_predecessor.as_path()),
+    );
+
+    let target_package = build_context_package(&workflow, target_id, 1200).unwrap();
+    let compact = build_compact_context_view_with_predecessor_plans(
+        &target_package,
+        &workflow,
+        &store_path,
+        Some(&canonical_target),
+        &plans,
+    );
+    let command = compact
+        .guardrail
+        .next_commands
+        .iter()
+        .find(|command| {
+            command
+                .windows(2)
+                .any(|pair| pair[0] == "--task" && pair[1] == predecessor_id)
+        })
+        .unwrap()
+        .clone();
+    let command_value = |flag: &str| {
+        command
+            .windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].as_str())
+            .unwrap()
+    };
+    assert_eq!(
+        command_value("--project-root"),
+        canonical_predecessor.to_str().unwrap(),
+    );
+    assert_ne!(
+        command_value("--project-root"),
+        canonical_target.to_str().unwrap(),
+    );
+    assert!(command
+        .windows(2)
+        .any(|pair| pair[0] == "--view" && pair[1] == "compact"));
+    assert!(!command
+        .iter()
+        .any(|argument| argument == canonical_target.to_str().unwrap()));
+
+    drop(store);
+    let handoff_output = forge()
+        .args(command.iter().skip(1))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff: Value = serde_json::from_slice(&handoff_output).unwrap();
+    assert_eq!(
+        handoff["schema_version"],
+        "forge.executor_handoff.compact.v1",
+    );
+    assert_eq!(handoff["status"], "handoff_ready");
+    let handoff_content = handoff["context"]["content"].as_str().unwrap();
+    assert!(handoff_content.contains(canonical_predecessor.to_str().unwrap()));
+    assert!(!handoff_content.contains(canonical_target.to_str().unwrap()));
+}
+
+#[test]
+fn heartbeat_waits_for_concurrent_terminal_transition_without_resurrecting_run() {
+    use chrono::Utc;
+    use forge_core::graph;
+    use forge_core::request::{
+        create_run_record, heartbeat_request, load_run_record, save_run_record,
+    };
+    use rusqlite::{params, Connection};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("request-heartbeat-terminal-race.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Never resurrect a request after a concurrent terminal transition",
+    ));
+    let run = create_run_record(&workflow, "test", "accepted");
+    store.save_workflow(&workflow).unwrap();
+    save_run_record(&store, &run).unwrap();
+    let worker_store = ForgeStore::open(&store_path).unwrap();
+
+    let mut cancelled = run.clone();
+    cancelled.status = "cancelled".to_string();
+    cancelled.updated_at = Utc::now();
+    let blocker = Connection::open(&store_path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    blocker
+        .execute(
+            "UPDATE runs SET status = ?2, data_json = ?3 WHERE id = ?1",
+            params![
+                run.run_id,
+                cancelled.status,
+                serde_json::to_string(&cancelled).unwrap()
+            ],
+        )
+        .unwrap();
+
+    let (started_sender, started_receiver) = mpsc::channel();
+    let (result_sender, result_receiver) = mpsc::channel();
+    let run_id = run.run_id.clone();
+    let handle = thread::spawn(move || {
+        started_sender.send(()).unwrap();
+        result_sender
+            .send(heartbeat_request(
+                &worker_store,
+                &run_id,
+                "codex",
+                "must observe the committed terminal transition",
+                300,
+                None,
+                "test",
+            ))
+            .unwrap();
+    });
+
+    started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    assert!(
+        matches!(
+            result_receiver.recv_timeout(Duration::from_millis(150)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "heartbeat returned before the concurrent terminal transition committed"
+    );
+    blocker.execute_batch("COMMIT").unwrap();
+
+    let error = result_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("terminal request"));
+    handle.join().unwrap();
+
+    let reopened = ForgeStore::open(&store_path).unwrap();
+    assert_eq!(
+        load_run_record(&reopened, &run.run_id).unwrap().status,
+        "cancelled"
+    );
+    assert!(reopened
+        .load_workflow_events(&workflow.id)
+        .unwrap()
+        .iter()
+        .all(|event| event.kind != "async_request_heartbeat"));
+}
+
+#[test]
+fn request_drive_rejects_handoff_selected_from_a_stale_workflow_snapshot() {
+    use forge_core::graph::{self, TaskStatus};
+    use forge_core::request::{create_run_record, drive_request, load_run_record, save_run_record};
+    use rusqlite::{params, Connection};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("request-drive-workflow-race.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Do not hand off a task selected from stale workflow state",
+    ));
+    let run = create_run_record(&workflow, "test", "accepted");
+    store.save_workflow(&workflow).unwrap();
+    save_run_record(&store, &run).unwrap();
+    let worker_store = ForgeStore::open(&store_path).unwrap();
+
+    let mut changed_workflow = workflow.clone();
+    changed_workflow.tasks[0].status = TaskStatus::Completed;
+    changed_workflow.status = "running".to_string();
+    let blocker = Connection::open(&store_path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    blocker
+        .execute(
+            "UPDATE workflows SET status = ?2, data_json = ?3 WHERE id = ?1",
+            params![
+                workflow.id,
+                changed_workflow.status,
+                serde_json::to_string(&changed_workflow).unwrap()
+            ],
+        )
+        .unwrap();
+
+    let (started_sender, started_receiver) = mpsc::channel();
+    let (result_sender, result_receiver) = mpsc::channel();
+    let run_id = run.run_id.clone();
+    let handle = thread::spawn(move || {
+        started_sender.send(()).unwrap();
+        result_sender
+            .send(drive_request(&worker_store, &run_id, "codex", 300, "test"))
+            .unwrap();
+    });
+
+    started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    assert!(
+        matches!(
+            result_receiver.recv_timeout(Duration::from_millis(150)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "drive returned before the concurrent workflow transition committed"
+    );
+    blocker.execute_batch("COMMIT").unwrap();
+
+    let error = result_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("workflow changed concurrently"));
+    handle.join().unwrap();
+
+    let reopened = ForgeStore::open(&store_path).unwrap();
+    assert_eq!(
+        load_run_record(&reopened, &run.run_id).unwrap().status,
+        "accepted"
+    );
+    assert_eq!(
+        reopened.load_workflow(&workflow.id).unwrap().tasks[0].status,
+        TaskStatus::Completed
+    );
+    assert!(reopened
+        .load_workflow_events(&workflow.id)
+        .unwrap()
+        .iter()
+        .all(|event| event.kind != "async_request_heartbeat"));
+}
+
+#[test]
+fn request_drive_rejects_handoff_selected_before_a_concurrent_checkpoint() {
+    use forge_core::graph;
+    use forge_core::request::{create_run_record, drive_request, load_run_record, save_run_record};
+    use rusqlite::{params, Connection};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("request-drive-checkpoint-race.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Do not hand off context made stale by a concurrent checkpoint",
+    ));
+    let run = create_run_record(&workflow, "test", "accepted");
+    store.save_workflow(&workflow).unwrap();
+    save_run_record(&store, &run).unwrap();
+    let worker_store = ForgeStore::open(&store_path).unwrap();
+
+    let checkpoint_id = "ckpt_concurrent_drive_regression";
+    let task_id = workflow.tasks[0].id.clone();
+    let checkpoint = serde_json::json!({
+        "checkpoint_id": checkpoint_id,
+        "workflow_id": workflow.id,
+        "task_id": task_id,
+        "executor": "codex",
+        "state": "failed",
+        "summary": "concurrent checkpoint must invalidate the selected handoff context",
+        "context_sha256": "0".repeat(64),
+        "context_routing_cache_key": null,
+        "workflow_revision": 0,
+        "created_at": "2026-07-23T00:00:00Z"
+    });
+    let blocker = Connection::open(&store_path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    blocker
+        .execute(
+            r#"
+            INSERT INTO task_checkpoints (
+                id, workflow_id, task_id, executor, state, created_at, data_json
+            )
+            VALUES (?1, ?2, ?3, 'codex', 'failed', '2026-07-23T00:00:00Z', ?4)
+            "#,
+            params![
+                checkpoint_id,
+                workflow.id,
+                workflow.tasks[0].id,
+                checkpoint.to_string()
+            ],
+        )
+        .unwrap();
+
+    let (started_sender, started_receiver) = mpsc::channel();
+    let (result_sender, result_receiver) = mpsc::channel();
+    let run_id = run.run_id.clone();
+    let handle = thread::spawn(move || {
+        started_sender.send(()).unwrap();
+        result_sender
+            .send(drive_request(&worker_store, &run_id, "codex", 300, "test"))
+            .unwrap();
+    });
+
+    started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    assert!(
+        matches!(
+            result_receiver.recv_timeout(Duration::from_millis(150)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "drive returned before the concurrent checkpoint committed"
+    );
+    blocker.execute_batch("COMMIT").unwrap();
+
+    let error = result_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("checkpoints changed concurrently"));
+    handle.join().unwrap();
+
+    let reopened = ForgeStore::open(&store_path).unwrap();
+    assert_eq!(
+        load_run_record(&reopened, &run.run_id).unwrap().status,
+        "accepted"
+    );
+    assert!(reopened
+        .load_workflow_events(&workflow.id)
+        .unwrap()
+        .iter()
+        .all(|event| event.kind != "async_request_heartbeat"));
+}
+
+#[test]
+fn request_drive_finds_fifth_ready_candidate_after_four_context_blockers() {
+    use forge_core::checkpoint::{record_task_checkpoint, TaskCheckpointRequest};
+    use forge_core::graph::{self, ExecutorKind, ValidationRule};
+    use forge_core::request::{create_run_record, drive_request, save_run_record};
+
+    let temp = tempdir().unwrap();
+    let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Find the ready handoff after four context-blocked candidates",
+    ));
+    workflow.tasks = (0..5)
+        .map(|index| {
+            graph::task(
+                &format!("candidate-{index:02}"),
+                &format!("Candidate {index:02}"),
+                &[],
+                &["bounded execution context"],
+                vec![ValidationRule {
+                    kind: "handoff".to_string(),
+                    command: None,
+                    expected: "candidate context is ready for execution".to_string(),
+                }],
+                "CandidateEvidence",
+                (ExecutorKind::Ai, 0.0),
+            )
+        })
+        .collect();
+    store.save_workflow(&workflow).unwrap();
+    for index in 0..4 {
+        record_task_checkpoint(
+            &store,
+            TaskCheckpointRequest {
+                workflow_id: &workflow.id,
+                task_id: &format!("candidate-{index:02}"),
+                executor: "codex",
+                state: "failed",
+                summary: &"failed checkpoint context that exceeds the bounded rework profile "
+                    .repeat(100),
+                context_sha256: &"0".repeat(64),
+                context_routing_cache_key: None,
+                workflow_revision: 0,
+            },
+        )
+        .unwrap();
+    }
+    let run = create_run_record(&workflow, "test", "accepted");
+    save_run_record(&store, &run).unwrap();
+
+    let driven = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap();
+    assert_eq!(driven.status, "ready_for_handoff");
+    assert_eq!(
+        driven.handoff_task.as_ref().unwrap().task_id,
+        "candidate-04"
+    );
+    assert_eq!(
+        driven
+            .parallel_handoff_tasks
+            .iter()
+            .map(|task| task.task_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["candidate-04"]
+    );
 }

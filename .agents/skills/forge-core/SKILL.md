@@ -15,7 +15,7 @@ Forge Core is the workflow orchestration authority. Use `forge plan --goal "<obj
 ## Required First Steps
 
 1. Run `forge plan --goal "<human objective>" --output json`.
-2. Use `forge context --workflow <id> --task <task-id> --project-root <project-root> --budget <bytes> --strict --output json` before giving an agent task-specific context.
+2. Use `forge context --workflow <id> --task <task-id> --project-root <project-root> --budget <bytes> --strict --view compact --output json` before giving an agent task-specific context.
 3. Use `forge validate --workflow <id> --output json` before promotion.
 
 ## Domain Skill Index

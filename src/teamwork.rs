@@ -1,9 +1,9 @@
 use crate::graph::create_workflow;
 use crate::intent::parse_intent;
 use crate::request::{create_run_record, save_run_record};
-use crate::storage::ForgeStore;
+use crate::storage::{open_configured_connection, ForgeStore};
 use anyhow::{anyhow, Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -115,8 +115,7 @@ pub fn plan_teamwork_workflow(
         .collect();
 
     // Roster and Heuristics Logic
-    let conn = Connection::open(store.path())?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+    let conn = open_configured_connection(store.path())?;
 
     // 1. Query disallowed brains from executor policy
     let mut disallowed_brains = HashSet::new();

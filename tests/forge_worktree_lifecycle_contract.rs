@@ -260,6 +260,8 @@ impl LifecycleFixture {
                     &self.task_id,
                     "--budget",
                     "4096",
+                    "--view",
+                    "full",
                     "--output",
                     "json",
                 ]),

@@ -20,7 +20,7 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 4. Inspect the generated atomic tasks, task goals, subtasks, impediments, async policy and validation rules.
 5. Use `forge workflow update-goal ... --origin codex|opencode|forge_cli|skill` when the human changes direction during execution.
 6. Use `forge workflow attach-artifact ... --origin codex|opencode|forge_cli|skill` when new artifacts appear during execution.
-7. Use `forge context --workflow <id> --task <task-id> --budget <bytes> --strict --output json` before giving an agent task-specific context.
+7. Use `forge context --workflow <id> --task <task-id> --budget <bytes> --strict --view compact --output json` before giving an agent task-specific context.
 8. Run `forge validate --workflow <id> --output json` before promotion. If `rework_tasks` is not empty, return those tasks to work.
 9. Run `forge improve --workflow <id> --target-version <version> --output json` only to generate a controlled experiment and changelog. Do not auto-promote without benchmark and validation evidence.
 10. Run `forge milestone status --version 0.5 --output json` and `forge milestone manifest --version 0.5 --output json` before claiming Forge 0.5 creative-runtime readiness; planned or groundwork capabilities block promotion unless their complete operator-approved required attached-evidence set is present. Use `forge milestone evidence-plan --capability <capability-id> --project-root <project-root> --output json` or MCP `forge.milestone.evidence_plan` to inspect project manifests, secret-free `manifest_templates` such as `.forge/connected-brain-runtimes.json`, `.forge/multimodal.json` and `.forge/multimodal-runtimes.json`, and collection commands before running real provider/runtime evidence. Use `forge milestone collect-evidence --capability <capability-id> --kind <evidence-kind> --project-root <project-root> --approved-by <operator> --output json` or MCP `forge.milestone.collect_evidence` to run a ready provider/runtime/demo source, persist the receipt and attach it; omit `--kind` only when the capability default receipt is intended. Use `forge milestone attach-evidence --capability <capability-id> --kind <kind> --artifact <path> --approved-by <operator> --output json` or MCP `forge.milestone.attach_evidence` only to attach already-reviewed external release evidence; a single receipt stays audit-only, while the complete required receipt set makes that capability promotion-ready in the manifest.
@@ -159,7 +159,7 @@ forge mcp call forge.interaction.answer --input '{"workflow_id":"<workflow-id>",
 forge runtime guard --substrate knative --resource service/forge-node --namespace forge --action update --owner forge --output json
 forge list --output json
 forge status --workflow <workflow-id> --output json
-forge context --workflow <workflow-id> --task task-001 --budget 1200 --strict --output json
+forge context --workflow <workflow-id> --task task-001 --budget 1200 --strict --view compact --output json
 forge run --workflow <workflow-id> --simulate --output json
 forge validate --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json

@@ -1,0 +1,851 @@
+#!/usr/bin/env bash
+# Fail closed: this drill is release evidence, not a best-effort recovery copy.
+set -euo pipefail
+set -o noclobber
+umask 077
+
+fail() {
+  printf 'forge restore drill: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  forge-restore-drill \
+    --forge /absolute/path/to/forge \
+    --uploader /absolute/path/to/offhost-uploader \
+    --target NON_SECRET_OFFHOST_TARGET \
+    --object forge-YYYYMMDDTHHMMSSZ.sqlite \
+    --object-epoch UTC_EPOCH_SECONDS \
+    --incident-epoch UTC_EPOCH_SECONDS \
+    --max-rpo-seconds SECONDS \
+    --max-rto-seconds SECONDS \
+    --approved-by OPERATOR_ID \
+    --canary-workflow-id wf_WORKFLOW_ID \
+    --output-dir /absolute/private/new-output-directory
+
+The object epoch must exactly match the canonical UTC timestamp embedded in
+the object name. The incident epoch must come from an archived external alert.
+
+The uploader must authenticate out of band and implement:
+  download --destination TARGET --object NAME \
+    --output LOCAL_PATH --sha256-output DIGEST_PATH
+
+The output directory must already exist, be private, and be owned by the
+invoking user. Every drill output path must be absent before the run.
+
+Vault keys are not command-line arguments. Configure Forge's key files through
+its normal out-of-band environment or service credentials. Inline vault key
+environment variables are rejected and key contents are never read or printed.
+EOF
+}
+
+require_value() {
+  local option="$1"
+  local value="${2-}"
+
+  [[ -n "$value" ]] || fail "$option requires a non-empty value"
+}
+
+require_single_line() {
+  local label="$1"
+  local value="$2"
+
+  [[ ! "$value" =~ [[:cntrl:]] ]] ||
+    fail "$label must not contain control characters"
+}
+
+parse_nonnegative_integer() {
+  local value="$1"
+  local label="$2"
+  local destination="$3"
+  local normalized=""
+
+  [[ "$value" =~ ^[0-9]+$ ]] ||
+    fail "$label must be a non-negative integer"
+  [[ ${#value} -le 18 ]] ||
+    fail "$label is outside the supported integer range"
+  normalized="$((10#$value))"
+  printf -v "$destination" '%s' "$normalized"
+}
+
+monotonic_milliseconds() {
+  local uptime_value=""
+  local whole_seconds=""
+  local fractional_seconds=""
+
+  [[ -r /proc/uptime ]] ||
+    fail "the monotonic clock /proc/uptime is not readable"
+  read -r uptime_value _ </proc/uptime
+  [[ "$uptime_value" =~ ^([0-9]+)\.([0-9]+)$ ]] ||
+    fail "the monotonic clock returned an invalid value"
+
+  whole_seconds="${BASH_REMATCH[1]}"
+  fractional_seconds="${BASH_REMATCH[2]}000"
+  fractional_seconds="${fractional_seconds:0:3}"
+  printf '%s\n' \
+    "$((10#$whole_seconds * 1000 + 10#$fractional_seconds))"
+}
+
+json_escape() {
+  local escaped="$1"
+
+  escaped="${escaped//\\/\\\\}"
+  escaped="${escaped//\"/\\\"}"
+  escaped="${escaped//$'\n'/\\n}"
+  escaped="${escaped//$'\r'/\\r}"
+  printf '%s' "$escaped"
+}
+
+audit_trusted_executable() {
+  local candidate="$1"
+  local label="$2"
+  local trust_root="$3"
+  local expected_uid="$4"
+  local canonical_candidate=""
+  local canonical_root=""
+  local component=""
+  local component_mode=""
+
+  canonical_candidate="$(realpath -e -- "$candidate")" ||
+    fail "cannot resolve $label path: $candidate"
+  canonical_root="$(realpath -e -- "$trust_root")" ||
+    fail "cannot resolve $label trust root: $trust_root"
+  [[ "$candidate" = "$canonical_candidate" ]] ||
+    fail "$label path must be canonical and contain no symlink: $candidate"
+
+  if [[ "$canonical_root" != "/" ]]; then
+    [[ "$canonical_candidate" = "$canonical_root/"* ]] ||
+      fail "$label is outside its audited trust root"
+  fi
+
+  component="$canonical_candidate"
+  while true; do
+    [[ ! -L "$component" ]] ||
+      fail "$label path component must not be a symlink: $component"
+    [[ "$(stat -c '%u' -- "$component")" -eq "$expected_uid" ]] ||
+      fail "$label path component has an untrusted owner: $component"
+    component_mode="$(stat -c '%a' -- "$component")"
+    [[ "$component_mode" =~ ^[0-7]{3,4}$ ]] ||
+      fail "could not validate $label path permissions: $component"
+    (( (8#$component_mode & 0022) == 0 )) ||
+      fail "$label path component is writable by group or other: $component"
+
+    [[ "$component" = "$canonical_root" ]] && break
+    component="${component%/*}"
+    [[ -n "$component" ]] || component="/"
+  done
+}
+
+for required_command in awk chmod curl date env grep kill mkdir mktemp openssl realpath rm sha256sum sleep stat timeout tr wc; do
+  command -v "$required_command" >/dev/null 2>&1 ||
+    fail "required command not found: $required_command"
+done
+
+[[ "$(date -u -d '@0' +%s 2>/dev/null)" = 0 ]] ||
+  fail "GNU date with UTC --date support is required"
+timeout --version >/dev/null 2>&1 ||
+  fail "GNU timeout is required"
+
+production_mode_value="${FORGE_PRODUCTION_MODE:-}"
+production_mode_value="${production_mode_value#"${production_mode_value%%[![:space:]]*}"}"
+production_mode_value="${production_mode_value%"${production_mode_value##*[![:space:]]}"}"
+production_mode_value="${production_mode_value,,}"
+case "$production_mode_value" in
+  1 | true | yes | on) production_mode_enabled=true ;;
+  *) production_mode_enabled=false ;;
+esac
+readonly production_mode_enabled
+readonly test_mode="${FORGE_RESTORE_DRILL_TEST_MODE:-0}"
+
+case "$test_mode" in
+  0 | 1) ;;
+  *) fail "FORGE_RESTORE_DRILL_TEST_MODE must be 0 or 1" ;;
+esac
+
+trusted_executable_root="/"
+trusted_executable_uid=0
+if [[ "$test_mode" = 1 ]]; then
+  [[ "$production_mode_enabled" = false ]] ||
+    fail "restore-drill test mode is forbidden when FORGE_PRODUCTION_MODE is enabled"
+  test_root="${FORGE_RESTORE_DRILL_TEST_ROOT:-}"
+  [[ "$test_root" = /* && "$test_root" != "/" &&
+    -d "$test_root" && ! -L "$test_root" ]] ||
+    fail "FORGE_RESTORE_DRILL_TEST_ROOT must be an absolute non-symlink directory"
+
+  test_marker="$test_root/.forge-restore-drill-test-root"
+  test_marker_lines=()
+  [[ -f "$test_marker" && ! -L "$test_marker" ]] ||
+    fail "restore-drill test root sentinel is missing or unsafe: $test_marker"
+  mapfile -t test_marker_lines <"$test_marker"
+  [[ ${#test_marker_lines[@]} -eq 1 &&
+    "${test_marker_lines[0]}" = "forge-restore-drill-smoke-v1" ]] ||
+    fail "restore-drill test root sentinel is invalid: $test_marker"
+
+  trusted_executable_root="$(realpath -e -- "$test_root")"
+  trusted_executable_uid="$(stat -c '%u' -- "$trusted_executable_root")"
+else
+  [[ -z "${FORGE_RESTORE_DRILL_TEST_ROOT:-}" ]] ||
+    fail "FORGE_RESTORE_DRILL_TEST_ROOT requires FORGE_RESTORE_DRILL_TEST_MODE=1"
+fi
+readonly trusted_executable_root
+readonly trusted_executable_uid
+
+forge_binary=""
+uploader=""
+target=""
+object=""
+object_epoch_input=""
+incident_epoch_input=""
+max_rpo_input=""
+max_rto_input=""
+approved_by=""
+canary_workflow_id=""
+output_dir_input=""
+
+while (($# > 0)); do
+  case "$1" in
+    --forge)
+      require_value "$1" "${2-}"
+      [[ -z "$forge_binary" ]] || fail "--forge may only be specified once"
+      forge_binary="$2"
+      shift 2
+      ;;
+    --uploader)
+      require_value "$1" "${2-}"
+      [[ -z "$uploader" ]] || fail "--uploader may only be specified once"
+      uploader="$2"
+      shift 2
+      ;;
+    --target)
+      require_value "$1" "${2-}"
+      [[ -z "$target" ]] || fail "--target may only be specified once"
+      target="$2"
+      shift 2
+      ;;
+    --object)
+      require_value "$1" "${2-}"
+      [[ -z "$object" ]] || fail "--object may only be specified once"
+      object="$2"
+      shift 2
+      ;;
+    --object-epoch)
+      require_value "$1" "${2-}"
+      [[ -z "$object_epoch_input" ]] ||
+        fail "--object-epoch may only be specified once"
+      object_epoch_input="$2"
+      shift 2
+      ;;
+    --incident-epoch)
+      require_value "$1" "${2-}"
+      [[ -z "$incident_epoch_input" ]] ||
+        fail "--incident-epoch may only be specified once"
+      incident_epoch_input="$2"
+      shift 2
+      ;;
+    --max-rpo-seconds)
+      require_value "$1" "${2-}"
+      [[ -z "$max_rpo_input" ]] ||
+        fail "--max-rpo-seconds may only be specified once"
+      max_rpo_input="$2"
+      shift 2
+      ;;
+    --max-rto-seconds)
+      require_value "$1" "${2-}"
+      [[ -z "$max_rto_input" ]] ||
+        fail "--max-rto-seconds may only be specified once"
+      max_rto_input="$2"
+      shift 2
+      ;;
+    --approved-by)
+      require_value "$1" "${2-}"
+      [[ -z "$approved_by" ]] ||
+        fail "--approved-by may only be specified once"
+      approved_by="$2"
+      shift 2
+      ;;
+    --canary-workflow-id)
+      require_value "$1" "${2-}"
+      [[ -z "$canary_workflow_id" ]] ||
+        fail "--canary-workflow-id may only be specified once"
+      canary_workflow_id="$2"
+      shift 2
+      ;;
+    --output-dir)
+      require_value "$1" "${2-}"
+      [[ -z "$output_dir_input" ]] ||
+        fail "--output-dir may only be specified once"
+      output_dir_input="$2"
+      shift 2
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --*)
+      fail "unknown option: $1"
+      ;;
+    *)
+      fail "unexpected positional argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$forge_binary" ]] || fail "--forge is required"
+[[ -n "$uploader" ]] || fail "--uploader is required"
+[[ -n "$target" ]] || fail "--target is required"
+[[ -n "$object" ]] || fail "--object is required"
+[[ -n "$object_epoch_input" ]] || fail "--object-epoch is required"
+[[ -n "$incident_epoch_input" ]] || fail "--incident-epoch is required"
+[[ -n "$max_rpo_input" ]] || fail "--max-rpo-seconds is required"
+[[ -n "$max_rto_input" ]] || fail "--max-rto-seconds is required"
+[[ -n "$approved_by" ]] || fail "--approved-by is required"
+[[ -n "$canary_workflow_id" ]] || fail "--canary-workflow-id is required"
+[[ -n "$output_dir_input" ]] || fail "--output-dir is required"
+
+for path_value in "$forge_binary" "$uploader" "$output_dir_input"; do
+  require_single_line "path" "$path_value"
+done
+require_single_line "target" "$target"
+require_single_line "object" "$object"
+require_single_line "operator identity" "$approved_by"
+require_single_line "canary workflow id" "$canary_workflow_id"
+
+[[ "$forge_binary" = /* ]] || fail "--forge must be an absolute path"
+[[ -f "$forge_binary" && ! -L "$forge_binary" && -x "$forge_binary" ]] ||
+  fail "--forge must identify a non-symlink executable regular file"
+[[ "$uploader" = /* ]] || fail "--uploader must be an absolute path"
+[[ -f "$uploader" && ! -L "$uploader" && -x "$uploader" ]] ||
+  fail "--uploader must identify a non-symlink executable regular file"
+audit_trusted_executable \
+  "$forge_binary" "Forge executable" \
+  "$trusted_executable_root" "$trusted_executable_uid"
+audit_trusted_executable \
+  "$uploader" "off-host uploader" \
+  "$trusted_executable_root" "$trusted_executable_uid"
+
+[[ "$target" != -* ]] || fail "--target must not begin with a dash"
+[[ "$target" != *\?* && "$target" != *\#* ]] ||
+  fail "--target must be a non-secret locator without query or fragment data"
+if [[ "$object" =~ ^forge-([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z\.sqlite$ ]]; then
+  object_utc_text="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]} ${BASH_REMATCH[4]}:${BASH_REMATCH[5]}:${BASH_REMATCH[6]} UTC"
+else
+  fail "--object must match canonical forge-YYYYMMDDTHHMMSSZ.sqlite"
+fi
+[[ "$canary_workflow_id" =~ ^wf_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]] ||
+  fail "--canary-workflow-id must be a bounded wf_ identifier"
+
+[[ -z "${FORGE_SECRET_VAULT_KEY+x}" ]] ||
+  fail "FORGE_SECRET_VAULT_KEY is forbidden; use a key file credential"
+[[ -z "${FORGE_SECRET_VAULT_PREVIOUS_KEYS+x}" ]] ||
+  fail "FORGE_SECRET_VAULT_PREVIOUS_KEYS is forbidden; use key file credentials"
+
+declared_object_epoch=0
+incident_epoch=0
+max_rpo_seconds=0
+max_rto_seconds=0
+parse_nonnegative_integer \
+  "$object_epoch_input" "--object-epoch" declared_object_epoch
+parse_nonnegative_integer \
+  "$incident_epoch_input" "--incident-epoch" incident_epoch
+parse_nonnegative_integer \
+  "$max_rpo_input" "--max-rpo-seconds" max_rpo_seconds
+parse_nonnegative_integer \
+  "$max_rto_input" "--max-rto-seconds" max_rto_seconds
+((max_rto_seconds > 0)) ||
+  fail "--max-rto-seconds must be greater than zero"
+
+object_epoch_text="$(date -u -d "$object_utc_text" +%s 2>/dev/null)" ||
+  fail "--object contains an invalid UTC timestamp"
+object_epoch=0
+parse_nonnegative_integer \
+  "$object_epoch_text" "canonical object UTC epoch" object_epoch
+canonical_object="$(
+  date -u -d "@$object_epoch" '+forge-%Y%m%dT%H%M%SZ.sqlite'
+)" || fail "could not canonicalize the object UTC timestamp"
+[[ "$canonical_object" = "$object" ]] ||
+  fail "--object contains a non-canonical or invalid UTC timestamp"
+[[ "$declared_object_epoch" -eq "$object_epoch" ]] ||
+  fail "--object-epoch does not match the canonical object timestamp"
+
+current_epoch_text="$(date -u +%s)"
+current_epoch=0
+parse_nonnegative_integer "$current_epoch_text" "current UTC epoch" current_epoch
+((object_epoch <= incident_epoch)) ||
+  fail "canonical object epoch must not be later than --incident-epoch"
+((incident_epoch <= current_epoch)) ||
+  fail "--incident-epoch must not be in the future"
+rpo_seconds="$((incident_epoch - object_epoch))"
+((rpo_seconds >= 0)) || fail "calculated RPO must be non-negative"
+((rpo_seconds <= max_rpo_seconds)) ||
+  fail "calculated RPO exceeds --max-rpo-seconds"
+
+[[ "$output_dir_input" = /* && "$output_dir_input" != "/" ]] ||
+  fail "--output-dir must be an absolute directory other than /"
+[[ -d "$output_dir_input" && ! -L "$output_dir_input" ]] ||
+  fail "--output-dir must be an existing non-symlink directory"
+output_dir="$(realpath -e -- "$output_dir_input")"
+[[ "$output_dir" = /* && "$output_dir" != "/" ]] ||
+  fail "could not resolve --output-dir to a safe absolute directory"
+[[ "$(stat -c '%u' -- "$output_dir")" = "$EUID" ]] ||
+  fail "--output-dir must be owned by the invoking user"
+output_dir_mode="$(stat -c '%a' -- "$output_dir")"
+[[ "$output_dir_mode" =~ ^[0-7]{3,4}$ ]] ||
+  fail "could not validate --output-dir permissions"
+(( (8#$output_dir_mode & 0022) == 0 )) ||
+  fail "--output-dir must not be writable by group or other"
+[[ -w "$output_dir" ]] || fail "--output-dir must be writable"
+
+downloaded_store="$output_dir/downloaded-store.sqlite"
+remote_digest="$output_dir/downloaded-store.sha256"
+download_output="$output_dir/download-output.txt"
+source_check_report="$output_dir/source-check.json"
+restore_report="$output_dir/restore.json"
+restored_store="$output_dir/restored-store.sqlite"
+restored_check_report="$output_dir/restored-check.json"
+canary_report="$output_dir/canary-inspect.json"
+final_check_report="$output_dir/final-check.json"
+ops_workspace="$output_dir/ops-workspace"
+ops_token_file="$output_dir/.ops-token"
+ops_curl_config="$output_dir/.ops-curl.conf"
+ops_startup_log="$output_dir/ops-startup.json"
+ops_stderr_log="$output_dir/ops-stderr.log"
+ops_snapshot_report="$output_dir/ops-snapshot.json"
+drill_report="$output_dir/drill-report.json"
+
+reserved_paths=(
+  "$downloaded_store"
+  "$downloaded_store-wal"
+  "$downloaded_store-shm"
+  "$remote_digest"
+  "$download_output"
+  "$source_check_report"
+  "$restore_report"
+  "$restored_store"
+  "$restored_store-wal"
+  "$restored_store-shm"
+  "$restored_store.secret.key"
+  "$restored_check_report"
+  "$canary_report"
+  "$final_check_report"
+  "$ops_workspace"
+  "$ops_token_file"
+  "$ops_curl_config"
+  "$ops_startup_log"
+  "$ops_stderr_log"
+  "$ops_snapshot_report"
+  "$drill_report"
+)
+for output_path in "${reserved_paths[@]}"; do
+  [[ "$output_path" = /* ]] ||
+    fail "derived output path is not absolute: $output_path"
+  [[ ! -e "$output_path" && ! -L "$output_path" ]] ||
+    fail "every output path must be new: $output_path"
+done
+
+remaining_rto_budget() {
+  local label="$1"
+  local now_text=""
+  local now_epoch=0
+  local elapsed=0
+  local remaining=0
+
+  now_text="$(date -u +%s)"
+  parse_nonnegative_integer "$now_text" "current UTC epoch" now_epoch
+  ((now_epoch >= incident_epoch)) ||
+    fail "current UTC epoch is earlier than the incident epoch"
+  elapsed="$((now_epoch - incident_epoch))"
+  remaining="$((max_rto_seconds - elapsed))"
+  ((remaining > 0)) ||
+    fail "RTO budget is exhausted before $label"
+  printf '%s\n' "$remaining"
+}
+
+run_timed_command() {
+  local label="$1"
+  local remaining=""
+  local status=0
+  shift
+
+  remaining="$(remaining_rto_budget "$label")"
+  if timeout \
+    --foreground \
+    --signal=TERM \
+    --kill-after=2s \
+    "${remaining}s" \
+    "$@"; then
+    return 0
+  else
+    status=$?
+  fi
+
+  case "$status" in
+    124 | 137)
+      fail "$label exceeded the remaining RTO budget"
+      ;;
+    *)
+      fail "$label failed with exit status $status"
+      ;;
+  esac
+}
+
+run_forge_command() {
+  local label="$1"
+  shift
+
+  run_timed_command \
+    "$label" \
+    env \
+    -u CREDENTIALS_DIRECTORY \
+    -u FORGE_BACKUP_OFFHOST_COMMAND_FILE \
+    -u FORGE_BACKUP_OFFHOST_DESTINATION_FILE \
+    -u FORGE_BACKUP_OFFHOST_GENERATION_FILE \
+    -u FORGE_OPS_BEARER_TOKEN \
+    -u FORGE_OPS_BEARER_TOKEN_FILE \
+    FORGE_PRODUCTION_MODE=1 \
+    "$forge_binary" "$@"
+}
+
+run_uploader_command() {
+  local label="$1"
+  shift
+
+  run_timed_command \
+    "$label" \
+    env \
+    -u FORGE_SECRET_VAULT_KEY \
+    -u FORGE_SECRET_VAULT_KEY_FILE \
+    -u FORGE_SECRET_VAULT_PREVIOUS_KEYS \
+    -u FORGE_SECRET_VAULT_PREVIOUS_KEY_FILES \
+    -u FORGE_OPS_BEARER_TOKEN \
+    -u FORGE_OPS_BEARER_TOKEN_FILE \
+    "$uploader" "$@"
+}
+
+ops_pid=""
+cleanup_runtime() {
+  if [[ "$ops_pid" =~ ^[0-9]+$ ]]; then
+    if kill -0 "$ops_pid" 2>/dev/null; then
+      kill -TERM "$ops_pid" 2>/dev/null || true
+    fi
+    wait "$ops_pid" 2>/dev/null || true
+  fi
+  rm -f -- "$ops_token_file" "$ops_curl_config"
+}
+trap cleanup_runtime EXIT
+
+read -r forge_sha256 _ < <(sha256sum -- "$forge_binary")
+[[ "$forge_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  fail "could not calculate the Forge executable SHA-256"
+read -r uploader_sha256 _ < <(sha256sum -- "$uploader")
+[[ "$uploader_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  fail "could not calculate the uploader SHA-256"
+forge_version="$(
+  run_forge_command "Forge version probe" --version
+)"
+[[ -n "$forge_version" && "$forge_version" != *$'\n'* &&
+  "$forge_version" != *$'\r'* ]] ||
+  fail "Forge --version must return exactly one non-empty line"
+
+drill_started_epoch_text="$(date -u +%s)"
+drill_started_epoch=0
+parse_nonnegative_integer \
+  "$drill_started_epoch_text" "drill start UTC epoch" drill_started_epoch
+hot_script_started_milliseconds="$(monotonic_milliseconds)"
+
+run_uploader_command \
+  "off-host download" \
+  download \
+  --destination "$target" \
+  --object "$object" \
+  --output "$downloaded_store" \
+  --sha256-output "$remote_digest" >"$download_output"
+
+for downloaded_path in \
+  "$downloaded_store" "$remote_digest" "$download_output"; do
+  [[ -f "$downloaded_path" && ! -L "$downloaded_path" ]] ||
+    fail "download did not create a non-symlink regular file: $downloaded_path"
+  chmod 600 -- "$downloaded_path"
+done
+
+digest_lines=()
+mapfile -t digest_lines <"$remote_digest"
+remote_digest_size="$(wc -c <"$remote_digest")"
+[[ "$remote_digest_size" -eq 64 || "$remote_digest_size" -eq 65 ]] ||
+  fail "remote digest output must contain exactly one lowercase SHA-256"
+LC_ALL=C grep -Eq '^[0-9a-f]{64}$' "$remote_digest" ||
+  fail "remote digest output must contain exactly one lowercase SHA-256"
+[[ ${#digest_lines[@]} -eq 1 &&
+  "${digest_lines[0]}" =~ ^[0-9a-f]{64}$ ]] ||
+  fail "remote digest output must contain exactly one lowercase SHA-256"
+remote_sha256="${digest_lines[0]}"
+
+read -r local_sha256 _ < <(sha256sum -- "$downloaded_store")
+[[ "$local_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  fail "could not calculate the downloaded store SHA-256"
+[[ "$local_sha256" = "$remote_sha256" ]] ||
+  fail "downloaded store SHA-256 does not match the persisted remote digest"
+
+run_forge_command \
+  "downloaded store check" \
+  --store "$downloaded_store" \
+  store check \
+  --output json >"$source_check_report"
+chmod 600 -- "$source_check_report"
+for source_sidecar in "$downloaded_store-wal" "$downloaded_store-shm"; do
+  if [[ -e "$source_sidecar" || -L "$source_sidecar" ]]; then
+    [[ -f "$source_sidecar" && ! -L "$source_sidecar" ]] ||
+      fail "Forge created an unsafe recovery source sidecar: $source_sidecar"
+    chmod 600 -- "$source_sidecar"
+  fi
+done
+
+run_forge_command \
+  "store restore" \
+  --store "$restored_store" \
+  store restore \
+  --source "$downloaded_store" \
+  --approved-by "$approved_by" \
+  --confirm-restore \
+  --output json >"$restore_report"
+chmod 600 -- "$restore_report"
+[[ -f "$restored_store" && ! -L "$restored_store" ]] ||
+  fail "Forge restore did not create a non-symlink regular store"
+
+run_forge_command \
+  "restored store check" \
+  --store "$restored_store" \
+  store check \
+  --output json >"$restored_check_report"
+chmod 600 -- "$restored_check_report"
+
+run_forge_command \
+  "canary workflow inspection" \
+  --store "$restored_store" \
+  inspect "$canary_workflow_id" \
+  --output json >"$canary_report"
+chmod 600 -- "$canary_report"
+
+mkdir -m 0700 -- "$ops_workspace"
+openssl rand -hex 32 >"$ops_token_file"
+chmod 600 -- "$ops_token_file"
+ops_token_value="$(tr -d '\r\n' <"$ops_token_file")"
+[[ "$ops_token_value" =~ ^[0-9a-f]{64}$ ]] ||
+  fail "generated Ops token is invalid"
+ops_token_for_curl="${ops_token_value//\\/\\\\}"
+ops_token_for_curl="${ops_token_for_curl//\"/\\\"}"
+printf 'header = "Authorization: Bearer %s"\n' \
+  "$ops_token_for_curl" >"$ops_curl_config"
+unset ops_token_value ops_token_for_curl
+chmod 600 -- "$ops_curl_config"
+[[ "$(stat -c '%a' -- "$ops_token_file")" = 600 &&
+  "$(stat -c '%a' -- "$ops_curl_config")" = 600 ]] ||
+  fail "Ops token and curl config must have mode 0600"
+
+ops_remaining="$(remaining_rto_budget "Forge Ops startup")"
+timeout \
+  --foreground \
+  --signal=TERM \
+  --kill-after=2s \
+  "${ops_remaining}s" \
+  env \
+  -u CREDENTIALS_DIRECTORY \
+  -u FORGE_BACKUP_OFFHOST_COMMAND_FILE \
+  -u FORGE_BACKUP_OFFHOST_DESTINATION_FILE \
+  -u FORGE_BACKUP_OFFHOST_GENERATION_FILE \
+  -u FORGE_OPS_BEARER_TOKEN \
+  FORGE_PRODUCTION_MODE=1 \
+  "FORGE_OPS_BEARER_TOKEN_FILE=$ops_token_file" \
+  "$forge_binary" \
+  --store "$restored_store" \
+  ops serve \
+  --project-root "$ops_workspace" \
+  --host 127.0.0.1 \
+  --port 0 \
+  >"$ops_startup_log" \
+  2>"$ops_stderr_log" &
+ops_pid="$!"
+chmod 600 -- "$ops_startup_log" "$ops_stderr_log"
+
+ops_bind_addr=""
+ops_snapshot_status=""
+while [[ "$ops_snapshot_status" != 200 ]]; do
+  remaining_rto_budget "authenticated Ops readiness probe" >/dev/null
+  if ! kill -0 "$ops_pid" 2>/dev/null; then
+    if wait "$ops_pid"; then
+      ops_exit_status=0
+    else
+      ops_exit_status=$?
+    fi
+    ops_pid=""
+    fail "Forge Ops exited before readiness with status $ops_exit_status"
+  fi
+
+  if [[ -z "$ops_bind_addr" ]] &&
+    grep -Fq '"schema_version": "forge.ops.serve.v1"' "$ops_startup_log" &&
+    grep -Fq '"status": "listening"' "$ops_startup_log" &&
+    grep -Fq '"local_only": true' "$ops_startup_log"; then
+    ops_bind_addr="$(
+      awk -F'"' '$2 == "bind_addr" { print $4; exit }' "$ops_startup_log"
+    )"
+    if [[ -n "$ops_bind_addr" ]]; then
+      [[ "$ops_bind_addr" =~ ^127\.0\.0\.1:([1-9][0-9]{0,4})$ ]] ||
+        fail "Forge Ops reported an unsafe loopback bind address"
+      ((10#${BASH_REMATCH[1]} <= 65535)) ||
+        fail "Forge Ops reported an invalid loopback port"
+    fi
+  fi
+
+  if [[ -n "$ops_bind_addr" ]]; then
+    ops_probe_remaining="$(
+      remaining_rto_budget "authenticated Ops snapshot request"
+    )"
+    ops_curl_max_time="$ops_probe_remaining"
+    if ((ops_curl_max_time > 2)); then
+      ops_curl_max_time=2
+    fi
+    ops_snapshot_status="$(
+      timeout \
+        --foreground \
+        --signal=TERM \
+        --kill-after=1s \
+        "${ops_probe_remaining}s" \
+        curl \
+        --disable \
+        --noproxy '*' \
+        --proto '=http' \
+        --config "$ops_curl_config" \
+        --silent \
+        --connect-timeout 1 \
+        --max-time "$ops_curl_max_time" \
+        --output "$ops_snapshot_report" \
+        --write-out '%{http_code}' \
+        "http://$ops_bind_addr/api/snapshot" ||
+        true
+    )"
+  fi
+
+  if [[ "$ops_snapshot_status" != 200 ]]; then
+    sleep 0.1
+  fi
+done
+
+[[ -f "$ops_snapshot_report" && ! -L "$ops_snapshot_report" ]] ||
+  fail "authenticated Ops snapshot did not create a safe report"
+chmod 600 -- "$ops_snapshot_report"
+grep -Fq '"schema_version": "forge.ops.snapshot.v1"' "$ops_snapshot_report" ||
+  fail "authenticated Ops snapshot returned an unexpected schema"
+grep -Fq '"status": "ok"' "$ops_snapshot_report" ||
+  fail "authenticated Ops snapshot did not report ready status"
+
+if ! kill -TERM "$ops_pid" 2>/dev/null; then
+  if wait "$ops_pid"; then
+    ops_wait_status=0
+  else
+    ops_wait_status=$?
+  fi
+  ops_pid=""
+  fail "Forge Ops exited before graceful shutdown with status $ops_wait_status"
+fi
+if wait "$ops_pid"; then
+  ops_wait_status=0
+else
+  ops_wait_status=$?
+fi
+ops_pid=""
+case "$ops_wait_status" in
+  0 | 143) ;;
+  124 | 137)
+    fail "Forge Ops exhausted the remaining RTO budget"
+    ;;
+  *)
+    fail "Forge Ops did not stop cleanly; status=$ops_wait_status"
+    ;;
+esac
+rm -f -- "$ops_token_file" "$ops_curl_config"
+
+run_forge_command \
+  "final restored store check" \
+  --store "$restored_store" \
+  store check \
+  --output json >"$final_check_report"
+chmod 600 -- "$final_check_report"
+
+read -r final_source_sha256 _ < <(sha256sum -- "$downloaded_store")
+[[ "$final_source_sha256" = "$remote_sha256" ]] ||
+  fail "downloaded recovery source changed during the restore drill"
+[[ ! -e "$restored_store.secret.key" &&
+  ! -L "$restored_store.secret.key" ]] ||
+  fail "Forge created an adjacent vault key instead of using out-of-band credentials"
+for restored_sidecar in "$restored_store-wal" "$restored_store-shm"; do
+  if [[ -e "$restored_sidecar" || -L "$restored_sidecar" ]]; then
+    [[ -f "$restored_sidecar" && ! -L "$restored_sidecar" ]] ||
+      fail "Forge created an unsafe restored store sidecar: $restored_sidecar"
+    chmod 600 -- "$restored_sidecar"
+  fi
+done
+
+hot_script_finished_milliseconds="$(monotonic_milliseconds)"
+((hot_script_finished_milliseconds >= hot_script_started_milliseconds)) ||
+  fail "monotonic clock moved backwards"
+hot_script_rto_milliseconds="$((hot_script_finished_milliseconds - hot_script_started_milliseconds))"
+hot_script_rto_seconds="$(((hot_script_rto_milliseconds + 999) / 1000))"
+
+drill_finished_epoch_text="$(date -u +%s)"
+drill_finished_epoch=0
+parse_nonnegative_integer \
+  "$drill_finished_epoch_text" "drill finish UTC epoch" drill_finished_epoch
+((drill_finished_epoch >= incident_epoch)) ||
+  fail "drill finish UTC epoch is earlier than the incident epoch"
+rto_seconds="$((drill_finished_epoch - incident_epoch))"
+((rto_seconds >= 0)) || fail "calculated RTO must be non-negative"
+((rto_seconds <= max_rto_seconds)) ||
+  fail "calculated RTO exceeds --max-rto-seconds"
+
+read -r target_sha256 _ < <(printf '%s' "$target" | sha256sum)
+[[ "$target_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  fail "could not calculate the off-host target identity"
+
+cat >"$drill_report" <<EOF
+{
+  "schema_version": "forge.restore_drill.v1",
+  "status": "passed",
+  "object": "$(json_escape "$object")",
+  "target": "$(json_escape "$target")",
+  "target_sha256": "$target_sha256",
+  "object_epoch_utc": $object_epoch,
+  "object_epoch_source": "canonical_object_name",
+  "incident_epoch_utc": $incident_epoch,
+  "incident_epoch_source": "archived_external_alert",
+  "drill_started_epoch_utc": $drill_started_epoch,
+  "drill_finished_epoch_utc": $drill_finished_epoch,
+  "rpo_seconds": $rpo_seconds,
+  "max_rpo_seconds": $max_rpo_seconds,
+  "rto_seconds": $rto_seconds,
+  "max_rto_seconds": $max_rto_seconds,
+  "hot_script_rto_milliseconds": $hot_script_rto_milliseconds,
+  "hot_script_rto_seconds": $hot_script_rto_seconds,
+  "sha256": "$remote_sha256",
+  "forge_version": "$(json_escape "$forge_version")",
+  "forge_sha256": "$forge_sha256",
+  "uploader_sha256": "$uploader_sha256",
+  "approved_by": "$(json_escape "$approved_by")",
+  "canary_workflow_id": "$(json_escape "$canary_workflow_id")",
+  "canary_verified": true,
+  "ops_snapshot_verified": true,
+  "downloaded_store": "$(json_escape "$downloaded_store")",
+  "restored_store": "$(json_escape "$restored_store")",
+  "source_check_report": "$(json_escape "$source_check_report")",
+  "restore_report": "$(json_escape "$restore_report")",
+  "restored_check_report": "$(json_escape "$restored_check_report")",
+  "canary_report": "$(json_escape "$canary_report")",
+  "ops_snapshot_report": "$(json_escape "$ops_snapshot_report")",
+  "final_check_report": "$(json_escape "$final_check_report")"
+}
+EOF
+chmod 600 -- "$drill_report"
+
+trap - EXIT
+printf 'forge restore drill: passed; report=%s RPO=%ss RTO=%ss hot-script=%ss\n' \
+  "$drill_report" "$rpo_seconds" "$rto_seconds" "$hot_script_rto_seconds"

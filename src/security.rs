@@ -635,7 +635,10 @@ fn url_candidates(
 }
 
 fn local_ai_fallback_candidates(input: &str) -> Vec<SecretCandidate> {
-    let lower = input.to_lowercase();
+    const VALUE_WINDOW_BYTES: usize = 128;
+
+    let lower = input.to_ascii_lowercase();
+    let spans = token_spans(input);
     for (marker, kind) in [
         ("password", "password"),
         ("senha", "password"),
@@ -645,26 +648,31 @@ fn local_ai_fallback_candidates(input: &str) -> Vec<SecretCandidate> {
         ("api key", "api_key"),
         ("database password", "password"),
     ] {
-        let Some(marker_start) = lower.find(marker) else {
-            continue;
-        };
-        let marker_end = marker_start + marker.len();
-        for (start, end) in token_spans(input) {
-            if start < marker_end {
-                continue;
+        let mut search_offset = 0;
+        while let Some(relative_start) = lower[search_offset..].find(marker) {
+            let marker_start = search_offset + relative_start;
+            let marker_end = marker_start + marker.len();
+            for &(start, end) in &spans {
+                if start < marker_end {
+                    continue;
+                }
+                if start.saturating_sub(marker_end) > VALUE_WINDOW_BYTES {
+                    break;
+                }
+                let value = &input[start..end];
+                if is_local_fallback_secret_value(value) {
+                    return vec![SecretCandidate {
+                        kind,
+                        provider: "generic",
+                        classification: "secret",
+                        confidence: 0.64,
+                        source: "local_ai_fallback",
+                        start,
+                        end,
+                    }];
+                }
             }
-            let value = &input[start..end];
-            if is_local_fallback_secret_value(value) {
-                return vec![SecretCandidate {
-                    kind,
-                    provider: "generic",
-                    classification: "secret",
-                    confidence: 0.64,
-                    source: "local_ai_fallback",
-                    start,
-                    end,
-                }];
-            }
+            search_offset = marker_end;
         }
     }
     Vec::new()
@@ -1219,6 +1227,38 @@ AUTHORIZATION=Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.signature123
             report.sanitized_text,
             "The production database password {{vault:project.generic.default}}"
         );
+    }
+
+    #[test]
+    fn secret_guardrail_does_not_treat_distant_schema_versions_as_token_values() {
+        let input = format!(
+            r#"{{"token_source":".forge/design/tokens.json","description":"{}","schema_version":"forge.operating_context.v1"}}"#,
+            "ordinary context ".repeat(20)
+        );
+
+        let report = sanitize_prompt_secrets(&input, SecretSanitizationOptions::default());
+
+        assert_eq!(report.status, "clean");
+        assert_eq!(report.detection_count, 0);
+        assert!(report.local_ai_fallback_attempted);
+        assert_eq!(report.sanitized_text, input);
+    }
+
+    #[test]
+    fn secret_guardrail_checks_later_marker_occurrences_within_the_safe_window() {
+        let secret = "Abc123456789";
+        let input = format!(
+            "token source is documented; {} token {secret}",
+            "ordinary context ".repeat(12)
+        );
+
+        let report = sanitize_prompt_secrets(&input, SecretSanitizationOptions::default());
+
+        assert_eq!(report.status, "sanitized");
+        assert_eq!(report.detection_count, 1);
+        assert_eq!(report.detections[0].source, "local_ai_fallback");
+        assert_eq!(report.detections[0].kind, "token");
+        assert!(!report.sanitized_text.contains(secret));
     }
 
     #[test]

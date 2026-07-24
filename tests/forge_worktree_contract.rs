@@ -163,7 +163,7 @@ fn worktree_binding_routes_context_and_runs_internal_test_sandbox() {
             .arg("--store")
             .arg(&store)
             .args(["context", "--workflow", workflow_id, "--task", "task-001"])
-            .args(["--budget", "4096", "--output", "json"]),
+            .args(["--budget", "4096", "--view", "full", "--output", "json"]),
     );
     assert_eq!(
         context_before["worktree"]["worktree_root"],
@@ -189,6 +189,8 @@ fn worktree_binding_routes_context_and_runs_internal_test_sandbox() {
             "codex",
             "--budget",
             "4096",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -263,7 +265,7 @@ fn worktree_binding_routes_context_and_runs_internal_test_sandbox() {
             .arg("--store")
             .arg(&store)
             .args(["context", "--workflow", workflow_id, "--task", "task-001"])
-            .args(["--budget", "4096", "--output", "json"]),
+            .args(["--budget", "4096", "--view", "full", "--output", "json"]),
     );
     assert_ne!(
         context_before["context_sha256"],
@@ -395,14 +397,14 @@ fn task_binding_precedes_workflow_binding() {
             .arg("--store")
             .arg(&store)
             .args(["context", "--workflow", workflow_id, "--task", "task-001"])
-            .args(["--budget", "4096", "--output", "json"]),
+            .args(["--budget", "4096", "--view", "full", "--output", "json"]),
     );
     let workflow_default = run_json(
         forge()
             .arg("--store")
             .arg(&store)
             .args(["context", "--workflow", workflow_id, "--task", "task-002"])
-            .args(["--budget", "4096", "--output", "json"]),
+            .args(["--budget", "4096", "--view", "full", "--output", "json"]),
     );
     assert_eq!(
         task_specific["worktree"]["worktree_root"],
@@ -522,7 +524,7 @@ fn custom_worktree_id_survives_binding_context_and_handoff() {
             .arg("--store")
             .arg(&store)
             .args(["context", "--workflow", workflow_id, "--task", "task-001"])
-            .args(["--budget", "4096", "--output", "json"]),
+            .args(["--budget", "4096", "--view", "full", "--output", "json"]),
     );
     assert_eq!(context["worktree"]["id"], "custom_worktree");
 
@@ -537,6 +539,8 @@ fn custom_worktree_id_survives_binding_context_and_handoff() {
         "codex",
         "--budget",
         "4096",
+        "--view",
+        "full",
         "--output",
         "json",
     ]));

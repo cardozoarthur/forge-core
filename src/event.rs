@@ -42,11 +42,11 @@ use chrono::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::sleep;
@@ -85,6 +85,13 @@ pub const EVENT_EGRESS_EMIT_SCHEMA_VERSION: &str = "forge.event_egress_emit.v1";
 pub const EVENT_EGRESS_REQUEST_SCHEMA_VERSION: &str = "forge.event_egress_request.v1";
 pub const EVENT_EGRESS_DELIVERY_EVIDENCE_SCHEMA_VERSION: &str =
     "forge.event_egress_delivery_evidence.v1";
+const WEBHOOK_TIMESTAMP_HEADER: &str = "x-forge-timestamp";
+const WEBHOOK_NONCE_HEADER: &str = "x-forge-nonce";
+const WEBHOOK_SIGNATURE_MAX_SKEW_SECONDS: i64 = 300;
+const WEBHOOK_RATE_LIMIT_PER_MINUTE_DEFAULT: usize = 60;
+const WEBHOOK_ALLOW_INSECURE_LOCAL_ENV: &str = "FORGE_ALLOW_INSECURE_LOCAL_WEBHOOK";
+const WEBHOOK_RATE_LIMIT_ENV: &str = "FORGE_WEBHOOK_RATE_LIMIT_PER_MINUTE";
+const MIN_WEBHOOK_HMAC_SECRET_BYTES: usize = 32;
 
 type WebhookIngressProgressCallback<'a> =
     Option<&'a mut dyn FnMut(&[EventWebhookIngressEntry], &str) -> Result<()>>;
@@ -944,6 +951,14 @@ pub struct EventWebhookIngressAuthReport {
     pub signature_header: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret_env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp_header: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce_header: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_clock_skew_seconds: Option<i64>,
+    pub replay_protection: bool,
+    pub rate_limit_per_minute: usize,
 }
 
 struct WebhookHttpRequest {
@@ -957,6 +972,14 @@ struct WebhookHmacVerifier {
     secret_env: String,
     signature_header: String,
     secret: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct WebhookIngressSecurityState {
+    seen_nonces: BTreeMap<String, Instant>,
+    requests_by_peer: BTreeMap<IpAddr, VecDeque<Instant>>,
+    rate_limit_per_minute: usize,
+    allow_unsigned_mutations: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5322,6 +5345,20 @@ fn run_event_webhook_ingress_server_with_progress(
     let transport = normalize_text(Some(transport)).unwrap_or_else(|| "webhook".to_string());
     let schema = normalize_text(schema);
     let hmac_verifier = build_webhook_hmac_verifier(hmac_secret_env, signature_header)?;
+    let bind_addresses = resolve_webhook_bind_addresses(&host, port)?;
+    let local_only = bind_addresses
+        .iter()
+        .all(|address| address.ip().is_loopback());
+    let allow_unsigned_mutations = local_only
+        && event_env_flag(WEBHOOK_ALLOW_INSECURE_LOCAL_ENV)
+        && !event_env_flag("FORGE_PRODUCTION_MODE");
+    validate_webhook_ingress_security(
+        local_only,
+        hmac_verifier.is_some(),
+        &default_action,
+        allow_unsigned_mutations,
+    )?;
+    let rate_limit_per_minute = configured_webhook_rate_limit();
     let auth = EventWebhookIngressAuthReport {
         required: hmac_verifier.is_some(),
         scheme: hmac_verifier
@@ -5334,16 +5371,29 @@ fn run_event_webhook_ingress_server_with_progress(
         secret_env: hmac_verifier
             .as_ref()
             .map(|verifier| verifier.secret_env.clone()),
+        timestamp_header: hmac_verifier
+            .as_ref()
+            .map(|_| WEBHOOK_TIMESTAMP_HEADER.to_string()),
+        nonce_header: hmac_verifier
+            .as_ref()
+            .map(|_| WEBHOOK_NONCE_HEADER.to_string()),
+        max_clock_skew_seconds: hmac_verifier
+            .as_ref()
+            .map(|_| WEBHOOK_SIGNATURE_MAX_SKEW_SECONDS),
+        replay_protection: hmac_verifier.is_some(),
+        rate_limit_per_minute,
     };
     let max_requests = max_requests.max(1);
     let max_body_bytes = max_body_bytes.clamp(256, 1_048_576);
-    let listener = TcpListener::bind(format!("{host}:{port}"))
+    let listener = TcpListener::bind(bind_addresses.as_slice())
         .with_context(|| format!("failed to bind webhook ingress on {host}:{port}"))?;
     let bind_address = listener.local_addr()?.to_string();
     let project_root = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
     let mut events = Vec::new();
+    let mut security_state =
+        WebhookIngressSecurityState::new(allow_unsigned_mutations, rate_limit_per_minute);
     let stop_file_display = stop_file.map(|path| path.display().to_string());
     let mut stop_requested = false;
     let mut stopped_reason = "max_requests_reached".to_string();
@@ -5367,10 +5417,11 @@ fn run_event_webhook_ingress_server_with_progress(
                 break;
             }
             match listener.accept() {
-                Ok((mut stream, _)) => {
+                Ok((mut stream, peer_address)) => {
                     let entry = build_webhook_ingress_entry_from_stream(
                         store,
                         &mut stream,
+                        peer_address,
                         &path,
                         &default_origin,
                         &default_action,
@@ -5380,6 +5431,7 @@ fn run_event_webhook_ingress_server_with_progress(
                         route_after_ingest,
                         max_body_bytes,
                         hmac_verifier.as_ref(),
+                        &mut security_state,
                     );
                     write_webhook_ingress_response(&mut stream, &entry)?;
                     events.push(entry);
@@ -5406,10 +5458,11 @@ fn run_event_webhook_ingress_server_with_progress(
         }
     } else {
         for _ in 0..max_requests {
-            let (mut stream, _) = listener.accept()?;
+            let (mut stream, peer_address) = listener.accept()?;
             let entry = build_webhook_ingress_entry_from_stream(
                 store,
                 &mut stream,
+                peer_address,
                 &path,
                 &default_origin,
                 &default_action,
@@ -5419,6 +5472,7 @@ fn run_event_webhook_ingress_server_with_progress(
                 route_after_ingest,
                 max_body_bytes,
                 hmac_verifier.as_ref(),
+                &mut security_state,
             );
             write_webhook_ingress_response(&mut stream, &entry)?;
             events.push(entry);
@@ -5477,6 +5531,7 @@ fn emit_webhook_ingress_progress(
 fn build_webhook_ingress_entry_from_stream(
     store: &ForgeStore,
     stream: &mut TcpStream,
+    peer_address: SocketAddr,
     path: &str,
     default_origin: &str,
     default_action: &str,
@@ -5486,10 +5541,12 @@ fn build_webhook_ingress_entry_from_stream(
     route_after_ingest: bool,
     max_body_bytes: usize,
     hmac_verifier: Option<&WebhookHmacVerifier>,
+    security_state: &mut WebhookIngressSecurityState,
 ) -> EventWebhookIngressEntry {
     match handle_webhook_ingress_stream(
         store,
         stream,
+        peer_address,
         path,
         default_origin,
         default_action,
@@ -5499,22 +5556,44 @@ fn build_webhook_ingress_entry_from_stream(
         route_after_ingest,
         max_body_bytes,
         hmac_verifier,
+        security_state,
     ) {
         Ok(entry) => entry,
-        Err(error) => EventWebhookIngressEntry {
-            request_id: format!("webhook_{}", Uuid::new_v4().to_string().replace('-', "")),
-            method: "unknown".to_string(),
-            path: path.to_string(),
-            http_status: 400,
-            status: "webhook_ingress_failed".to_string(),
-            origin: default_origin.to_string(),
-            action: default_action.to_string(),
-            auth_verified: hmac_verifier.map(|_| false),
-            event_id: None,
-            event: None,
-            route: None,
-            error: Some(error.to_string()),
-        },
+        Err(error) => {
+            let error_message = error.to_string();
+            let http_status = webhook_ingress_error_status(&error_message);
+            EventWebhookIngressEntry {
+                request_id: format!("webhook_{}", Uuid::new_v4().to_string().replace('-', "")),
+                method: "unknown".to_string(),
+                path: path.to_string(),
+                http_status,
+                status: "webhook_ingress_failed".to_string(),
+                origin: default_origin.to_string(),
+                action: default_action.to_string(),
+                auth_verified: hmac_verifier.map(|_| false),
+                event_id: None,
+                event: None,
+                route: None,
+                error: Some(error_message),
+            }
+        }
+    }
+}
+
+fn webhook_ingress_error_status(message: &str) -> u16 {
+    if message.contains("rate limit exceeded") {
+        429
+    } else if message.contains("replay detected") {
+        409
+    } else if message.contains("HMAC")
+        || message.contains("signature")
+        || message.contains("timestamp")
+        || message.contains("nonce")
+        || message.contains("requires authentication")
+    {
+        401
+    } else {
+        400
     }
 }
 
@@ -6139,16 +6218,25 @@ fn deliver_event_egress(
     let body = serde_json::to_vec(request)?;
     let signature = build_event_egress_auth_headers(&adapter.adapter, &body)?;
     let response = if parsed.scheme.eq_ignore_ascii_case("https") {
+        let resolved_address = if event_env_value_is("FORGE_EVENT_EGRESS_HTTPS_MODE", "simulate") {
+            None
+        } else {
+            Some(resolve_event_egress_address(&parsed)?)
+        };
         post_event_egress_https_curl(
             endpoint,
+            &parsed,
+            resolved_address,
             &body,
             timeout,
             max_response_bytes,
             &signature.headers,
         )?
     } else {
+        let resolved_address = resolve_event_egress_address(&parsed)?;
         post_event_egress_json(
             &parsed,
+            resolved_address,
             &body,
             timeout,
             max_response_bytes,
@@ -6475,9 +6563,12 @@ fn build_event_egress_auth_headers(
         .and_then(|value| normalize_text(Some(value)))
         .unwrap_or_else(|| "X-Forge-Signature".to_string());
     let signature_header = normalize_http_header_name("signature_header", &signature_header)?;
+    let timestamp = Utc::now().timestamp().to_string();
+    let nonce = Uuid::new_v4().simple().to_string();
+    let signed_payload = webhook_signature_payload(&timestamp, &nonce, body);
     let signature = format!(
         "sha256={}",
-        hex_encode(&hmac_sha256(secret.as_bytes(), body))
+        hex_encode(&hmac_sha256(secret.as_bytes(), &signed_payload))
     );
     Ok(EventEgressSignatureHeaders {
         auth_scheme: "hmac".to_string(),
@@ -6486,7 +6577,11 @@ fn build_event_egress_auth_headers(
         secret_env: resolved_secret.env_name,
         secret_source: resolved_secret.source,
         credential_vault: resolved_secret.credential_vault,
-        headers: vec![(signature_header, signature)],
+        headers: vec![
+            (signature_header, signature),
+            ("X-Forge-Timestamp".to_string(), timestamp),
+            ("X-Forge-Nonce".to_string(), nonce),
+        ],
     })
 }
 
@@ -6631,6 +6726,15 @@ fn parse_http_event_endpoint(endpoint: &str) -> Result<ParsedHttpEndpoint> {
     if host.trim().is_empty() {
         bail!("event egress endpoint host must not be empty");
     }
+    if !host
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':'))
+    {
+        bail!("event egress endpoint host contains unsupported characters");
+    }
+    if path.contains('\r') || path.contains('\n') {
+        bail!("event egress endpoint path must not contain CR/LF");
+    }
     Ok(ParsedHttpEndpoint {
         scheme,
         host,
@@ -6667,23 +6771,79 @@ fn event_egress_allowed_host(host: &str, allowed_hosts: &[String]) -> bool {
 fn is_local_http_host(host: &str) -> bool {
     let host = host.trim().trim_matches('[').trim_matches(']');
     host.eq_ignore_ascii_case("localhost")
-        || host == "::1"
-        || host == "0:0:0:0:0:0:0:1"
-        || host.starts_with("127.")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn resolve_event_egress_address(endpoint: &ParsedHttpEndpoint) -> Result<SocketAddr> {
+    let addresses = (endpoint.host.as_str(), endpoint.port)
+        .to_socket_addrs()
+        .with_context(|| "failed to resolve event egress endpoint")?
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        bail!("event egress endpoint did not resolve to any address");
+    }
+    let explicit_loopback = is_local_http_host(&endpoint.host);
+    for address in &addresses {
+        if address.ip().is_loopback() && explicit_loopback {
+            continue;
+        }
+        if !ip_is_public_for_outbound(address.ip()) {
+            bail!(
+                "event egress endpoint resolved to blocked private, link-local or reserved address"
+            );
+        }
+    }
+    Ok(addresses[0])
+}
+
+fn ip_is_public_for_outbound(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_multicast()
+                || ip.is_documentation()
+                || octets[0] == 0
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+                || (octets[0] == 198 && matches!(octets[1], 18 | 19))
+                || octets[0] >= 240)
+        }
+        IpAddr::V6(ip) => {
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return ip_is_public_for_outbound(IpAddr::V4(mapped));
+            }
+            let segments = ip.segments();
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || segments[..6].iter().all(|segment| *segment == 0)
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] & 0xffc0) == 0xfec0
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                || (segments[0] == 0x0100
+                    && segments[1] == 0
+                    && segments[2] == 0
+                    && segments[3] == 0))
+        }
+    }
 }
 
 fn post_event_egress_json(
     endpoint: &ParsedHttpEndpoint,
+    address: SocketAddr,
     body: &[u8],
     timeout: Duration,
     max_response_bytes: usize,
     extra_headers: &[(String, String)],
 ) -> Result<EventEgressHttpResponse> {
-    let address = (endpoint.host.as_str(), endpoint.port)
-        .to_socket_addrs()
-        .with_context(|| "failed to resolve event egress endpoint")?
-        .next()
-        .with_context(|| "event egress endpoint did not resolve to any address")?;
     let mut stream = TcpStream::connect_timeout(&address, timeout)
         .with_context(|| "failed to connect to event egress endpoint")?;
     stream.set_read_timeout(Some(timeout))?;
@@ -6716,6 +6876,9 @@ fn post_event_egress_json(
     limited.read_to_end(&mut response)?;
     let truncated = response.len() >= read_limit;
     let status_code = parse_http_event_status_code(&response)?;
+    if (300..400).contains(&status_code) {
+        bail!("event egress redirects are denied");
+    }
     let response_body = http_event_response_body(&response);
     Ok(EventEgressHttpResponse {
         status_code,
@@ -6730,14 +6893,14 @@ fn post_event_egress_json(
 
 fn post_event_egress_https_curl(
     endpoint: &str,
+    parsed: &ParsedHttpEndpoint,
+    resolved_address: Option<SocketAddr>,
     body: &[u8],
     timeout: Duration,
     max_response_bytes: usize,
     extra_headers: &[(String, String)],
 ) -> Result<EventEgressHttpResponse> {
-    let simulated = env::var("FORGE_EVENT_EGRESS_HTTPS_MODE")
-        .map(|value| value.eq_ignore_ascii_case("simulate"))
-        .unwrap_or(false);
+    let simulated = event_env_value_is("FORGE_EVENT_EGRESS_HTTPS_MODE", "simulate");
     if simulated {
         let body = json!({
             "ok": true,
@@ -6756,9 +6919,22 @@ fn post_event_egress_https_curl(
     }
 
     let timeout_seconds = timeout.as_secs().max(1).to_string();
+    let resolved_address =
+        resolved_address.with_context(|| "event egress HTTPS endpoint address was not resolved")?;
+    let resolve_value = curl_resolve_value(&parsed.host, parsed.port, resolved_address.ip());
     let mut command = Command::new("curl");
     command.args([
         "-sS",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--max-redirs",
+        "0",
+        "--noproxy",
+        "*",
+        "--resolve",
+        &resolve_value,
         "--max-time",
         &timeout_seconds,
         "-X",
@@ -6793,6 +6969,9 @@ fn post_event_egress_https_curl(
         .with_context(|| "failed to wait for HTTPS event egress curl")?;
     let (status_code, response_body) = parse_curl_http_status(&output.stdout)
         .unwrap_or_else(|| (if output.status.success() { 200 } else { 0 }, output.stdout));
+    if (300..400).contains(&status_code) {
+        bail!("event egress redirects are denied");
+    }
     let response_body = if response_body.is_empty() && !output.status.success() {
         output.stderr
     } else {
@@ -6804,6 +6983,13 @@ fn post_event_egress_https_curl(
         body: response_body.into_iter().take(max_response_bytes).collect(),
         truncated,
     })
+}
+
+fn curl_resolve_value(host: &str, port: u16, ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(ip) => format!("{host}:{port}:{ip}"),
+        IpAddr::V6(ip) => format!("{host}:{port}:[{ip}]"),
+    }
 }
 
 fn parse_curl_http_status(output: &[u8]) -> Option<(u16, Vec<u8>)> {
@@ -6842,6 +7028,7 @@ fn http_event_response_body(response: &[u8]) -> &[u8] {
 fn handle_webhook_ingress_stream(
     store: &ForgeStore,
     stream: &mut TcpStream,
+    peer_address: SocketAddr,
     expected_path: &str,
     default_origin: &str,
     default_action: &str,
@@ -6851,10 +7038,12 @@ fn handle_webhook_ingress_stream(
     route_after_ingest: bool,
     max_body_bytes: usize,
     hmac_verifier: Option<&WebhookHmacVerifier>,
+    security_state: &mut WebhookIngressSecurityState,
 ) -> Result<EventWebhookIngressEntry> {
     stream.set_read_timeout(Some(Duration::from_secs(15)))?;
     stream.set_write_timeout(Some(Duration::from_secs(15)))?;
     let request_id = format!("webhook_{}", Uuid::new_v4().to_string().replace('-', ""));
+    security_state.check_rate_limit(peer_address.ip())?;
     let request = read_webhook_http_request(stream, max_body_bytes)?;
     if request.method != "POST" {
         bail!("webhook ingress accepts POST only");
@@ -6866,7 +7055,7 @@ fn handle_webhook_ingress_stream(
         );
     }
     let auth_verified = if let Some(verifier) = hmac_verifier {
-        verify_webhook_hmac(verifier, &request)?;
+        verify_webhook_hmac(verifier, &request, security_state)?;
         Some(true)
     } else {
         None
@@ -6883,6 +7072,12 @@ fn handle_webhook_ingress_stream(
     )?;
     let origin = inbound_input.origin.clone();
     let action = inbound_input.action.clone();
+    if event_route_action_mutates_workflow(&normalized_action(&action))
+        && auth_verified != Some(true)
+        && !security_state.allow_unsigned_mutations
+    {
+        bail!("mutable webhook action `{action}` requires authentication");
+    }
     let operating_context = load_project_operating_context(project_root)?;
     let ingest = ingest_inbound_event_with_context(store, inbound_input, &operating_context)?;
     let event_id = ingest.event.id.clone();
@@ -6939,7 +7134,11 @@ fn read_webhook_http_request(
         }
         request.extend_from_slice(&buffer[..read]);
         if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-            break index + 4;
+            let header_end = index + 4;
+            if header_end > 16_384 {
+                bail!("webhook request headers exceeded 16KiB");
+            }
+            break header_end;
         }
         if request.len() > 16_384 {
             bail!("webhook request headers exceeded 16KiB");
@@ -6962,14 +7161,27 @@ fn read_webhook_http_request(
         .next()
         .unwrap_or("/")
         .to_string();
-    let content_length = headers
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("Content-Length:")
-                .or_else(|| line.strip_prefix("content-length:"))
-                .and_then(|value| value.trim().parse::<usize>().ok())
+    let parsed_headers = parse_webhook_headers(&headers)?;
+    if parsed_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+    {
+        bail!("webhook ingress does not accept Transfer-Encoding requests");
+    }
+    let content_lengths = parsed_headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .map(|(_, value)| {
+            value
+                .trim()
+                .parse::<usize>()
+                .with_context(|| "webhook request has invalid Content-Length")
         })
-        .with_context(|| "webhook request requires Content-Length")?;
+        .collect::<Result<Vec<_>>>()?;
+    if content_lengths.len() != 1 {
+        bail!("webhook request requires exactly one Content-Length header");
+    }
+    let content_length = content_lengths[0];
     if content_length > max_body_bytes {
         bail!("webhook body exceeds max_body_bytes ({max_body_bytes})");
     }
@@ -6983,7 +7195,7 @@ fn read_webhook_http_request(
     Ok(WebhookHttpRequest {
         method,
         path,
-        headers: parse_webhook_headers(&headers),
+        headers: parsed_headers,
         body: request[header_end..header_end + content_length].to_vec(),
     })
 }
@@ -7039,13 +7251,17 @@ fn enrich_webhook_event_data(
     }
 }
 
-fn parse_webhook_headers(headers: &str) -> Vec<(String, String)> {
+fn parse_webhook_headers(headers: &str) -> Result<Vec<(String, String)>> {
     headers
         .lines()
         .skip(1)
-        .filter_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (name, value) = line
+                .split_once(':')
+                .with_context(|| "malformed webhook HTTP header")?;
+            let name = normalize_http_header_name("webhook header", name)?;
+            Ok((name.to_ascii_lowercase(), value.trim().to_string()))
         })
         .collect()
 }
@@ -7057,11 +7273,13 @@ fn build_webhook_hmac_verifier(
     let Some(secret_env) = normalize_text(hmac_secret_env) else {
         return Ok(None);
     };
-    let signature_header = required_text("signature_header", signature_header)?;
+    let signature_header = normalize_http_header_name("signature_header", signature_header)?;
     let secret = env::var(&secret_env)
         .with_context(|| format!("webhook HMAC secret env `{secret_env}` is not set"))?;
-    if secret.is_empty() {
-        bail!("webhook HMAC secret env `{secret_env}` is empty");
+    if secret.len() < MIN_WEBHOOK_HMAC_SECRET_BYTES {
+        bail!(
+            "webhook HMAC secret env `{secret_env}` must contain at least {MIN_WEBHOOK_HMAC_SECRET_BYTES} bytes"
+        );
     }
     Ok(Some(WebhookHmacVerifier {
         secret_env,
@@ -7070,27 +7288,181 @@ fn build_webhook_hmac_verifier(
     }))
 }
 
-fn verify_webhook_hmac(verifier: &WebhookHmacVerifier, request: &WebhookHttpRequest) -> Result<()> {
+fn verify_webhook_hmac(
+    verifier: &WebhookHmacVerifier,
+    request: &WebhookHttpRequest,
+    security_state: &mut WebhookIngressSecurityState,
+) -> Result<()> {
     let header_name = verifier.signature_header.to_ascii_lowercase();
-    let signature = request
-        .headers
-        .iter()
-        .find(|(name, _)| name == &header_name)
-        .map(|(_, value)| value.trim())
-        .with_context(|| {
-            format!(
-                "webhook request missing signature header `{}`",
-                verifier.signature_header
-            )
-        })?;
+    let signature = unique_webhook_header(request, &header_name)?.with_context(|| {
+        format!(
+            "webhook request missing signature header `{}`",
+            verifier.signature_header
+        )
+    })?;
     let signature_hex = signature.strip_prefix("sha256=").unwrap_or(signature);
     let provided = decode_hex_bytes(signature_hex)
         .with_context(|| "webhook HMAC signature must be hex or sha256=<hex>")?;
-    let expected = hmac_sha256(&verifier.secret, &request.body);
+    let timestamp =
+        unique_webhook_header(request, WEBHOOK_TIMESTAMP_HEADER)?.with_context(|| {
+            format!("webhook request missing timestamp header `{WEBHOOK_TIMESTAMP_HEADER}`")
+        })?;
+    let nonce = unique_webhook_header(request, WEBHOOK_NONCE_HEADER)?.with_context(|| {
+        format!("webhook request missing nonce header `{WEBHOOK_NONCE_HEADER}`")
+    })?;
+    validate_webhook_nonce(nonce)?;
+    let timestamp_seconds = timestamp
+        .parse::<i64>()
+        .with_context(|| "webhook timestamp must be Unix epoch seconds")?;
+    let signed_payload = webhook_signature_payload(timestamp, nonce, &request.body);
+    let expected = hmac_sha256(&verifier.secret, &signed_payload);
     if !constant_time_eq(&provided, &expected) {
         bail!("webhook HMAC signature mismatch");
     }
+    security_state.accept_fresh_nonce(timestamp_seconds, nonce)?;
     Ok(())
+}
+
+impl WebhookIngressSecurityState {
+    fn new(allow_unsigned_mutations: bool, rate_limit_per_minute: usize) -> Self {
+        Self {
+            seen_nonces: BTreeMap::new(),
+            requests_by_peer: BTreeMap::new(),
+            rate_limit_per_minute,
+            allow_unsigned_mutations,
+        }
+    }
+
+    fn check_rate_limit(&mut self, peer_ip: IpAddr) -> Result<()> {
+        let now = Instant::now();
+        let requests = self.requests_by_peer.entry(peer_ip).or_default();
+        while requests
+            .front()
+            .is_some_and(|started| now.duration_since(*started) >= Duration::from_secs(60))
+        {
+            requests.pop_front();
+        }
+        if requests.len() >= self.rate_limit_per_minute {
+            bail!(
+                "webhook rate limit exceeded for peer; limit is {} requests per minute",
+                self.rate_limit_per_minute
+            );
+        }
+        requests.push_back(now);
+        Ok(())
+    }
+
+    fn accept_fresh_nonce(&mut self, timestamp_seconds: i64, nonce: &str) -> Result<()> {
+        let now_seconds = Utc::now().timestamp();
+        if now_seconds.abs_diff(timestamp_seconds) > WEBHOOK_SIGNATURE_MAX_SKEW_SECONDS as u64 {
+            bail!(
+                "webhook timestamp is outside the {} second acceptance window",
+                WEBHOOK_SIGNATURE_MAX_SKEW_SECONDS
+            );
+        }
+        let now = Instant::now();
+        self.seen_nonces.retain(|_, seen_at| {
+            now.duration_since(*seen_at)
+                < Duration::from_secs((WEBHOOK_SIGNATURE_MAX_SKEW_SECONDS * 2) as u64)
+        });
+        if self.seen_nonces.contains_key(nonce) {
+            bail!("webhook replay detected for nonce");
+        }
+        self.seen_nonces.insert(nonce.to_string(), now);
+        Ok(())
+    }
+}
+
+fn configured_webhook_rate_limit() -> usize {
+    env::var(WEBHOOK_RATE_LIMIT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(WEBHOOK_RATE_LIMIT_PER_MINUTE_DEFAULT)
+        .clamp(1, 10_000)
+}
+
+fn unique_webhook_header<'a>(
+    request: &'a WebhookHttpRequest,
+    name: &str,
+) -> Result<Option<&'a str>> {
+    let mut matches = request
+        .headers
+        .iter()
+        .filter(|(header_name, _)| header_name.eq_ignore_ascii_case(name));
+    let first = matches.next().map(|(_, value)| value.trim());
+    if matches.next().is_some() {
+        bail!("webhook request contains duplicate security header `{name}`");
+    }
+    Ok(first)
+}
+
+fn validate_webhook_nonce(nonce: &str) -> Result<()> {
+    if !(16..=128).contains(&nonce.len())
+        || !nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        bail!("webhook nonce must contain 16-128 ASCII letters, digits, hyphen or underscore");
+    }
+    Ok(())
+}
+
+fn webhook_signature_payload(timestamp: &str, nonce: &str, body: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(timestamp.len() + nonce.len() + body.len() + 2);
+    payload.extend_from_slice(timestamp.as_bytes());
+    payload.push(b'.');
+    payload.extend_from_slice(nonce.as_bytes());
+    payload.push(b'.');
+    payload.extend_from_slice(body);
+    payload
+}
+
+fn resolve_webhook_bind_addresses(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("failed to resolve webhook ingress bind host `{host}`"))?
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        bail!("webhook ingress bind host `{host}` did not resolve");
+    }
+    Ok(addresses)
+}
+
+fn validate_webhook_ingress_security(
+    local_only: bool,
+    hmac_configured: bool,
+    default_action: &str,
+    allow_unsigned_mutations: bool,
+) -> Result<()> {
+    if !local_only && !hmac_configured {
+        bail!("webhook ingress exposed beyond loopback requires HMAC authentication");
+    }
+    if event_route_action_mutates_workflow(&normalized_action(default_action))
+        && !hmac_configured
+        && !allow_unsigned_mutations
+    {
+        bail!(
+            "mutable webhook action `{default_action}` requires HMAC authentication; set --hmac-secret-env"
+        );
+    }
+    Ok(())
+}
+
+fn event_env_flag(name: &str) -> bool {
+    env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn event_env_value_is(name: &str, expected: &str) -> bool {
+    env::var(name)
+        .map(|value| value.trim().eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
 }
 
 fn hmac_sha256(secret: &[u8], body: &[u8]) -> Vec<u8> {
@@ -7158,16 +7530,34 @@ fn write_webhook_ingress_response(
     let status_text = match entry.http_status {
         202 => "Accepted",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
+        429 => "Too Many Requests",
         500 => "Internal Server Error",
         _ => "OK",
     };
+    let retry_after = if entry.http_status == 429 {
+        "Retry-After: 60\r\n"
+    } else {
+        ""
+    };
     let response = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        concat!(
+            "HTTP/1.1 {} {}\r\n",
+            "Content-Type: application/json\r\n",
+            "Content-Length: {}\r\n",
+            "Cache-Control: no-store\r\n",
+            "X-Content-Type-Options: nosniff\r\n",
+            "{}",
+            "Connection: close\r\n\r\n{}"
+        ),
         entry.http_status,
         status_text,
         body.len(),
+        retry_after,
         body
     );
     stream.write_all(response.as_bytes())?;
@@ -9456,5 +9846,95 @@ pub(crate) fn infer_severity(kind: &str, data: &Value) -> String {
         "warning".to_string()
     } else {
         "info".to_string()
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn mutable_and_exposed_webhooks_fail_closed_without_hmac() {
+        assert!(validate_webhook_ingress_security(true, false, "start_workflow", false).is_err());
+        assert!(validate_webhook_ingress_security(false, false, "observe", false).is_err());
+        assert!(validate_webhook_ingress_security(true, false, "start_workflow", true).is_ok());
+        assert!(validate_webhook_ingress_security(false, true, "start_workflow", false).is_ok());
+    }
+
+    #[test]
+    fn webhook_hmac_rejects_replayed_nonce() {
+        let body = br#"{"action":"start_workflow","data":{"goal":"secure"}}"#.to_vec();
+        let timestamp = Utc::now().timestamp().to_string();
+        let nonce = "unit-test-nonce-00000001";
+        let secret = b"0123456789abcdef0123456789abcdef";
+        let signature = format!(
+            "sha256={}",
+            hex_encode(&hmac_sha256(
+                secret,
+                &webhook_signature_payload(&timestamp, nonce, &body)
+            ))
+        );
+        let request = WebhookHttpRequest {
+            method: "POST".to_string(),
+            path: "/webhook".to_string(),
+            headers: vec![
+                ("x-forge-signature".to_string(), signature),
+                (WEBHOOK_TIMESTAMP_HEADER.to_string(), timestamp),
+                (WEBHOOK_NONCE_HEADER.to_string(), nonce.to_string()),
+            ],
+            body,
+        };
+        let verifier = WebhookHmacVerifier {
+            secret_env: "UNIT_TEST_SECRET".to_string(),
+            signature_header: "X-Forge-Signature".to_string(),
+            secret: secret.to_vec(),
+        };
+        let mut state = WebhookIngressSecurityState {
+            seen_nonces: BTreeMap::new(),
+            requests_by_peer: BTreeMap::new(),
+            rate_limit_per_minute: 60,
+            allow_unsigned_mutations: false,
+        };
+        verify_webhook_hmac(&verifier, &request, &mut state).unwrap();
+        let replay = verify_webhook_hmac(&verifier, &request, &mut state).unwrap_err();
+        assert!(replay.to_string().contains("replay detected"));
+    }
+
+    #[test]
+    fn webhook_rate_limit_fails_closed_per_peer() {
+        let mut state = WebhookIngressSecurityState {
+            seen_nonces: BTreeMap::new(),
+            requests_by_peer: BTreeMap::new(),
+            rate_limit_per_minute: 1,
+            allow_unsigned_mutations: false,
+        };
+        let peer = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        state.check_rate_limit(peer).unwrap();
+        let limited = state.check_rate_limit(peer).unwrap_err();
+        assert!(limited.to_string().contains("rate limit exceeded"));
+        let stale = state
+            .accept_fresh_nonce(
+                Utc::now().timestamp() - WEBHOOK_SIGNATURE_MAX_SKEW_SECONDS - 1,
+                "stale-request-nonce-0001",
+            )
+            .unwrap_err();
+        assert!(stale.to_string().contains("outside"));
+    }
+
+    #[test]
+    fn outbound_ssrf_filter_blocks_private_and_link_local_addresses() {
+        assert!(!ip_is_public_for_outbound(IpAddr::V4(Ipv4Addr::new(
+            10, 0, 0, 1
+        ))));
+        assert!(!ip_is_public_for_outbound(IpAddr::V4(Ipv4Addr::new(
+            169, 254, 169, 254
+        ))));
+        assert!(!ip_is_public_for_outbound(IpAddr::V6(
+            "fe80::1".parse::<Ipv6Addr>().unwrap()
+        )));
+        assert!(ip_is_public_for_outbound(IpAddr::V4(Ipv4Addr::new(
+            8, 8, 8, 8
+        ))));
     }
 }

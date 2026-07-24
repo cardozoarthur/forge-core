@@ -50,9 +50,15 @@ Use `j`/`k` para mover o foco no REPL, `enter` para abrir o painel focado, `m` p
 
 ## Status
 
-Current version: `0.4.177`
+Current version: `0.5.0`
 
-This is the first functional CLI + Skill version:
+Forge v0.5 is production-supported for one trusted operator on one host, with a
+local SQLite store and loopback-only Ops service. Multi-tenant operation, high
+availability, and direct public exposure of the built-in HTTP service are
+outside this release profile. See
+[`docs/production-single-host.md`](docs/production-single-host.md).
+
+This release includes:
 
 - Rust CLI binary: `forge`
 - SQLite persistence
@@ -60,7 +66,7 @@ This is the first functional CLI + Skill version:
 - versioned, sharded bounded context package generation with subflow-aware routing
 - strict context readiness gates for executor handoff
 - validation gates
-- simulated execution runtime
+- durable mixed AI and deterministic execution runtime
 - autonomous mixed AI/non-AI workflow planning
 - native cron/wait task representation with timezone, next-run, missed-run policy, run history and scale-to-zero metadata
 - explicit loop primitives for loop-over-items, bounded repeat, retry/backoff, while/until and infinite recurring subflow semantics
@@ -179,6 +185,14 @@ This is the first functional CLI + Skill version:
 - file-first memory policy/search with `MEMORY_NONE`, `MEMORY_SESSION`, `MEMORY_SHORT_TERM`, `MEMORY_STANDARD`, `MEMORY_FULL` and `MEMORY_ADMIN` levels before scoped Markdown retrieval across global, organization, project and processing roots
 
 ## Install
+
+Install a checksum-verified release archive with the platform scripts in
+[`installer/README.md`](installer/README.md). Linux release binaries require
+kernel 4.18 or newer and glibc 2.34 or newer. The scripts do not edit `PATH`;
+their documentation shows the default binary directory and the one-time shell
+activation.
+
+To build and install the current source tree instead:
 
 ```bash
 cargo install --path .
@@ -394,7 +408,7 @@ forge schedule pause --workflow <workflow-id> --task task-010 --origin codex --o
 forge schedule resume --workflow <workflow-id> --task task-010 --origin codex --output json
 forge schedule run-due --workflow <workflow-id> --output json
 forge task validate-response --workflow <workflow-id> --task task-001 --response ./executor-response.json --output json
-forge context --workflow <workflow-id> --task task-001 --budget 1200 --output json
+forge context --workflow <workflow-id> --task task-001 --budget 1200 --view compact --output json
 forge run --workflow <workflow-id> --simulate --output json
 forge validate --workflow <workflow-id> --output json
 forge improve candidates --output json
@@ -415,7 +429,9 @@ forge multimodal benchmark-template --capability image_understanding --output js
 forge multimodal demo-plan --demo local_image_recognition --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v30`) with a deterministic
+The compact command above emits `forge.context.compact.v2`, the bounded executor
+envelope. Use `--view full` when an audit needs the versioned full context packet
+(`forge.context.v30`) with the deterministic
 `task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_shard_selection_audit_v30` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, project `operating_context`, persona routing metadata for
@@ -488,23 +504,24 @@ terminal diagram to the selected task.
 Use strict context mode when handing a package to an executor:
 
 ```bash
-forge context --workflow <workflow-id> --task task-001 --budget 1200 --strict --output json
+forge context --workflow <workflow-id> --task task-001 --budget 1200 --strict --view compact --output json
 ```
 
-Strict mode still prints the replayable context package, but exits non-zero if
-`handoff_ready=false`.
+Strict mode prints the selected response view, but exits non-zero if
+`handoff_ready=false`. Compact responses expose an executable `guardrail` and a
+full-context expansion command; request `--view full` for replay diagnostics.
 
 Acquire an executor handoff packet when a bounded adapter is ready to work:
 
 ```bash
-forge task handoff --workflow <workflow-id> --task task-001 --executor codex --budget 1200 --ttl-seconds 900 --output json
+forge task handoff --workflow <workflow-id> --task task-001 --executor codex --budget 1200 --ttl-seconds 900 --view compact --output json
 ```
 
-The command reuses the strict context readiness contract, acquires a Forge task
-lease only when `handoff_ready=true`, and returns `forge.executor_handoff.v8`
-with the selected executor, task executor kind, lease id, context SHA-256,
-routing fingerprint schema, routing cache key, lineage hash, expected output,
-context routing quality, execution policy mode, full execution policy and validation gate. Human-facing
+The compact command reuses the strict context readiness contract, acquires a
+Forge task lease only when `handoff_ready=true`, and returns
+`forge.executor_handoff.compact.v1` with bounded context, lease and execution
+fields. Request `--view full` for `forge.executor_handoff.v8`, including routing
+fingerprints, lineage, full execution policy and audit metadata. Human-facing
 persona nodes also carry a versioned `persona_contract` with the derived profile id,
 profile checksum, node-scoped mode, voice, tone, brand voice/tone/values, design token source,
 operating policy, instruction source, source model summaries, persona validation gate and lineage hashes so adapters do not have to
@@ -870,7 +887,7 @@ The current test suite validates:
 - workflow registry listing preserves initial requests and lifecycle state;
 - workflow inspection renders terminal DAGs with dependency, lifecycle, persona and context next-action annotations;
 - context routing carries proposed child-subflow bindings for reusable deterministic nodes;
-- simulated execution can complete the graph and unlock validation;
+- deterministic local execution can complete the graph and unlock validation;
 - worktree contracts cover creation/config authorization, workflow/task binding precedence, approved manifest hashing, modifiable/protected path decisions, revisioned predecessor blocking/unblocking, path escape rejection, blocked sandbox plans and bounded test receipts;
 - skill installation works for Codex and OpenCode paths.
 

@@ -3002,12 +3002,14 @@ fn task_handoff_command(workflow: &Workflow, task_id: &str) -> Vec<String> {
         task_id.to_string(),
         "--executor".to_string(),
         executor.to_string(),
+        "--view".to_string(),
+        "compact".to_string(),
         "--output".to_string(),
         "json".to_string(),
     ]
 }
 
-fn suggested_handoff_executor(task: &AtomicTask) -> &'static str {
+pub(crate) fn suggested_handoff_executor(task: &AtomicTask) -> &'static str {
     match task.executor {
         ExecutorKind::Ai | ExecutorKind::Mixed if task.execution_policy.ai_allowed => "codex",
         _ => "forge_cli",

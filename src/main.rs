@@ -50,6 +50,7 @@ use forge_core::cluster::{
     place_task_on_cluster, register_cluster_node, ClusterNodeInput,
 };
 use forge_core::context::{
+    build_compact_context_view_with_predecessor_plans,
     build_context_package_with_checkpoint_and_project,
     build_context_package_with_checkpoint_project_and_worktree, DEFAULT_CONTEXT_BUDGET,
 };
@@ -85,7 +86,9 @@ use forge_core::executor::{
     ExecutorQuotaObservation, ExecutorSyncOptions, ShellLaunchPlanOptions,
 };
 use forge_core::graph::create_workflow;
-use forge_core::handoff::build_task_handoff_with_project;
+use forge_core::handoff::{
+    build_predecessor_handoff_plans, build_task_handoff_response_with_project, TaskHandoffView,
+};
 use forge_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
     evaluate_tenant_policy_for_action, inspect_project_operating_context, link_identity,
@@ -148,6 +151,7 @@ use forge_core::interactive::{
 use forge_core::ir::{CreativeArtifact, TokenCollection};
 use forge_core::lease::{acquire_task_lease, release_task_lease};
 use forge_core::mcp::{call_mcp_tool, mcp_tools_manifest};
+use forge_core::mcp_stdio::serve_stdio;
 use forge_core::memory::{
     configure_memory_governance, list_memory_promotions, memory_cleanup_report,
     memory_policy_report_for_project, memory_retention_report, promote_memory, search_memory,
@@ -208,6 +212,7 @@ use forge_core::security::{
 use forge_core::self_evolve::{run_self_evolution, SelfRunOptions};
 use forge_core::skill::install_skill;
 use forge_core::storage::ForgeStore;
+use forge_core::store_admin::{backup_store, check_store, restore_store};
 use forge_core::validation::validate_workflow;
 use forge_core::workflow::{
     attach_creative_artifact, attach_workflow_artifact_with_tags, get_workflow_token_collection,
@@ -296,6 +301,8 @@ enum Commands {
         budget: usize,
         #[arg(long)]
         strict: bool,
+        #[arg(long, value_enum, default_value_t = ContextViewArg::Compact)]
+        view: ContextViewArg,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -312,6 +319,10 @@ enum Commands {
         workflow: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
+    },
+    Store {
+        #[command(subcommand)]
+        command: StoreCommands,
     },
     Improve {
         #[command(subcommand)]
@@ -505,6 +516,30 @@ enum Commands {
         output: OutputFormat,
         #[arg(long)]
         bypass_cache: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum StoreCommands {
+    Check {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Backup {
+        #[arg(long)]
+        destination: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Restore {
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long = "approved-by")]
+        approved_by: String,
+        #[arg(long = "confirm-restore", default_value_t = false)]
+        confirm_restore: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
     },
 }
 
@@ -3244,6 +3279,8 @@ enum TaskCommands {
         budget: usize,
         #[arg(long, default_value_t = 900)]
         ttl_seconds: u64,
+        #[arg(long, value_enum, default_value_t = ContextViewArg::Compact)]
+        view: ContextViewArg,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -3475,6 +3512,7 @@ enum RequestCommands {
 
 #[derive(Debug, Subcommand)]
 enum McpCommands {
+    Serve,
     Tools {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -4461,6 +4499,28 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(Debug, Serialize)]
+struct CliErrorEnvelope {
+    schema_version: &'static str,
+    status: &'static str,
+    error: CliErrorDetail,
+}
+
+#[derive(Debug, Serialize)]
+struct CliErrorDetail {
+    code: &'static str,
+    category: &'static str,
+    message: String,
+    retryable: bool,
+    remediation: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ContextViewArg {
+    Full,
+    Compact,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum WorkflowLifecycleArg {
     All,
@@ -4482,14 +4542,124 @@ fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
         Err(error) => {
-            eprintln!("{error:?}");
+            if let Some(cli_error) = error.downcast_ref::<clap::Error>() {
+                if matches!(
+                    cli_error.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) {
+                    let _ = cli_error.print();
+                    std::process::exit(cli_error.exit_code());
+                }
+            }
+            if requested_json_output() {
+                let response = classify_cli_error(&error);
+                match serde_json::to_string(&response) {
+                    Ok(json) => eprintln!("{json}"),
+                    Err(_) => eprintln!(
+                        "{{\"schema_version\":\"forge.cli.error.v1\",\"status\":\"error\",\"error\":{{\"code\":\"internal_error\",\"category\":\"internal\",\"message\":\"Forge command failed\",\"retryable\":false,\"remediation\":\"Retry with human output and inspect operator logs.\"}}}}"
+                    ),
+                }
+            } else {
+                eprintln!("{error:#}");
+            }
             std::process::exit(1);
         }
     }
 }
 
+fn requested_json_output() -> bool {
+    let mut arguments = std::env::args_os();
+    while let Some(argument) = arguments.next() {
+        if argument == "--output" {
+            return arguments
+                .next()
+                .and_then(|value| value.to_str().map(str::to_owned))
+                .is_some_and(|value| value.eq_ignore_ascii_case("json"));
+        }
+        if argument
+            .to_str()
+            .is_some_and(|value| value.eq_ignore_ascii_case("--output=json"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn classify_cli_error(error: &anyhow::Error) -> CliErrorEnvelope {
+    let message = error.to_string();
+    let normalized = message.to_ascii_lowercase();
+    let (code, category, retryable, remediation) = if normalized.contains("database is locked")
+        || normalized.contains("database is busy")
+        || normalized.contains("sqlite_busy")
+    {
+        (
+            "store_busy",
+            "availability",
+            true,
+            "Retry after the active SQLite writer completes.",
+        )
+    } else if normalized.contains("not found") {
+        (
+            "not_found",
+            "input",
+            false,
+            "Inspect the requested identifier and retry.",
+        )
+    } else if normalized.contains("permission")
+        || normalized.contains("unauthorized")
+        || normalized.contains("forbidden")
+        || normalized.contains("approval")
+    {
+        (
+            "permission_denied",
+            "authorization",
+            false,
+            "Use an authorized principal or provide the required explicit approval.",
+        )
+    } else if normalized.contains("unknown")
+        || normalized.contains("invalid")
+        || normalized.contains("unexpected")
+        || normalized.contains("usage:")
+        || normalized.contains("requires")
+        || normalized.contains("required")
+        || normalized.contains("must ")
+    {
+        (
+            "invalid_argument",
+            "input",
+            false,
+            "Correct the command input and retry.",
+        )
+    } else {
+        (
+            "internal_error",
+            "internal",
+            false,
+            "Retry with human output and inspect operator logs.",
+        )
+    };
+
+    CliErrorEnvelope {
+        schema_version: "forge.cli.error.v1",
+        status: "error",
+        error: CliErrorDetail {
+            code,
+            category,
+            message,
+            retryable,
+            remediation,
+        },
+    }
+}
+
 fn run() -> Result<i32> {
-    let cli = Cli::parse();
+    let cli = Cli::try_parse()?;
+    if forge_production_mode_enabled() && !cli.store.is_absolute() {
+        anyhow::bail!(
+            "FORGE_PRODUCTION_MODE requires an absolute --store path to prevent state fragmentation"
+        );
+    }
     let Some(command) = cli.command else {
         return run_forge_tui(&cli.store, Some(std::env::current_dir()?));
     };
@@ -4741,8 +4911,10 @@ fn run() -> Result<i32> {
             project_root,
             budget,
             strict,
+            view,
             output,
         } => {
+            let store_path = cli.store.clone();
             let store = ForgeStore::open(cli.store)?;
             ensure_workflow_policy(&store, &workflow, "context request")?;
             let workflow = store.load_workflow(&workflow)?;
@@ -4784,12 +4956,34 @@ fn run() -> Result<i32> {
                     effective_project_root.as_deref(),
                 )?
             };
-            print_response(output, &context)?;
-            Ok(if strict && !context.handoff_ready {
+            let exit_code = if strict && !context.handoff_ready {
                 1
             } else {
                 0
-            })
+            };
+            match view {
+                ContextViewArg::Full => print_response(output, &context)?,
+                ContextViewArg::Compact => {
+                    let predecessor_plans = build_predecessor_handoff_plans(
+                        &store,
+                        &workflow,
+                        &task,
+                        budget,
+                        project_root.as_deref(),
+                    )?;
+                    print_response(
+                        output,
+                        &build_compact_context_view_with_predecessor_plans(
+                            &context,
+                            &workflow,
+                            &store_path,
+                            effective_project_root.as_deref(),
+                            &predecessor_plans,
+                        ),
+                    )?
+                }
+            }
+            Ok(exit_code)
         }
         Commands::Run {
             workflow,
@@ -4825,6 +5019,32 @@ fn run() -> Result<i32> {
             print_response(output, &report)?;
             Ok(exit_code)
         }
+        Commands::Store { command } => match command {
+            StoreCommands::Check { output } => {
+                let report = check_store(&cli.store)?;
+                let exit_code = if report.healthy { 0 } else { 1 };
+                print_response(output, &report)?;
+                Ok(exit_code)
+            }
+            StoreCommands::Backup {
+                destination,
+                output,
+            } => {
+                let report = backup_store(&cli.store, &destination)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            StoreCommands::Restore {
+                source,
+                approved_by,
+                confirm_restore,
+                output,
+            } => {
+                let report = restore_store(&cli.store, &source, &approved_by, confirm_restore)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+        },
         Commands::Improve {
             command,
             workflow,
@@ -8858,10 +9078,11 @@ fn run() -> Result<i32> {
                 project_root,
                 budget,
                 ttl_seconds,
+                view,
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = build_task_handoff_with_project(
+                let report = build_task_handoff_response_with_project(
                     &store,
                     &workflow,
                     &task,
@@ -8869,8 +9090,12 @@ fn run() -> Result<i32> {
                     budget,
                     ttl_seconds,
                     project_root.as_deref(),
+                    match view {
+                        ContextViewArg::Compact => TaskHandoffView::Compact,
+                        ContextViewArg::Full => TaskHandoffView::Full,
+                    },
                 )?;
-                let exit_code = if report.allowed { 0 } else { 1 };
+                let exit_code = if report.allowed() { 0 } else { 1 };
                 print_response(output, &report)?;
                 Ok(exit_code)
             }
@@ -9189,20 +9414,30 @@ fn run() -> Result<i32> {
                 let store = ForgeStore::open(cli.store.clone())?;
                 loop {
                     let report = step_request(&store, &run_id, &executor, ttl_seconds, &origin)?;
-                    if report.status == "completed"
-                        || report.status == "failed"
-                        || report.status == "cancelled"
+                    let stops_loop = |status: &str| {
+                        matches!(
+                            status,
+                            "complete"
+                                | "completed"
+                                | "failed"
+                                | "cancelled"
+                                | "blocked"
+                                | "needs_attention"
+                                | "completion_audit_required"
+                                | "rework_required"
+                                | "handoff_required"
+                                | "validation_failed"
+                        )
+                    };
+                    if stops_loop(&report.status)
+                        || stops_loop(&report.drive_before.status)
+                        || report
+                            .drive_after
+                            .as_ref()
+                            .is_some_and(|drive| stops_loop(&drive.status))
                     {
                         break;
                     }
-                    if report.status == "skipped" && report.reason.contains("no ready handoff task")
-                    {
-                        break;
-                    }
-                    if report.status == "handoff_required" || report.status == "validation_failed" {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 Ok(0)
             }
@@ -9406,6 +9641,11 @@ fn run() -> Result<i32> {
             }
         },
         Commands::Mcp { command } => match command {
+            McpCommands::Serve => {
+                let store = ForgeStore::open(cli.store)?;
+                serve_stdio(&store)?;
+                Ok(0)
+            }
             McpCommands::Tools { output } => {
                 let manifest = mcp_tools_manifest();
                 print_response(output, &manifest)?;
@@ -10777,6 +11017,13 @@ fn run() -> Result<i32> {
             }
         },
     }
+}
+
+fn forge_production_mode_enabled() -> bool {
+    std::env::var("FORGE_PRODUCTION_MODE")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
 }
 
 fn print_response<T: Serialize>(format: OutputFormat, value: &T) -> Result<()> {

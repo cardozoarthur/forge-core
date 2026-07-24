@@ -72,7 +72,6 @@ fn test_challenger_cognitive_task_handoff_halts() {
             "teamwork",
             "--goal",
             "Perform research write up and analysis on system metrics",
-            "--detached",
             "--output",
             "json",
         ])
@@ -83,7 +82,15 @@ fn test_challenger_cognitive_task_handoff_halts() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let run_id = json["run_id"].as_str().unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let connection = Connection::open(&store_path).unwrap();
+    let run_id: String = connection
+        .query_row(
+            "SELECT id FROM runs WHERE workflow_id = ?1",
+            [workflow_id],
+            |row| row.get(0),
+        )
+        .unwrap();
 
     let mut step_json: serde_json::Value = serde_json::Value::Null;
     for _ in 0..15 {
@@ -91,7 +98,14 @@ fn test_challenger_cognitive_task_handoff_halts() {
             .unwrap()
             .arg("--store")
             .arg(store_path.to_str().unwrap())
-            .args(["request", "step", "--run", run_id, "--output", "json"])
+            .args([
+                "request",
+                "step",
+                "--run",
+                run_id.as_str(),
+                "--output",
+                "json",
+            ])
             .assert()
             .success()
             .get_output()

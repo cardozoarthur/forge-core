@@ -110,6 +110,20 @@ pub struct ArtifactAttachReport {
     pub artifact: AttachedArtifact,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedArtifactAttach {
+    artifact: ArtifactRecord,
+    bytes: u64,
+    origin: String,
+    source_description: String,
+}
+
+impl PreparedArtifactAttach {
+    pub(crate) fn artifact_id(&self) -> &str {
+        &self.artifact.id
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SubflowValidationReport {
     pub status: String,
@@ -701,35 +715,73 @@ pub fn attach_workflow_artifact_with_tags(
     tags: &[String],
 ) -> Result<ArtifactAttachReport> {
     ensure_workflow_policy(store, workflow_id, "workflow artifact attach")?;
-    let mut workflow = store.load_workflow(workflow_id)?;
     let (relative_path, sha256, bytes) =
         copy_artifact(&store.base_dir(), workflow_id, source_path, kind)?;
-    let tags = normalize_artifact_tags(kind, &relative_path, origin, tags);
-    let artifact = ArtifactRecord {
-        id: format!("artifact_{}", Uuid::new_v4().to_string().replace('-', "")),
-        kind: kind.to_string(),
-        path: relative_path.clone(),
-        sha256: sha256.clone(),
-        tags: tags.clone(),
-        created_at: Utc::now(),
-        lineage: None,
-    };
+    let prepared = prepare_workflow_artifact_attach(
+        kind,
+        &relative_path,
+        &sha256,
+        bytes,
+        origin,
+        tags,
+        source_path.display().to_string(),
+    );
+    record_prepared_workflow_artifact(store, workflow_id, &prepared)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_workflow_artifact_attach(
+    kind: &str,
+    relative_path: &str,
+    sha256: &str,
+    bytes: u64,
+    origin: &str,
+    explicit_tags: &[String],
+    source_description: String,
+) -> PreparedArtifactAttach {
+    let tags = normalize_artifact_tags(kind, relative_path, origin, explicit_tags);
+    PreparedArtifactAttach {
+        artifact: ArtifactRecord {
+            id: format!("artifact_{}", Uuid::new_v4().to_string().replace('-', "")),
+            kind: kind.to_string(),
+            path: relative_path.to_string(),
+            sha256: sha256.to_string(),
+            tags,
+            created_at: Utc::now(),
+            lineage: None,
+        },
+        bytes,
+        origin: origin.to_string(),
+        source_description,
+    }
+}
+
+pub(crate) fn record_prepared_workflow_artifact(
+    store: &ForgeStore,
+    workflow_id: &str,
+    prepared: &PreparedArtifactAttach,
+) -> Result<ArtifactAttachReport> {
+    let mut workflow = store.load_workflow(workflow_id)?;
+    let artifact = prepared.artifact.clone();
     workflow.artifacts.push(artifact.clone());
     let revision = push_revision(
         &mut workflow.revisions,
-        origin,
+        &prepared.origin,
         "artifact_attached",
-        &format!("attached artifact {} as {kind}", source_path.display()),
+        &format!(
+            "attached artifact {} as {}",
+            prepared.source_description, artifact.kind
+        ),
     );
     store.save_workflow(&workflow)?;
     store.record_event(
         workflow_id,
         "artifact_attached",
         &serde_json::json!({
-            "origin": origin,
-            "path": relative_path,
-            "sha256": sha256,
-            "tags": tags,
+            "origin": &prepared.origin,
+            "path": &artifact.path,
+            "sha256": &artifact.sha256,
+            "tags": &artifact.tags,
             "revision": revision
         }),
     )?;
@@ -737,14 +789,14 @@ pub fn attach_workflow_artifact_with_tags(
     Ok(ArtifactAttachReport {
         status: "artifact_attached".to_string(),
         workflow_id: workflow_id.to_string(),
-        origin: origin.to_string(),
+        origin: prepared.origin.clone(),
         revision,
         artifact: AttachedArtifact {
             id: artifact.id,
             kind: artifact.kind,
             path: artifact.path,
             sha256: artifact.sha256,
-            bytes,
+            bytes: prepared.bytes,
             tags: artifact.tags,
         },
     })

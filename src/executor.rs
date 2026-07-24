@@ -3418,6 +3418,8 @@ fn shell_preflight_commands(
             "<task-id>".to_string(),
             "--executor".to_string(),
             session.brain_id.clone(),
+            "--view".to_string(),
+            "compact".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ]);
@@ -3441,6 +3443,8 @@ fn shell_context_command(
         "--budget".to_string(),
         context_budget.to_string(),
         "--strict".to_string(),
+        "--view".to_string(),
+        "compact".to_string(),
         "--output".to_string(),
         "json".to_string(),
     ])
@@ -3471,6 +3475,8 @@ fn shell_handoff_command(
         context_budget.to_string(),
         "--ttl-seconds".to_string(),
         ttl_seconds.to_string(),
+        "--view".to_string(),
+        "compact".to_string(),
         "--output".to_string(),
         "json".to_string(),
     ])
@@ -3703,6 +3709,8 @@ fn brain_session_context_command(
         "--budget".to_string(),
         context_budget.to_string(),
         "--strict".to_string(),
+        "--view".to_string(),
+        "compact".to_string(),
         "--output".to_string(),
         "json".to_string(),
     ])
@@ -3734,6 +3742,8 @@ fn brain_session_handoff_command(
         context_budget.to_string(),
         "--ttl-seconds".to_string(),
         ttl_seconds.to_string(),
+        "--view".to_string(),
+        "compact".to_string(),
         "--output".to_string(),
         "json".to_string(),
     ])

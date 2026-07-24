@@ -2820,7 +2820,14 @@ fn selected_harness_executor_readiness(
             },
             "wrapper_plan.env.FORGE_CONTEXT_ROUTING",
             "Task context should be built by Forge context policy instead of an implicit CLI project scan.",
-            vec!["forge".to_string(), "context".to_string(), "--output".to_string(), "json".to_string()],
+                vec![
+                    "forge".to_string(),
+                    "context".to_string(),
+                    "--view".to_string(),
+                    "compact".to_string(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ],
         ),
         executor_surface_readiness(
             "memory_routing",

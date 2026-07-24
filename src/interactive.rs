@@ -4511,7 +4511,7 @@ fn architecture_execution_plan(
                 "forge interactive identity --output json",
                 "forge interactive context-memory --output json",
                 "forge memory policy --project-root . --output json",
-                "forge context --workflow <id> --task <task-id> --project-root . --strict --output json",
+                "forge context --workflow <id> --task <task-id> --project-root . --strict --view compact --output json",
             ],
             &[
                 "Não vazar memória privada para contexto global ou público.",
@@ -5687,9 +5687,11 @@ pub fn build_replacement_cli_evidence_smoke(
             "forge interactive release-gates --version 0.5 --output json",
         ),
         operational_tui_smoke_check(
-            "does_not_auto_promote",
-            "Evidence collection does not auto-promote Forge 0.5",
-            !collect_ready.promotion_ready_after_collection && !release_gates.promotion_ready,
+            "preserves_core_promotion_decision",
+            "Optional evidence collection preserves the promotable Forge 0.5 core decision",
+            collect_ready.promotion_ready_after_collection
+                && release_gates.promotion_ready
+                && release_gates.promotion_decision.decision == "promote",
             format!(
                 "collection promotion {}; release promotion {}; decision {}",
                 collect_ready.promotion_ready_after_collection,
@@ -9680,6 +9682,7 @@ fn patch_workbench_ignored_paths(store: &ForgeStore, repository_path: &str) -> B
         PathBuf::from(format!("{}-wal", store_path.display())),
         PathBuf::from(format!("{}-shm", store_path.display())),
         PathBuf::from(format!("{}-journal", store_path.display())),
+        PathBuf::from(format!("{}.secret.key", store_path.display())),
     ] {
         if let Some(relative) = repo_relative_display_path(&path, &root) {
             ignored.insert(relative);
@@ -13088,8 +13091,8 @@ fn build_operating_context_panel(
             .iter()
             .any(|gate| gate == "company_work_decision_required"),
         evidence_commands: vec![
-            "forge context --workflow <workflow-id> --task <task-id> --project-root <project-root> --strict --output json".to_string(),
-            "forge task handoff --workflow <workflow-id> --task <task-id> --executor <executor> --project-root <project-root> --output json".to_string(),
+            "forge context --workflow <workflow-id> --task <task-id> --project-root <project-root> --strict --view compact --output json".to_string(),
+            "forge task handoff --workflow <workflow-id> --task <task-id> --executor <executor> --project-root <project-root> --view compact --output json".to_string(),
         ],
     };
     let company_work_contract = InteractiveOperatingCompanyWorkContract {
@@ -13442,6 +13445,8 @@ fn operating_context_commands(project_root: &Path) -> InteractiveOperatingContex
             "--project-root".to_string(),
             project_root.clone(),
             "--strict".to_string(),
+            "--view".to_string(),
+            "compact".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -13457,6 +13462,8 @@ fn operating_context_commands(project_root: &Path) -> InteractiveOperatingContex
             "<executor>".to_string(),
             "--project-root".to_string(),
             project_root,
+            "--view".to_string(),
+            "compact".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -13480,7 +13487,7 @@ fn operating_context_next_actions(
         );
     }
     actions.push(
-        "Use forge context --workflow <id> --task <id> --project-root <project-root> --strict --output json before external brain handoff.".to_string(),
+        "Use forge context --workflow <id> --task <id> --project-root <project-root> --strict --view compact --output json before external brain handoff.".to_string(),
     );
     actions
 }
@@ -13546,6 +13553,8 @@ fn context_memory_context_commands(project_root: &Path) -> BTreeMap<String, Vec<
             "--budget".to_string(),
             "1200".to_string(),
             "--strict".to_string(),
+            "--view".to_string(),
+            "compact".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -13557,7 +13566,7 @@ fn context_memory_next_actions(project_root: &Path) -> Vec<String> {
     vec![
         format!("forge memory policy --project-root {project_root} --output json"),
         format!(
-            "forge context --workflow <workflow-id> --task <task-id> --project-root {project_root} --budget 1200 --strict --output json"
+        "forge context --workflow <workflow-id> --task <task-id> --project-root {project_root} --budget 1200 --strict --view compact --output json"
         ),
         format!(
             "forge memory search --workflow <workflow-id> --query <query> --project-root {project_root} --output json"
@@ -18435,7 +18444,7 @@ fn build_operational_cockpit_panel(
             "forge interactive task-board --output json",
             vec![
                 "forge interactive readiness --output json".to_string(),
-                "forge context --workflow <workflow-id> --task <task-id> --strict --output json"
+                "forge context --workflow <workflow-id> --task <task-id> --strict --view compact --output json"
                     .to_string(),
             ],
         ),
@@ -21263,6 +21272,8 @@ fn build_workflow_mutation_panel(
                 "--task".to_string(),
                 "<task-id>".to_string(),
                 "--strict".to_string(),
+                "--view".to_string(),
+                "compact".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -21275,6 +21286,8 @@ fn build_workflow_mutation_panel(
                 "<task-id>".to_string(),
                 "--executor".to_string(),
                 "<executor>".to_string(),
+                "--view".to_string(),
+                "compact".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -21452,6 +21465,8 @@ fn workflow_mutation_card(
                 "--task".to_string(),
                 context_task.clone(),
                 "--strict".to_string(),
+                "--view".to_string(),
+                "compact".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -21464,6 +21479,8 @@ fn workflow_mutation_card(
                 context_task,
                 "--executor".to_string(),
                 handoff_executor,
+                "--view".to_string(),
+                "compact".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -22939,6 +22956,8 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
                 "--task",
                 "<task-id>",
                 "--strict",
+                "--view",
+                "compact",
             ],
             false,
             "low",
@@ -22957,6 +22976,8 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
                 "<task-id>",
                 "--executor",
                 "<executor>",
+                "--view",
+                "compact",
             ],
             true,
             "medium",

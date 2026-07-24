@@ -187,7 +187,7 @@ pub fn build_patch_plan(
             strict: true,
             budget_bytes: DEFAULT_CONTEXT_BUDGET_BYTES,
             command: format!(
-                "forge context --workflow {workflow_id} --task {task_id} --budget {DEFAULT_CONTEXT_BUDGET_BYTES} --strict --output json"
+                "forge context --workflow {workflow_id} --task {task_id} --budget {DEFAULT_CONTEXT_BUDGET_BYTES} --strict --view compact --output json"
             ),
             handoff_rule:
                 "Executor must receive bounded context and return a diff/patch for human review; Forge does not apply changes during planning."

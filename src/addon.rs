@@ -1,4 +1,5 @@
 use crate::artifact::{hex_sha256, write_json_artifact};
+use crate::context::sanitize_compact_human_text;
 use crate::credential_vault::resolve_credential_vault_bin;
 use crate::graph::{
     create_workflow, task as workflow_task, ArtifactRecord, AtomicTask, ExecutorKind,
@@ -26,9 +27,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -48,6 +51,8 @@ pub const ADDON_EVENT_EXTENSIONS_SCHEMA_VERSION: &str = "forge.addon_event_exten
 pub const ADDON_OBSERVABILITY_SCHEMA_VERSION: &str = "forge.addon_observability.v1";
 pub const ADDON_RUNTIME_CONTRACTS_SCHEMA_VERSION: &str = "forge.addon_runtime_contracts.v1";
 pub const ADDON_PLANNER_REGISTRY_SCHEMA_VERSION: &str = "forge.addon_planner_registry.v1";
+const LOCAL_PROCESS_MAX_OUTPUT_BYTES_DEFAULT: usize = 64 * 1024;
+const FORGE_PRODUCTION_MODE_ENV: &str = "FORGE_PRODUCTION_MODE";
 
 type CapabilitySuggestionAction = (
     String,
@@ -8475,6 +8480,14 @@ struct LocalProcessWorkerConfig {
     args: Vec<String>,
     cwd: Option<String>,
     timeout_seconds: u64,
+    max_output_bytes: usize,
+    environment: Vec<(String, String)>,
+}
+
+#[derive(Debug)]
+struct BoundedProcessOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -8548,6 +8561,11 @@ fn local_process_worker_config(
     }
     ensure_worker_allowlist_contains(&worker.data, "allowed_entrypoints", &entry.entrypoint)?;
     ensure_worker_allowlist_contains(&worker.data, "allowed_contracts", &entry.contract_id)?;
+    validate_local_process_production_policy(
+        addon_production_mode_enabled(),
+        &worker.trust_level,
+        &worker.data,
+    )?;
     let command = worker
         .data
         .get("command")
@@ -8602,12 +8620,51 @@ fn local_process_worker_config(
         .and_then(|value| value.as_u64())
         .unwrap_or(30)
         .clamp(1, 300);
+    let max_output_bytes = worker
+        .data
+        .get("max_output_bytes")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(LOCAL_PROCESS_MAX_OUTPUT_BYTES_DEFAULT as u64)
+        .clamp(1024, 1024 * 1024) as usize;
+    let environment = local_process_worker_environment(&worker.data)?;
     Ok(LocalProcessWorkerConfig {
         command,
         args,
         cwd,
         timeout_seconds,
+        max_output_bytes,
+        environment,
     })
+}
+
+fn validate_local_process_production_policy(
+    production_mode: bool,
+    trust_level: &str,
+    data: &serde_json::Value,
+) -> Result<()> {
+    if production_mode {
+        if data
+            .get("production_allowed")
+            .and_then(|value| value.as_bool())
+            != Some(true)
+        {
+            bail!(
+                "local_process worker is blocked in production mode unless production_allowed is true"
+            );
+        }
+        if !matches!(trust_level, "signed" | "trusted") {
+            bail!("local_process worker must be signed or trusted in production mode");
+        }
+        ensure_non_empty_worker_allowlist(data, "allowed_entrypoints")?;
+        ensure_non_empty_worker_allowlist(data, "allowed_contracts")?;
+        if !data
+            .get("env_allowlist")
+            .is_some_and(|value| value.is_array())
+        {
+            bail!("local_process worker must declare env_allowlist in production mode");
+        }
+    }
+    Ok(())
 }
 
 fn ensure_worker_allowlist_contains(
@@ -8625,6 +8682,90 @@ fn ensure_worker_allowlist_contains(
         return Ok(());
     }
     bail!("worker {field} does not include {required}");
+}
+
+fn ensure_non_empty_worker_allowlist(data: &serde_json::Value, field: &str) -> Result<()> {
+    if data
+        .get(field)
+        .and_then(|value| value.as_array())
+        .is_some_and(|values| !values.is_empty())
+    {
+        return Ok(());
+    }
+    bail!("local_process worker must declare a non-empty {field} in production mode");
+}
+
+fn local_process_worker_environment(data: &serde_json::Value) -> Result<Vec<(String, String)>> {
+    let names = data
+        .get("env_allowlist")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .context("local_process env_allowlist entries must be strings")
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let mut environment = vec![
+        (
+            "PATH".to_string(),
+            "/usr/local/bin:/usr/bin:/bin".to_string(),
+        ),
+        ("LANG".to_string(), "C.UTF-8".to_string()),
+    ];
+    let mut seen = BTreeSet::from(["PATH".to_string(), "LANG".to_string()]);
+    for name in names {
+        validate_local_process_env_name(name)?;
+        if seen.insert(name.to_string()) {
+            if let Ok(value) = env::var(name) {
+                environment.push((name.to_string(), value));
+            }
+        }
+    }
+    Ok(environment)
+}
+
+fn validate_local_process_env_name(name: &str) -> Result<()> {
+    let valid = !name.is_empty()
+        && name.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+        });
+    if !valid {
+        bail!("local_process env_allowlist contains invalid environment variable name");
+    }
+    let upper = name.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "LD_PRELOAD"
+            | "LD_LIBRARY_PATH"
+            | "BASH_ENV"
+            | "ENV"
+            | "PYTHONPATH"
+            | "PERL5LIB"
+            | "RUBYOPT"
+            | "NODE_OPTIONS"
+            | "RUSTC_WRAPPER"
+    ) || upper.starts_with("DYLD_")
+    {
+        bail!("local_process env_allowlist contains blocked loader/runtime variable `{name}`");
+    }
+    Ok(())
+}
+
+fn addon_production_mode_enabled() -> bool {
+    env::var(FORGE_PRODUCTION_MODE_ENV)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn external_api_worker_config(
@@ -8694,23 +8835,52 @@ fn parse_http_worker_endpoint(endpoint: &str) -> Result<(String, String, u16, St
     if authority.is_empty() {
         bail!("external_api worker endpoint host is required");
     }
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port)) if !host.contains(']') => {
-            let port = port
-                .parse::<u16>()
-                .with_context(|| format!("invalid external_api endpoint port: {port}"))?;
-            (host.to_string(), port)
+    if authority.contains('@') {
+        bail!("external_api worker endpoint must not include userinfo");
+    }
+    if path.contains('\r') || path.contains('\n') {
+        bail!("external_api worker endpoint path must not contain CR/LF");
+    }
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, remainder) = bracketed
+            .split_once(']')
+            .context("invalid bracketed external_api IPv6 host")?;
+        let port = remainder
+            .strip_prefix(':')
+            .map(|value| value.parse::<u16>())
+            .transpose()
+            .context("invalid external_api endpoint port")?
+            .unwrap_or(default_port);
+        (host.to_string(), port)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) if !host.contains(':') => {
+                let port = port
+                    .parse::<u16>()
+                    .with_context(|| format!("invalid external_api endpoint port: {port}"))?;
+                (host.to_string(), port)
+            }
+            _ => (authority.to_string(), default_port),
         }
-        _ => (authority.to_string(), default_port),
     };
     if host.trim().is_empty() {
         bail!("external_api worker endpoint host is required");
+    }
+    if !host
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':'))
+    {
+        bail!("external_api worker endpoint host contains unsupported characters");
     }
     Ok((scheme, host, port, path))
 }
 
 fn is_local_http_host(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
+    let host = host.trim().trim_matches('[').trim_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn worker_allowed_host(data: &serde_json::Value, host: &str) -> bool {
@@ -8953,9 +9123,13 @@ fn execute_local_process_worker(
     let mut command = Command::new(&config.command);
     command
         .args(&config.args)
+        .env_clear()
+        .envs(config.environment.iter().map(|(name, value)| (name, value)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
     if let Some(cwd) = &config.cwd {
         command.current_dir(cwd);
     }
@@ -8981,44 +9155,92 @@ fn execute_local_process_worker(
             });
         }
     };
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(&request_bytes)?;
-    }
+    let stdout_reader = child
+        .stdout
+        .take()
+        .context("failed to capture local_process stdout")?;
+    let stderr_reader = child
+        .stderr
+        .take()
+        .context("failed to capture local_process stderr")?;
+    let stdout_handle = spawn_bounded_output_reader(stdout_reader, config.max_output_bytes);
+    let stderr_handle = spawn_bounded_output_reader(stderr_reader, config.max_output_bytes);
+    let stdin_handle = child.stdin.take().map(|mut stdin| {
+        thread::spawn(move || {
+            stdin
+                .write_all(&request_bytes)
+                .map_err(|error| error.to_string())
+        })
+    });
     let timeout = Duration::from_secs(config.timeout_seconds);
     let started = Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            break;
+    let (exit_status, timed_out) = loop {
+        if let Some(status) = child.try_wait()? {
+            terminate_local_process_group(&mut child, false)?;
+            break (status, false);
         }
         if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let output = child.wait_with_output()?;
-            return Ok(RuntimeWorkerExecution {
-                status: "failed".to_string(),
-                result: serde_json::json!({
-                    "outcome": "local_process_timeout",
-                    "timeout_seconds": config.timeout_seconds,
-                    "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
-                    "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
-                }),
-                signature: None,
-                attestation: local_process_attestation(
-                    worker,
-                    entry,
-                    config,
-                    started_at,
-                    output.status.code(),
-                    "timeout",
-                ),
-            });
+            terminate_local_process_group(&mut child, true)?;
+            break (child.wait()?, true);
         }
         thread::sleep(Duration::from_millis(25));
+    };
+    let stdout_output = join_bounded_output_reader(stdout_handle, "stdout")?;
+    let stderr_output = join_bounded_output_reader(stderr_handle, "stderr")?;
+    let stdin_error = stdin_handle.and_then(|handle| match handle.join() {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error),
+        Err(_) => Some("local_process stdin writer panicked".to_string()),
+    });
+    let (stdout, stdout_redaction_count) =
+        sanitize_local_process_output(stdout_output, &config.environment);
+    let (stderr, stderr_redaction_count) =
+        sanitize_local_process_output(stderr_output, &config.environment);
+    let redaction_count = stdout_redaction_count.saturating_add(stderr_redaction_count);
+    if let Some(error) = stdin_error {
+        return Ok(RuntimeWorkerExecution {
+            status: "failed".to_string(),
+            result: serde_json::json!({
+                "outcome": "local_process_stdin_failed",
+                "error": error,
+                "stdout": stdout,
+                "stderr": stderr,
+                "output_redaction_count": redaction_count,
+            }),
+            signature: None,
+            attestation: local_process_attestation(
+                worker,
+                entry,
+                config,
+                started_at,
+                exit_status.code(),
+                "stdin_failed",
+            ),
+        });
     }
-    let output = child.wait_with_output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if timed_out {
+        return Ok(RuntimeWorkerExecution {
+            status: "failed".to_string(),
+            result: serde_json::json!({
+                "outcome": "local_process_timeout",
+                "timeout_seconds": config.timeout_seconds,
+                "stdout": stdout,
+                "stderr": stderr,
+                "output_redaction_count": redaction_count,
+            }),
+            signature: None,
+            attestation: local_process_attestation(
+                worker,
+                entry,
+                config,
+                started_at,
+                exit_status.code(),
+                "timeout",
+            ),
+        });
+    }
     let parsed = serde_json::from_str::<serde_json::Value>(&stdout).ok();
-    let default_status = if output.status.success() {
+    let default_status = if exit_status.success() {
         "completed"
     } else {
         "failed"
@@ -9036,9 +9258,10 @@ fn execute_local_process_worker(
         .unwrap_or_else(|| {
             serde_json::json!({
                 "outcome": "local_process_completed",
-                "exit_code": output.status.code(),
+                "exit_code": exit_status.code(),
                 "stdout": stdout,
                 "stderr": stderr,
+                "output_redaction_count": redaction_count,
             })
         });
     let signature = parsed
@@ -9056,7 +9279,7 @@ fn execute_local_process_worker(
                 entry,
                 config,
                 started_at,
-                output.status.code(),
+                exit_status.code(),
                 "completed",
             )
         });
@@ -9066,6 +9289,176 @@ fn execute_local_process_worker(
         signature,
         attestation,
     })
+}
+
+fn spawn_bounded_output_reader<R>(
+    mut reader: R,
+    max_bytes: usize,
+) -> thread::JoinHandle<std::io::Result<BoundedProcessOutput>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut bytes = Vec::with_capacity(max_bytes.min(8192));
+        let mut buffer = [0u8; 8192];
+        let mut truncated = false;
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            let remaining = max_bytes.saturating_sub(bytes.len());
+            let retained = read.min(remaining);
+            bytes.extend_from_slice(&buffer[..retained]);
+            truncated |= retained < read;
+        }
+        Ok(BoundedProcessOutput { bytes, truncated })
+    })
+}
+
+fn join_bounded_output_reader(
+    handle: thread::JoinHandle<std::io::Result<BoundedProcessOutput>>,
+    stream_name: &str,
+) -> Result<BoundedProcessOutput> {
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("local_process {stream_name} reader panicked"))?
+        .with_context(|| format!("failed to read local_process {stream_name}"))
+}
+
+fn sanitize_local_process_output(
+    output: BoundedProcessOutput,
+    environment: &[(String, String)],
+) -> (String, usize) {
+    let mut text = String::from_utf8_lossy(&output.bytes).to_string();
+    let mut redaction_count = 0usize;
+    for (name, value) in environment {
+        if matches!(name.as_str(), "PATH" | "LANG") || value.len() < 4 {
+            continue;
+        }
+        let matches = text.matches(value).count();
+        if matches > 0 {
+            text = text.replace(value, "{{redacted:worker_env}}");
+            redaction_count = redaction_count.saturating_add(matches);
+        }
+    }
+    if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&text) {
+        redact_sensitive_worker_json(&mut json, &mut redaction_count);
+        sanitize_worker_json_strings(&mut json, None, &mut redaction_count);
+        if let Ok(serialized) = serde_json::to_string(&json) {
+            text = serialized;
+        }
+    } else {
+        let mut detected_secrets = 0usize;
+        text = sanitize_compact_human_text(&text, &mut detected_secrets);
+        redaction_count = redaction_count.saturating_add(detected_secrets);
+    }
+    if output.truncated {
+        text.push_str("\n[forge output truncated at configured byte limit]");
+    }
+    (text, redaction_count)
+}
+
+fn redact_sensitive_worker_json(value: &mut serde_json::Value, redaction_count: &mut usize) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if worker_json_key_is_sensitive(key) {
+                    *value = serde_json::Value::String("[REDACTED]".to_string());
+                    *redaction_count = redaction_count.saturating_add(1);
+                } else {
+                    redact_sensitive_worker_json(value, redaction_count);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_sensitive_worker_json(value, redaction_count);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sanitize_worker_json_strings(
+    value: &mut serde_json::Value,
+    field_name: Option<&str>,
+    redaction_count: &mut usize,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                sanitize_worker_json_strings(value, Some(key), redaction_count);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                sanitize_worker_json_strings(value, field_name, redaction_count);
+            }
+        }
+        serde_json::Value::String(text) if !worker_json_key_is_integrity_field(field_name) => {
+            let mut detected = 0usize;
+            *text = sanitize_compact_human_text(text, &mut detected);
+            *redaction_count = redaction_count.saturating_add(detected);
+        }
+        _ => {}
+    }
+}
+
+fn worker_json_key_is_integrity_field(field_name: Option<&str>) -> bool {
+    let Some(field_name) = field_name else {
+        return false;
+    };
+    let field_name = field_name.trim().to_ascii_lowercase().replace('-', "_");
+    matches!(
+        field_name.as_str(),
+        "signature" | "public_key_hex" | "attestation_hash" | "result_hash"
+    ) || field_name.ends_with("_sha256")
+}
+
+fn worker_json_key_is_sensitive(key: &str) -> bool {
+    let key = key.trim().to_ascii_lowercase().replace('-', "_");
+    matches!(
+        key.as_str(),
+        "secret"
+            | "secret_value"
+            | "token"
+            | "access_token"
+            | "refresh_token"
+            | "password"
+            | "passphrase"
+            | "api_key"
+            | "authorization"
+            | "credential"
+            | "private_key"
+    ) || key.ends_with("_secret")
+        || key.ends_with("_password")
+        || key.ends_with("_token")
+        || key.ends_with("_api_key")
+}
+
+fn terminate_local_process_group(child: &mut Child, leader_running: bool) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let process_group = -(child.id() as i32);
+        // SAFETY: process_group is the negative id of the child group created by process_group(0).
+        let result = unsafe { libc::kill(process_group, libc::SIGKILL) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error).context("failed to terminate local_process process group");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    if leader_running {
+        child
+            .kill()
+            .context("failed to terminate local_process worker")?;
+    }
+    #[cfg(unix)]
+    let _ = leader_running;
+    Ok(())
 }
 
 fn execute_external_api_worker(
@@ -9200,12 +9593,7 @@ fn post_external_api_worker_json(
         return post_external_api_worker_https_curl(config, request_bytes, &extra_headers);
     }
     let timeout = Duration::from_secs(config.timeout_seconds);
-    let mut addrs = (config.host.as_str(), config.port)
-        .to_socket_addrs()
-        .with_context(|| format!("failed to resolve external_api host {}", config.host))?;
-    let addr = addrs
-        .next()
-        .with_context(|| format!("no socket address resolved for {}", config.host))?;
+    let addr = resolve_external_api_worker_address(config)?;
     let mut stream = TcpStream::connect_timeout(&addr, timeout)
         .with_context(|| format!("failed to connect to external_api worker {}", config.host))?;
     stream.set_read_timeout(Some(timeout))?;
@@ -9248,6 +9636,9 @@ fn post_external_api_worker_json(
         .context("external_api response missing HTTP header terminator")?;
     let headers = String::from_utf8_lossy(&response[..header_end]);
     let status_code = parse_http_status_code(&headers)?;
+    if (300..400).contains(&status_code) {
+        bail!("external_api worker redirects are denied");
+    }
     let body = response[header_end..].to_vec();
     if body.len() > config.max_response_bytes {
         bail!("external_api response body exceeded max_response_bytes");
@@ -9291,9 +9682,21 @@ fn post_external_api_worker_https_curl(
     }
 
     let timeout_seconds = config.timeout_seconds.max(1).to_string();
+    let resolved_address = resolve_external_api_worker_address(config)?;
+    let resolve_value = worker_curl_resolve_value(&config.host, config.port, resolved_address.ip());
     let mut command = Command::new("curl");
     command.args([
         "-sS",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--max-redirs",
+        "0",
+        "--noproxy",
+        "*",
+        "--resolve",
+        &resolve_value,
         "--max-time",
         &timeout_seconds,
         "-X",
@@ -9328,6 +9731,9 @@ fn post_external_api_worker_https_curl(
         .context("failed to wait for external_api HTTPS worker curl")?;
     let (status_code, response_body) = parse_worker_curl_http_status(&output.stdout)
         .unwrap_or_else(|| (if output.status.success() { 200 } else { 0 }, output.stdout));
+    if (300..400).contains(&status_code) {
+        bail!("external_api worker redirects are denied");
+    }
     let body = if response_body.is_empty() && !output.status.success() {
         output.stderr
     } else {
@@ -9337,6 +9743,73 @@ fn post_external_api_worker_https_curl(
         bail!("external_api response body exceeded max_response_bytes");
     }
     Ok(ExternalApiHttpResponse { status_code, body })
+}
+
+fn resolve_external_api_worker_address(config: &ExternalApiWorkerConfig) -> Result<SocketAddr> {
+    let addresses = (config.host.as_str(), config.port)
+        .to_socket_addrs()
+        .with_context(|| format!("failed to resolve external_api host {}", config.host))?
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        bail!("no socket address resolved for {}", config.host);
+    }
+    let explicit_loopback = is_local_http_host(&config.host);
+    for address in &addresses {
+        if address.ip().is_loopback() && explicit_loopback {
+            continue;
+        }
+        if !worker_ip_is_public_for_outbound(address.ip()) {
+            bail!(
+                "external_api worker endpoint resolved to blocked private, link-local or reserved address"
+            );
+        }
+    }
+    Ok(addresses[0])
+}
+
+fn worker_ip_is_public_for_outbound(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_multicast()
+                || ip.is_documentation()
+                || octets[0] == 0
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+                || (octets[0] == 198 && matches!(octets[1], 18 | 19))
+                || octets[0] >= 240)
+        }
+        IpAddr::V6(ip) => {
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return worker_ip_is_public_for_outbound(IpAddr::V4(mapped));
+            }
+            let segments = ip.segments();
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || segments[..6].iter().all(|segment| *segment == 0)
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] & 0xffc0) == 0xfec0
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                || (segments[0] == 0x0100
+                    && segments[1] == 0
+                    && segments[2] == 0
+                    && segments[3] == 0))
+        }
+    }
+}
+
+fn worker_curl_resolve_value(host: &str, port: u16, ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(ip) => format!("{host}:{port}:{ip}"),
+        IpAddr::V6(ip) => format!("{host}:{port}:[{ip}]"),
+    }
 }
 
 fn parse_worker_curl_http_status(output: &[u8]) -> Option<(u16, Vec<u8>)> {
@@ -9417,6 +9890,8 @@ fn local_process_attestation(
         "command_sha256": hex_sha256(config.command.as_bytes()),
         "args_sha256": hex_sha256(serde_json::to_string(&config.args).unwrap_or_default().as_bytes()),
         "timeout_seconds": config.timeout_seconds,
+        "max_output_bytes": config.max_output_bytes,
+        "environment_allowlist": config.environment.iter().map(|(name, _)| name).collect::<Vec<_>>(),
         "exit_code": exit_code,
         "started_at": started_at.to_rfc3339(),
         "finished_at": Utc::now().to_rfc3339(),
@@ -13845,4 +14320,90 @@ fn default_addon_view_action_type() -> String {
 
 fn default_permission_risk() -> String {
     "medium".to_string()
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn local_process_output_is_bounded_and_redacts_allowlisted_values() {
+        let secret = "worker-secret-value-123456";
+        let output = BoundedProcessOutput {
+            bytes: format!("token={secret}").into_bytes(),
+            truncated: true,
+        };
+        let environment = vec![
+            (
+                "PATH".to_string(),
+                "/usr/local/bin:/usr/bin:/bin".to_string(),
+            ),
+            ("WORKER_TOKEN".to_string(), secret.to_string()),
+        ];
+        let (sanitized, redaction_count) = sanitize_local_process_output(output, &environment);
+        assert!(!sanitized.contains(secret));
+        assert!(sanitized.contains("truncated"));
+        assert!(redaction_count >= 1);
+    }
+
+    #[test]
+    fn local_process_redaction_preserves_protocol_signature() {
+        let signature = "ab".repeat(64);
+        let output = BoundedProcessOutput {
+            bytes: serde_json::json!({
+                "status": "completed",
+                "signature": signature,
+                "result": {"token": "must-not-survive"}
+            })
+            .to_string()
+            .into_bytes(),
+            truncated: false,
+        };
+        let (sanitized, redaction_count) = sanitize_local_process_output(output, &[]);
+        let value: serde_json::Value = serde_json::from_str(&sanitized).unwrap();
+        assert_eq!(value["signature"], signature);
+        assert_eq!(value["result"]["token"], "[REDACTED]");
+        assert!(redaction_count >= 1);
+    }
+
+    #[test]
+    fn external_worker_ssrf_filter_blocks_private_and_link_local_addresses() {
+        assert!(!worker_ip_is_public_for_outbound(IpAddr::V4(
+            Ipv4Addr::new(192, 168, 1, 1)
+        )));
+        assert!(!worker_ip_is_public_for_outbound(IpAddr::V4(
+            Ipv4Addr::new(169, 254, 169, 254)
+        )));
+        assert!(!worker_ip_is_public_for_outbound(IpAddr::V6(
+            "fc00::1".parse::<Ipv6Addr>().unwrap()
+        )));
+        assert!(worker_ip_is_public_for_outbound(IpAddr::V4(Ipv4Addr::new(
+            1, 1, 1, 1
+        ))));
+    }
+
+    #[test]
+    fn local_process_env_allowlist_rejects_loader_injection() {
+        assert!(validate_local_process_env_name("WORKER_REGION").is_ok());
+        assert!(validate_local_process_env_name("LD_PRELOAD").is_err());
+        assert!(validate_local_process_env_name("NODE_OPTIONS").is_err());
+    }
+
+    #[test]
+    fn production_mode_blocks_untrusted_local_process_without_explicit_policy() {
+        let incomplete = serde_json::json!({
+            "execution_mode": "local_process",
+            "production_allowed": true,
+            "allowed_entrypoints": ["worker.run"],
+            "allowed_contracts": ["worker.contract"],
+            "env_allowlist": []
+        });
+        assert!(validate_local_process_production_policy(true, "local", &incomplete).is_err());
+        assert!(validate_local_process_production_policy(true, "trusted", &incomplete).is_ok());
+        assert!(
+            validate_local_process_production_policy(false, "local", &serde_json::json!({}))
+                .is_ok()
+        );
+    }
 }

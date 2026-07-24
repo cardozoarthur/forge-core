@@ -1,8 +1,0 @@
-{
-  "schema_version": "forge.tui.chat_session.v1",
-  "chat_session_code": "chat_ef63c6297b704d08a226c6000f3c0560",
-  "project_root": "/home/arthur/projects/forge-core",
-  "created_at": "2026-07-04T11:51:01.397716940+00:00",
-  "updated_at": "2026-07-04T11:51:01.397716940+00:00",
-  "conversation_history": []
-}

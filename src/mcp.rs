@@ -48,8 +48,10 @@ use crate::cli_integration::{
     HarnessRuntimePolicyOptions, HeadroomStatsOptions, ProviderAdapterInstallOptions,
 };
 use crate::context::{
+    build_compact_context_view_with_predecessor_plans,
     build_context_package_with_checkpoint_and_project,
-    build_context_package_with_checkpoint_project_and_worktree, DEFAULT_CONTEXT_BUDGET,
+    build_context_package_with_checkpoint_project_and_worktree,
+    CONTEXT_COMPACT_VIEW_SCHEMA_VERSION, CONTEXT_SCHEMA_VERSION, DEFAULT_CONTEXT_BUDGET,
 };
 use crate::cost::{
     apply_cost_ledger_retention_for_context, build_cost_ledger_for_context,
@@ -78,7 +80,10 @@ use crate::executor::{
     record_shell_session_plan, BrainSessionLifecycleOptions, BrainSessionsReportOptions,
     ShellLaunchPlanOptions,
 };
-use crate::handoff::build_task_handoff_with_project;
+use crate::handoff::{
+    build_predecessor_handoff_plans, build_task_handoff_response_with_project, TaskHandoffView,
+    EXECUTOR_HANDOFF_COMPACT_SCHEMA_VERSION, EXECUTOR_HANDOFF_SCHEMA_VERSION,
+};
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
     inspect_project_operating_context, link_identity, list_identity_links,
@@ -181,7 +186,8 @@ use crate::worktree::{
     WorktreeSandboxRequest,
 };
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
@@ -201,7 +207,7 @@ pub struct McpToolsManifest {
     pub tools: Vec<McpToolSpec>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct McpToolSpec {
     pub name: String,
     pub title: String,
@@ -211,6 +217,31 @@ pub struct McpToolSpec {
     pub forge_command: Vec<String>,
     pub async_safe: bool,
     pub mutates_workflow: bool,
+}
+
+impl Serialize for McpToolSpec {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let output_schema_selector = output_schema_selector(&self.name);
+        let mut state = serializer.serialize_struct(
+            "McpToolSpec",
+            8 + usize::from(output_schema_selector.is_some()),
+        )?;
+        state.serialize_field("name", &self.name)?;
+        state.serialize_field("title", &self.title)?;
+        state.serialize_field("description", &self.description)?;
+        state.serialize_field("input_schema", &self.input_schema)?;
+        state.serialize_field("output_schema", &self.output_schema)?;
+        state.serialize_field("forge_command", &self.forge_command)?;
+        state.serialize_field("async_safe", &self.async_safe)?;
+        state.serialize_field("mutates_workflow", &self.mutates_workflow)?;
+        if let Some(selector) = output_schema_selector {
+            state.serialize_field("output_schema_selector", &selector)?;
+        }
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1827,6 +1858,7 @@ struct ContextRequestInput {
     task_id: String,
     budget: Option<usize>,
     project_root: Option<String>,
+    view: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1888,6 +1920,7 @@ struct TaskHandoffInput {
     budget: Option<usize>,
     ttl_seconds: Option<u64>,
     project_root: Option<String>,
+    view: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6206,14 +6239,20 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.context.request",
                 "Request Bounded Context",
                 "Build the minimum correct task-local context package before executor handoff, optionally resolving project memory governance.",
-                object_schema(&[
-                    ("workflow_id", "string", "workflow id"),
-                    ("task_id", "string", "task id"),
-                    ("budget", "integer", "context byte budget"),
-                    ("project_root", "string", "optional project root containing .forge/memory-governance.json"),
-                ], &["workflow_id", "task_id"]),
-                "forge.context.v30",
-                &["forge", "context", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                context_request_input_schema(),
+            CONTEXT_COMPACT_VIEW_SCHEMA_VERSION,
+            &[
+                "forge",
+                "context",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--view",
+                "compact",
+                "--output",
+                "json",
+            ],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -6564,16 +6603,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.task.handoff",
                 "Acquire Task Handoff",
                 "Acquire a bounded executor handoff packet for an authorized task executor, optionally resolving project memory governance.",
-                object_schema(&[
-                    ("workflow_id", "string", "workflow id"),
-                    ("task_id", "string", "task id"),
-                    ("executor", "string", "selected executor id"),
-                    ("budget", "integer", "context byte budget"),
-                    ("ttl_seconds", "integer", "lease TTL in seconds"),
-                    ("project_root", "string", "optional project root containing .forge/memory-governance.json"),
-                ], &["workflow_id", "task_id", "executor"]),
-                "forge.executor_handoff.v9",
-                &["forge", "task", "handoff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--executor", "<executor>", "--output", "json"],
+                task_handoff_input_schema(),
+                EXECUTOR_HANDOFF_COMPACT_SCHEMA_VERSION,
+                &["forge", "task", "handoff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--executor", "<executor>", "--view", "compact", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -9897,6 +9929,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let workflow = store.load_workflow(&input.workflow_id)?;
             let latest_checkpoint =
                 load_latest_task_checkpoint(store, &input.workflow_id, &input.task_id)?;
+            let budget = input.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET);
             let explicit_project_root = input.project_root.as_deref().map(PathBuf::from);
             let project_root = resolve_effective_project_root(
                 store,
@@ -9922,7 +9955,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 build_context_package_with_checkpoint_project_and_worktree(
                     &workflow,
                     &input.task_id,
-                    input.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
+                    budget,
                     latest_checkpoint,
                     project_root.as_deref(),
                     bound_worktree,
@@ -9931,12 +9964,31 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 build_context_package_with_checkpoint_and_project(
                     &workflow,
                     &input.task_id,
-                    input.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
+                    budget,
                     latest_checkpoint,
                     project_root.as_deref(),
                 )?
             };
-            serde_json::to_value(package)?
+            match input.view.as_deref().unwrap_or("compact") {
+                "full" => serde_json::to_value(package)?,
+                "compact" => {
+                    let predecessor_plans = build_predecessor_handoff_plans(
+                        store,
+                        &workflow,
+                        &input.task_id,
+                        budget,
+                        explicit_project_root.as_deref(),
+                    )?;
+                    serde_json::to_value(build_compact_context_view_with_predecessor_plans(
+                        &package,
+                        &workflow,
+                        store.path(),
+                        project_root.as_deref(),
+                        &predecessor_plans,
+                    ))?
+                }
+                view => bail!("unsupported context view `{view}`; expected full or compact"),
+            }
         }
         "forge.worktree.guard.check" => {
             let input: WorktreeGuardCheckInput = parse_input(input)?;
@@ -10453,7 +10505,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.task.handoff" => {
             let input: TaskHandoffInput = parse_input(input)?;
             let project_root = input.project_root.as_deref().map(PathBuf::from);
-            serde_json::to_value(build_task_handoff_with_project(
+            let view = match input.view.as_deref().unwrap_or("compact") {
+                "compact" => TaskHandoffView::Compact,
+                "full" => TaskHandoffView::Full,
+                view => bail!("unsupported task handoff view `{view}`; expected compact or full"),
+            };
+            serde_json::to_value(build_task_handoff_response_with_project(
                 store,
                 &input.workflow_id,
                 &input.task_id,
@@ -10461,6 +10518,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
                 input.ttl_seconds.unwrap_or(900),
                 project_root.as_deref(),
+                view,
             )?)?
         }
         "forge.patch.plan" => {
@@ -11026,6 +11084,78 @@ fn tool(
         async_safe: flags.async_safe,
         mutates_workflow: flags.mutates_workflow,
     }
+}
+
+fn output_schema_selector(tool_name: &str) -> Option<Value> {
+    match tool_name {
+        "forge.context.request" => Some(json!({
+            "input_field": "view",
+            "default_value": "compact",
+            "mapping": {
+                "full": CONTEXT_SCHEMA_VERSION,
+                "compact": CONTEXT_COMPACT_VIEW_SCHEMA_VERSION,
+            }
+        })),
+        "forge.task.handoff" => Some(json!({
+            "input_field": "view",
+            "default_value": "compact",
+            "mapping": {
+                "full": EXECUTOR_HANDOFF_SCHEMA_VERSION,
+                "compact": EXECUTOR_HANDOFF_COMPACT_SCHEMA_VERSION,
+            }
+        })),
+        _ => None,
+    }
+}
+
+fn context_request_input_schema() -> Value {
+    let mut schema = object_schema(
+        &[
+            ("workflow_id", "string", "workflow id"),
+            ("task_id", "string", "task id"),
+            ("budget", "integer", "context byte budget"),
+            (
+                "project_root",
+                "string",
+                "optional project root containing .forge/memory-governance.json",
+            ),
+            (
+                "view",
+                "string",
+                "full|compact response view; compact is optimized for executor context",
+            ),
+        ],
+        &["workflow_id", "task_id"],
+    );
+    schema["properties"]["view"]["enum"] = json!(["full", "compact"]);
+    schema["properties"]["view"]["default"] = json!("compact");
+    schema
+}
+
+fn task_handoff_input_schema() -> Value {
+    let mut schema = object_schema(
+        &[
+            ("workflow_id", "string", "workflow id"),
+            ("task_id", "string", "task id"),
+            ("executor", "string", "selected executor id"),
+            ("budget", "integer", "context byte budget"),
+            ("ttl_seconds", "integer", "lease TTL in seconds"),
+            (
+                "project_root",
+                "string",
+                "optional project root containing .forge/memory-governance.json",
+            ),
+            (
+                "view",
+                "string",
+                "compact by default for executor use; full is reserved for audit and replay",
+            ),
+        ],
+        &["workflow_id", "task_id", "executor"],
+    );
+    schema["properties"]["view"]["enum"] = json!(["compact", "full"]);
+    schema["properties"]["view"]["default"] = json!("compact");
+    schema
 }
 
 #[derive(Debug, Clone, Copy)]
