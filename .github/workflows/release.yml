@@ -81,6 +81,12 @@ jobs:
           tar -xzf "$archive" gitleaks
           sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
 
+      - name: Scan tagged source and history for secrets
+        run: |
+          # Run before tests and smokes create ignored runtime keys under .forge/.
+          gitleaks dir --redact=100 --no-banner --no-color .
+          gitleaks git --redact=100 --no-banner --no-color --log-opts="--all" .
+
       - name: Run release gates
         run: |
           cargo fmt --check
@@ -89,8 +95,6 @@ jobs:
           cargo build --release --all-features --locked
           bash packaging/smoke-production.sh target/release/forge
           bash packaging/smoke-offhost-backup.sh target/release/forge
-          gitleaks dir --redact=100 --no-banner --no-color .
-          gitleaks git --redact=100 --no-banner --no-color --log-opts="--all" .
           cargo audit
           cargo deny check advisories licenses bans sources
 

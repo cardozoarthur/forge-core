@@ -50,7 +50,7 @@ Use `j`/`k` para mover o foco no REPL, `enter` para abrir o painel focado, `m` p
 
 ## Status
 
-Current version: `0.5.0`
+Current version: `0.5.1`
 
 Forge v0.5 is production-supported for one trusted operator on one host, with a
 local SQLite store and loopback-only Ops service. Multi-tenant operation, high
