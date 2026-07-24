@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.5.1 - 2026-07-24
+
+### Fixed
+
+- Moved release secret scans ahead of tests and production smokes so ignored,
+  runtime-generated `.forge` encryption keys remain fail-closed without being
+  mistaken for tracked source leaks.
+- Preserved tag-bound release identity by publishing a patch release instead of
+  moving the failed `v0.5.0` tag.
+
 ## 0.5.0 - 2026-07-24
 
 ### Production profile
