@@ -27,6 +27,20 @@ fn forge() -> Command {
     Command::cargo_bin("forge").expect("forge binary should build")
 }
 
+fn configure_test_git_identity(repo: &Path) {
+    for (key, value) in [
+        ("user.email", "test@example.com"),
+        ("user.name", "Forge Test"),
+    ] {
+        assert!(StdCommand::new("git")
+            .args(["config", key, value])
+            .current_dir(repo)
+            .status()
+            .expect("git config should run")
+            .success());
+    }
+}
+
 fn forge_tui_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -27643,6 +27657,7 @@ fn self_run_falls_back_to_agy_before_opencode_if_previous_executor_fails() {
         .status()
         .expect("git init should succeed");
     assert!(status.success());
+    configure_test_git_identity(&repo);
     fs::write(repo.join("README.md"), "# repo\n").unwrap();
 
     let executors_dir = temp.path().join("bin");
@@ -27664,7 +27679,7 @@ fn self_run_falls_back_to_agy_before_opencode_if_previous_executor_fails() {
     let path = format!("{}:{}", executors_dir.display(), old_path);
 
     let output = forge()
-        .env("PATH", path)
+        .env("PATH", &path)
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -27729,6 +27744,7 @@ fn self_run_keeps_request_active_between_multiple_cycles() {
         .status()
         .expect("git init should succeed");
     assert!(status.success());
+    configure_test_git_identity(&repo);
     fs::write(repo.join("README.md"), "# repo\n").unwrap();
 
     let executors_dir = temp.path().join("bin");
@@ -60183,6 +60199,7 @@ fn interactive_retention_requires_approval_before_deleting_artifact_workflow() {
         .contains("external side effect"));
 }
 
+#[cfg(unix)]
 #[test]
 fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
     let temp = tempdir().unwrap();
@@ -60190,6 +60207,15 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
     let project_root = temp.path().join("replacement-cli-project");
     std::fs::create_dir_all(project_root.join(".forge")).unwrap();
     let project_root_text = project_root.to_str().unwrap();
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    write_fake_executor(
+        &bin_dir,
+        "codex",
+        "#!/bin/sh\nprintf 'codex 0.5.0\\n'\nexit 0\n",
+    );
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{old_path}", bin_dir.display());
 
     forge()
         .args([
@@ -60208,6 +60234,7 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
         .success();
 
     let output = forge()
+        .env("PATH", &path)
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -60452,6 +60479,7 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
         )));
 
     let home_output = forge()
+        .env("PATH", &path)
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -60484,6 +60512,7 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
         .any(|widget| widget["widget_id"] == "replacement_cli_panel"));
 
     let text_output = forge()
+        .env("PATH", &path)
         .args([
             "--store",
             store.to_str().unwrap(),

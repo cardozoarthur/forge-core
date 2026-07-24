@@ -14960,7 +14960,9 @@ pub fn route_interactive_input_with_context(
         return Ok(route_slash_command(trimmed));
     }
 
-    if let Some(answer) = deterministic_direct_interactive_answer(store, trimmed) {
+    if let Some(answer) =
+        deterministic_direct_interactive_answer(store, trimmed, conversation_context)
+    {
         return Ok(InteractiveRouteReport {
             status: "routed".to_string(),
             schema_version: INTERACTIVE_ROUTE_SCHEMA_VERSION.to_string(),
@@ -15049,7 +15051,11 @@ pub fn route_interactive_input_with_context(
     })
 }
 
-fn deterministic_direct_interactive_answer(store: &ForgeStore, input: &str) -> Option<String> {
+fn deterministic_direct_interactive_answer(
+    store: &ForgeStore,
+    input: &str,
+    conversation_context: &[String],
+) -> Option<String> {
     let lower = input.trim().to_lowercase();
     if lower.is_empty() {
         return Some("Diga o que você quer saber ou executar no Forge.".to_string());
@@ -15067,13 +15073,46 @@ fn deterministic_direct_interactive_answer(store: &ForgeStore, input: &str) -> O
     if is_date_question(&lower) {
         return Some(format!("Hoje é {} em UTC.", Utc::now().date_naive()));
     }
+    if let Some(name) = declared_user_name(input) {
+        return Some(format!(
+            "Prazer, {name}. Vou considerar esse nome durante esta conversa."
+        ));
+    }
     if is_identity_question(&lower) {
+        if let Some(name) = conversation_context
+            .iter()
+            .rev()
+            .filter_map(|line| line.strip_prefix("user: "))
+            .find_map(declared_user_name)
+        {
+            return Some(format!("Seu nome é {name}."));
+        }
         return Some(
             "Eu conheço o contexto operacional desta sessão pelo Forge, mas não invento dados pessoais que não estejam registrados no runtime."
                 .to_string(),
         );
     }
     None
+}
+
+fn declared_user_name(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    let lower = trimmed.to_lowercase();
+    let prefixes = ["meu nome é ", "meu nome e ", "meu nome eh ", "my name is "];
+    let prefix = prefixes
+        .into_iter()
+        .find(|prefix| lower.starts_with(prefix))?;
+    let name = trimmed
+        .get(prefix.len()..)?
+        .trim()
+        .trim_end_matches(['.', '!', '?'])
+        .trim();
+    let valid = !name.is_empty()
+        && name.chars().count() <= 80
+        && name
+            .chars()
+            .all(|character| character.is_alphabetic() || " '-".contains(character));
+    valid.then(|| name.to_string())
 }
 
 fn is_forge_status_question(lower: &str) -> bool {
@@ -25457,6 +25496,30 @@ mod tests {
         let answer = name.answer.unwrap();
         assert_ne!(answer, "não sei");
         assert!(!answer.trim().is_empty());
+    }
+
+    #[test]
+    fn declared_name_stays_in_direct_conversation_context_without_workflow() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let introduction =
+            route_interactive_input_with_context(&store, "Meu nome é Arthur.", "test", &[])
+                .unwrap();
+        assert!(!introduction.workflow_created);
+        assert_eq!(introduction.routing_decision, "direct_answer");
+        assert!(introduction.answer.unwrap().contains("Arthur"));
+
+        let context = vec![
+            "user: Meu nome é Arthur.".to_string(),
+            "assistant: Prazer, Arthur.".to_string(),
+            "user: Você sabe meu nome?".to_string(),
+        ];
+        let question =
+            route_interactive_input_with_context(&store, "Você sabe meu nome?", "test", &context)
+                .unwrap();
+        assert!(!question.workflow_created);
+        assert_eq!(question.routing_decision, "direct_answer");
+        assert!(question.answer.unwrap().contains("Arthur"));
     }
 
     #[test]
