@@ -4,15 +4,18 @@ use crate::graph::{
     ArtifactRecord, AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind,
     PersonaRoutingSpec, TaskStatus, Workflow,
 };
+use crate::improve::suggested_handoff_executor;
 use crate::intent::OperatingContextSpec;
 use crate::memory::project_memory_governance_report;
+use crate::security::{sanitize_prompt_secrets, SecretSanitizationOptions};
+use crate::worktree::{worktree_context_for_project, WorktreeContextReport};
 use anyhow::{bail, Result};
 use serde::Serialize;
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v30";
-const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
+pub(crate) const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v30";
+const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v2";
 const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "forge.context.routing_contract.v1";
 const ROUTING_REPAIR_SCHEMA_VERSION: &str = "forge.context.routing_repair.v1";
 const BUDGET_PLAN_SCHEMA_VERSION: &str = "forge.context.budget_plan.v1";
@@ -23,6 +26,7 @@ const CONTEXT_DELTA_SCHEMA_VERSION: &str = "forge.context.delta.v1";
 const ROUTING_ECONOMY_SCHEMA_VERSION: &str = "forge.context.routing_economy.v1";
 const PROMPT_PACKET_SCHEMA_VERSION: &str = "forge.context.prompt_packet.v2";
 const EXECUTOR_PROMPT_PACKET_VERSION: &str = "forge.executor.prompt_packet.v2";
+const CONTEXT_SECRET_GUARDRAIL_SCHEMA_VERSION: &str = "forge.context.secret_guardrail.v1";
 const ORGANIZATION_PROMPT_CONTEXT_SCHEMA_VERSION: &str =
     "forge.context.organization_prompt_context.v1";
 const PERSONALITY_DECISION_SCHEMA_VERSION: &str = "forge.context.personality_decision.v1";
@@ -30,7 +34,7 @@ const COMPANY_WORK_DECISION_SCHEMA_VERSION: &str = "forge.context.company_work_d
 const CONTEXT_REPLAY_MANIFEST_SCHEMA_VERSION: &str = "forge.context.replay_manifest.v1";
 const CONTEXT_SELECTION_RECEIPT_SCHEMA_VERSION: &str = "forge.context.selection_receipt.v1";
 const EXECUTION_POLICY_DECISION_SCHEMA_VERSION: &str = "forge.context.execution_policy_decision.v1";
-const CONTEXT_SELECTOR_VERSION: &str = "forge.context.selector.v1";
+const CONTEXT_SELECTOR_VERSION: &str = "forge.context.selector.v2";
 const EXECUTOR_PROFILE_SCHEMA_VERSION: &str = "forge.context.executor_profile.v1";
 const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v1";
 const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "forge.context_routing_quality.v1";
@@ -41,11 +45,39 @@ const CONTINUATION_PLAN_SCHEMA_VERSION: &str = "forge.context.continuation_plan.
 const CONTEXT_MEMORY_POLICY_SCHEMA_VERSION: &str = "forge.context.memory_policy.v1";
 const CONTEXT_DEFERRED_DISCOVERY_SCHEMA_VERSION: &str = "forge.context.deferred_discovery.v1";
 const CONTEXT_ROUTER_SCHEMA_VERSION: &str = "forge.context.router.v1";
+const CONTEXT_COMPACT_OMISSION_SCHEMA_VERSION: &str = "forge.context.compact_omissions.v1";
+pub(crate) const CONTEXT_COMPACT_VIEW_SCHEMA_VERSION: &str = "forge.context.compact.v2";
+pub(crate) const COMPACT_PREDECESSOR_TASK_LIMIT: usize = 4;
+pub(crate) const COMPACT_PREDECESSOR_VALIDATION_RULE_LIMIT: usize = 2;
+pub(crate) const COMPACT_EXPAND_COMMAND_LIMIT: usize = 4;
+pub(crate) const COMPACT_NEXT_COMMAND_LIMIT: usize = 8;
+const COMPACT_BLOCKING_REF_LIMIT: usize = 16;
+const COMPACT_SECTION_LIMIT: usize = 16;
+const COMPACT_SOURCE_ID_LIMIT: usize = 16;
+const COMPACT_CHANGED_COMPONENT_LIMIT: usize = 16;
+const COMPACT_REQUIRED_DECISION_LIMIT: usize = 8;
+const COMPACT_VALIDATION_GATE_LIMIT: usize = 16;
+const COMPACT_SECTION_BYTE_LIMIT: usize = 64;
+const COMPACT_SOURCE_ID_BYTE_LIMIT: usize = 128;
+const COMPACT_CHANGED_COMPONENT_BYTE_LIMIT: usize = 128;
+const COMPACT_INSTRUCTION_ID_BYTE_LIMIT: usize = 128;
+const COMPACT_INSTRUCTION_TEXT_BYTE_LIMIT: usize = 192;
+const COMPACT_REQUIRED_DECISION_BYTE_LIMIT: usize = 256;
+const COMPACT_VALIDATION_GATE_BYTE_LIMIT: usize = 192;
+const COMPACT_ACTION_BYTE_LIMIT: usize = 128;
+const COMPACT_GUARDRAIL_REASON_BYTE_LIMIT: usize = 512;
+pub(crate) const COMPACT_TASK_ID_BYTE_LIMIT: usize = 128;
+pub(crate) const COMPACT_TASK_TITLE_BYTE_LIMIT: usize = 128;
+pub(crate) const COMPACT_TASK_GOAL_BYTE_LIMIT: usize = 256;
+pub(crate) const COMPACT_EXPECTED_OUTPUT_BYTE_LIMIT: usize = 192;
+pub(crate) const COMPACT_VALIDATION_KIND_BYTE_LIMIT: usize = 48;
+pub(crate) const COMPACT_VALIDATION_COMMAND_BYTE_LIMIT: usize = 192;
+pub(crate) const COMPACT_VALIDATION_EXPECTED_BYTE_LIMIT: usize = 192;
 const ROUTING_POLICY: &str =
     "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_shard_selection_audit_v30";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 4096;
-const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
+const DETERMINISTIC_CONTEXT_BUDGET: usize = 768;
 const ARTIFACT_MANIFEST_CONTEXT_BUDGET: usize = DEFAULT_CONTEXT_BUDGET;
 const FINAL_COMPLETION_AUDIT_CONTEXT_BUDGET: usize = 12000;
 const REWORK_CONTEXT_BUDGET: usize = 4096;
@@ -149,6 +181,8 @@ pub struct ContextPackage {
     pub lineage: ContextLineage,
     pub operating_context: OperatingContextSpec,
     pub memory_policy: ContextMemoryPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeContextReport>,
     pub deferred_discovery: ContextDeferredDiscoveryPlan,
     pub context_router: ContextRouterPlan,
     pub persona: Option<PersonaRoutingSpec>,
@@ -173,6 +207,7 @@ pub struct ContextPackage {
     pub context_sha256: String,
     pub replay_manifest: ContextReplayManifest,
     pub selection_receipt: ContextSelectionReceipt,
+    pub secret_guardrail: ContextSecretGuardrailReport,
     pub prompt_packet: ContextPromptPacket,
     pub routing_fingerprint: ContextRoutingFingerprint,
     pub routing_contract: ContextRoutingContract,
@@ -193,6 +228,190 @@ pub struct ContextPackage {
     pub profile_omitted_sections: Vec<String>,
     pub shards: Vec<ContextShard>,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextCompactView {
+    pub schema_version: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub workflow_revision: u64,
+    pub status: String,
+    pub context_ready: bool,
+    pub handoff_ready: bool,
+    pub handoff_status: String,
+    pub content: String,
+    pub context_bytes: usize,
+    pub context_sha256: String,
+    pub routing_cache_key: String,
+    pub included_sections: Vec<String>,
+    pub missing_required_sections: Vec<String>,
+    pub selected_source_ids: Vec<String>,
+    pub deferred_source_ids: Vec<String>,
+    pub expand_commands: Vec<Vec<String>>,
+    pub instruction_contract: ContextCompactInstructionContract,
+    pub economy: ContextCompactEconomy,
+    pub continuation: ContextCompactContinuation,
+    pub guardrail: ContextCompactGuardrail,
+    pub secret_redaction_count: usize,
+    pub omissions: ContextCompactOmissionReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextCompactOmissionReport {
+    pub schema_version: String,
+    pub omitted_items: usize,
+    pub omitted_bytes: usize,
+    pub omitted_sha256: String,
+    pub fields: Vec<ContextCompactOmittedField>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextCompactOmittedField {
+    pub field: String,
+    pub omitted_items: usize,
+    pub omitted_bytes: usize,
+    pub omitted_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextCompactInstructionContract {
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub voice: String,
+    pub tone: String,
+    pub persona_mode: String,
+    pub persona_profile_id: String,
+    pub operating_depth: String,
+    pub required_decisions: Vec<String>,
+    pub validation_gates: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextCompactEconomy {
+    pub baseline_bytes: usize,
+    pub selected_bytes: usize,
+    pub avoided_bytes: usize,
+    pub reduction_bps: u32,
+    pub model_calls_avoided: u32,
+    pub canonical_envelope_bytes: usize,
+    pub envelope_overhead_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextCompactContinuation {
+    pub action: String,
+    pub checkpoint_reusable: bool,
+    pub requires_fresh_context: bool,
+    pub changed_components: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextCompactGuardrail {
+    pub status: String,
+    pub action: String,
+    pub reason: String,
+    pub blocking_refs: Vec<String>,
+    pub blocking_refs_omitted: usize,
+    pub recommended_budget_bytes: usize,
+    pub next_commands: Vec<Vec<String>>,
+    pub predecessor_tasks: Vec<ContextPredecessorTaskSpec>,
+    pub predecessor_tasks_total: usize,
+    pub predecessor_tasks_included: usize,
+    pub predecessor_tasks_omitted: usize,
+    pub predecessor_validation_rules_omitted: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextPredecessorTaskSpec {
+    pub task_id: String,
+    pub title: String,
+    pub goal: String,
+    pub status: String,
+    pub expected_output: String,
+    pub validation_rules: Vec<crate::graph::ValidationRule>,
+    pub validation_rules_omitted: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextPredecessorHandoffPlan {
+    pub recommended_budget_bytes: usize,
+    pub project_root: Option<PathBuf>,
+}
+
+#[derive(Default)]
+struct CompactOmissionCollector {
+    fields: BTreeMap<String, Vec<String>>,
+}
+
+impl CompactOmissionCollector {
+    fn record(&mut self, field: &str, omitted_material: String) {
+        self.fields
+            .entry(field.to_string())
+            .or_default()
+            .push(omitted_material);
+    }
+
+    fn record_serializable<T: Serialize>(&mut self, field: &str, value: &T) {
+        let material = serde_json::to_string(value)
+            .expect("compact omitted material should always serialize to JSON");
+        self.record(field, material);
+    }
+
+    fn finish(self) -> ContextCompactOmissionReport {
+        let canonical_material = self.fields.iter().collect::<Vec<_>>();
+        let omitted_sha256 = hex_sha256(
+            &serde_json::to_vec(&canonical_material)
+                .expect("compact omitted material should always serialize to JSON"),
+        );
+        let omitted_items = self.fields.values().map(Vec::len).sum();
+        let omitted_bytes = self
+            .fields
+            .values()
+            .flat_map(|values| values.iter())
+            .map(String::len)
+            .sum();
+        let fields = self
+            .fields
+            .into_iter()
+            .map(|(field, values)| {
+                let omitted_items = values.len();
+                let omitted_bytes = values.iter().map(String::len).sum();
+                let omitted_sha256 = hex_sha256(
+                    &serde_json::to_vec(&values)
+                        .expect("compact omitted field should always serialize to JSON"),
+                );
+                ContextCompactOmittedField {
+                    field,
+                    omitted_items,
+                    omitted_bytes,
+                    omitted_sha256,
+                }
+            })
+            .collect();
+
+        ContextCompactOmissionReport {
+            schema_version: CONTEXT_COMPACT_OMISSION_SCHEMA_VERSION.to_string(),
+            omitted_items,
+            omitted_bytes,
+            omitted_sha256,
+            fields,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextSecretGuardrailReport {
+    pub schema_version: String,
+    pub status: String,
+    pub detection_count: usize,
+    pub vault_references: Vec<String>,
+    pub prompt_builder_input: String,
+    pub deterministic_first: bool,
+    pub external_ai_allowed: bool,
+    pub local_ai_fallback_attempted: bool,
+    pub sanitized_context_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -317,6 +536,7 @@ pub struct ContextRouterFallbackPolicy {
 pub struct ContextRoutingFingerprint {
     pub schema_version: String,
     pub cache_key: String,
+    pub audit_sha256: String,
     pub workflow_revision: u64,
     pub executor_profile_id: String,
     pub context_sha256: String,
@@ -562,6 +782,9 @@ pub struct ContextRoutingRepair {
     pub current_effective_budget: usize,
     pub recommended_budget_bytes: usize,
     pub required_budget_deficit_bytes: usize,
+    pub budget_repairable: bool,
+    pub profile_max_context_bytes: Option<usize>,
+    pub minimum_correct_budget_bytes: usize,
     pub missing_required_sections: Vec<String>,
     pub budget_omitted_sections: Vec<String>,
     pub compressed_sections: Vec<String>,
@@ -772,6 +995,8 @@ pub struct ContextHandoffTask {
     pub blocking_refs: Vec<String>,
     pub context_sha256: String,
     pub resume_context_status: String,
+    pub routing_action: String,
+    pub recommended_budget_bytes: usize,
     pub routing_quality: ContextRoutingQuality,
 }
 
@@ -921,6 +1146,35 @@ struct ContextShardCandidate {
     source: &'static str,
     priority: u8,
     content: String,
+}
+
+struct PreparedContextShard {
+    section: &'static str,
+    source: &'static str,
+    priority: u8,
+    content: String,
+    compressed_content: String,
+    summary: String,
+    required: bool,
+    allowed: bool,
+    original_bytes: usize,
+    minimum_routable_bytes: usize,
+    source_sha256: String,
+}
+
+impl PreparedContextShard {
+    fn minimum_content(&self) -> (&str, bool) {
+        if self.compressed_content.len() < self.original_bytes {
+            (&self.compressed_content, true)
+        } else {
+            (&self.content, false)
+        }
+    }
+
+    fn full_upgrade_bytes(&self) -> usize {
+        self.original_bytes
+            .saturating_sub(self.minimum_routable_bytes)
+    }
 }
 
 #[derive(Serialize)]
@@ -1148,6 +1402,17 @@ struct RoutingFingerprintInput<'a> {
     context_sha256: &'a str,
 }
 
+struct ContextNextActionInput<'a> {
+    current_route: &'a str,
+    handoff_blockers: &'a [ContextHandoffBlocker],
+    task_status: &'a TaskStatus,
+    context_ready: bool,
+    dependency_ready: bool,
+    latest_checkpoint: Option<&'a TaskCheckpoint>,
+    resume_context_status: &'a str,
+    resume_context_reason: &'a str,
+}
+
 struct PromptPacketInput<'a> {
     workflow_id: &'a str,
     task: &'a AtomicTask,
@@ -1203,6 +1468,767 @@ pub fn build_context_package(
     build_context_package_with_checkpoint(workflow, task_id, budget, None)
 }
 
+pub fn build_compact_context_view(
+    package: &ContextPackage,
+    workflow: &Workflow,
+    store_path: &Path,
+    project_root: Option<&Path>,
+) -> ContextCompactView {
+    build_compact_context_view_with_predecessor_plans(
+        package,
+        workflow,
+        store_path,
+        project_root,
+        &BTreeMap::new(),
+    )
+}
+
+pub fn build_compact_context_view_with_predecessor_plans(
+    package: &ContextPackage,
+    workflow: &Workflow,
+    store_path: &Path,
+    project_root: Option<&Path>,
+    predecessor_plans: &BTreeMap<String, ContextPredecessorHandoffPlan>,
+) -> ContextCompactView {
+    let mut omissions = CompactOmissionCollector::default();
+    let mut secret_redaction_count = 0usize;
+    let mut predecessor_tasks = Vec::new();
+    let mut next_commands = Vec::new();
+    let predecessor_frontier = unresolved_predecessor_frontier(workflow, &package.task_id);
+
+    if package.routing_repair.action == "increase_context_budget" && predecessor_frontier.is_empty()
+    {
+        let mut command = forge_store_command(store_path);
+        command.extend([
+            "context".to_string(),
+            "--workflow".to_string(),
+            package.workflow_id.clone(),
+            "--task".to_string(),
+            package.task_id.clone(),
+        ]);
+        append_project_root(&mut command, project_root);
+        command.extend([
+            "--budget".to_string(),
+            package.routing_repair.recommended_budget_bytes.to_string(),
+            "--strict".to_string(),
+            "--view".to_string(),
+            "compact".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
+        next_commands.push(command);
+    }
+
+    let predecessor_tasks_total = predecessor_frontier.len();
+    let predecessor_tasks_omitted = predecessor_frontier
+        .len()
+        .saturating_sub(COMPACT_PREDECESSOR_TASK_LIMIT);
+    for task in predecessor_frontier
+        .iter()
+        .skip(COMPACT_PREDECESSOR_TASK_LIMIT)
+    {
+        let sanitized_task = sanitize_compact_predecessor_task(task, &mut secret_redaction_count);
+        omissions.record_serializable("guardrail.predecessor_tasks", &sanitized_task);
+    }
+    let predecessor_validation_rules_total = predecessor_frontier
+        .iter()
+        .map(|task| task.validation_rules.len())
+        .sum::<usize>();
+    let predecessor_validation_rules_included = predecessor_frontier
+        .iter()
+        .take(COMPACT_PREDECESSOR_TASK_LIMIT)
+        .map(|task| {
+            task.validation_rules
+                .len()
+                .min(COMPACT_PREDECESSOR_VALIDATION_RULE_LIMIT)
+        })
+        .sum::<usize>();
+    for task in predecessor_frontier
+        .iter()
+        .take(COMPACT_PREDECESSOR_TASK_LIMIT)
+    {
+        let sanitized_task = sanitize_compact_predecessor_task(task, &mut secret_redaction_count);
+        let validation_rules_omitted = sanitized_task
+            .validation_rules
+            .len()
+            .saturating_sub(COMPACT_PREDECESSOR_VALIDATION_RULE_LIMIT);
+        for rule in sanitized_task
+            .validation_rules
+            .iter()
+            .skip(COMPACT_PREDECESSOR_VALIDATION_RULE_LIMIT)
+        {
+            omissions.record_serializable("guardrail.predecessor_validation_rules", rule);
+        }
+        let validation_rules = sanitized_task
+            .validation_rules
+            .iter()
+            .take(COMPACT_PREDECESSOR_VALIDATION_RULE_LIMIT)
+            .map(|rule| {
+                compact_validation_rule_with_omissions(
+                    rule,
+                    "guardrail.predecessor_validation_rules",
+                    &mut omissions,
+                )
+            })
+            .collect::<Vec<_>>();
+        predecessor_tasks.push(ContextPredecessorTaskSpec {
+            task_id: compact_text_with_omission(
+                &sanitized_task.task_id,
+                COMPACT_TASK_ID_BYTE_LIMIT,
+                "guardrail.predecessor_task_ids",
+                &mut omissions,
+            ),
+            title: compact_text_with_omission(
+                &sanitized_task.title,
+                COMPACT_TASK_TITLE_BYTE_LIMIT,
+                "guardrail.predecessor_titles",
+                &mut omissions,
+            ),
+            goal: compact_text_with_omission(
+                &sanitized_task.goal,
+                COMPACT_TASK_GOAL_BYTE_LIMIT,
+                "guardrail.predecessor_goals",
+                &mut omissions,
+            ),
+            status: sanitized_task.status,
+            expected_output: compact_text_with_omission(
+                &sanitized_task.expected_output,
+                COMPACT_EXPECTED_OUTPUT_BYTE_LIMIT,
+                "guardrail.predecessor_expected_outputs",
+                &mut omissions,
+            ),
+            validation_rules,
+            validation_rules_omitted,
+        });
+        if task.status == TaskStatus::Pending {
+            let fallback_budget = || {
+                build_context_package(workflow, &task.id, package.requested_budget)
+                    .map(|predecessor| predecessor.routing_repair.recommended_budget_bytes)
+                    .unwrap_or(package.routing_repair.recommended_budget_bytes)
+            };
+            let plan = predecessor_plans.get(&task.id);
+            let budget = plan
+                .map(|plan| plan.recommended_budget_bytes)
+                .unwrap_or_else(fallback_budget);
+            let predecessor_project_root = plan
+                .and_then(|plan| plan.project_root.as_deref())
+                .or(project_root);
+            next_commands.push(task_handoff_command(
+                store_path,
+                &workflow.id,
+                task,
+                budget,
+                predecessor_project_root,
+            ));
+        }
+    }
+
+    if package.handoff_ready {
+        if let Some(task) = workflow
+            .tasks
+            .iter()
+            .find(|task| task.id == package.task_id)
+        {
+            next_commands.push(task_handoff_command(
+                store_path,
+                &workflow.id,
+                task,
+                package.routing_repair.recommended_budget_bytes,
+                project_root,
+            ));
+        }
+    }
+    let next_commands = compact_command_list(
+        next_commands,
+        COMPACT_NEXT_COMMAND_LIMIT,
+        "guardrail.next_commands",
+        &mut omissions,
+    );
+
+    let guardrail_status = if package.handoff_ready {
+        "ready"
+    } else {
+        "blocked"
+    };
+    let blocking_refs_omitted = package
+        .next_action
+        .blocking_refs
+        .len()
+        .saturating_sub(COMPACT_BLOCKING_REF_LIMIT);
+    let blocking_refs = compact_string_list(
+        &package.next_action.blocking_refs,
+        COMPACT_BLOCKING_REF_LIMIT,
+        COMPACT_TASK_ID_BYTE_LIMIT,
+        "guardrail.blocking_refs",
+        &mut omissions,
+    );
+    let included_sections = compact_string_list(
+        &package.included_sections,
+        COMPACT_SECTION_LIMIT,
+        COMPACT_SECTION_BYTE_LIMIT,
+        "included_sections",
+        &mut omissions,
+    );
+    let missing_required_sections = compact_string_list(
+        &package.missing_required_sections,
+        COMPACT_SECTION_LIMIT,
+        COMPACT_SECTION_BYTE_LIMIT,
+        "missing_required_sections",
+        &mut omissions,
+    );
+    let selected_source_ids = compact_string_list(
+        &package.context_router.selected_source_ids,
+        COMPACT_SOURCE_ID_LIMIT,
+        COMPACT_SOURCE_ID_BYTE_LIMIT,
+        "selected_source_ids",
+        &mut omissions,
+    );
+    let deferred_source_ids = compact_string_list(
+        &package.context_router.deferred_source_ids,
+        COMPACT_SOURCE_ID_LIMIT,
+        COMPACT_SOURCE_ID_BYTE_LIMIT,
+        "deferred_source_ids",
+        &mut omissions,
+    );
+    let expand_commands = build_compact_expand_commands(
+        package,
+        workflow,
+        store_path,
+        project_root,
+        &mut omissions,
+        &mut secret_redaction_count,
+    );
+    let instruction_contract =
+        build_compact_instruction_contract(package, &mut omissions, &mut secret_redaction_count);
+    let continuation = ContextCompactContinuation {
+        action: compact_text_with_omission(
+            &package.continuation_plan.action,
+            COMPACT_ACTION_BYTE_LIMIT,
+            "continuation.action",
+            &mut omissions,
+        ),
+        checkpoint_reusable: package.continuation_plan.checkpoint_reusable,
+        requires_fresh_context: package.continuation_plan.requires_fresh_context,
+        changed_components: compact_string_list(
+            &package.context_delta.changed_components,
+            COMPACT_CHANGED_COMPONENT_LIMIT,
+            COMPACT_CHANGED_COMPONENT_BYTE_LIMIT,
+            "continuation.changed_components",
+            &mut omissions,
+        ),
+    };
+    let guardrail_action = compact_text_with_omission(
+        &package.next_action.action,
+        COMPACT_ACTION_BYTE_LIMIT,
+        "guardrail.action",
+        &mut omissions,
+    );
+    let guardrail_reason = compact_text_with_omission(
+        &package.next_action.reason,
+        COMPACT_GUARDRAIL_REASON_BYTE_LIMIT,
+        "guardrail.reason",
+        &mut omissions,
+    );
+    let omissions = omissions.finish();
+    let view = ContextCompactView {
+        schema_version: CONTEXT_COMPACT_VIEW_SCHEMA_VERSION.to_string(),
+        workflow_id: package.workflow_id.clone(),
+        task_id: package.task_id.clone(),
+        workflow_revision: package.workflow_revision,
+        status: guardrail_status.to_string(),
+        context_ready: package.context_ready,
+        handoff_ready: package.handoff_ready,
+        handoff_status: package.handoff_status.clone(),
+        content: package.content.clone(),
+        context_bytes: package.context_bytes,
+        context_sha256: package.context_sha256.clone(),
+        routing_cache_key: package.routing_fingerprint.cache_key.clone(),
+        included_sections,
+        missing_required_sections,
+        selected_source_ids,
+        deferred_source_ids,
+        expand_commands,
+        instruction_contract,
+        economy: ContextCompactEconomy {
+            baseline_bytes: package.routing_economy.baseline_bytes,
+            selected_bytes: package.routing_economy.selected_bytes,
+            avoided_bytes: package.routing_economy.total_avoided_bytes,
+            reduction_bps: package.routing_economy.reduction_bps,
+            model_calls_avoided: package.routing_economy.estimated_model_calls_avoided,
+            canonical_envelope_bytes: 0,
+            envelope_overhead_bytes: 0,
+        },
+        continuation,
+        guardrail: ContextCompactGuardrail {
+            status: guardrail_status.to_string(),
+            action: guardrail_action,
+            reason: guardrail_reason,
+            blocking_refs,
+            blocking_refs_omitted,
+            recommended_budget_bytes: package.routing_repair.recommended_budget_bytes,
+            next_commands,
+            predecessor_tasks_included: predecessor_tasks.len(),
+            predecessor_tasks,
+            predecessor_tasks_total,
+            predecessor_tasks_omitted,
+            predecessor_validation_rules_omitted: predecessor_validation_rules_total
+                .saturating_sub(predecessor_validation_rules_included),
+        },
+        secret_redaction_count: package
+            .secret_guardrail
+            .detection_count
+            .saturating_add(secret_redaction_count),
+        omissions,
+    };
+    finalize_compact_envelope_economy(view)
+}
+
+pub(crate) fn unresolved_predecessor_frontier<'a>(
+    workflow: &'a Workflow,
+    task_id: &str,
+) -> Vec<&'a AtomicTask> {
+    fn visit<'a>(
+        workflow: &'a Workflow,
+        task_id: &str,
+        visited: &mut BTreeSet<String>,
+        frontier: &mut Vec<&'a AtomicTask>,
+    ) {
+        let Some(task) = workflow.tasks.iter().find(|task| task.id == task_id) else {
+            return;
+        };
+        for dependency_id in &task.dependencies {
+            if !visited.insert(dependency_id.clone()) {
+                continue;
+            }
+            let Some(dependency) = workflow
+                .tasks
+                .iter()
+                .find(|candidate| candidate.id == *dependency_id)
+            else {
+                continue;
+            };
+            if dependency.status == TaskStatus::Completed {
+                continue;
+            }
+            let has_unresolved_dependencies = dependency.dependencies.iter().any(|candidate_id| {
+                workflow
+                    .tasks
+                    .iter()
+                    .find(|candidate| candidate.id == *candidate_id)
+                    .is_none_or(|candidate| candidate.status != TaskStatus::Completed)
+            });
+            if has_unresolved_dependencies {
+                visit(workflow, &dependency.id, visited, frontier);
+            } else {
+                frontier.push(dependency);
+            }
+        }
+    }
+
+    let mut visited = BTreeSet::new();
+    let mut frontier = Vec::new();
+    visit(workflow, task_id, &mut visited, &mut frontier);
+    frontier.sort_by_key(|task| task.status != TaskStatus::Pending);
+    frontier
+}
+
+fn sanitize_compact_predecessor_task(
+    task: &AtomicTask,
+    secret_redaction_count: &mut usize,
+) -> ContextPredecessorTaskSpec {
+    ContextPredecessorTaskSpec {
+        task_id: task.id.clone(),
+        title: sanitize_compact_human_text(&task.title, secret_redaction_count),
+        goal: sanitize_compact_human_text(&task.goal, secret_redaction_count),
+        status: task_status(&task.status).to_string(),
+        expected_output: sanitize_compact_human_text(&task.expected_output, secret_redaction_count),
+        validation_rules: task
+            .validation_rules
+            .iter()
+            .map(|rule| sanitize_compact_validation_rule_human_text(rule, secret_redaction_count))
+            .collect(),
+        validation_rules_omitted: 0,
+    }
+}
+
+fn sanitize_compact_validation_rule_human_text(
+    rule: &crate::graph::ValidationRule,
+    secret_redaction_count: &mut usize,
+) -> crate::graph::ValidationRule {
+    crate::graph::ValidationRule {
+        kind: rule.kind.clone(),
+        command: rule
+            .command
+            .as_deref()
+            .map(|command| sanitize_compact_human_text(command, secret_redaction_count)),
+        expected: sanitize_compact_human_text(&rule.expected, secret_redaction_count),
+    }
+}
+
+pub(crate) fn compact_validation_rule(
+    rule: &crate::graph::ValidationRule,
+) -> crate::graph::ValidationRule {
+    crate::graph::ValidationRule {
+        kind: compact_text(&rule.kind, COMPACT_VALIDATION_KIND_BYTE_LIMIT),
+        command: rule
+            .command
+            .as_deref()
+            .map(|command| compact_text(command, COMPACT_VALIDATION_COMMAND_BYTE_LIMIT)),
+        expected: compact_text(&rule.expected, COMPACT_VALIDATION_EXPECTED_BYTE_LIMIT),
+    }
+}
+
+pub(crate) fn sanitize_compact_human_text(
+    value: &str,
+    secret_redaction_count: &mut usize,
+) -> String {
+    let report = sanitize_prompt_secrets(value, SecretSanitizationOptions::default());
+    *secret_redaction_count = secret_redaction_count.saturating_add(report.detection_count);
+    report.sanitized_text
+}
+
+pub(crate) fn compact_text(value: &str, max_bytes: usize) -> String {
+    let Some(boundary) = compact_text_boundary(value, max_bytes) else {
+        return value.to_string();
+    };
+
+    const ELLIPSIS: &str = "…";
+    let mut compact = value[..boundary].to_string();
+    if max_bytes >= ELLIPSIS.len() {
+        compact.push_str(ELLIPSIS);
+    }
+    compact
+}
+
+fn compact_text_boundary(value: &str, max_bytes: usize) -> Option<usize> {
+    if value.len() <= max_bytes {
+        return None;
+    }
+
+    const ELLIPSIS: &str = "…";
+    let content_limit = max_bytes.saturating_sub(ELLIPSIS.len());
+    let mut boundary = content_limit.min(value.len());
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    Some(boundary)
+}
+
+fn compact_text_with_omission(
+    value: &str,
+    max_bytes: usize,
+    field: &str,
+    omissions: &mut CompactOmissionCollector,
+) -> String {
+    if let Some(boundary) = compact_text_boundary(value, max_bytes) {
+        omissions.record(field, value[boundary..].to_string());
+    }
+    compact_text(value, max_bytes)
+}
+
+fn compact_string_list(
+    values: &[String],
+    item_limit: usize,
+    item_byte_limit: usize,
+    field: &str,
+    omissions: &mut CompactOmissionCollector,
+) -> Vec<String> {
+    let compact = values
+        .iter()
+        .take(item_limit)
+        .map(|value| compact_text_with_omission(value, item_byte_limit, field, omissions))
+        .collect();
+    for value in values.iter().skip(item_limit) {
+        omissions.record(field, value.clone());
+    }
+    compact
+}
+
+fn compact_validation_rule_with_omissions(
+    rule: &crate::graph::ValidationRule,
+    field: &str,
+    omissions: &mut CompactOmissionCollector,
+) -> crate::graph::ValidationRule {
+    crate::graph::ValidationRule {
+        kind: compact_text_with_omission(
+            &rule.kind,
+            COMPACT_VALIDATION_KIND_BYTE_LIMIT,
+            field,
+            omissions,
+        ),
+        command: rule.command.as_deref().map(|command| {
+            compact_text_with_omission(
+                command,
+                COMPACT_VALIDATION_COMMAND_BYTE_LIMIT,
+                field,
+                omissions,
+            )
+        }),
+        expected: compact_text_with_omission(
+            &rule.expected,
+            COMPACT_VALIDATION_EXPECTED_BYTE_LIMIT,
+            field,
+            omissions,
+        ),
+    }
+}
+
+fn compact_command_list(
+    commands: Vec<Vec<String>>,
+    command_limit: usize,
+    field: &str,
+    omissions: &mut CompactOmissionCollector,
+) -> Vec<Vec<String>> {
+    for command in commands.iter().skip(command_limit) {
+        omissions.record_serializable(field, command);
+    }
+    commands.into_iter().take(command_limit).collect()
+}
+
+fn build_compact_expand_commands(
+    package: &ContextPackage,
+    workflow: &Workflow,
+    store_path: &Path,
+    project_root: Option<&Path>,
+    omissions: &mut CompactOmissionCollector,
+    secret_redaction_count: &mut usize,
+) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+    let mut full_context = forge_store_command(store_path);
+    full_context.extend([
+        "context".to_string(),
+        "--workflow".to_string(),
+        package.workflow_id.clone(),
+        "--task".to_string(),
+        package.task_id.clone(),
+    ]);
+    append_project_root(&mut full_context, project_root);
+    full_context.extend([
+        "--budget".to_string(),
+        package.requested_budget.to_string(),
+        "--view".to_string(),
+        "full".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]);
+    commands.push(full_context);
+
+    let source_deferred = |source_id: &str| {
+        package
+            .context_router
+            .deferred_source_ids
+            .iter()
+            .any(|deferred| deferred == source_id)
+    };
+    if source_deferred("workflow_registry_search") {
+        let mut command = forge_store_command(store_path);
+        command.extend([
+            "list".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
+        commands.push(command);
+    }
+    if source_deferred("project_memory_search") {
+        let task_query = workflow
+            .tasks
+            .iter()
+            .find(|task| task.id == package.task_id)
+            .map(|task| {
+                if task.goal.trim().is_empty() {
+                    task.title.as_str()
+                } else {
+                    task.goal.as_str()
+                }
+            })
+            .unwrap_or(package.task_id.as_str());
+        let task_query = sanitize_compact_human_text(task_query, secret_redaction_count);
+        let mut command = forge_store_command(store_path);
+        command.extend([
+            "memory".to_string(),
+            "search".to_string(),
+            "--workflow".to_string(),
+            package.workflow_id.clone(),
+            "--query".to_string(),
+            task_query,
+        ]);
+        append_project_root(&mut command, project_root);
+        command.extend(["--output".to_string(), "json".to_string()]);
+        commands.push(command);
+    }
+    if source_deferred("mcp_servers_and_tools") {
+        let mut command = forge_store_command(store_path);
+        command.extend([
+            "mcp".to_string(),
+            "tools".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
+        commands.push(command);
+    }
+    for source_id in &package.context_router.deferred_source_ids {
+        if !matches!(
+            source_id.as_str(),
+            "workflow_registry_search" | "project_memory_search" | "mcp_servers_and_tools"
+        ) {
+            omissions.record(
+                "expand_commands.unsupported_deferred_source_ids",
+                source_id.clone(),
+            );
+        }
+    }
+
+    compact_command_list(
+        commands,
+        COMPACT_EXPAND_COMMAND_LIMIT,
+        "expand_commands",
+        omissions,
+    )
+}
+
+fn build_compact_instruction_contract(
+    package: &ContextPackage,
+    omissions: &mut CompactOmissionCollector,
+    secret_redaction_count: &mut usize,
+) -> ContextCompactInstructionContract {
+    let organization_context = &package.prompt_packet.organization_context;
+    let personality = &package.prompt_packet.personality_decision;
+    let company_work = &package.prompt_packet.company_work_decision;
+    let voice = sanitize_compact_human_text(&personality.selected_voice, secret_redaction_count);
+    let tone = sanitize_compact_human_text(&personality.selected_tone, secret_redaction_count);
+    ContextCompactInstructionContract {
+        organization_id: compact_text_with_omission(
+            &organization_context.organization_id,
+            COMPACT_INSTRUCTION_ID_BYTE_LIMIT,
+            "instruction_contract.organization_id",
+            omissions,
+        ),
+        brand_id: compact_text_with_omission(
+            &organization_context.brand_id,
+            COMPACT_INSTRUCTION_ID_BYTE_LIMIT,
+            "instruction_contract.brand_id",
+            omissions,
+        ),
+        product_id: compact_text_with_omission(
+            &organization_context.product_id,
+            COMPACT_INSTRUCTION_ID_BYTE_LIMIT,
+            "instruction_contract.product_id",
+            omissions,
+        ),
+        voice: compact_text_with_omission(
+            &voice,
+            COMPACT_INSTRUCTION_TEXT_BYTE_LIMIT,
+            "instruction_contract.voice",
+            omissions,
+        ),
+        tone: compact_text_with_omission(
+            &tone,
+            COMPACT_INSTRUCTION_TEXT_BYTE_LIMIT,
+            "instruction_contract.tone",
+            omissions,
+        ),
+        persona_mode: compact_text_with_omission(
+            &personality.selected_mode,
+            COMPACT_INSTRUCTION_ID_BYTE_LIMIT,
+            "instruction_contract.persona_mode",
+            omissions,
+        ),
+        persona_profile_id: compact_text_with_omission(
+            &personality.selected_profile_id,
+            COMPACT_INSTRUCTION_ID_BYTE_LIMIT,
+            "instruction_contract.persona_profile_id",
+            omissions,
+        ),
+        operating_depth: compact_text_with_omission(
+            &company_work.operating_depth,
+            COMPACT_INSTRUCTION_TEXT_BYTE_LIMIT,
+            "instruction_contract.operating_depth",
+            omissions,
+        ),
+        required_decisions: compact_string_list(
+            &company_work.required_decisions,
+            COMPACT_REQUIRED_DECISION_LIMIT,
+            COMPACT_REQUIRED_DECISION_BYTE_LIMIT,
+            "instruction_contract.required_decisions",
+            omissions,
+        ),
+        validation_gates: compact_string_list(
+            &package.prompt_packet.validation_gates,
+            COMPACT_VALIDATION_GATE_LIMIT,
+            COMPACT_VALIDATION_GATE_BYTE_LIMIT,
+            "instruction_contract.validation_gates",
+            omissions,
+        ),
+    }
+}
+
+fn finalize_compact_envelope_economy(mut view: ContextCompactView) -> ContextCompactView {
+    for _ in 0..32 {
+        let Ok(serialized) = serde_json::to_vec(&view) else {
+            view.economy.canonical_envelope_bytes = 0;
+            view.economy.envelope_overhead_bytes = 0;
+            return view;
+        };
+        let canonical_envelope_bytes = serialized.len();
+        let envelope_overhead_bytes = canonical_envelope_bytes.saturating_sub(view.content.len());
+        if view.economy.canonical_envelope_bytes == canonical_envelope_bytes
+            && view.economy.envelope_overhead_bytes == envelope_overhead_bytes
+        {
+            return view;
+        }
+        view.economy.canonical_envelope_bytes = canonical_envelope_bytes;
+        view.economy.envelope_overhead_bytes = envelope_overhead_bytes;
+    }
+    view
+}
+
+fn forge_store_command(store_path: &Path) -> Vec<String> {
+    vec![
+        "forge".to_string(),
+        "--store".to_string(),
+        store_path.display().to_string(),
+    ]
+}
+
+fn append_project_root(command: &mut Vec<String>, project_root: Option<&Path>) {
+    if let Some(project_root) = project_root {
+        command.extend([
+            "--project-root".to_string(),
+            project_root.display().to_string(),
+        ]);
+    }
+}
+
+fn task_handoff_command(
+    store_path: &Path,
+    workflow_id: &str,
+    task: &AtomicTask,
+    budget: usize,
+    project_root: Option<&Path>,
+) -> Vec<String> {
+    let mut command = forge_store_command(store_path);
+    command.extend([
+        "task".to_string(),
+        "handoff".to_string(),
+        "--workflow".to_string(),
+        workflow_id.to_string(),
+        "--task".to_string(),
+        task.id.clone(),
+        "--executor".to_string(),
+        suggested_handoff_executor(task).to_string(),
+    ]);
+    append_project_root(&mut command, project_root);
+    command.extend([
+        "--budget".to_string(),
+        budget.to_string(),
+        "--view".to_string(),
+        "compact".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]);
+    command
+}
+
 pub fn build_context_package_with_project(
     workflow: &Workflow,
     task_id: &str,
@@ -1217,16 +2243,77 @@ pub fn build_context_handoff_summary(
     budget: usize,
     checkpoints: &[TaskCheckpoint],
 ) -> Result<ContextHandoffSummary> {
+    build_context_handoff_summary_with_task_projects(
+        workflow,
+        budget,
+        checkpoints,
+        &BTreeMap::new(),
+    )
+}
+
+pub fn build_context_handoff_summary_with_task_projects(
+    workflow: &Workflow,
+    budget: usize,
+    checkpoints: &[TaskCheckpoint],
+    task_project_roots: &BTreeMap<String, PathBuf>,
+) -> Result<ContextHandoffSummary> {
+    let task_ids = workflow
+        .tasks
+        .iter()
+        .map(|task| task.id.clone())
+        .collect::<Vec<_>>();
+    build_context_handoff_summary_for_task_ids_with_task_projects(
+        workflow,
+        budget,
+        checkpoints,
+        task_project_roots,
+        &task_ids,
+    )
+}
+
+pub fn build_context_handoff_summary_for_task_ids_with_task_projects(
+    workflow: &Workflow,
+    budget: usize,
+    checkpoints: &[TaskCheckpoint],
+    task_project_roots: &BTreeMap<String, PathBuf>,
+    task_ids: &[String],
+) -> Result<ContextHandoffSummary> {
+    let known_task_ids = workflow
+        .tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let unknown_task_ids = task_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|task_id| !known_task_ids.contains(task_id))
+        .collect::<BTreeSet<_>>();
+    if !unknown_task_ids.is_empty() {
+        bail!(
+            "unknown task ids: {}",
+            unknown_task_ids.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    let selected_task_ids = task_ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let mut tasks = Vec::new();
 
-    for task in &workflow.tasks {
+    for task in workflow
+        .tasks
+        .iter()
+        .filter(|task| selected_task_ids.contains(task.id.as_str()))
+    {
         let latest_checkpoint = checkpoints
             .iter()
             .rev()
             .find(|checkpoint| checkpoint.task_id == task.id)
             .cloned();
-        let package =
-            build_context_package_with_checkpoint(workflow, &task.id, budget, latest_checkpoint)?;
+        let package = build_context_package_with_checkpoint_and_project(
+            workflow,
+            &task.id,
+            budget,
+            latest_checkpoint,
+            task_project_roots.get(&task.id).map(PathBuf::as_path),
+        )?;
         let blocking_refs = package
             .handoff_blockers
             .iter()
@@ -1247,6 +2334,8 @@ pub fn build_context_handoff_summary(
             blocking_refs,
             context_sha256: package.context_sha256,
             resume_context_status: package.resume_context_status,
+            routing_action: package.next_action.action,
+            recommended_budget_bytes: package.routing_repair.recommended_budget_bytes,
             routing_quality: package.routing_quality,
         });
     }
@@ -1306,6 +2395,25 @@ pub fn build_context_package_with_checkpoint_and_project(
     latest_checkpoint: Option<TaskCheckpoint>,
     project_root: Option<&Path>,
 ) -> Result<ContextPackage> {
+    let worktree = worktree_context_for_project(project_root)?;
+    build_context_package_with_checkpoint_project_and_worktree(
+        workflow,
+        task_id,
+        budget,
+        latest_checkpoint,
+        project_root,
+        worktree,
+    )
+}
+
+pub fn build_context_package_with_checkpoint_project_and_worktree(
+    workflow: &Workflow,
+    task_id: &str,
+    budget: usize,
+    latest_checkpoint: Option<TaskCheckpoint>,
+    project_root: Option<&Path>,
+    worktree: Option<WorktreeContextReport>,
+) -> Result<ContextPackage> {
     let task = workflow
         .tasks
         .iter()
@@ -1337,6 +2445,10 @@ pub fn build_context_package_with_checkpoint_and_project(
     let operating_context = workflow.intent.operating_context.clone();
     let memory_policy =
         build_context_memory_policy(workflow, task, &operating_context, project_root);
+    let worktree_context = worktree
+        .as_ref()
+        .map(render_worktree_context)
+        .unwrap_or_default();
     let persona = task.persona.clone();
     let persona_profile = persona
         .as_ref()
@@ -1356,8 +2468,11 @@ pub fn build_context_package_with_checkpoint_and_project(
         revision_sources,
         artifact_manifest: &artifact_manifest,
     })?;
-    let (resume_context_status, resume_context_reason) =
-        resume_context_status(latest_checkpoint.as_ref(), workflow_revision);
+    let (resume_context_status, resume_context_reason) = resume_context_status(
+        latest_checkpoint.as_ref(),
+        workflow_revision,
+        worktree.as_ref(),
+    );
     let dependency_refs = build_dependency_refs(workflow, task);
     let dependency_summary = summarize_dependency_refs(&dependency_refs);
     let persona_contract = persona
@@ -1371,12 +2486,13 @@ pub fn build_context_package_with_checkpoint_and_project(
             source: "task",
             priority: priority_for_profile(&profile, "local_objective", 100),
             content: format!(
-                "Task {}: {}\nGoal: {}\nExpected output: {}\nDefinition of ready: {}\n",
+                "Task {}: {}\nGoal: {}\nExpected output: {}\nDefinition of ready: {}\n{}",
                 task.id,
                 task.title,
                 task.goal,
                 task.expected_output,
-                task.work_item.goal_validation.evidence_required.join("; ")
+                task.work_item.goal_validation.evidence_required.join("; "),
+                worktree_context,
             ),
         },
         ContextShardCandidate {
@@ -1480,13 +2596,6 @@ pub fn build_context_package_with_checkpoint_and_project(
         },
     ];
 
-    let mut content = String::new();
-    let mut included_sections = Vec::new();
-    let mut omitted_sections = Vec::new();
-    let mut profile_omitted_sections = Vec::new();
-    let mut required_sections = Vec::new();
-    let mut shards = Vec::new();
-
     candidates.sort_by(|left, right| {
         let left_required = profile.required_sections.contains(&left.section);
         let right_required = profile.required_sections.contains(&right.section);
@@ -1496,6 +2605,12 @@ pub fn build_context_package_with_checkpoint_and_project(
             .then_with(|| left.section.cmp(right.section))
     });
 
+    let mut required_sections = Vec::new();
+    let mut secret_detection_count = 0usize;
+    let mut secret_vault_references = Vec::new();
+    let mut secret_local_ai_fallback_attempted = false;
+    let mut prepared = Vec::new();
+
     for candidate in candidates {
         if candidate.content.is_empty() {
             continue;
@@ -1504,11 +2619,82 @@ pub fn build_context_package_with_checkpoint_and_project(
         if required {
             required_sections.push(candidate.section.to_string());
         }
-        let summary = summarize_shard(&candidate.content);
-        let original_bytes = candidate.content.len();
-        let source_sha256 = hex_sha256(candidate.content.as_bytes());
-        let compressed_content = compress_shard(&candidate, &summary);
+        let secret_report =
+            sanitize_prompt_secrets(&candidate.content, SecretSanitizationOptions::default());
+        secret_detection_count += secret_report.detection_count;
+        secret_local_ai_fallback_attempted |= secret_report.local_ai_fallback_attempted;
+        secret_vault_references.extend(
+            secret_report
+                .detections
+                .iter()
+                .map(|detection| detection.vault_reference.clone()),
+        );
+        let sanitized_candidate = ContextShardCandidate {
+            section: candidate.section,
+            source: candidate.source,
+            priority: candidate.priority,
+            content: secret_report.sanitized_text,
+        };
+        let summary = summarize_shard(&sanitized_candidate.content);
+        let original_bytes = sanitized_candidate.content.len();
+        let source_sha256 = hex_sha256(sanitized_candidate.content.as_bytes());
+        let compressed_content = compress_shard(&sanitized_candidate, &summary);
         let minimum_routable_bytes = original_bytes.min(compressed_content.len());
+
+        prepared.push(PreparedContextShard {
+            section: sanitized_candidate.section,
+            source: sanitized_candidate.source,
+            priority: sanitized_candidate.priority,
+            content: sanitized_candidate.content,
+            compressed_content,
+            summary,
+            required,
+            allowed: profile.allowed_sections.contains(&candidate.section),
+            original_bytes,
+            minimum_routable_bytes,
+            source_sha256,
+        });
+    }
+
+    let required_profile_blocked = prepared
+        .iter()
+        .any(|candidate| candidate.required && !candidate.allowed);
+    let required_minimum_bytes = prepared
+        .iter()
+        .filter(|candidate| candidate.required && candidate.allowed)
+        .map(|candidate| candidate.minimum_routable_bytes)
+        .sum::<usize>();
+    let required_original_bytes = prepared
+        .iter()
+        .filter(|candidate| candidate.required && candidate.allowed)
+        .map(|candidate| candidate.original_bytes)
+        .sum::<usize>();
+    let optional_minimum_bytes = prepared
+        .iter()
+        .filter(|candidate| !candidate.required && candidate.allowed)
+        .map(|candidate| candidate.minimum_routable_bytes)
+        .sum::<usize>();
+    let required_minimum_complete =
+        !required_profile_blocked && effective_budget >= required_minimum_bytes;
+    let required_full_complete =
+        required_minimum_complete && effective_budget >= required_original_bytes;
+    let optional_budget = effective_budget.saturating_sub(required_original_bytes);
+    let optional_minimum_complete =
+        required_full_complete && optional_budget >= optional_minimum_bytes;
+
+    let mut content = String::new();
+    let mut included_sections = Vec::new();
+    let mut omitted_sections = Vec::new();
+    let mut profile_omitted_sections = Vec::new();
+    let mut shards = Vec::new();
+    let mut required_minimum_prefix_open = true;
+    let mut required_upgrade_prefix_open = true;
+    let mut required_upgrade_budget = effective_budget.saturating_sub(required_minimum_bytes);
+    let mut optional_minimum_prefix_open = true;
+    let mut optional_upgrade_prefix_open = true;
+    let mut optional_upgrade_budget = optional_budget.saturating_sub(optional_minimum_bytes);
+
+    for candidate in prepared {
         let shard_id = build_shard_id(
             &workflow.id,
             &task.id,
@@ -1516,11 +2702,11 @@ pub fn build_context_package_with_checkpoint_and_project(
             &profile,
             candidate.section,
             candidate.source,
-            &source_sha256,
+            &candidate.source_sha256,
         );
         let sequence = shards.len();
         let remaining_budget_before = effective_budget.saturating_sub(content.len());
-        if !profile.allowed_sections.contains(&candidate.section) {
+        if !candidate.allowed {
             omitted_sections.push(candidate.section.to_string());
             profile_omitted_sections.push(candidate.section.to_string());
             shards.push(ContextShard {
@@ -1529,11 +2715,11 @@ pub fn build_context_package_with_checkpoint_and_project(
                 section: candidate.section.to_string(),
                 source: candidate.source.to_string(),
                 priority: candidate.priority,
-                required,
+                required: candidate.required,
                 included: false,
                 compressed: false,
                 profile_excluded: true,
-                missing_required: required,
+                missing_required: candidate.required,
                 routing_decision: "omitted_profile".to_string(),
                 decision_reason: format!(
                     "section is not allowed by executor profile {}",
@@ -1542,44 +2728,134 @@ pub fn build_context_package_with_checkpoint_and_project(
                 remaining_budget_before,
                 remaining_budget_after: remaining_budget_before,
                 bytes: 0,
-                original_bytes,
-                minimum_routable_bytes,
-                selection_saved_bytes: original_bytes,
+                original_bytes: candidate.original_bytes,
+                minimum_routable_bytes: candidate.minimum_routable_bytes,
+                selection_saved_bytes: candidate.original_bytes,
                 selection_cost_bps: 0,
-                source_sha256,
+                source_sha256: candidate.source_sha256,
                 content_sha256: hex_sha256(b""),
-                summary,
+                summary: candidate.summary,
             });
             continue;
         }
 
         let (included, compressed, selected_content, routing_decision, decision_reason) =
-            if content.len() + candidate.content.len() <= effective_budget {
-                (
-                    true,
-                    false,
-                    candidate.content.clone(),
-                    "included_full",
-                    "full shard fits within remaining effective budget",
-                )
-            } else if compressed_content.len() < original_bytes
-                && content.len() + compressed_content.len() <= effective_budget
-            {
-                (
-                    true,
-                    true,
-                    compressed_content,
-                    "included_compressed",
-                    "compressed shard fits within remaining effective budget",
-                )
-            } else {
+            if candidate.required && required_minimum_complete {
+                let upgrade_bytes = candidate.full_upgrade_bytes();
+                let select_full = upgrade_bytes == 0
+                    || (required_upgrade_prefix_open && upgrade_bytes <= required_upgrade_budget);
+                if select_full {
+                    required_upgrade_budget = required_upgrade_budget.saturating_sub(upgrade_bytes);
+                    (
+                        true,
+                        false,
+                        candidate.content.clone(),
+                        "included_full",
+                        "full shard fits within remaining effective budget while preserving every required minimum",
+                    )
+                } else {
+                    required_upgrade_prefix_open = false;
+                    let (minimum_content, compressed) = candidate.minimum_content();
+                    (
+                        true,
+                        compressed,
+                        minimum_content.to_string(),
+                        if compressed {
+                            "included_compressed"
+                        } else {
+                            "included_full"
+                        },
+                        "minimum shard selected to preserve monotonic required-first routing",
+                    )
+                }
+            } else if candidate.required {
+                let (minimum_content, compressed) = candidate.minimum_content();
+                if required_minimum_prefix_open
+                    && content.len() + minimum_content.len() <= effective_budget
+                {
+                    (
+                        true,
+                        compressed,
+                        minimum_content.to_string(),
+                        if compressed {
+                            "included_compressed"
+                        } else {
+                            "included_full"
+                        },
+                        "minimum shard fits within the monotonic required priority prefix",
+                    )
+                } else {
+                    required_minimum_prefix_open = false;
+                    (
+                        false,
+                        false,
+                        String::new(),
+                        "omitted_budget",
+                        "required shard exceeds the remaining monotonic priority prefix budget",
+                    )
+                }
+            } else if !required_full_complete {
                 (
                     false,
                     false,
                     String::new(),
                     "omitted_budget",
-                    "full and compressed shard exceed remaining effective budget",
+                    "optional shard deferred until every required shard is routed in full",
                 )
+            } else if optional_minimum_complete {
+                let upgrade_bytes = candidate.full_upgrade_bytes();
+                let select_full = upgrade_bytes == 0
+                    || (optional_upgrade_prefix_open && upgrade_bytes <= optional_upgrade_budget);
+                if select_full {
+                    optional_upgrade_budget = optional_upgrade_budget.saturating_sub(upgrade_bytes);
+                    (
+                        true,
+                        false,
+                        candidate.content.clone(),
+                        "included_full",
+                        "full optional shard fits within remaining effective budget while preserving lower-priority minimums",
+                    )
+                } else {
+                    optional_upgrade_prefix_open = false;
+                    let (minimum_content, compressed) = candidate.minimum_content();
+                    (
+                        true,
+                        compressed,
+                        minimum_content.to_string(),
+                        if compressed {
+                            "included_compressed"
+                        } else {
+                            "included_full"
+                        },
+                        "minimum optional shard selected to preserve monotonic priority routing",
+                    )
+                }
+            } else {
+                let (minimum_content, compressed) = candidate.minimum_content();
+                if optional_minimum_prefix_open
+                    && content.len() + minimum_content.len() <= effective_budget
+                {
+                    (
+                        true,
+                        compressed,
+                        minimum_content.to_string(),
+                        if compressed {
+                            "included_compressed"
+                        } else {
+                            "included_full"
+                        },
+                        "minimum optional shard fits within the monotonic priority prefix",
+                    )
+                } else {
+                    optional_minimum_prefix_open = false;
+                    (
+                        false,
+                        false,
+                        String::new(),
+                        "omitted_budget",
+                        "optional shard exceeds the remaining monotonic priority prefix budget",
+                    )
+                }
             };
 
         if included {
@@ -1589,8 +2865,8 @@ pub fn build_context_package_with_checkpoint_and_project(
             omitted_sections.push(candidate.section.to_string());
         }
         let selected_bytes = selected_content.len();
-        let selection_saved_bytes = original_bytes.saturating_sub(selected_bytes);
-        let selection_cost_bps = selection_cost_bps(selected_bytes, original_bytes);
+        let selection_saved_bytes = candidate.original_bytes.saturating_sub(selected_bytes);
+        let selection_cost_bps = selection_cost_bps(selected_bytes, candidate.original_bytes);
         let remaining_budget_after = remaining_budget_before.saturating_sub(selected_content.len());
 
         shards.push(ContextShard {
@@ -1599,23 +2875,23 @@ pub fn build_context_package_with_checkpoint_and_project(
             section: candidate.section.to_string(),
             source: candidate.source.to_string(),
             priority: candidate.priority,
-            required,
+            required: candidate.required,
             included,
             compressed,
             profile_excluded: false,
-            missing_required: required && !included,
+            missing_required: candidate.required && !included,
             routing_decision: routing_decision.to_string(),
             decision_reason: decision_reason.to_string(),
             remaining_budget_before,
             remaining_budget_after,
             bytes: selected_bytes,
-            original_bytes,
-            minimum_routable_bytes,
+            original_bytes: candidate.original_bytes,
+            minimum_routable_bytes: candidate.minimum_routable_bytes,
             selection_saved_bytes,
             selection_cost_bps,
-            source_sha256,
+            source_sha256: candidate.source_sha256,
             content_sha256: hex_sha256(selected_content.as_bytes()),
-            summary,
+            summary: candidate.summary,
         });
     }
 
@@ -1626,10 +2902,33 @@ pub fn build_context_package_with_checkpoint_and_project(
         .map(|shard| shard.section.clone())
         .collect::<Vec<_>>();
     let context_ready = missing_required_sections.is_empty();
-    let handoff_blockers = build_handoff_blockers(&missing_required_sections, &dependency_summary);
+    let handoff_blockers = build_handoff_blockers(
+        task,
+        &profile,
+        required_minimum_bytes,
+        &missing_required_sections,
+        &dependency_summary,
+    );
     let handoff_ready = handoff_blockers.is_empty();
     let handoff_status = derive_handoff_status(&handoff_blockers);
     let context_sha256 = hex_sha256(content.as_bytes());
+    secret_vault_references.sort();
+    secret_vault_references.dedup();
+    let secret_guardrail = ContextSecretGuardrailReport {
+        schema_version: CONTEXT_SECRET_GUARDRAIL_SCHEMA_VERSION.to_string(),
+        status: if secret_detection_count == 0 {
+            "clean".to_string()
+        } else {
+            "sanitized".to_string()
+        },
+        detection_count: secret_detection_count,
+        vault_references: secret_vault_references,
+        prompt_builder_input: "sanitized_context_shards".to_string(),
+        deterministic_first: true,
+        external_ai_allowed: false,
+        local_ai_fallback_attempted: secret_local_ai_fallback_attempted,
+        sanitized_context_sha256: context_sha256.clone(),
+    };
     let routing_contract =
         build_routing_contract(&profile, budget, effective_budget, &required_sections)?;
     let routing_repair = build_routing_repair(
@@ -1637,6 +2936,7 @@ pub fn build_context_package_with_checkpoint_and_project(
         &shards,
         &missing_required_sections,
         effective_budget,
+        &profile,
     );
     let budget_plan = build_budget_plan(
         &routing_summary,
@@ -1644,6 +2944,7 @@ pub fn build_context_package_with_checkpoint_and_project(
         &missing_required_sections,
         budget,
         effective_budget,
+        &profile,
     );
     let minimum_correct_set = build_minimum_correct_set(
         &workflow.id,
@@ -1652,6 +2953,7 @@ pub fn build_context_package_with_checkpoint_and_project(
         &profile,
         &budget_plan,
         &shards,
+        !routing_repair.budget_repairable,
     )?;
     let routing_economy = build_routing_economy(&profile, &routing_summary, &shards);
     let routing_quality = build_routing_quality(
@@ -1708,7 +3010,7 @@ pub fn build_context_package_with_checkpoint_and_project(
         routing_quality: &routing_quality,
         handoff_status,
     })?;
-    let routing_fingerprint = build_routing_fingerprint(RoutingFingerprintInput {
+    let mut routing_fingerprint = build_routing_fingerprint(RoutingFingerprintInput {
         workflow_id: &workflow.id,
         task_id: &task.id,
         workflow_revision,
@@ -1739,15 +3041,34 @@ pub fn build_context_package_with_checkpoint_and_project(
         prompt_packet: &prompt_packet,
         context_sha256: &context_sha256,
     })?;
-    let next_action = build_context_next_action(
-        &routing_fingerprint.cache_key,
-        &handoff_blockers,
+    if latest_checkpoint
+        .as_ref()
+        .is_some_and(|checkpoint| !is_rework_checkpoint(checkpoint))
+    {
+        // A paused checkpoint is execution progress, not a new execution route. Rebuild the
+        // same bounded route without the checkpoint payload so cache identity remains stable;
+        // the full checkpoint-bearing packet remains covered by `audit_sha256`.
+        routing_fingerprint.cache_key = build_context_package_with_checkpoint_project_and_worktree(
+            workflow,
+            task_id,
+            budget,
+            None,
+            project_root,
+            worktree.clone(),
+        )?
+        .routing_fingerprint
+        .cache_key;
+    }
+    let next_action = build_context_next_action(ContextNextActionInput {
+        current_route: &routing_fingerprint.cache_key,
+        handoff_blockers: &handoff_blockers,
+        task_status: &task.status,
         context_ready,
-        dependency_summary.ready,
-        latest_checkpoint.as_ref(),
+        dependency_ready: dependency_summary.ready,
+        latest_checkpoint: latest_checkpoint.as_ref(),
         resume_context_status,
         resume_context_reason,
-    );
+    });
     let context_delta = build_context_delta(
         latest_checkpoint.as_ref(),
         workflow_revision,
@@ -1776,6 +3097,7 @@ pub fn build_context_package_with_checkpoint_and_project(
         lineage,
         operating_context,
         memory_policy,
+        worktree,
         deferred_discovery,
         context_router,
         persona,
@@ -1800,6 +3122,7 @@ pub fn build_context_package_with_checkpoint_and_project(
         context_sha256,
         replay_manifest,
         selection_receipt,
+        secret_guardrail,
         prompt_packet,
         routing_fingerprint,
         routing_contract,
@@ -1987,7 +3310,7 @@ fn build_deferred_discovery_plan(
     );
 
     let mut expand_commands = vec![
-        "forge context --workflow {workflow_id} --task {task_id} --budget {budget} --output json"
+        "forge context --workflow {workflow_id} --task {task_id} --budget {budget} --view compact --output json"
             .to_string(),
     ];
     if discovery_source_selected(&selected_sources, "workflow_registry_search") {
@@ -2390,21 +3713,76 @@ fn crm_subject_bound_to_current_node(node_text: &str) -> bool {
     )
 }
 
-fn build_context_next_action(
-    current_route: &str,
-    handoff_blockers: &[ContextHandoffBlocker],
-    context_ready: bool,
-    dependency_ready: bool,
-    latest_checkpoint: Option<&TaskCheckpoint>,
-    resume_context_status: &str,
-    resume_context_reason: &str,
-) -> ContextNextAction {
+fn build_context_next_action(input: ContextNextActionInput<'_>) -> ContextNextAction {
+    let ContextNextActionInput {
+        current_route,
+        handoff_blockers,
+        task_status: task_status_value,
+        context_ready,
+        dependency_ready,
+        latest_checkpoint,
+        resume_context_status,
+        resume_context_reason,
+    } = input;
     let blocking_refs = handoff_blockers
         .iter()
         .flat_map(|blocker| blocker.refs.iter().cloned())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+
+    if task_status_value != &TaskStatus::Pending {
+        let status = task_status(task_status_value);
+        let (action, reason) = match task_status_value {
+            TaskStatus::Running => (
+                "observe_running_task",
+                "task is already running; context remains available for inspection but a new executor handoff is disabled",
+            ),
+            TaskStatus::Completed => (
+                "inspect_completed_task",
+                "task is completed; context remains available for audit but executor handoff is disabled",
+            ),
+            TaskStatus::Blocked => (
+                "repair_blocked_task",
+                "task is blocked; return it to pending through a traced rework transition before executor handoff",
+            ),
+            TaskStatus::Failed => (
+                "return_failed_task_to_work",
+                "task failed; return it to pending through a traced rework transition before executor handoff",
+            ),
+            TaskStatus::Pending => unreachable!("pending task handled after task-state guard"),
+        };
+        return ContextNextAction {
+            schema_version: CONTEXT_NEXT_ACTION_SCHEMA_VERSION.to_string(),
+            action: action.to_string(),
+            ready_for_handoff: false,
+            partial_retry_recommended: false,
+            checkpoint_id: None,
+            checkpoint_context_sha256: None,
+            checkpoint_context_routing_cache_key: None,
+            current_context_routing_cache_key: current_route.to_string(),
+            reason: format!("{reason}; current task status is {status}"),
+            blocking_refs,
+        };
+    }
+
+    if handoff_blockers
+        .iter()
+        .any(|blocker| blocker.kind == "executor_profile_budget_cap")
+    {
+        return ContextNextAction {
+            schema_version: CONTEXT_NEXT_ACTION_SCHEMA_VERSION.to_string(),
+            action: "change_executor_profile_budget".to_string(),
+            ready_for_handoff: false,
+            partial_retry_recommended: false,
+            checkpoint_id: None,
+            checkpoint_context_sha256: None,
+            checkpoint_context_routing_cache_key: None,
+            current_context_routing_cache_key: current_route.to_string(),
+            reason: "required minimum context exceeds the executor profile cap; increasing the requested budget cannot repair this route".to_string(),
+            blocking_refs,
+        };
+    }
 
     if !context_ready && !dependency_ready {
         return ContextNextAction {
@@ -2551,32 +3929,30 @@ fn build_context_delta(
         _ => {}
     }
 
+    let route_changed = changed_components
+        .iter()
+        .any(|component| component == "routing_cache_key");
     let status = if resume_context_status == "checkpoint_stale" {
         "checkpoint_stale"
     } else if checkpoint.context_routing_cache_key.is_none() {
         "checkpoint_route_unknown"
-    } else if changed_components.is_empty() {
-        "unchanged"
-    } else if changed_components
-        .iter()
-        .any(|component| component == "routing_cache_key")
-    {
+    } else if route_changed {
         "route_changed"
-    } else if changed_components
-        .iter()
-        .any(|component| component == "context_payload")
-    {
-        "content_changed"
     } else {
-        "changed"
+        "unchanged"
     };
     let reason = match status {
         "checkpoint_stale" => resume_context_reason,
         "checkpoint_route_unknown" => "checkpoint does not carry a context routing cache key",
+        "unchanged"
+            if changed_components
+                .iter()
+                .any(|component| component == "context_payload") =>
+        {
+            "underlying execution route matches; payload difference is limited to checkpoint context"
+        }
         "unchanged" => "checkpoint context route matches the current context route",
         "route_changed" => "checkpoint context route differs from the current context route",
-        "content_changed" => "checkpoint context payload differs from the current context payload",
-        "changed" => "checkpoint context differs from current context",
         _ => "no checkpoint recorded for this workflow task",
     };
 
@@ -2919,6 +4295,8 @@ fn build_replay_manifest(input: ReplayManifestInput<'_>) -> Result<ContextReplay
             input.task_id.to_string(),
             "--budget".to_string(),
             input.requested_budget.to_string(),
+            "--view".to_string(),
+            "full".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -3223,10 +4601,39 @@ fn prompt_packet_validation_gates(
 }
 
 fn build_handoff_blockers(
+    task: &AtomicTask,
+    profile: &ExecutorContextProfile,
+    required_minimum_bytes: usize,
     missing_required_sections: &[String],
     dependency_summary: &ContextDependencySummary,
 ) -> Vec<ContextHandoffBlocker> {
     let mut blockers = Vec::new();
+
+    if task.status != TaskStatus::Pending {
+        blockers.push(ContextHandoffBlocker {
+            kind: "task_not_pending".to_string(),
+            message: format!(
+                "task status is {}; executor handoff requires pending status",
+                task_status(&task.status)
+            ),
+            refs: vec![task.id.clone()],
+        });
+    }
+
+    if profile
+        .max_context_bytes
+        .is_some_and(|maximum| required_minimum_bytes > maximum)
+    {
+        blockers.push(ContextHandoffBlocker {
+            kind: "executor_profile_budget_cap".to_string(),
+            message: format!(
+                "required minimum context is {required_minimum_bytes} bytes, exceeding executor profile {} cap of {} bytes",
+                profile.id,
+                profile.max_context_bytes.unwrap_or_default()
+            ),
+            refs: vec![profile.id.to_string()],
+        });
+    }
 
     if !missing_required_sections.is_empty() {
         blockers.push(ContextHandoffBlocker {
@@ -3249,6 +4656,18 @@ fn build_handoff_blockers(
 }
 
 fn derive_handoff_status(blockers: &[ContextHandoffBlocker]) -> &'static str {
+    if blockers
+        .iter()
+        .any(|blocker| blocker.kind == "task_not_pending")
+    {
+        return "blocked_task_status";
+    }
+    if blockers
+        .iter()
+        .any(|blocker| blocker.kind == "executor_profile_budget_cap")
+    {
+        return "blocked_executor_profile_budget";
+    }
     let missing_context = blockers
         .iter()
         .any(|blocker| blocker.kind == "missing_required_context");
@@ -3412,6 +4831,7 @@ fn build_routing_repair(
     shards: &[ContextShard],
     missing_required_sections: &[String],
     effective_budget: usize,
+    profile: &ExecutorContextProfile,
 ) -> ContextRoutingRepair {
     let budget_omitted_sections = unique_sections(
         shards
@@ -3427,15 +4847,39 @@ fn build_routing_repair(
     );
 
     if !missing_required_sections.is_empty() {
-        let missing_required_budget = shards
+        let minimum_correct_budget = shards
             .iter()
-            .filter(|shard| shard.missing_required)
+            .filter(|shard| shard.required)
             .map(minimum_routable_shard_bytes)
-            .sum::<usize>();
-        let recommended_budget_bytes = summary
-            .selected_bytes
-            .saturating_add(missing_required_budget)
-            .max(effective_budget.saturating_add(1));
+            .sum::<usize>()
+            .max(MINIMUM_CONTEXT_BUDGET_BYTES);
+        let budget_repairable = profile
+            .max_context_bytes
+            .is_none_or(|maximum| minimum_correct_budget <= maximum);
+        if !budget_repairable {
+            let profile_max_context_bytes = profile.max_context_bytes.unwrap_or(effective_budget);
+            return ContextRoutingRepair {
+                schema_version: ROUTING_REPAIR_SCHEMA_VERSION.to_string(),
+                status: "blocked".to_string(),
+                action: "change_executor_profile_budget".to_string(),
+                current_effective_budget: effective_budget,
+                recommended_budget_bytes: profile_max_context_bytes,
+                required_budget_deficit_bytes: minimum_correct_budget
+                    .saturating_sub(effective_budget),
+                budget_repairable: false,
+                profile_max_context_bytes: profile.max_context_bytes,
+                minimum_correct_budget_bytes: minimum_correct_budget,
+                missing_required_sections: missing_required_sections.to_vec(),
+                budget_omitted_sections,
+                compressed_sections,
+                reason: format!(
+                    "minimum correct context requires {minimum_correct_budget} bytes, exceeding executor profile {} cap of {} bytes; requested budget retries cannot repair this route",
+                    profile.id,
+                    profile.max_context_bytes.unwrap_or_default()
+                ),
+            };
+        }
+        let recommended_budget_bytes = minimum_correct_budget.max(effective_budget);
 
         return ContextRoutingRepair {
             schema_version: ROUTING_REPAIR_SCHEMA_VERSION.to_string(),
@@ -3445,6 +4889,9 @@ fn build_routing_repair(
             recommended_budget_bytes,
             required_budget_deficit_bytes: recommended_budget_bytes
                 .saturating_sub(effective_budget),
+            budget_repairable: true,
+            profile_max_context_bytes: profile.max_context_bytes,
+            minimum_correct_budget_bytes: minimum_correct_budget,
             missing_required_sections: missing_required_sections.to_vec(),
             budget_omitted_sections,
             compressed_sections,
@@ -3460,6 +4907,14 @@ fn build_routing_repair(
             current_effective_budget: effective_budget,
             recommended_budget_bytes: effective_budget,
             required_budget_deficit_bytes: 0,
+            budget_repairable: true,
+            profile_max_context_bytes: profile.max_context_bytes,
+            minimum_correct_budget_bytes: shards
+                .iter()
+                .filter(|shard| shard.required)
+                .map(minimum_routable_shard_bytes)
+                .sum::<usize>()
+                .max(MINIMUM_CONTEXT_BUDGET_BYTES),
             missing_required_sections: Vec::new(),
             budget_omitted_sections,
             compressed_sections,
@@ -3475,6 +4930,14 @@ fn build_routing_repair(
         current_effective_budget: effective_budget,
         recommended_budget_bytes: effective_budget,
         required_budget_deficit_bytes: 0,
+        budget_repairable: true,
+        profile_max_context_bytes: profile.max_context_bytes,
+        minimum_correct_budget_bytes: shards
+            .iter()
+            .filter(|shard| shard.required)
+            .map(minimum_routable_shard_bytes)
+            .sum::<usize>()
+            .max(MINIMUM_CONTEXT_BUDGET_BYTES),
         missing_required_sections: Vec::new(),
         budget_omitted_sections,
         compressed_sections,
@@ -3488,6 +4951,7 @@ fn build_budget_plan(
     missing_required_sections: &[String],
     requested_budget: usize,
     effective_budget: usize,
+    profile: &ExecutorContextProfile,
 ) -> ContextBudgetPlan {
     let required_original_bytes = shards
         .iter()
@@ -3498,7 +4962,7 @@ fn build_budget_plan(
         .iter()
         .filter(|shard| shard.required)
         .map(minimum_routable_shard_bytes)
-        .sum();
+        .sum::<usize>();
     let optional_original_bytes = shards
         .iter()
         .filter(|shard| !shard.required && !shard.profile_excluded)
@@ -3519,30 +4983,31 @@ fn build_budget_plan(
         .filter(|shard| !shard.required && !shard.included && !shard.profile_excluded)
         .map(|shard| shard.original_bytes)
         .sum();
-    let missing_required_minimum_bytes = shards
-        .iter()
-        .filter(|shard| shard.missing_required)
-        .map(minimum_routable_shard_bytes)
-        .sum::<usize>();
     let budget_omitted_sections = unique_sections(
         shards
             .iter()
             .filter(|shard| shard.routing_decision == "omitted_budget")
             .map(|shard| shard.section.as_str()),
     );
-    let minimum_correct_budget_bytes = required_minimum_bytes;
-    let recommended_budget_bytes = if !missing_required_sections.is_empty() {
-        summary
-            .selected_bytes
-            .saturating_add(missing_required_minimum_bytes)
-            .max(minimum_correct_budget_bytes)
-            .max(effective_budget.saturating_add(1))
+    let minimum_correct_budget_bytes = required_minimum_bytes.max(MINIMUM_CONTEXT_BUDGET_BYTES);
+    let profile_budget_blocked = profile
+        .max_context_bytes
+        .is_some_and(|maximum| minimum_correct_budget_bytes > maximum);
+    let recommended_budget_bytes = if profile_budget_blocked {
+        effective_budget
+    } else if !missing_required_sections.is_empty() {
+        minimum_correct_budget_bytes.max(effective_budget)
     } else if summary.budget_omitted_shards > 0 {
         effective_budget.max(minimum_correct_budget_bytes)
     } else {
         summary.selected_bytes.max(minimum_correct_budget_bytes)
     };
-    let (status, reason) = if !missing_required_sections.is_empty() {
+    let (status, reason) = if profile_budget_blocked {
+        (
+            "blocked_executor_profile_budget",
+            "minimum correct context exceeds the executor profile cap; increasing the requested budget cannot repair this route",
+        )
+    } else if !missing_required_sections.is_empty() {
         (
             "repair_required",
             "minimum correct context cannot be routed until required sections fit",
@@ -3587,6 +5052,7 @@ fn build_minimum_correct_set(
     profile: &ExecutorContextProfile,
     budget_plan: &ContextBudgetPlan,
     shards: &[ContextShard],
+    profile_budget_blocked: bool,
 ) -> Result<ContextMinimumCorrectSet> {
     let sections = shards
         .iter()
@@ -3598,7 +5064,7 @@ fn build_minimum_correct_set(
             missing: shard.missing_required,
             routing_decision: shard.routing_decision.clone(),
             decision_reason: shard.decision_reason.clone(),
-            repair_action: minimum_correct_repair_action(shard).to_string(),
+            repair_action: minimum_correct_repair_action(shard, profile_budget_blocked).to_string(),
             bytes: shard.bytes,
             original_bytes: shard.original_bytes,
             source_sha256: shard.source_sha256.clone(),
@@ -3651,9 +5117,14 @@ fn build_minimum_correct_set(
     })
 }
 
-fn minimum_correct_repair_action(shard: &ContextShard) -> &'static str {
+fn minimum_correct_repair_action(
+    shard: &ContextShard,
+    profile_budget_blocked: bool,
+) -> &'static str {
     if !shard.missing_required {
         "none"
+    } else if profile_budget_blocked {
+        "change_executor_profile_budget"
     } else if shard.profile_excluded || shard.routing_decision == "omitted_profile" {
         "verify_executor_profile"
     } else if shard.routing_decision == "omitted_budget" {
@@ -3728,8 +5199,7 @@ fn build_routing_economy(
 }
 
 fn minimum_routable_shard_bytes(shard: &ContextShard) -> usize {
-    let compressed_bytes = format!("[compressed {}]\n{}\n", shard.section, shard.summary).len();
-    shard.original_bytes.min(compressed_bytes)
+    shard.minimum_routable_bytes
 }
 
 fn selection_cost_bps(selected_bytes: usize, original_bytes: usize) -> u32 {
@@ -3769,7 +5239,7 @@ fn build_routing_contract(
         selector_version: CONTEXT_SELECTOR_VERSION,
         profile_version: EXECUTOR_PROFILE_SCHEMA_VERSION,
         profile_id: profile.id.to_string(),
-        selection_strategy: "required_first_priority_budgeted_compression",
+        selection_strategy: "monotonic_required_minimum_then_optional",
         reasoning_allowed: profile.reasoning_allowed,
         deterministic: profile.deterministic,
         max_context_bytes: profile.max_context_bytes,
@@ -3927,6 +5397,11 @@ fn build_routing_fingerprint(
     let components = vec![
         fingerprint_component("routing_policy", ROUTING_POLICY.to_string()),
         fingerprint_component(
+            "cache_key_scope",
+            "execution route excludes checkpoint payload and resume state; full packet remains covered by audit_sha256"
+                .to_string(),
+        ),
+        fingerprint_component(
             "executor_profile",
             format!(
                 "{}:reasoning={}:deterministic={}",
@@ -3979,11 +5454,12 @@ fn build_routing_fingerprint(
         lineage_sha256: &input.lineage.lineage_sha256,
         components: &components,
     };
-    let cache_key = hex_sha256(serde_json::to_string(&seed)?.as_bytes());
+    let audit_sha256 = hex_sha256(serde_json::to_string(&seed)?.as_bytes());
 
     Ok(ContextRoutingFingerprint {
         schema_version: ROUTING_FINGERPRINT_SCHEMA_VERSION.to_string(),
-        cache_key,
+        cache_key: audit_sha256.clone(),
+        audit_sha256,
         workflow_revision: input.workflow_revision,
         executor_profile_id: input.profile.id.to_string(),
         context_sha256: input.context_sha256.to_string(),
@@ -4299,6 +5775,48 @@ fn render_operating_context_context(context: &OperatingContextSpec) -> String {
         context.operating_policy.data_classification,
         context.operating_policy.memory_visibility,
         context.operating_policy.approval_policy,
+    )
+}
+
+fn render_worktree_context(context: &WorktreeContextReport) -> String {
+    let configured_environment_keys = context
+        .sandbox
+        .environment
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let settings_keys = context.settings.keys().cloned().collect::<Vec<_>>();
+    let config_fingerprint = &context.config_sha256[..context.config_sha256.len().min(16)];
+    format!(
+        "Execution worktree: {} root={} branch={} config={} sandbox={}/{}/{}\nRepository root: {}\nHEAD: {}\nDirty: {}\nWorktree config: {} sha256={} approved={}\nBinding drifted: {} reasons={}\nWorktree guardrails: {}\nWorktree sandbox: {}\nWorktree setting keys: {}\n",
+        context.id,
+        context.worktree_root,
+        context.branch.as_deref().unwrap_or("detached"),
+        config_fingerprint,
+        context.sandbox.enabled,
+        context.sandbox.runtime,
+        context.sandbox.network,
+        context.repository_root,
+        context.head,
+        context.dirty,
+        context.config_status,
+        context.config_sha256,
+        context.config_approved,
+        context.binding_drifted,
+        join_or_none(&context.binding_drift_reasons),
+        serde_json::to_string(&context.guardrails).unwrap_or_else(|_| "{}".to_string()),
+        serde_json::to_string(&serde_json::json!({
+            "enabled": context.sandbox.enabled,
+            "name": context.sandbox.name,
+            "root": context.sandbox.root,
+            "runtime": context.sandbox.runtime,
+            "working_directory": context.sandbox.working_directory,
+            "purposes": context.sandbox.purposes,
+            "network": context.sandbox.network,
+            "configured_environment_keys": configured_environment_keys,
+        }))
+        .unwrap_or_else(|_| "{}".to_string()),
+        settings_keys.join(", "),
     )
 }
 
@@ -4721,6 +6239,7 @@ fn task_status(status: &TaskStatus) -> &'static str {
 fn resume_context_status(
     checkpoint: Option<&TaskCheckpoint>,
     workflow_revision: u64,
+    worktree: Option<&WorktreeContextReport>,
 ) -> (&'static str, &'static str) {
     let Some(checkpoint) = checkpoint else {
         return (
@@ -4728,6 +6247,12 @@ fn resume_context_status(
             "no checkpoint recorded for this workflow task",
         );
     };
+    if worktree.is_some_and(|worktree| worktree.binding_drifted) {
+        return (
+            "checkpoint_stale",
+            "bound worktree HEAD, configuration or identity differs from its binding fingerprint",
+        );
+    }
     if checkpoint.workflow_revision == workflow_revision {
         return (
             "checkpoint_current",
@@ -4751,6 +6276,19 @@ fn summarize_shard(content: &str) -> String {
 }
 
 fn compress_shard(candidate: &ContextShardCandidate, summary: &str) -> String {
+    if candidate.section == "local_objective" {
+        let worktree = candidate
+            .content
+            .lines()
+            .find(|line| line.starts_with("Execution worktree:"));
+        return match worktree {
+            Some(worktree) => {
+                format!("[compressed local_objective]\n{summary}\n{worktree}\n")
+            }
+            None => format!("[compressed local_objective]\n{summary}\n"),
+        };
+    }
+
     if candidate.section == "checkpoint" {
         let state = candidate
             .content

@@ -14,7 +14,7 @@ Use:
 ```bash
 forge request start --goal "<objective>" --origin codex --output json
 forge request step --run <run-id> --executor codex --ttl-seconds 300 --origin codex --output json
-forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --output json
+forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --view compact --output json
 forge mcp call forge.task.handoff --input '{"workflow_id":"<workflow-id>","task_id":"<task-id>","executor":"codex"}' --output json
 forge request complete-task --run <run-id> --task <task-id> --executor codex --summary "<validated evidence>" --origin codex --output json
 forge schedule worker-status --output json

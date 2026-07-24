@@ -1,0 +1,39 @@
+{
+  "schema_version": "forge.worktree_hardening.intent.v1",
+  "workflow_id": "wf_cf8a1698f266442981479112786f00b0",
+  "goal": "Identificar como o Forge funciona e está documentado hoje e adicionar capacidade de trabalho em worktrees, incluindo sandbox interno para preview e testes e configurações específicas de guardrails e outras configurações por worktree",
+  "constraints": [
+    "Forge continua sendo a autoridade de orquestração e o Git continua sendo a autoridade do checkout",
+    "O store SQLite central permanece fora de worktrees descartáveis",
+    "Toda mutação sensível exige autorização explícita e produz trilha auditável",
+    "Docker, Kubernetes e Knative não são instalados nem mutados por este fluxo",
+    "Promoção só ocorre após validação determinística"
+  ],
+  "deliverables": [
+    "registro, descoberta, criação, configuração, vínculo e inspeção de Git worktrees",
+    "guardrails por worktree com aprovação por hash, precedência de paths protegidos e rejeição de symlinks",
+    "predecessoras estruturadas, idempotentes e integradas ao DAG",
+    "sandboxes process e Bubblewrap para preview/test com receipts e lifecycle persistentes",
+    "paridade CLI/MCP para plan, run, start, status e stop",
+    "hardening de processos descendentes, timeout, perda de supervisor e redação de segredos",
+    "documentação, skill modular e testes de contrato"
+  ],
+  "risks": [
+    "processos podem escapar do PGID com setsid",
+    "a perda abrupta do supervisor pode deixar payloads vivos ou estado stale",
+    "segredos podem entrar por argv, environment, stdout, stderr ou erros",
+    "drift de HEAD ou configuração pode invalidar um vínculo",
+    "escopos amplos podem sobrepor paths protegidos",
+    "publicação do estado local em repositório público pode incluir metadados operacionais"
+  ],
+  "unknowns": [
+    {
+      "question": "Bubblewrap está disponível e consegue impor filesystem read-only e network deny neste host?",
+      "resolution": "Resolvido por smoke real com /usr/bin/bwrap, /workspace read-only, sandbox gravável e network_isolation_enforced=true."
+    },
+    {
+      "question": "Descendentes que usam setsid sobrevivem a timeout, stop ou perda do supervisor?",
+      "resolution": "Resolvido por rastreamento Linux via subreaper e /proc, persistência dos PIDs e regressões que provam a eliminação."
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "schema_version": "forge.worktree_hardening.artifact_manifest.v1",
+  "workflow_id": "wf_cf8a1698f266442981479112786f00b0",
+  "task_id": "task-007",
+  "generated_at": "2026-07-22T21:09:36-03:00",
+  "path_policy": "repository_relative",
+  "hash_algorithm": "sha256",
+  "artifact_count": 6,
+  "artifacts": [
+    {
+      "task_id": "task-001",
+      "kind": "intent",
+      "path": "docs/reports/worktree-sandbox-hardening-2026-07-22/intent.json",
+      "bytes": 2406,
+      "sha256": "ae04a7488f7c37e3a6e3a5cedc7e82545f170eb2fa42bb8c16486a5333e5f2ff"
+    },
+    {
+      "task_id": "task-002",
+      "kind": "requirements",
+      "path": "docs/reports/worktree-sandbox-hardening-2026-07-22/requirements.md",
+      "bytes": 2641,
+      "sha256": "578893530583cb5edc6b688b2fc1a021949c2ed4e3bf8d38ed84a8ef8ee94f76"
+    },
+    {
+      "task_id": "task-003",
+      "kind": "graph",
+      "path": "docs/reports/worktree-sandbox-hardening-2026-07-22/task-graph.json",
+      "bytes": 1359,
+      "sha256": "17e9e1d984d823127247687977a51dc819b2809306b0e849da511aada1be1187"
+    },
+    {
+      "task_id": "task-004",
+      "kind": "context",
+      "path": "docs/reports/worktree-sandbox-hardening-2026-07-22/context-package.json",
+      "bytes": 5544,
+      "sha256": "c3db8273bb1e3835e4a784c45f6fd80f4c03f9fbf4e371dcf9fa461d840573e8"
+    },
+    {
+      "task_id": "task-005",
+      "kind": "trace",
+      "path": "docs/reports/worktree-sandbox-hardening-2026-07-22/execution-trace.md",
+      "bytes": 2239,
+      "sha256": "e5ccd0fa140d834d902b84d960b4e2c1ebb2ebfa99c09fad4ee5dd21ddd9f56b"
+    },
+    {
+      "task_id": "task-006",
+      "kind": "test-results",
+      "path": "docs/reports/worktree-sandbox-hardening-2026-07-22/validation-report.md",
+      "bytes": 1784,
+      "sha256": "c16a585bc620ca6e1594c44da6e0337f81f466a4ca388dca3b826cf57593f00c"
+    }
+  ]
+}

@@ -79,7 +79,6 @@ fn test_stress_cognitive_tasks_halting() {
             "teamwork",
             "--goal",
             "Perform research write up and analysis on system metrics",
-            "--detached",
             "--output",
             "json",
         ])
@@ -90,7 +89,15 @@ fn test_stress_cognitive_tasks_halting() {
         .clone();
 
     let json: Value = serde_json::from_slice(&output).unwrap();
-    let run_id = json["run_id"].as_str().unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let connection = Connection::open(&store_path).unwrap();
+    let run_id: String = connection
+        .query_row(
+            "SELECT id FROM runs WHERE workflow_id = ?1",
+            [workflow_id],
+            |row| row.get(0),
+        )
+        .unwrap();
 
     // Step the run repeatedly. task-005 (Execute isolated task) is of Mixed executor type,
     // which is not auto-steppable, so it should halt and return handoff_required.
@@ -99,7 +106,14 @@ fn test_stress_cognitive_tasks_halting() {
         let step_output = forge()
             .arg("--store")
             .arg(store_path.to_str().unwrap())
-            .args(["request", "step", "--run", run_id, "--output", "json"])
+            .args([
+                "request",
+                "step",
+                "--run",
+                run_id.as_str(),
+                "--output",
+                "json",
+            ])
             .assert()
             .success()
             .get_output()

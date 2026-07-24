@@ -35,7 +35,24 @@ use crate::aws_ops::{
 };
 use crate::checkpoint::load_latest_task_checkpoint;
 use crate::cli_factory::{create_cli_factory_plan, CliFactoryCreateInput};
-use crate::context::{build_context_package_with_checkpoint_and_project, DEFAULT_CONTEXT_BUDGET};
+use crate::cli_integration::{
+    analyze_token_headroom, build_cli_wrapper_plan, build_harness_activation_profile,
+    build_harness_adoption_plan, build_harness_bootstrap_report, build_harness_doctor_report,
+    build_harness_headroom_plan, build_harness_mode_report, build_headroom_stats_report,
+    inspect_cli_harness_shim_status, install_cli_harness_shim, install_cli_provider_adapter,
+    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
+    resolve_harness_runtime_policy, retrieve_headroom_blob, run_cli_harness_exec,
+    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
+    HarnessActivationProfileOptions, HarnessAdoptionPlanOptions, HarnessBootstrapOptions,
+    HarnessDoctorOptions, HarnessHeadroomPlanOptions, HarnessModeOptions,
+    HarnessRuntimePolicyOptions, HeadroomStatsOptions, ProviderAdapterInstallOptions,
+};
+use crate::context::{
+    build_compact_context_view_with_predecessor_plans,
+    build_context_package_with_checkpoint_and_project,
+    build_context_package_with_checkpoint_project_and_worktree,
+    CONTEXT_COMPACT_VIEW_SCHEMA_VERSION, CONTEXT_SCHEMA_VERSION, DEFAULT_CONTEXT_BUDGET,
+};
 use crate::cost::{
     apply_cost_ledger_retention_for_context, build_cost_ledger_for_context,
     build_cost_ledger_history_for_context, maintain_cost_ledger_for_context,
@@ -63,18 +80,9 @@ use crate::executor::{
     record_shell_session_plan, BrainSessionLifecycleOptions, BrainSessionsReportOptions,
     ShellLaunchPlanOptions,
 };
-use crate::handoff::build_task_handoff_with_project;
-use crate::harness::{
-    analyze_token_headroom, build_cli_wrapper_plan, build_harness_activation_profile,
-    build_harness_adoption_plan, build_harness_bootstrap_report, build_harness_doctor_report,
-    build_harness_headroom_plan, build_harness_mode_report, build_headroom_stats_report,
-    inspect_cli_harness_shim_status, install_cli_harness_shim, install_cli_provider_adapter,
-    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
-    resolve_harness_runtime_policy, retrieve_headroom_blob, run_cli_harness_exec,
-    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
-    HarnessActivationProfileOptions, HarnessAdoptionPlanOptions, HarnessBootstrapOptions,
-    HarnessDoctorOptions, HarnessHeadroomPlanOptions, HarnessModeOptions,
-    HarnessRuntimePolicyOptions, HeadroomStatsOptions, ProviderAdapterInstallOptions,
+use crate::handoff::{
+    build_predecessor_handoff_plans, build_task_handoff_response_with_project, TaskHandoffView,
+    EXECUTOR_HANDOFF_COMPACT_SCHEMA_VERSION, EXECUTOR_HANDOFF_SCHEMA_VERSION,
 };
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
@@ -157,6 +165,9 @@ use crate::schedule::{
     run_due_workflow, scan_due_workflows, scan_due_workflows_parallel, update_loop_state,
     update_workflow_schedule, ScheduleUpdateOptions,
 };
+use crate::security::{
+    sanitize_prompt_secrets_with_vault, SecretSanitizationOptions, SecretVaultPersistOptions,
+};
 use crate::storage::ForgeStore;
 use crate::validation::{validate_workflow, ValidationReport};
 use crate::workflow::{
@@ -167,8 +178,16 @@ use crate::workflow::{
     update_workflow_node_brain_routing, CreativeCollaborationEventRequest,
     WorkflowNodeBrainRoutingUpdateInput,
 };
+use crate::worktree::{
+    bound_worktree_context, create_worktree_guard_predecessor_task,
+    evaluate_worktree_modification_guard, inspect_worktree_sandbox_lifecycle,
+    plan_worktree_sandbox, resolve_effective_project_root, run_worktree_sandbox,
+    start_worktree_sandbox, stop_worktree_sandbox, WorktreeModificationGuardRequest,
+    WorktreeSandboxRequest,
+};
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
@@ -188,7 +207,7 @@ pub struct McpToolsManifest {
     pub tools: Vec<McpToolSpec>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct McpToolSpec {
     pub name: String,
     pub title: String,
@@ -198,6 +217,31 @@ pub struct McpToolSpec {
     pub forge_command: Vec<String>,
     pub async_safe: bool,
     pub mutates_workflow: bool,
+}
+
+impl Serialize for McpToolSpec {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let output_schema_selector = output_schema_selector(&self.name);
+        let mut state = serializer.serialize_struct(
+            "McpToolSpec",
+            8 + usize::from(output_schema_selector.is_some()),
+        )?;
+        state.serialize_field("name", &self.name)?;
+        state.serialize_field("title", &self.title)?;
+        state.serialize_field("description", &self.description)?;
+        state.serialize_field("input_schema", &self.input_schema)?;
+        state.serialize_field("output_schema", &self.output_schema)?;
+        state.serialize_field("forge_command", &self.forge_command)?;
+        state.serialize_field("async_safe", &self.async_safe)?;
+        state.serialize_field("mutates_workflow", &self.mutates_workflow)?;
+        if let Some(selector) = output_schema_selector {
+            state.serialize_field("output_schema_selector", &selector)?;
+        }
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -773,6 +817,8 @@ struct HarnessExecInput {
     token_headroom: Option<bool>,
     dry_run: Option<bool>,
     allow_exec: Option<bool>,
+    secret_env: Option<Vec<String>>,
+    secret_permissions: Option<Vec<String>>,
     project_root: Option<String>,
     cwd: Option<String>,
 }
@@ -1812,6 +1858,58 @@ struct ContextRequestInput {
     task_id: String,
     budget: Option<usize>,
     project_root: Option<String>,
+    view: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeGuardCheckInput {
+    worktree: String,
+    #[serde(default = "default_worktree_guard_operation")]
+    operation: String,
+    paths: Vec<String>,
+    reason: String,
+    workflow_id: Option<String>,
+    task_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeGuardCreatePredecessorInput {
+    worktree: String,
+    workflow_id: String,
+    task_id: String,
+    paths: Vec<String>,
+    goal: String,
+    allow_workflow_mutation: bool,
+    approved_by: String,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeSandboxInput {
+    worktree: String,
+    purpose: String,
+    workflow_id: Option<String>,
+    task_id: Option<String>,
+    #[serde(default)]
+    command: Vec<String>,
+    allow_exec: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeSandboxStatusInput {
+    #[serde(alias = "sandbox")]
+    sandbox_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeSandboxStopInput {
+    #[serde(alias = "sandbox")]
+    sandbox_id: String,
+    allow_stop: Option<bool>,
+}
+
+fn default_worktree_guard_operation() -> String {
+    "modify".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1822,6 +1920,7 @@ struct TaskHandoffInput {
     budget: Option<usize>,
     ttl_seconds: Option<u64>,
     project_root: Option<String>,
+    view: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2129,6 +2228,17 @@ struct CredentialVaultInput {
     contract: String,
     data: String,
     vault_bin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SecuritySecretScanInput {
+    input: String,
+    scope: Option<String>,
+    workflow_id: Option<String>,
+    origin: Option<String>,
+    enable_entropy: Option<bool>,
+    enable_local_ai_fallback: Option<bool>,
+    allow_external_ai: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5533,8 +5643,44 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ],
                 ToolFlags::new(true, true),
             ),
-            tool(
-                "forge.credential_vault.describe",
+        tool(
+            "forge.security.secret_scan",
+            "Sanitize Secret Values",
+            "Detect and replace secret values with Forge Secret Vault references before prompt construction. The result never serializes raw secret values.",
+            object_schema(
+                &[
+                    ("input", "string", "text to scan and sanitize"),
+                    ("scope", "string", "optional vault scope; defaults to project"),
+                    ("workflow_id", "string", "optional workflow id for tenant-scoped vault storage"),
+                    ("origin", "string", "optional audit origin"),
+                    ("enable_entropy", "boolean", "optional entropy scanner toggle"),
+                    (
+                        "enable_local_ai_fallback",
+                        "boolean",
+                        "optional local-only AI fallback toggle",
+                    ),
+                    (
+                        "allow_external_ai",
+                        "boolean",
+                        "must remain false for secret guardrail safety",
+                    ),
+                ],
+                &["input"],
+            ),
+            "forge.runtime.secret_guardrail.v1",
+            &[
+                "forge",
+                "security",
+                "secret-scan",
+                "--input",
+                "<input>",
+                "--output",
+                "json",
+            ],
+            ToolFlags::new(true, false),
+        ),
+        tool(
+            "forge.credential_vault.describe",
                 "Describe Credential Vault Contract",
                 "Inspect credential-vault contract metadata without resolving or printing secret values.",
                 object_schema(
@@ -6093,14 +6239,122 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.context.request",
                 "Request Bounded Context",
                 "Build the minimum correct task-local context package before executor handoff, optionally resolving project memory governance.",
+                context_request_input_schema(),
+            CONTEXT_COMPACT_VIEW_SCHEMA_VERSION,
+            &[
+                "forge",
+                "context",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--view",
+                "compact",
+                "--output",
+                "json",
+            ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.worktree.guard.check",
+                "Check Worktree Modification Guard",
+                "Evaluate file and directory modification scopes for a registered worktree and return a fail-closed agent action when a protected path needs a predecessor task.",
                 object_schema(&[
+                    ("worktree", "string", "registered worktree id or root"),
+                    ("operation", "string", "modify"),
+                    ("paths", "array", "repository-relative files or directory scopes"),
+                    ("reason", "string", "objective reason for the requested modification"),
+                    ("workflow_id", "string", "optional workflow binding"),
+                    ("task_id", "string", "optional current task binding"),
+                ], &["worktree", "paths", "reason"]),
+                "forge.worktree.modification_guard.v1",
+                &["forge", "worktree", "guard", "check", "--worktree", "<worktree-id>", "--path", "<path>", "--reason", "<reason>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.worktree.guard.create_predecessor",
+                "Create Worktree Guard Predecessor",
+                "With explicit workflow-mutation approval, create a path-specific predecessor task and block the current task through a revisioned DAG dependency.",
+                object_schema(&[
+                    ("worktree", "string", "registered worktree id or root"),
                     ("workflow_id", "string", "workflow id"),
-                    ("task_id", "string", "task id"),
-                    ("budget", "integer", "context byte budget"),
-                    ("project_root", "string", "optional project root containing .forge/memory-governance.json"),
-                ], &["workflow_id", "task_id"]),
-                "forge.context.v30",
-                &["forge", "context", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                    ("task_id", "string", "current task id"),
+                    ("paths", "array", "blocked repository-relative paths"),
+                    ("goal", "string", "objective and path-specific predecessor goal"),
+                    ("allow_workflow_mutation", "boolean", "explicit mutation authorization"),
+                    ("approved_by", "string", "approver identity"),
+                    ("origin", "string", "mutation origin"),
+                ], &["worktree", "workflow_id", "task_id", "paths", "goal", "allow_workflow_mutation", "approved_by"]),
+                "forge.worktree.predecessor_task.v1",
+                &["forge", "worktree", "guard", "create-predecessor", "--worktree", "<worktree-id>", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>", "--goal", "<goal>", "--allow-workflow-mutation", "--approved-by", "<approver>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.worktree.sandbox.plan",
+                "Plan Worktree Sandbox",
+                "Evaluate the approved worktree, binding, command, runtime, filesystem and network guardrails without executing the preview or test payload.",
+                object_schema(&[
+                    ("worktree", "string", "registered worktree id or root"),
+                    ("purpose", "string", "preview|test"),
+                    ("workflow_id", "string", "optional workflow binding"),
+                    ("task_id", "string", "optional task binding; requires workflow_id"),
+                    ("command", "array", "optional command argv override"),
+                ], &["worktree", "purpose"]),
+                "forge.worktree.sandbox_plan.v1",
+                &["forge", "worktree", "sandbox", "plan", "--worktree", "<worktree-id>", "--purpose", "<preview|test>", "--output", "json", "--", "<command>"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.worktree.sandbox.run",
+                "Run Worktree Sandbox",
+                "Run one bounded preview or test command after explicit execution authorization and persist a structured, redacted receipt.",
+                object_schema(&[
+                    ("worktree", "string", "registered worktree id or root"),
+                    ("purpose", "string", "preview|test"),
+                    ("workflow_id", "string", "optional workflow binding"),
+                    ("task_id", "string", "optional task binding; requires workflow_id"),
+                    ("command", "array", "optional command argv override"),
+                    ("allow_exec", "boolean", "explicit payload execution authorization"),
+                ], &["worktree", "purpose", "allow_exec"]),
+                "forge.worktree.sandbox_receipt.v1",
+                &["forge", "worktree", "sandbox", "run", "--worktree", "<worktree-id>", "--purpose", "<preview|test>", "--allow-exec", "--output", "json", "--", "<command>"],
+                ToolFlags::new(false, false),
+            ),
+            tool(
+                "forge.worktree.sandbox.start",
+                "Start Worktree Sandbox",
+                "Start a detached, persistent preview or test sandbox under a Forge supervisor after explicit execution authorization.",
+                object_schema(&[
+                    ("worktree", "string", "registered worktree id or root"),
+                    ("purpose", "string", "preview|test"),
+                    ("workflow_id", "string", "optional workflow binding"),
+                    ("task_id", "string", "optional task binding; requires workflow_id"),
+                    ("command", "array", "optional command argv override"),
+                    ("allow_exec", "boolean", "explicit payload execution authorization"),
+                ], &["worktree", "purpose", "allow_exec"]),
+                "forge.worktree.sandbox_lifecycle.v1",
+                &["forge", "worktree", "sandbox", "start", "--worktree", "<worktree-id>", "--purpose", "<preview|test>", "--allow-exec", "--output", "json", "--", "<command>"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.worktree.sandbox.status",
+                "Inspect Worktree Sandbox",
+                "Inspect the durable lifecycle state for a persistent preview or test sandbox.",
+                object_schema(&[("sandbox_id", "string", "persistent sandbox id")], &["sandbox_id"]),
+                "forge.worktree.sandbox_lifecycle.v1",
+                &["forge", "worktree", "sandbox", "status", "--sandbox", "<sandbox-id>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.worktree.sandbox.stop",
+                "Stop Worktree Sandbox",
+                "Stop the persistent sandbox payload process group after explicit stop authorization and persist the terminal lifecycle state.",
+                object_schema(&[
+                    ("sandbox_id", "string", "persistent sandbox id"),
+                    ("allow_stop", "boolean", "explicit process-group termination authorization"),
+                ], &["sandbox_id", "allow_stop"]),
+                "forge.worktree.sandbox_lifecycle.v1",
+                &["forge", "worktree", "sandbox", "stop", "--sandbox", "<sandbox-id>", "--allow-stop", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -6336,6 +6590,8 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("token_headroom", "boolean", "enable token-headroom env"),
                     ("dry_run", "boolean", "default true; false requests guarded execution"),
                     ("allow_exec", "boolean", "must be true together with dry_run=false before executing"),
+                    ("secret_env", "array", "optional ENV=vault.reference mappings resolved only with secret permissions"),
+                    ("secret_permissions", "array", "must include credential_secret_permissions and tool_usage_permissions for injection"),
                     ("project_root", "string", "optional project root containing .forge/harness.json"),
                     ("cwd", "string", "optional child working directory"),
                 ], &["executor"]),
@@ -6347,16 +6603,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.task.handoff",
                 "Acquire Task Handoff",
                 "Acquire a bounded executor handoff packet for an authorized task executor, optionally resolving project memory governance.",
-                object_schema(&[
-                    ("workflow_id", "string", "workflow id"),
-                    ("task_id", "string", "task id"),
-                    ("executor", "string", "selected executor id"),
-                    ("budget", "integer", "context byte budget"),
-                    ("ttl_seconds", "integer", "lease TTL in seconds"),
-                    ("project_root", "string", "optional project root containing .forge/memory-governance.json"),
-                ], &["workflow_id", "task_id", "executor"]),
-                "forge.executor_handoff.v9",
-                &["forge", "task", "handoff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--executor", "<executor>", "--output", "json"],
+                task_handoff_input_schema(),
+                EXECUTOR_HANDOFF_COMPACT_SCHEMA_VERSION,
+                &["forge", "task", "handoff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--executor", "<executor>", "--view", "compact", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -9241,6 +9490,35 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
+        "forge.security.secret_scan" => {
+            let input: SecuritySecretScanInput = parse_input(input)?;
+            let tenant_context = input
+                .workflow_id
+                .as_deref()
+                .and_then(|workflow_id| store.load_workflow(workflow_id).ok())
+                .map(|workflow| serde_json::to_value(&workflow.intent.operating_context))
+                .transpose()?
+                .unwrap_or_else(|| {
+                    serde_json::to_value(crate::intent::OperatingContextSpec::default())
+                        .unwrap_or_else(|_| serde_json::json!({}))
+                });
+            serde_json::to_value(sanitize_prompt_secrets_with_vault(
+                &input.input,
+                SecretSanitizationOptions {
+                    scope: input.scope.unwrap_or_else(|| "project".to_string()),
+                    enable_entropy: input.enable_entropy.unwrap_or(true),
+                    enable_local_ai_fallback: input.enable_local_ai_fallback.unwrap_or(true),
+                    allow_external_ai: input.allow_external_ai.unwrap_or(false),
+                    ..SecretSanitizationOptions::default()
+                },
+                SecretVaultPersistOptions {
+                    store,
+                    workflow_id: input.workflow_id.as_deref(),
+                    origin: input.origin.as_deref().unwrap_or("mcp"),
+                    tenant_context: &tenant_context,
+                },
+            )?)?
+        }
         "forge.credential_vault.describe" => {
             let input: CredentialVaultInput = parse_input(input)?;
             serde_json::to_value(run_credential_vault_describe(
@@ -9651,13 +9929,149 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let workflow = store.load_workflow(&input.workflow_id)?;
             let latest_checkpoint =
                 load_latest_task_checkpoint(store, &input.workflow_id, &input.task_id)?;
-            let project_root = input.project_root.as_deref().map(PathBuf::from);
-            serde_json::to_value(build_context_package_with_checkpoint_and_project(
-                &workflow,
+            let budget = input.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET);
+            let explicit_project_root = input.project_root.as_deref().map(PathBuf::from);
+            let project_root = resolve_effective_project_root(
+                store,
+                &input.workflow_id,
+                Some(&input.task_id),
+                explicit_project_root.as_deref(),
+            )?;
+            let bound_worktree =
+                bound_worktree_context(store, &input.workflow_id, Some(&input.task_id))?;
+            let workflow_secret_scan_input = serde_json::to_string(&workflow)?;
+            let tenant_context = serde_json::to_value(&workflow.intent.operating_context)?;
+            let _ = sanitize_prompt_secrets_with_vault(
+                &workflow_secret_scan_input,
+                SecretSanitizationOptions::default(),
+                SecretVaultPersistOptions {
+                    store,
+                    workflow_id: Some(&workflow.id),
+                    origin: "forge_mcp_context",
+                    tenant_context: &tenant_context,
+                },
+            )?;
+            let package = if bound_worktree.is_some() {
+                build_context_package_with_checkpoint_project_and_worktree(
+                    &workflow,
+                    &input.task_id,
+                    budget,
+                    latest_checkpoint,
+                    project_root.as_deref(),
+                    bound_worktree,
+                )?
+            } else {
+                build_context_package_with_checkpoint_and_project(
+                    &workflow,
+                    &input.task_id,
+                    budget,
+                    latest_checkpoint,
+                    project_root.as_deref(),
+                )?
+            };
+            match input.view.as_deref().unwrap_or("compact") {
+                "full" => serde_json::to_value(package)?,
+                "compact" => {
+                    let predecessor_plans = build_predecessor_handoff_plans(
+                        store,
+                        &workflow,
+                        &input.task_id,
+                        budget,
+                        explicit_project_root.as_deref(),
+                    )?;
+                    serde_json::to_value(build_compact_context_view_with_predecessor_plans(
+                        &package,
+                        &workflow,
+                        store.path(),
+                        project_root.as_deref(),
+                        &predecessor_plans,
+                    ))?
+                }
+                view => bail!("unsupported context view `{view}`; expected full or compact"),
+            }
+        }
+        "forge.worktree.guard.check" => {
+            let input: WorktreeGuardCheckInput = parse_input(input)?;
+            serde_json::to_value(evaluate_worktree_modification_guard(
+                store,
+                WorktreeModificationGuardRequest {
+                    worktree: input.worktree,
+                    operation: input.operation,
+                    paths: input.paths,
+                    reason: input.reason,
+                    workflow_id: input.workflow_id,
+                    task_id: input.task_id,
+                },
+            )?)?
+        }
+        "forge.worktree.guard.create_predecessor" => {
+            let input: WorktreeGuardCreatePredecessorInput = parse_input(input)?;
+            serde_json::to_value(create_worktree_guard_predecessor_task(
+                store,
+                &input.worktree,
+                &input.workflow_id,
                 &input.task_id,
-                input.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
-                latest_checkpoint,
-                project_root.as_deref(),
+                input.paths,
+                &input.goal,
+                input.allow_workflow_mutation,
+                &input.approved_by,
+                input.origin.as_deref().unwrap_or("mcp"),
+            )?)?
+        }
+        "forge.worktree.sandbox.plan" => {
+            let input: WorktreeSandboxInput = parse_input(input)?;
+            serde_json::to_value(plan_worktree_sandbox(
+                store,
+                WorktreeSandboxRequest {
+                    worktree: input.worktree,
+                    purpose: input.purpose,
+                    workflow_id: input.workflow_id,
+                    task_id: input.task_id,
+                    command: input.command,
+                },
+            )?)?
+        }
+        "forge.worktree.sandbox.run" => {
+            let input: WorktreeSandboxInput = parse_input(input)?;
+            serde_json::to_value(run_worktree_sandbox(
+                store,
+                WorktreeSandboxRequest {
+                    worktree: input.worktree,
+                    purpose: input.purpose,
+                    workflow_id: input.workflow_id,
+                    task_id: input.task_id,
+                    command: input.command,
+                },
+                input.allow_exec.unwrap_or(false),
+            )?)?
+        }
+        "forge.worktree.sandbox.start" => {
+            let input: WorktreeSandboxInput = parse_input(input)?;
+            serde_json::to_value(start_worktree_sandbox(
+                store,
+                WorktreeSandboxRequest {
+                    worktree: input.worktree,
+                    purpose: input.purpose,
+                    workflow_id: input.workflow_id,
+                    task_id: input.task_id,
+                    command: input.command,
+                },
+                input.allow_exec.unwrap_or(false),
+            )?)?
+        }
+        "forge.worktree.sandbox.status" => {
+            let input: WorktreeSandboxStatusInput = parse_input(input)?;
+            serde_json::to_value(inspect_worktree_sandbox_lifecycle(
+                store,
+                &input.sandbox_id,
+            )?)?
+        }
+        "forge.worktree.sandbox.stop" => {
+            let input: WorktreeSandboxStopInput = parse_input(input)?;
+            serde_json::to_value(stop_worktree_sandbox(
+                store,
+                &input.sandbox_id,
+                input.allow_stop.unwrap_or(false),
             )?)?
         }
         "forge.harness.token_headroom" => {
@@ -10012,17 +10426,50 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let workflow_id = input.workflow_id.or(input.workflow);
             let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
-            let cwd = input.cwd.as_deref().map(std::path::Path::new);
-            let project_root = input.project_root.as_deref().map(std::path::Path::new);
+            let explicit_cwd = input.cwd.as_deref().map(PathBuf::from);
+            let explicit_project_root = input.project_root.as_deref().map(PathBuf::from);
+            let project_root = if let Some(workflow_id) = workflow_id.as_deref() {
+                resolve_effective_project_root(
+                    store,
+                    workflow_id,
+                    task_id.as_deref(),
+                    explicit_project_root.as_deref(),
+                )?
+            } else {
+                explicit_project_root
+            };
+            let bound_root = workflow_id
+                .as_deref()
+                .map(|workflow_id| {
+                    resolve_effective_project_root(store, workflow_id, task_id.as_deref(), None)
+                })
+                .transpose()?
+                .flatten();
+            let cwd = if let Some(bound_root) = bound_root.as_ref() {
+                if let Some(explicit_cwd) = explicit_cwd.as_ref() {
+                    let explicit_cwd = std::fs::canonicalize(explicit_cwd)?;
+                    let canonical_bound = std::fs::canonicalize(bound_root)?;
+                    if explicit_cwd != canonical_bound {
+                        bail!(
+                            "explicit cwd {} conflicts with bound worktree {}",
+                            explicit_cwd.display(),
+                            canonical_bound.display()
+                        );
+                    }
+                }
+                Some(bound_root.clone())
+            } else {
+                explicit_cwd
+            };
             let (forge_first, forge_first_source) = if let Some(forge_first) = input.forge_first {
                 (forge_first, "mcp_input")
-            } else if let Some(project_root) = project_root {
+            } else if let Some(project_root) = project_root.as_deref() {
                 resolve_harness_forge_first_source_for_project(false, false, Some(project_root))
             } else {
                 (true, "mcp_default")
             };
             let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
-                project_root,
+                project_root: project_root.as_deref(),
                 context_budget: input.context_budget,
                 context_budget_source: "mcp_input",
                 token_headroom: input.token_headroom,
@@ -10030,6 +10477,8 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 forge_first,
                 default_context_budget: DEFAULT_CONTEXT_BUDGET,
             });
+            let secret_env = input.secret_env.unwrap_or_default();
+            let secret_permissions = input.secret_permissions.unwrap_or_default();
             serde_json::to_value(run_cli_harness_exec(CliHarnessExecOptions {
                 store: Some(store),
                 executor: &input.executor,
@@ -10047,14 +10496,21 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     .require_token_headroom_for_forge_first,
                 dry_run: input.dry_run.unwrap_or(true),
                 allow_exec: input.allow_exec.unwrap_or(false),
-                project_root,
-                cwd,
+                secret_env: &secret_env,
+                secret_permissions: &secret_permissions,
+                project_root: project_root.as_deref(),
+                cwd: cwd.as_deref(),
             })?)?
         }
         "forge.task.handoff" => {
             let input: TaskHandoffInput = parse_input(input)?;
             let project_root = input.project_root.as_deref().map(PathBuf::from);
-            serde_json::to_value(build_task_handoff_with_project(
+            let view = match input.view.as_deref().unwrap_or("compact") {
+                "compact" => TaskHandoffView::Compact,
+                "full" => TaskHandoffView::Full,
+                view => bail!("unsupported task handoff view `{view}`; expected compact or full"),
+            };
+            serde_json::to_value(build_task_handoff_response_with_project(
                 store,
                 &input.workflow_id,
                 &input.task_id,
@@ -10062,6 +10518,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
                 input.ttl_seconds.unwrap_or(900),
                 project_root.as_deref(),
+                view,
             )?)?
         }
         "forge.patch.plan" => {
@@ -10627,6 +11084,78 @@ fn tool(
         async_safe: flags.async_safe,
         mutates_workflow: flags.mutates_workflow,
     }
+}
+
+fn output_schema_selector(tool_name: &str) -> Option<Value> {
+    match tool_name {
+        "forge.context.request" => Some(json!({
+            "input_field": "view",
+            "default_value": "compact",
+            "mapping": {
+                "full": CONTEXT_SCHEMA_VERSION,
+                "compact": CONTEXT_COMPACT_VIEW_SCHEMA_VERSION,
+            }
+        })),
+        "forge.task.handoff" => Some(json!({
+            "input_field": "view",
+            "default_value": "compact",
+            "mapping": {
+                "full": EXECUTOR_HANDOFF_SCHEMA_VERSION,
+                "compact": EXECUTOR_HANDOFF_COMPACT_SCHEMA_VERSION,
+            }
+        })),
+        _ => None,
+    }
+}
+
+fn context_request_input_schema() -> Value {
+    let mut schema = object_schema(
+        &[
+            ("workflow_id", "string", "workflow id"),
+            ("task_id", "string", "task id"),
+            ("budget", "integer", "context byte budget"),
+            (
+                "project_root",
+                "string",
+                "optional project root containing .forge/memory-governance.json",
+            ),
+            (
+                "view",
+                "string",
+                "full|compact response view; compact is optimized for executor context",
+            ),
+        ],
+        &["workflow_id", "task_id"],
+    );
+    schema["properties"]["view"]["enum"] = json!(["full", "compact"]);
+    schema["properties"]["view"]["default"] = json!("compact");
+    schema
+}
+
+fn task_handoff_input_schema() -> Value {
+    let mut schema = object_schema(
+        &[
+            ("workflow_id", "string", "workflow id"),
+            ("task_id", "string", "task id"),
+            ("executor", "string", "selected executor id"),
+            ("budget", "integer", "context byte budget"),
+            ("ttl_seconds", "integer", "lease TTL in seconds"),
+            (
+                "project_root",
+                "string",
+                "optional project root containing .forge/memory-governance.json",
+            ),
+            (
+                "view",
+                "string",
+                "compact by default for executor use; full is reserved for audit and replay",
+            ),
+        ],
+        &["workflow_id", "task_id", "executor"],
+    );
+    schema["properties"]["view"]["enum"] = json!(["compact", "full"]);
+    schema["properties"]["view"]["default"] = json!("compact");
+    schema
 }
 
 #[derive(Debug, Clone, Copy)]

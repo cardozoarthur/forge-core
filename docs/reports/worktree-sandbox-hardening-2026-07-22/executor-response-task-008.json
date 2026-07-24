@@ -1,0 +1,22 @@
+{
+  "schema_version": "forge.executor_response.v1",
+  "task_id": "task-008",
+  "status": "completed",
+  "artifacts": [
+    "docs/reports/worktree-sandbox-hardening-2026-07-22/operational-report.md"
+  ],
+  "trace_ref": "docs/reports/worktree-sandbox-hardening-2026-07-22/execution-trace.md",
+  "cost": {
+    "estimated_usd": 0.0,
+    "tokens_in": 0,
+    "tokens_out": 0
+  },
+  "validation_evidence": [
+    {
+      "command": "grep -n 'worktree create\\|approve-config\\|guard create-predecessor\\|sandbox plan\\|sandbox run\\|sandbox start\\|sandbox status\\|sandbox stop' operational-report.md",
+      "exit_code": 0,
+      "summary": "O relatório documenta o replay completo de criação/registro, aprovação, binding, guardrails, sandbox, lifecycle, validação e limites operacionais."
+    }
+  ],
+  "rework_items": []
+}

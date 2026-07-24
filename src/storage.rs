@@ -3,9 +3,79 @@ use crate::event::{build_event_observability, categorize_event, infer_severity};
 use crate::graph::Workflow;
 use crate::intent::OperatingContextSpec;
 use anyhow::{Context, Result};
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
+use chacha20poly1305::{
+    aead::{Aead, KeyInit, Payload},
+    XChaCha20Poly1305, XNonce,
+};
+use rusqlite::{
+    params, params_from_iter, Connection, Error as SqliteError, ErrorCode, OptionalExtension, Row,
+    Transaction, TransactionBehavior,
+};
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::thread;
+use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
+
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const SQLITE_RETRY_DELAY: Duration = Duration::from_millis(25);
+const STORE_SCHEMA_VERSION: i64 = 4;
+const EVENT_OBSERVABILITY_RECONCILIATION_BATCH_SIZE: usize = 64;
+const EVENT_OBSERVABILITY_RECONCILIATION_CURSOR: &str = "event_observability_schema_v3_rebuild";
+const GLOBAL_EVENTS_OBSERVABILITY_QUEUE_TRIGGER: &str = "trg_global_events_observability_queue";
+const EVENT_OBSERVABILITY_DELETE_QUEUE_TRIGGER: &str = "trg_event_observability_delete_queue";
+const RUNTIME_SECRET_ENCRYPTED_INSERT_TRIGGER: &str = "trg_runtime_secret_vault_encrypted_insert";
+const RUNTIME_SECRET_ENCRYPTED_UPDATE_TRIGGER: &str = "trg_runtime_secret_vault_encrypted_update";
+const RUNTIME_SECRET_ENVELOPE_PREFIX: &str = "forge:vault:v1";
+const RUNTIME_SECRET_KEY_FILE_PREFIX: &str = "forge-secret-vault-key-v1:";
+const RUNTIME_SECRET_KEY_ENV: &str = "FORGE_SECRET_VAULT_KEY";
+const RUNTIME_SECRET_KEY_FILE_ENV: &str = "FORGE_SECRET_VAULT_KEY_FILE";
+const RUNTIME_SECRET_PREVIOUS_KEYS_ENV: &str = "FORGE_SECRET_VAULT_PREVIOUS_KEYS";
+const RUNTIME_SECRET_PREVIOUS_KEY_FILES_ENV: &str = "FORGE_SECRET_VAULT_PREVIOUS_KEY_FILES";
+const RUNTIME_SECRET_SCRUB_CURSOR: &str = "runtime_secret_vault_encryption_v1_scrub";
+const RUNTIME_SECRET_NONCE_BYTES: usize = 24;
+const RUNTIME_SECRET_KEY_BYTES: usize = 32;
+const RUNTIME_SECRET_KEY_FILE_MAX_BYTES: u64 = 16 * 1024;
+const RUNTIME_SECRET_MAX_BYTES: usize = 1024 * 1024;
+const GLOBAL_EVENTS_OBSERVABILITY_QUEUE_TRIGGER_SQL: &str = r#"
+CREATE TRIGGER trg_global_events_observability_queue
+AFTER INSERT ON global_events
+BEGIN
+    INSERT OR IGNORE INTO event_observability_reconciliation_queue (global_event_id)
+    VALUES (NEW.id);
+END;
+"#;
+const EVENT_OBSERVABILITY_DELETE_QUEUE_TRIGGER_SQL: &str = r#"
+CREATE TRIGGER trg_event_observability_delete_queue
+AFTER DELETE ON event_observability_index
+WHEN EXISTS (
+    SELECT 1 FROM global_events WHERE id = OLD.global_event_id
+)
+BEGIN
+    INSERT OR IGNORE INTO event_observability_reconciliation_queue (global_event_id)
+    VALUES (OLD.global_event_id);
+END;
+"#;
+const RUNTIME_SECRET_ENCRYPTED_INSERT_TRIGGER_SQL: &str = r#"
+CREATE TRIGGER trg_runtime_secret_vault_encrypted_insert
+BEFORE INSERT ON runtime_secret_vault
+WHEN NEW.secret_value NOT GLOB 'forge:vault:v1:*'
+BEGIN
+    SELECT RAISE(ABORT, 'runtime secret vault requires an encrypted v1 envelope');
+END;
+"#;
+const RUNTIME_SECRET_ENCRYPTED_UPDATE_TRIGGER_SQL: &str = r#"
+CREATE TRIGGER trg_runtime_secret_vault_encrypted_update
+BEFORE UPDATE OF secret_value ON runtime_secret_vault
+WHEN NEW.secret_value NOT GLOB 'forge:vault:v1:*'
+BEGIN
+    SELECT RAISE(ABORT, 'runtime secret vault requires an encrypted v1 envelope');
+END;
+"#;
 
 type InboundEventRow = (
     String,
@@ -22,10 +92,608 @@ type InboundEventRow = (
     String,
     String,
 );
+type RuntimeSecretStoredRecord = (String, Zeroizing<String>, String, i64);
 
 pub struct ForgeStore {
     path: PathBuf,
     connection: Connection,
+    runtime_secret_cipher: RuntimeSecretCipher,
+}
+
+struct RuntimeSecretCipher {
+    current: RuntimeSecretKey,
+    previous: Vec<RuntimeSecretKey>,
+}
+
+struct RuntimeSecretKey {
+    id: String,
+    bytes: Zeroizing<[u8; RUNTIME_SECRET_KEY_BYTES]>,
+}
+
+impl RuntimeSecretCipher {
+    fn load(store_path: &Path, encrypted_records_exist: bool) -> Result<Self> {
+        let configured_key = std::env::var_os(RUNTIME_SECRET_KEY_ENV);
+        let configured_key_file = std::env::var_os(RUNTIME_SECRET_KEY_FILE_ENV);
+        if configured_key.is_some() && configured_key_file.is_some() {
+            anyhow::bail!(
+                "{RUNTIME_SECRET_KEY_ENV} and {RUNTIME_SECRET_KEY_FILE_ENV} are mutually exclusive"
+            );
+        }
+        let external_key_configured = configured_key.is_some() || configured_key_file.is_some();
+
+        let fallback_path = runtime_secret_fallback_key_path(store_path);
+        let mut keyring = if let Some(encoded) = configured_key {
+            let encoded = Zeroizing::new(encoded.into_string().map_err(|_| {
+                anyhow::anyhow!("{RUNTIME_SECRET_KEY_ENV} must contain valid UTF-8")
+            })?);
+            vec![RuntimeSecretKey::parse(
+                encoded.trim(),
+                RUNTIME_SECRET_KEY_ENV,
+            )?]
+        } else if let Some(path) = configured_key_file {
+            let path = PathBuf::from(path);
+            if path.as_os_str().is_empty() {
+                anyhow::bail!("{RUNTIME_SECRET_KEY_FILE_ENV} must not be empty");
+            }
+            read_runtime_secret_keyring(&path, false)?
+        } else if is_sqlite_memory_path(store_path) {
+            vec![ephemeral_runtime_secret_key()?]
+        } else if fallback_path.exists() {
+            read_runtime_secret_keyring(&fallback_path, true)?
+        } else if encrypted_records_exist {
+            anyhow::bail!(
+                "runtime secret vault encryption key is unavailable; restore the configured key before opening this store"
+            );
+        } else {
+            vec![create_runtime_secret_fallback_key(&fallback_path)?]
+        };
+
+        if keyring.is_empty() {
+            anyhow::bail!("runtime secret vault keyring must contain a current key");
+        }
+        let current = keyring.remove(0);
+        let mut previous = keyring;
+
+        if external_key_configured && fallback_path.exists() && !is_sqlite_memory_path(store_path) {
+            previous.extend(read_runtime_secret_keyring(&fallback_path, true)?);
+        }
+
+        if let Some(encoded_previous) = std::env::var_os(RUNTIME_SECRET_PREVIOUS_KEYS_ENV) {
+            let encoded_previous =
+                Zeroizing::new(encoded_previous.into_string().map_err(|_| {
+                    anyhow::anyhow!("{RUNTIME_SECRET_PREVIOUS_KEYS_ENV} must contain valid UTF-8")
+                })?);
+            for encoded in encoded_previous
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                previous.push(RuntimeSecretKey::parse(
+                    encoded,
+                    RUNTIME_SECRET_PREVIOUS_KEYS_ENV,
+                )?);
+            }
+        }
+
+        if let Some(previous_files) = std::env::var_os(RUNTIME_SECRET_PREVIOUS_KEY_FILES_ENV) {
+            for path in std::env::split_paths(&previous_files) {
+                previous.extend(read_runtime_secret_keyring(&path, false)?);
+            }
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        seen.insert(current.id.clone());
+        previous.retain(|key| seen.insert(key.id.clone()));
+        if previous.len() > 32 {
+            anyhow::bail!("runtime secret vault keyring exceeds the 32-key safety limit");
+        }
+
+        Ok(Self { current, previous })
+    }
+
+    fn encrypt(
+        &self,
+        vault_key: &str,
+        value_sha256: &str,
+        value_len: usize,
+        plaintext: &[u8],
+    ) -> Result<String> {
+        validate_runtime_secret_metadata(plaintext, value_sha256, value_len)?;
+        let mut nonce = [0u8; RUNTIME_SECRET_NONCE_BYTES];
+        getrandom::fill(&mut nonce)
+            .map_err(|_| anyhow::anyhow!("failed to obtain OS randomness for secret encryption"))?;
+        let cipher = XChaCha20Poly1305::new_from_slice(self.current.bytes.as_ref())
+            .map_err(|_| anyhow::anyhow!("failed to initialize runtime secret vault cipher"))?;
+        let aad = runtime_secret_aad(vault_key, value_sha256, value_len);
+        let ciphertext = cipher
+            .encrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("failed to encrypt runtime secret vault value"))?;
+        Ok(format!(
+            "{RUNTIME_SECRET_ENVELOPE_PREFIX}:{}:{}:{}",
+            self.current.id,
+            hex_encode(&nonce),
+            hex_encode(&ciphertext)
+        ))
+    }
+
+    fn decrypt(
+        &self,
+        vault_key: &str,
+        value_sha256: &str,
+        value_len: usize,
+        envelope: &str,
+    ) -> Result<(Zeroizing<Vec<u8>>, bool)> {
+        let components = envelope.split(':').collect::<Vec<_>>();
+        if components.len() != 6
+            || components[0] != "forge"
+            || components[1] != "vault"
+            || components[2] != "v1"
+        {
+            anyhow::bail!("runtime secret vault contains an unsupported encrypted envelope");
+        }
+        let key_id = components[3];
+        let key = std::iter::once(&self.current)
+            .chain(self.previous.iter())
+            .find(|key| key.id == key_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "runtime secret vault key `{key_id}` is unavailable; provide it as a previous rotation key"
+                )
+            })?;
+        if components[4].len() != RUNTIME_SECRET_NONCE_BYTES * 2 {
+            anyhow::bail!("runtime secret vault contains an invalid nonce");
+        }
+        let nonce = hex_decode(components[4], "runtime secret nonce")?;
+        if value_len > RUNTIME_SECRET_MAX_BYTES {
+            anyhow::bail!("runtime secret vault values are limited to 1 MiB");
+        }
+        let expected_ciphertext_bytes = value_len
+            .checked_add(16)
+            .context("runtime secret vault value length overflow")?;
+        if components[5].len() != expected_ciphertext_bytes * 2 {
+            anyhow::bail!("runtime secret vault encrypted value length is inconsistent");
+        }
+        let ciphertext = hex_decode(components[5], "runtime secret ciphertext")?;
+        let cipher = XChaCha20Poly1305::new_from_slice(key.bytes.as_ref())
+            .map_err(|_| anyhow::anyhow!("failed to initialize runtime secret vault cipher"))?;
+        let aad = runtime_secret_aad(vault_key, value_sha256, value_len);
+        let plaintext = cipher
+            .decrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &ciphertext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "runtime secret vault authentication failed; the key or encrypted record is invalid"
+                )
+            })?;
+        validate_runtime_secret_metadata(&plaintext, value_sha256, value_len)?;
+        Ok((Zeroizing::new(plaintext), key.id != self.current.id))
+    }
+}
+
+impl RuntimeSecretKey {
+    fn parse(encoded: &str, source: &str) -> Result<Self> {
+        let encoded = encoded
+            .strip_prefix(RUNTIME_SECRET_KEY_FILE_PREFIX)
+            .unwrap_or(encoded);
+        if encoded.len() != RUNTIME_SECRET_KEY_BYTES * 2 {
+            anyhow::bail!(
+                "{source} must contain a 32-byte key encoded as exactly 64 hexadecimal characters"
+            );
+        }
+        let decoded = hex_decode(encoded, source)?;
+        let mut bytes = Zeroizing::new([0u8; RUNTIME_SECRET_KEY_BYTES]);
+        bytes.copy_from_slice(&decoded);
+        if bytes.iter().all(|byte| *byte == 0) {
+            anyhow::bail!("{source} must not contain an all-zero key");
+        }
+        let digest = crate::artifact::hex_sha256(bytes.as_ref());
+        Ok(Self {
+            id: digest[..32].to_string(),
+            bytes,
+        })
+    }
+
+    fn encoded(&self) -> Zeroizing<String> {
+        Zeroizing::new(format!(
+            "{RUNTIME_SECRET_KEY_FILE_PREFIX}{}",
+            hex_encode(self.bytes.as_ref())
+        ))
+    }
+}
+
+fn runtime_secret_aad(vault_key: &str, value_sha256: &str, value_len: usize) -> Vec<u8> {
+    let mut aad = b"forge.runtime.secret-vault.aead.v1".to_vec();
+    append_len_prefixed(&mut aad, vault_key.as_bytes());
+    append_len_prefixed(&mut aad, value_sha256.as_bytes());
+    aad.extend_from_slice(&(value_len as u64).to_be_bytes());
+    aad
+}
+
+fn append_len_prefixed(output: &mut Vec<u8>, value: &[u8]) {
+    output.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    output.extend_from_slice(value);
+}
+
+fn validate_runtime_secret_metadata(
+    plaintext: &[u8],
+    value_sha256: &str,
+    value_len: usize,
+) -> Result<()> {
+    if value_len > RUNTIME_SECRET_MAX_BYTES || plaintext.len() > RUNTIME_SECRET_MAX_BYTES {
+        anyhow::bail!("runtime secret vault values are limited to 1 MiB");
+    }
+    if plaintext.len() != value_len || crate::artifact::hex_sha256(plaintext) != value_sha256 {
+        anyhow::bail!("runtime secret vault value metadata validation failed");
+    }
+    Ok(())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn hex_decode(encoded: &str, subject: &str) -> Result<Vec<u8>> {
+    if !encoded.len().is_multiple_of(2) {
+        anyhow::bail!("{subject} must be hexadecimal");
+    }
+    let mut decoded = Vec::with_capacity(encoded.len() / 2);
+    for pair in encoded.as_bytes().chunks_exact(2) {
+        let high =
+            hex_nibble(pair[0]).ok_or_else(|| anyhow::anyhow!("{subject} must be hexadecimal"))?;
+        let low =
+            hex_nibble(pair[1]).ok_or_else(|| anyhow::anyhow!("{subject} must be hexadecimal"))?;
+        decoded.push((high << 4) | low);
+    }
+    Ok(decoded)
+}
+
+fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn runtime_secret_fallback_key_path(store_path: &Path) -> PathBuf {
+    let mut path = OsString::from(store_path.as_os_str());
+    path.push(".secret.key");
+    PathBuf::from(path)
+}
+
+fn read_runtime_secret_keyring(
+    path: &Path,
+    locally_managed: bool,
+) -> Result<Vec<RuntimeSecretKey>> {
+    let metadata = if locally_managed {
+        secure_existing_private_file(path, 0o600)?;
+        std::fs::symlink_metadata(path)
+    } else {
+        std::fs::metadata(path)
+    }
+    .with_context(|| {
+        format!(
+            "failed to inspect runtime secret vault key file {}",
+            path.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        anyhow::bail!(
+            "runtime secret vault key path {} is not a regular file",
+            path.display()
+        );
+    }
+    if metadata.len() > RUNTIME_SECRET_KEY_FILE_MAX_BYTES {
+        anyhow::bail!(
+            "runtime secret vault key file {} exceeds 16 KiB",
+            path.display()
+        );
+    }
+    require_private_key_file_mode(path, &metadata)?;
+
+    let file = open_runtime_secret_key_file(path, locally_managed)?;
+    let mut contents = Zeroizing::new(String::new());
+    file.take(RUNTIME_SECRET_KEY_FILE_MAX_BYTES + 1)
+        .read_to_string(&mut contents)
+        .with_context(|| {
+            format!(
+                "failed to read runtime secret vault key file {}",
+                path.display()
+            )
+        })?;
+    if contents.len() as u64 > RUNTIME_SECRET_KEY_FILE_MAX_BYTES {
+        anyhow::bail!(
+            "runtime secret vault key file {} exceeds 16 KiB",
+            path.display()
+        );
+    }
+    let mut keys = Vec::new();
+    for encoded in contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        keys.push(RuntimeSecretKey::parse(
+            encoded,
+            &format!("runtime secret vault key file {}", path.display()),
+        )?);
+    }
+    if keys.is_empty() {
+        anyhow::bail!("runtime secret vault key file {} is empty", path.display());
+    }
+    Ok(keys)
+}
+
+fn create_runtime_secret_fallback_key(path: &Path) -> Result<RuntimeSecretKey> {
+    let mut bytes = Zeroizing::new([0u8; RUNTIME_SECRET_KEY_BYTES]);
+    getrandom::fill(bytes.as_mut())
+        .map_err(|_| anyhow::anyhow!("failed to obtain OS randomness for secret vault key"))?;
+    let digest = crate::artifact::hex_sha256(bytes.as_ref());
+    let key = RuntimeSecretKey {
+        id: digest[..32].to_string(),
+        bytes,
+    };
+    let encoded = key.encoded();
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    match options.open(path) {
+        Ok(mut file) => {
+            if let Err(error) = file
+                .write_all(encoded.as_bytes())
+                .and_then(|_| file.write_all(b"\n"))
+                .and_then(|_| file.sync_all())
+            {
+                let _ = std::fs::remove_file(path);
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to persist runtime secret vault key {}",
+                        path.display()
+                    )
+                });
+            }
+            secure_existing_private_file(path, 0o600)?;
+            sync_parent_directory(path)?;
+            Ok(key)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_runtime_secret_keyring(path, true).and_then(|mut keys| {
+                if keys.is_empty() {
+                    anyhow::bail!("runtime secret vault key file {} is empty", path.display());
+                }
+                Ok(keys.remove(0))
+            })
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to create runtime secret vault key {}",
+                path.display()
+            )
+        }),
+    }
+}
+
+fn ephemeral_runtime_secret_key() -> Result<RuntimeSecretKey> {
+    static KEY: OnceLock<[u8; RUNTIME_SECRET_KEY_BYTES]> = OnceLock::new();
+    if KEY.get().is_none() {
+        let mut generated = Zeroizing::new([0u8; RUNTIME_SECRET_KEY_BYTES]);
+        getrandom::fill(generated.as_mut())
+            .map_err(|_| anyhow::anyhow!("failed to obtain OS randomness for in-memory vault"))?;
+        let _ = KEY.set(*generated);
+    }
+    let bytes = KEY
+        .get()
+        .context("failed to initialize the in-memory runtime secret vault key")?;
+    let bytes = Zeroizing::new(*bytes);
+    let digest = crate::artifact::hex_sha256(bytes.as_ref());
+    Ok(RuntimeSecretKey {
+        id: digest[..32].to_string(),
+        bytes,
+    })
+}
+
+fn is_sqlite_memory_path(path: &Path) -> bool {
+    let value = path.to_string_lossy();
+    value == ":memory:" || (value.starts_with("file:") && value.contains("mode=memory"))
+}
+
+fn runtime_secret_encrypted_records_exist(connection: &Connection) -> Result<bool> {
+    let table_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_secret_vault')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !table_exists {
+        return Ok(false);
+    }
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_secret_vault WHERE secret_value LIKE 'forge:vault:%')",
+            [],
+            |row| row.get(0),
+        )
+        .context("failed to inspect runtime secret vault encryption state")
+}
+
+fn open_runtime_secret_key_file(path: &Path, no_follow: bool) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let flags = libc::O_CLOEXEC | if no_follow { libc::O_NOFOLLOW } else { 0 };
+        options.custom_flags(flags);
+    }
+    options.open(path).with_context(|| {
+        format!(
+            "failed to open runtime secret vault key file {}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(unix)]
+fn require_private_key_file_mode(path: &Path, metadata: &std::fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if metadata.permissions().mode() & 0o077 != 0 {
+        anyhow::bail!(
+            "runtime secret vault key file {} must not be accessible by group or other users",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn require_private_key_file_mode(_path: &Path, _metadata: &std::fs::Metadata) -> Result<()> {
+    Ok(())
+}
+
+fn prepare_private_store_path(path: &Path) -> Result<()> {
+    if is_sqlite_memory_path(path) {
+        return Ok(());
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        let parent_existed = parent.exists();
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create store directory {}", parent.display()))?;
+        if !parent_existed || parent.file_name().is_some_and(|name| name == ".forge") {
+            secure_private_directory(parent)?;
+        }
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let created = match options.open(path) {
+        Ok(file) => {
+            file.sync_all()
+                .with_context(|| format!("failed to initialize SQLite store {}", path.display()))?;
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to initialize SQLite store {}", path.display()));
+        }
+    };
+    secure_existing_private_file(path, 0o600)?;
+    if created {
+        sync_parent_directory(path)?;
+    }
+    Ok(())
+}
+
+fn secure_sqlite_files(path: &Path) -> Result<()> {
+    if is_sqlite_memory_path(path) {
+        return Ok(());
+    }
+    secure_existing_private_file(path, 0o600)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = OsString::from(path.as_os_str());
+        sidecar.push(suffix);
+        let sidecar = PathBuf::from(sidecar);
+        match std::fs::symlink_metadata(&sidecar) {
+            Ok(_) => secure_existing_private_file(&sidecar, 0o600)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to inspect SQLite sidecar {}", sidecar.display())
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn secure_private_directory(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect store directory {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!(
+            "store directory {} must be a real directory, not a symlink",
+            path.display()
+        );
+    }
+    set_private_permissions(path, 0o700)
+}
+
+fn secure_existing_private_file(path: &Path, mode: u32) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect private file {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!(
+            "private file {} must be a regular file, not a symlink",
+            path.display()
+        );
+    }
+    set_private_permissions(path, mode)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| {
+            format!(
+                "failed to synchronize private file directory {}",
+                parent.display()
+            )
+        })
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_permissions(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .with_context(|| format!("failed to secure permissions on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_private_permissions(_path: &Path, _mode: u32) -> Result<()> {
+    Ok(())
 }
 
 pub struct TaskLeaseWrite<'a> {
@@ -58,6 +726,40 @@ pub struct GlobalEventWrite<'a> {
     pub origin: &'a str,
     pub status: &'a str,
     pub data: &'a serde_json::Value,
+    pub tenant_context: &'a serde_json::Value,
+}
+
+pub struct RuntimeSecretVaultWrite<'a> {
+    pub vault_reference: &'a str,
+    pub workflow_id: Option<&'a str>,
+    pub scope: &'a str,
+    pub provider: &'a str,
+    pub kind: &'a str,
+    pub classification: &'a str,
+    pub secret_value: &'a str,
+    pub value_sha256: &'a str,
+    pub value_len: usize,
+    pub source: &'a str,
+    pub origin: &'a str,
+    pub tenant_context: &'a serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeSecretVaultResolve {
+    pub vault_reference: String,
+    pub workflow_id: Option<String>,
+    pub secret_value: String,
+    pub value_sha256: String,
+    pub value_len: usize,
+    pub audit_event_id: i64,
+}
+
+pub struct RuntimeSecretVaultAccess<'a> {
+    pub vault_reference: &'a str,
+    pub workflow_id: Option<&'a str>,
+    pub requester: &'a str,
+    pub allowed: bool,
+    pub origin: &'a str,
     pub tenant_context: &'a serde_json::Value,
 }
 
@@ -584,42 +1286,334 @@ pub struct StoredMemoryPromotionRecord {
     pub created_at: String,
 }
 
+pub(crate) fn open_configured_connection(path: &Path) -> Result<Connection> {
+    prepare_private_store_path(path)?;
+    let connection = Connection::open(path)
+        .with_context(|| format!("failed to open SQLite store {}", path.display()))?;
+    connection.busy_timeout(Duration::ZERO).with_context(|| {
+        format!(
+            "failed to configure SQLite probe timeout for {}",
+            path.display()
+        )
+    })?;
+    let journal_mode =
+        connection.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0));
+    let is_memory_database = if journal_mode
+        .as_ref()
+        .is_ok_and(|mode| mode.eq_ignore_ascii_case("memory"))
+    {
+        connection
+            .query_row(
+                "SELECT file FROM pragma_database_list WHERE name = 'main'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .with_context(|| {
+                format!(
+                    "failed to inspect SQLite database path for {}",
+                    path.display()
+                )
+            })?
+            .is_empty()
+    } else {
+        false
+    };
+    connection
+        .busy_timeout(SQLITE_BUSY_TIMEOUT)
+        .with_context(|| format!("failed to configure SQLite timeout for {}", path.display()))?;
+    match journal_mode {
+        Ok(mode) if mode.eq_ignore_ascii_case("wal") || is_memory_database => {}
+        Ok(_) => ensure_wal(&connection, path, SQLITE_BUSY_TIMEOUT)?,
+        Err(error) if sqlite_is_contention(&error) => {
+            // A transient lock can hide either WAL or a rollback journal. Retry until the
+            // persistent mode is confirmed instead of returning an ambiguously configured
+            // connection.
+            ensure_wal(&connection, path, SQLITE_BUSY_TIMEOUT)?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect SQLite journal mode for {}",
+                    path.display()
+                )
+            });
+        }
+    }
+    connection
+        .pragma_update(None, "synchronous", "FULL")
+        .with_context(|| {
+            format!(
+                "failed to configure SQLite durability for {}",
+                path.display()
+            )
+        })?;
+    connection
+        .pragma_update(None, "secure_delete", "ON")
+        .with_context(|| {
+            format!(
+                "failed to configure SQLite secure deletion for {}",
+                path.display()
+            )
+        })?;
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .with_context(|| {
+            format!(
+                "failed to enable SQLite foreign key enforcement for {}",
+                path.display()
+            )
+        })?;
+    let foreign_keys_enabled: i64 = connection
+        .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+        .with_context(|| {
+            format!(
+                "failed to verify SQLite foreign key enforcement for {}",
+                path.display()
+            )
+        })?;
+    if foreign_keys_enabled != 1 {
+        anyhow::bail!(
+            "SQLite foreign key enforcement could not be enabled for {}",
+            path.display()
+        );
+    }
+    secure_sqlite_files(path)?;
+    Ok(connection)
+}
+
+fn ensure_wal(connection: &Connection, path: &Path, timeout: Duration) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        match connection.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0)) {
+            Ok(mode) if mode.eq_ignore_ascii_case("wal") => return Ok(()),
+            Ok(_) => {}
+            Err(error) if sqlite_is_contention(&error) => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect SQLite journal mode for {}",
+                        path.display()
+                    )
+                });
+            }
+        }
+
+        if started.elapsed() >= timeout {
+            anyhow::bail!(
+                "timed out after {} ms enabling SQLite WAL for {} because the store remained busy or locked",
+                timeout.as_millis(),
+                path.display()
+            );
+        }
+
+        match connection
+            .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))
+        {
+            Ok(mode) if mode.eq_ignore_ascii_case("wal") => return Ok(()),
+            Ok(_) => {}
+            Err(error) if sqlite_is_contention(&error) => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to enable SQLite WAL for {}", path.display())
+                });
+            }
+        }
+
+        if started.elapsed() >= timeout {
+            anyhow::bail!(
+                "timed out after {} ms enabling SQLite WAL for {} because the store remained busy or locked",
+                timeout.as_millis(),
+                path.display()
+            );
+        }
+        thread::sleep(SQLITE_RETRY_DELAY.min(timeout.saturating_sub(started.elapsed())));
+    }
+}
+
+fn sqlite_is_contention(error: &SqliteError) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(ErrorCode::DatabaseBusy) | Some(ErrorCode::DatabaseLocked)
+    )
+}
+
+#[cfg(test)]
+fn event_observability_trigger_count(connection: &Connection) -> Result<i64> {
+    connection
+        .query_row(
+            r#"
+            SELECT count(*)
+            FROM sqlite_master
+            WHERE type = 'trigger'
+              AND name IN (?1, ?2)
+            "#,
+            params![
+                GLOBAL_EVENTS_OBSERVABILITY_QUEUE_TRIGGER,
+                EVENT_OBSERVABILITY_DELETE_QUEUE_TRIGGER
+            ],
+            |row| row.get(0),
+        )
+        .context("failed to inspect event observability reconciliation triggers")
+}
+
+fn canonical_trigger_sql(sql: &str) -> String {
+    let compact = sql
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != ';')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    compact.replacen("createtriggerifnotexists", "createtrigger", 1)
+}
+
+fn event_observability_triggers_are_valid(connection: &Connection) -> Result<bool> {
+    for (name, table, expected_sql) in [
+        (
+            GLOBAL_EVENTS_OBSERVABILITY_QUEUE_TRIGGER,
+            "global_events",
+            GLOBAL_EVENTS_OBSERVABILITY_QUEUE_TRIGGER_SQL,
+        ),
+        (
+            EVENT_OBSERVABILITY_DELETE_QUEUE_TRIGGER,
+            "event_observability_index",
+            EVENT_OBSERVABILITY_DELETE_QUEUE_TRIGGER_SQL,
+        ),
+    ] {
+        let trigger = connection
+            .query_row(
+                r#"
+                SELECT tbl_name, sql
+                FROM sqlite_master
+                WHERE type = 'trigger' AND name = ?1
+                "#,
+                params![name],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .with_context(|| format!("failed to inspect event observability trigger {name}"))?;
+        let Some((actual_table, Some(actual_sql))) = trigger else {
+            return Ok(false);
+        };
+        if actual_table != table
+            || canonical_trigger_sql(&actual_sql) != canonical_trigger_sql(expected_sql)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn runtime_secret_vault_encryption_triggers_are_valid(connection: &Connection) -> Result<bool> {
+    for (name, expected_sql) in [
+        (
+            RUNTIME_SECRET_ENCRYPTED_INSERT_TRIGGER,
+            RUNTIME_SECRET_ENCRYPTED_INSERT_TRIGGER_SQL,
+        ),
+        (
+            RUNTIME_SECRET_ENCRYPTED_UPDATE_TRIGGER,
+            RUNTIME_SECRET_ENCRYPTED_UPDATE_TRIGGER_SQL,
+        ),
+    ] {
+        let trigger_sql = connection
+            .query_row(
+                r#"
+                SELECT sql
+                FROM sqlite_master
+                WHERE type = 'trigger'
+                  AND name = ?1
+                  AND tbl_name = 'runtime_secret_vault'
+                "#,
+                params![name],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .with_context(|| format!("failed to inspect runtime secret vault trigger {name}"))?
+            .flatten();
+        let Some(trigger_sql) = trigger_sql else {
+            return Ok(false);
+        };
+        if canonical_trigger_sql(&trigger_sql) != canonical_trigger_sql(expected_sql) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn load_runtime_secret_vault_records(
+    connection: &Connection,
+) -> Result<Vec<RuntimeSecretStoredRecord>> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT vault_key, secret_value, value_sha256, value_len
+            FROM runtime_secret_vault
+            ORDER BY vault_key
+            "#,
+        )
+        .context("failed to prepare runtime secret vault migration")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            Zeroizing::new(row.get::<_, String>(1)?),
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to inspect runtime secret vault migration state")
+}
+
 impl ForgeStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create store directory {}", parent.display())
-            })?;
-        }
-        let connection = Connection::open(&path)
-            .with_context(|| format!("failed to open SQLite store {}", path.display()))?;
-        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+        let connection = open_configured_connection(&path)?;
 
-        let table_count: i64 = connection.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let table_count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )
+            .with_context(|| {
+                format!("failed to inspect SQLite schema in {}", path.display())
+            })?;
 
         if table_count > 0 {
-            let events_exists: bool = connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='events')",
-                [],
-                |row| row.get(0),
-            ).unwrap_or(false);
-            let workflows_exists: bool = connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflows')",
-                [],
-                |row| row.get(0),
-            ).unwrap_or(false);
+            let events_exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='events')",
+                    [],
+                    |row| row.get(0),
+                )
+                .with_context(|| {
+                    format!("failed to inspect events table in {}", path.display())
+                })?;
+            let workflows_exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflows')",
+                    [],
+                    |row| row.get(0),
+                )
+                .with_context(|| {
+                    format!("failed to inspect workflows table in {}", path.display())
+                })?;
             if events_exists && !workflows_exists {
                 anyhow::bail!("Database is corrupted: table 'workflows' is missing.");
             }
         }
 
-        let store = Self { path, connection };
-        store.migrate()?;
+        let encrypted_records_exist = runtime_secret_encrypted_records_exist(&connection)?;
+        let runtime_secret_cipher = RuntimeSecretCipher::load(&path, encrypted_records_exist)?;
+        let store = Self {
+            path,
+            connection,
+            runtime_secret_cipher,
+        };
+        store.migrate_if_needed()?;
+        store.ensure_runtime_secret_vault_encryption_triggers()?;
+        store.migrate_runtime_secret_vault_encryption()?;
+        store.repair_event_observability_triggers_if_needed()?;
+        store.reconcile_derived_state_if_needed()?;
+        secure_sqlite_files(&store.path)?;
         Ok(store)
     }
 
@@ -632,6 +1626,287 @@ impl ForgeStore {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    pub fn with_transaction<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        match operation() {
+            Ok(value) => {
+                transaction.commit()?;
+                Ok(value)
+            }
+            Err(error) => {
+                drop(transaction);
+                Err(error)
+            }
+        }
+    }
+
+    fn migrate_if_needed(&self) -> Result<()> {
+        let version = self.store_schema_version()?;
+        if version > STORE_SCHEMA_VERSION {
+            anyhow::bail!(
+                "SQLite store schema version {version} is newer than supported version {STORE_SCHEMA_VERSION}"
+            );
+        }
+        if version == STORE_SCHEMA_VERSION {
+            return Ok(());
+        }
+
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                .context("failed to acquire SQLite store migration lock")?;
+        let locked_version: i64 =
+            transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if locked_version > STORE_SCHEMA_VERSION {
+            anyhow::bail!(
+                "SQLite store schema version {locked_version} is newer than supported version {STORE_SCHEMA_VERSION}"
+            );
+        }
+        if locked_version < STORE_SCHEMA_VERSION {
+            self.migrate()?;
+            self.initialize_event_observability_reconciliation_cursor()?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+        }
+        transaction
+            .commit()
+            .context("failed to commit SQLite store migration")?;
+        Ok(())
+    }
+
+    fn ensure_runtime_secret_vault_encryption_triggers(&self) -> Result<()> {
+        if runtime_secret_vault_encryption_triggers_are_valid(&self.connection)? {
+            return Ok(());
+        }
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                .context("failed to acquire runtime secret vault trigger repair lock")?;
+        if runtime_secret_vault_encryption_triggers_are_valid(&transaction)? {
+            transaction.commit()?;
+            return Ok(());
+        }
+        transaction.execute_batch(&format!(
+            r#"
+            DROP TRIGGER IF EXISTS {RUNTIME_SECRET_ENCRYPTED_INSERT_TRIGGER};
+            DROP TRIGGER IF EXISTS {RUNTIME_SECRET_ENCRYPTED_UPDATE_TRIGGER};
+            {RUNTIME_SECRET_ENCRYPTED_INSERT_TRIGGER_SQL}
+            {RUNTIME_SECRET_ENCRYPTED_UPDATE_TRIGGER_SQL}
+            "#
+        ))?;
+        transaction
+            .commit()
+            .context("failed to enforce encrypted runtime secret vault writes")
+    }
+
+    fn migrate_runtime_secret_vault_encryption(&self) -> Result<usize> {
+        let mut migration_required = false;
+        for (vault_key, stored_value, value_sha256, raw_value_len) in
+            load_runtime_secret_vault_records(&self.connection)?
+        {
+            let (_plaintext, _value_len, requires_reencryption) = self
+                .decode_runtime_secret_record(
+                    &vault_key,
+                    &stored_value,
+                    &value_sha256,
+                    raw_value_len,
+                )?;
+            migration_required |= requires_reencryption;
+        }
+        let mut scrub_pending = self.runtime_secret_vault_scrub_pending()?;
+        let mut migrated = 0usize;
+        if migration_required {
+            let transaction =
+                Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                    .context("failed to acquire runtime secret vault migration lock")?;
+            for (vault_key, stored_value, value_sha256, raw_value_len) in
+                load_runtime_secret_vault_records(&transaction)?
+            {
+                let (plaintext, value_len, requires_reencryption) = self
+                    .decode_runtime_secret_record(
+                        &vault_key,
+                        &stored_value,
+                        &value_sha256,
+                        raw_value_len,
+                    )?;
+                if !requires_reencryption {
+                    continue;
+                }
+                let envelope = self.runtime_secret_cipher.encrypt(
+                    &vault_key,
+                    &value_sha256,
+                    value_len,
+                    &plaintext,
+                )?;
+                transaction
+                    .execute(
+                        "UPDATE runtime_secret_vault SET secret_value = ?1, updated_at = CURRENT_TIMESTAMP WHERE vault_key = ?2",
+                        params![envelope, vault_key],
+                    )
+                    .context("failed to re-encrypt runtime secret vault record")?;
+                migrated += 1;
+            }
+            if migrated > 0 {
+                transaction
+                    .execute(
+                        r#"
+                        INSERT INTO store_reconciliation_cursors (
+                            cursor_key, last_global_event_id, upper_bound_global_event_id,
+                            status, updated_at
+                        )
+                        VALUES (?1, 0, 0, 'pending', CURRENT_TIMESTAMP)
+                        ON CONFLICT(cursor_key) DO UPDATE SET
+                            status='pending',
+                            updated_at=CURRENT_TIMESTAMP
+                        "#,
+                        params![RUNTIME_SECRET_SCRUB_CURSOR],
+                    )
+                    .context("failed to record runtime secret vault scrub requirement")?;
+            }
+            transaction
+                .commit()
+                .context("failed to commit runtime secret vault migration")?;
+            scrub_pending |= migrated > 0;
+        }
+
+        if scrub_pending {
+            if is_sqlite_memory_path(&self.path) {
+                self.connection.execute(
+                    "DELETE FROM store_reconciliation_cursors WHERE cursor_key = ?1",
+                    params![RUNTIME_SECRET_SCRUB_CURSOR],
+                )?;
+            } else {
+                self.scrub_runtime_secret_vault_migration()?;
+            }
+        }
+        Ok(migrated)
+    }
+
+    fn decode_runtime_secret_record(
+        &self,
+        vault_key: &str,
+        stored_value: &str,
+        value_sha256: &str,
+        raw_value_len: i64,
+    ) -> Result<(Zeroizing<Vec<u8>>, usize, bool)> {
+        let value_len = usize::try_from(raw_value_len)
+            .context("runtime secret vault contains an invalid value length")?;
+        if stored_value.starts_with("forge:vault:") {
+            let (plaintext, requires_reencryption) = self.runtime_secret_cipher.decrypt(
+                vault_key,
+                value_sha256,
+                value_len,
+                stored_value,
+            )?;
+            Ok((plaintext, value_len, requires_reencryption))
+        } else {
+            let plaintext = Zeroizing::new(stored_value.as_bytes().to_vec());
+            validate_runtime_secret_metadata(&plaintext, value_sha256, value_len)?;
+            Ok((plaintext, value_len, true))
+        }
+    }
+
+    fn runtime_secret_vault_scrub_pending(&self) -> Result<bool> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM store_reconciliation_cursors WHERE cursor_key = ?1 AND status = 'pending')",
+                params![RUNTIME_SECRET_SCRUB_CURSOR],
+                |row| row.get(0),
+            )
+            .context("failed to inspect runtime secret vault scrub state")
+    }
+
+    fn scrub_runtime_secret_vault_migration(&self) -> Result<()> {
+        self.checkpoint_runtime_secret_vault_migration()?;
+        self.connection
+            .execute_batch("VACUUM")
+            .context("failed to vacuum SQLite after runtime secret vault migration")?;
+        self.checkpoint_runtime_secret_vault_migration()?;
+        self.connection
+            .execute(
+                "DELETE FROM store_reconciliation_cursors WHERE cursor_key = ?1",
+                params![RUNTIME_SECRET_SCRUB_CURSOR],
+            )
+            .context("failed to complete runtime secret vault scrub marker")?;
+        self.checkpoint_runtime_secret_vault_migration()?;
+        secure_sqlite_files(&self.path)
+    }
+
+    fn checkpoint_runtime_secret_vault_migration(&self) -> Result<()> {
+        let (busy, _log_frames, _checkpointed_frames): (i64, i64, i64) = self
+            .connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .context("failed to checkpoint runtime secret vault migration")?;
+        if busy != 0 {
+            anyhow::bail!(
+                "runtime secret vault migration checkpoint is busy; retry after other store users exit"
+            );
+        }
+        Ok(())
+    }
+
+    fn store_schema_version(&self) -> Result<i64> {
+        self.connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .context("failed to read SQLite store schema version")
+    }
+
+    fn initialize_event_observability_reconciliation_cursor(&self) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM store_reconciliation_cursors WHERE cursor_key = ?1",
+            params![EVENT_OBSERVABILITY_RECONCILIATION_CURSOR],
+        )?;
+        self.connection.execute(
+            r#"
+            INSERT INTO store_reconciliation_cursors (
+                cursor_key,
+                last_global_event_id,
+                upper_bound_global_event_id,
+                status,
+                updated_at
+            )
+            SELECT
+                ?1,
+                0,
+                COALESCE(MAX(id), 0),
+                CASE WHEN COALESCE(MAX(id), 0) = 0 THEN 'completed' ELSE 'pending' END,
+                CURRENT_TIMESTAMP
+            FROM global_events
+            "#,
+            params![EVENT_OBSERVABILITY_RECONCILIATION_CURSOR],
+        )?;
+        Ok(())
+    }
+
+    fn repair_event_observability_triggers_if_needed(&self) -> Result<()> {
+        if event_observability_triggers_are_valid(&self.connection)? {
+            return Ok(());
+        }
+
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                .context("failed to acquire event observability trigger repair lock")?;
+        if event_observability_triggers_are_valid(&transaction)? {
+            transaction
+                .commit()
+                .context("failed to release event observability trigger repair lock")?;
+            return Ok(());
+        }
+
+        transaction.execute_batch(&format!(
+            r#"
+            DROP TRIGGER IF EXISTS trg_global_events_observability_queue;
+            DROP TRIGGER IF EXISTS trg_event_observability_delete_queue;
+            {GLOBAL_EVENTS_OBSERVABILITY_QUEUE_TRIGGER_SQL}
+            {EVENT_OBSERVABILITY_DELETE_QUEUE_TRIGGER_SQL}
+            "#
+        ))?;
+        transaction
+            .commit()
+            .context("failed to commit event observability trigger repair")?;
+        Ok(())
     }
 
     fn migrate(&self) -> Result<()> {
@@ -681,7 +1956,44 @@ impl ForgeStore {
             CREATE INDEX IF NOT EXISTS idx_global_events_tenant
                 ON global_events (organization_id, brand_id, product_id, id);
             CREATE INDEX IF NOT EXISTS idx_global_events_kind
-                ON global_events (kind, id);
+            ON global_events (kind, id);
+            CREATE TABLE IF NOT EXISTS runtime_secret_vault (
+                vault_key TEXT PRIMARY KEY,
+                vault_reference TEXT NOT NULL,
+                workflow_id TEXT NOT NULL DEFAULT '',
+                scope TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                classification TEXT NOT NULL,
+                secret_value TEXT NOT NULL,
+                value_sha256 TEXT NOT NULL,
+                value_len INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                organization_id TEXT NOT NULL,
+                brand_id TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                tenant_context_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_runtime_secret_vault_reference
+            ON runtime_secret_vault (vault_reference, workflow_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_secret_vault_tenant
+            ON runtime_secret_vault (organization_id, brand_id, product_id, vault_reference);
+            CREATE TRIGGER IF NOT EXISTS trg_runtime_secret_vault_encrypted_insert
+            BEFORE INSERT ON runtime_secret_vault
+            WHEN NEW.secret_value NOT GLOB 'forge:vault:v1:*'
+            BEGIN
+                SELECT RAISE(ABORT, 'runtime secret vault requires an encrypted v1 envelope');
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_runtime_secret_vault_encrypted_update
+            BEFORE UPDATE OF secret_value ON runtime_secret_vault
+            WHEN NEW.secret_value NOT GLOB 'forge:vault:v1:*'
+            BEGIN
+                SELECT RAISE(ABORT, 'runtime secret vault requires an encrypted v1 envelope');
+            END;
             CREATE TABLE IF NOT EXISTS event_observability_index (
                 global_event_id INTEGER PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
@@ -718,6 +2030,32 @@ impl ForgeStore {
                 ON event_observability_index (node_ref, global_event_id);
             CREATE INDEX IF NOT EXISTS idx_event_observability_addon
                 ON event_observability_index (addon_id, global_event_id);
+            CREATE TABLE IF NOT EXISTS event_observability_reconciliation_queue (
+                global_event_id INTEGER PRIMARY KEY,
+                enqueued_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS store_reconciliation_cursors (
+                cursor_key TEXT PRIMARY KEY,
+                last_global_event_id INTEGER NOT NULL,
+                upper_bound_global_event_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TRIGGER IF NOT EXISTS trg_global_events_observability_queue
+            AFTER INSERT ON global_events
+            BEGIN
+                INSERT OR IGNORE INTO event_observability_reconciliation_queue (global_event_id)
+                VALUES (NEW.id);
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_event_observability_delete_queue
+            AFTER DELETE ON event_observability_index
+            WHEN EXISTS (
+                SELECT 1 FROM global_events WHERE id = OLD.global_event_id
+            )
+            BEGIN
+                INSERT OR IGNORE INTO event_observability_reconciliation_queue (global_event_id)
+                VALUES (OLD.global_event_id);
+            END;
             CREATE TABLE IF NOT EXISTS cost_ledger_index (
                 row_key TEXT PRIMARY KEY,
                 source_kind TEXT NOT NULL,
@@ -1029,6 +2367,30 @@ impl ForgeStore {
                 data_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS worktree_states (
+                id TEXT PRIMARY KEY,
+                repository_root TEXT NOT NULL,
+                worktree_root TEXT NOT NULL UNIQUE,
+                branch TEXT,
+                head TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_worktree_states_repository
+                ON worktree_states (repository_root, worktree_root);
+            CREATE INDEX IF NOT EXISTS idx_worktree_states_branch
+                ON worktree_states (branch, updated_at);
+            CREATE TABLE IF NOT EXISTS worktree_sandbox_states (
+                id TEXT PRIMARY KEY,
+                worktree_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_worktree_sandbox_states_worktree
+                ON worktree_sandbox_states (worktree_id, status, updated_at);
             CREATE TABLE IF NOT EXISTS runs (
                 id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
@@ -1094,11 +2456,18 @@ impl ForgeStore {
             "#,
         )?;
         self.ensure_event_observability_context_columns()?;
-        self.backfill_event_observability_index()?;
         self.ensure_event_inbox_tenant_columns()?;
         self.ensure_event_services_tenant_columns()?;
         self.ensure_memory_promotion_tenant_columns()?;
         self.ensure_operational_tenant_columns()?;
+        Ok(())
+    }
+
+    fn reconcile_derived_state_if_needed(&self) -> Result<()> {
+        self.backfill_missing_event_observability_index()?;
+        self.backfill_event_inbox_tenant_context()?;
+        self.backfill_event_services_tenant_context()?;
+        self.backfill_operational_tenant_columns()?;
         Ok(())
     }
 
@@ -1202,6 +2571,45 @@ impl ForgeStore {
                 }
             }
         }
+        self.connection.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_event_inbox_tenant
+                ON event_inbox (organization_id, brand_id, product_id, status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_event_inbox_missing_tenant
+                ON event_inbox (id)
+                WHERE organization_id = ''
+                   OR brand_id = ''
+                   OR product_id = ''
+                   OR user_id = ''
+                   OR channel_id = ''
+                   OR tenant_context_json = '{}';
+            "#,
+        )?;
+        self.backfill_event_inbox_tenant_context()?;
+        Ok(())
+    }
+
+    fn backfill_event_inbox_tenant_context(&self) -> Result<()> {
+        let missing: bool = self.connection.query_row(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM event_inbox
+                WHERE organization_id = ''
+                   OR brand_id = ''
+                   OR product_id = ''
+                   OR user_id = ''
+                   OR channel_id = ''
+                   OR tenant_context_json = '{}'
+            )
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+        if !missing {
+            return Ok(());
+        }
+
         let default_context = default_operating_context_json();
         self.connection.execute(
             r#"
@@ -1227,12 +2635,6 @@ impl ForgeStore {
                 tenant_context_identity_id(&default_context, "channel"),
                 serde_json::to_string(&default_context)?,
             ],
-        )?;
-        self.connection.execute_batch(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_event_inbox_tenant
-                ON event_inbox (organization_id, brand_id, product_id, status, created_at);
-            "#,
         )?;
         Ok(())
     }
@@ -1270,6 +2672,45 @@ impl ForgeStore {
                 }
             }
         }
+        self.connection.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_event_services_tenant
+                ON event_services (organization_id, brand_id, product_id, service_kind, status, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_event_services_missing_tenant
+                ON event_services (id)
+                WHERE organization_id = ''
+                   OR brand_id = ''
+                   OR product_id = ''
+                   OR user_id = ''
+                   OR channel_id = ''
+                   OR tenant_context_json = '{}';
+            "#,
+        )?;
+        self.backfill_event_services_tenant_context()?;
+        Ok(())
+    }
+
+    fn backfill_event_services_tenant_context(&self) -> Result<()> {
+        let missing: bool = self.connection.query_row(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM event_services
+                WHERE organization_id = ''
+                   OR brand_id = ''
+                   OR product_id = ''
+                   OR user_id = ''
+                   OR channel_id = ''
+                   OR tenant_context_json = '{}'
+            )
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+        if !missing {
+            return Ok(());
+        }
+
         let default_context = default_operating_context_json();
         self.connection.execute(
             r#"
@@ -1295,12 +2736,6 @@ impl ForgeStore {
                 tenant_context_identity_id(&default_context, "channel"),
                 serde_json::to_string(&default_context)?,
             ],
-        )?;
-        self.connection.execute_batch(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_event_services_tenant
-                ON event_services (organization_id, brand_id, product_id, service_kind, status, updated_at);
-            "#,
         )?;
         Ok(())
     }
@@ -1337,6 +2772,27 @@ impl ForgeStore {
                 ON task_leases (organization_id, brand_id, product_id, expires_at);
             CREATE INDEX IF NOT EXISTS idx_task_checkpoints_tenant
                 ON task_checkpoints (organization_id, brand_id, product_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_runs_missing_tenant
+                ON runs (id)
+                WHERE organization_id = ''
+                   OR brand_id = ''
+                   OR product_id = ''
+                   OR user_id = ''
+                   OR channel_id = '';
+            CREATE INDEX IF NOT EXISTS idx_task_leases_missing_tenant
+                ON task_leases (workflow_id, task_id)
+                WHERE organization_id = ''
+                   OR brand_id = ''
+                   OR product_id = ''
+                   OR user_id = ''
+                   OR channel_id = '';
+            CREATE INDEX IF NOT EXISTS idx_task_checkpoints_missing_tenant
+                ON task_checkpoints (id)
+                WHERE organization_id = ''
+                   OR brand_id = ''
+                   OR product_id = ''
+                   OR user_id = ''
+                   OR channel_id = '';
             "#,
         )?;
         self.backfill_operational_tenant_columns()?;
@@ -1344,9 +2800,36 @@ impl ForgeStore {
     }
 
     fn backfill_operational_tenant_columns(&self) -> Result<()> {
+        let mut tables_with_missing_tenant = Vec::new();
+        for table in ["runs", "task_leases", "task_checkpoints"] {
+            let missing: bool = self.connection.query_row(
+                &format!(
+                    r#"
+                    SELECT EXISTS(
+                        SELECT 1
+                        FROM {table}
+                        WHERE organization_id = ''
+                           OR brand_id = ''
+                           OR product_id = ''
+                           OR user_id = ''
+                           OR channel_id = ''
+                    )
+                    "#
+                ),
+                [],
+                |row| row.get(0),
+            )?;
+            if missing {
+                tables_with_missing_tenant.push(table);
+            }
+        }
+        if tables_with_missing_tenant.is_empty() {
+            return Ok(());
+        }
+
         for workflow in self.load_workflows()? {
             let tenant = operational_tenant_columns(Some(&workflow));
-            for table in ["runs", "task_leases", "task_checkpoints"] {
+            for table in &tables_with_missing_tenant {
                 self.connection.execute(
                     &format!(
                         r#"
@@ -1376,6 +2859,34 @@ impl ForgeStore {
                     ],
                 )?;
             }
+        }
+
+        let default_tenant = operational_tenant_columns(None);
+        for table in tables_with_missing_tenant {
+            self.connection.execute(
+                &format!(
+                    r#"
+                    UPDATE {table}
+                    SET organization_id = ?1,
+                        brand_id = ?2,
+                        product_id = ?3,
+                        user_id = ?4,
+                        channel_id = ?5
+                    WHERE organization_id = ''
+                       OR brand_id = ''
+                       OR product_id = ''
+                       OR user_id = ''
+                       OR channel_id = ''
+                    "#
+                ),
+                params![
+                    default_tenant.organization_id,
+                    default_tenant.brand_id,
+                    default_tenant.product_id,
+                    default_tenant.user_id,
+                    default_tenant.channel_id,
+                ],
+            )?;
         }
         Ok(())
     }
@@ -1949,6 +3460,212 @@ impl ForgeStore {
         Ok(())
     }
 
+    pub fn save_runtime_secret(&self, write: RuntimeSecretVaultWrite<'_>) -> Result<i64> {
+        let workflow_key = write.workflow_id.unwrap_or("");
+        let vault_key = runtime_secret_vault_key(workflow_key, write.vault_reference);
+        let encrypted_value = self.runtime_secret_cipher.encrypt(
+            &vault_key,
+            write.value_sha256,
+            write.value_len,
+            write.secret_value.as_bytes(),
+        )?;
+        let organization_id = tenant_context_identity_id(write.tenant_context, "organization");
+        let brand_id = tenant_context_identity_id(write.tenant_context, "brand");
+        let product_id = tenant_context_identity_id(write.tenant_context, "product");
+        let user_id = tenant_context_identity_id(write.tenant_context, "user");
+        let channel_id = tenant_context_identity_id(write.tenant_context, "channel");
+        self.connection.execute(
+            r#"
+            INSERT INTO runtime_secret_vault (
+                vault_key, vault_reference, workflow_id, scope, provider, kind,
+                classification, secret_value, value_sha256, value_len, source,
+                organization_id, brand_id, product_id, user_id, channel_id,
+                tenant_context_json
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            ON CONFLICT(vault_key) DO UPDATE SET
+                scope=excluded.scope,
+                provider=excluded.provider,
+                kind=excluded.kind,
+                classification=excluded.classification,
+                secret_value=excluded.secret_value,
+                value_sha256=excluded.value_sha256,
+                value_len=excluded.value_len,
+                source=excluded.source,
+                organization_id=excluded.organization_id,
+                brand_id=excluded.brand_id,
+                product_id=excluded.product_id,
+                user_id=excluded.user_id,
+                channel_id=excluded.channel_id,
+                tenant_context_json=excluded.tenant_context_json,
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+            params![
+                vault_key,
+                write.vault_reference,
+                workflow_key,
+                write.scope,
+                write.provider,
+                write.kind,
+                write.classification,
+                encrypted_value,
+                write.value_sha256,
+                write.value_len as i64,
+                write.source,
+                organization_id,
+                brand_id,
+                product_id,
+                user_id,
+                channel_id,
+                serde_json::to_string(write.tenant_context)?,
+            ],
+        )?;
+        let data = serde_json::json!({
+            "schema_version": "forge.runtime.secret_vault.audit.v1",
+            "action": "write",
+            "vault_reference": write.vault_reference,
+            "workflow_id": write.workflow_id,
+            "scope": write.scope,
+            "provider": write.provider,
+            "kind": write.kind,
+            "classification": write.classification,
+            "source": write.source,
+            "value_sha256": write.value_sha256,
+            "value_len": write.value_len,
+            "redaction": "secret_value_redacted",
+        });
+        self.insert_global_event(GlobalEventWrite {
+            source: "runtime_secret_vault",
+            source_id: &vault_key,
+            workflow_id: write.workflow_id,
+            kind: "runtime_secret_vault_write",
+            origin: write.origin,
+            status: "stored",
+            data: &data,
+            tenant_context: write.tenant_context,
+        })
+    }
+
+    pub fn resolve_runtime_secret(
+        &self,
+        access: RuntimeSecretVaultAccess<'_>,
+    ) -> Result<RuntimeSecretVaultResolve> {
+        let workflow_key = access.workflow_id.unwrap_or("");
+        let organization_id = tenant_context_identity_id(access.tenant_context, "organization");
+        let brand_id = tenant_context_identity_id(access.tenant_context, "brand");
+        let product_id = tenant_context_identity_id(access.tenant_context, "product");
+        let record = self
+            .connection
+            .query_row(
+                r#"
+                SELECT vault_key, workflow_id, secret_value, value_sha256, value_len
+                FROM runtime_secret_vault
+                WHERE vault_reference = ?1
+                  AND workflow_id IN (?2, '')
+                  AND organization_id = ?3
+                  AND brand_id = ?4
+                  AND product_id = ?5
+                ORDER BY CASE WHEN workflow_id = ?2 THEN 0 ELSE 1 END
+                LIMIT 1
+                "#,
+                params![
+                    access.vault_reference,
+                    workflow_key,
+                    organization_id,
+                    brand_id,
+                    product_id,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let status = if record.is_some() {
+            if access.allowed {
+                "allowed"
+            } else {
+                "denied"
+            }
+        } else {
+            "missing"
+        };
+        let (_resolved_workflow_id, value_sha256, value_len) = record
+            .as_ref()
+            .map(
+                |(_vault_key, workflow_id, _secret_value, value_sha256, value_len)| {
+                    (
+                        workflow_id.clone(),
+                        value_sha256.clone(),
+                        (*value_len).max(0) as usize,
+                    )
+                },
+            )
+            .unwrap_or_else(|| (workflow_key.to_string(), String::new(), 0));
+        let data = serde_json::json!({
+            "schema_version": "forge.runtime.secret_vault.audit.v1",
+            "action": "resolve",
+            "vault_reference": access.vault_reference,
+            "workflow_id": access.workflow_id,
+            "requester": access.requester,
+            "result": status,
+            "value_sha256": value_sha256,
+            "value_len": value_len,
+            "redaction": "secret_value_redacted",
+        });
+        let audit_event_id = self.insert_global_event(GlobalEventWrite {
+            source: "runtime_secret_vault",
+            source_id: access.vault_reference,
+            workflow_id: access.workflow_id,
+            kind: "runtime_secret_vault_access",
+            origin: access.origin,
+            status,
+            data: &data,
+            tenant_context: access.tenant_context,
+        })?;
+        let Some((vault_key, resolved_workflow_id, encrypted_value, value_sha256, value_len)) =
+            record
+        else {
+            anyhow::bail!(
+                "runtime secret vault reference `{}` was not found for current tenant",
+                access.vault_reference
+            );
+        };
+        if !access.allowed {
+            anyhow::bail!(
+                "runtime secret vault access denied for `{}`",
+                access.vault_reference
+            );
+        }
+        let value_len = usize::try_from(value_len)
+            .context("runtime secret vault contains an invalid value length")?;
+        let (plaintext, _requires_rotation) = self.runtime_secret_cipher.decrypt(
+            &vault_key,
+            &value_sha256,
+            value_len,
+            &encrypted_value,
+        )?;
+        let secret_value = String::from_utf8(plaintext.to_vec())
+            .context("runtime secret vault decrypted value is not valid UTF-8")?;
+        Ok(RuntimeSecretVaultResolve {
+            vault_reference: access.vault_reference.to_string(),
+            workflow_id: if resolved_workflow_id.is_empty() {
+                None
+            } else {
+                Some(resolved_workflow_id)
+            },
+            secret_value,
+            value_sha256,
+            value_len,
+            audit_event_id,
+        })
+    }
+
     pub fn load_global_events(&self) -> Result<Vec<StoredGlobalEventRecord>> {
         let mut statement = self.connection.prepare(
             r#"
@@ -2379,39 +4096,324 @@ impl ForgeStore {
             .map_err(Into::into)
     }
 
-    fn backfill_event_observability_index(&self) -> Result<()> {
-        let records = {
+    fn backfill_missing_event_observability_index(&self) -> Result<()> {
+        let migration_batch_enqueued =
+            self.enqueue_event_observability_reconciliation_cursor_batch()?;
+        if !migration_batch_enqueued {
+            self.enqueue_missing_event_observability_records()?;
+        }
+        self.backfill_queued_event_observability_records()
+    }
+
+    fn enqueue_event_observability_reconciliation_cursor_batch(&self) -> Result<bool> {
+        let cursor_pending: bool = self.connection.query_row(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM store_reconciliation_cursors
+                WHERE cursor_key = ?1
+                  AND status = 'pending'
+            )
+            "#,
+            params![EVENT_OBSERVABILITY_RECONCILIATION_CURSOR],
+            |row| row.get(0),
+        )?;
+        if !cursor_pending {
+            return Ok(false);
+        }
+        if self.connection.is_autocommit() {
+            return self.with_transaction(|| {
+                self.enqueue_event_observability_reconciliation_cursor_batch_in_transaction()
+            });
+        }
+        self.enqueue_event_observability_reconciliation_cursor_batch_in_transaction()
+    }
+
+    fn enqueue_event_observability_reconciliation_cursor_batch_in_transaction(
+        &self,
+    ) -> Result<bool> {
+        let cursor = self
+            .connection
+            .query_row(
+                r#"
+                SELECT last_global_event_id, upper_bound_global_event_id, status
+                FROM store_reconciliation_cursors
+                WHERE cursor_key = ?1
+                "#,
+                params![EVENT_OBSERVABILITY_RECONCILIATION_CURSOR],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((last_global_event_id, upper_bound_global_event_id, status)) = cursor else {
+            return Ok(false);
+        };
+        if status != "pending" {
+            return Ok(false);
+        }
+
+        let candidate_ids = {
             let mut statement = self.connection.prepare(
+                r#"
+                SELECT id
+                FROM global_events
+                WHERE id > ?1
+                  AND id <= ?2
+                ORDER BY id ASC
+                LIMIT ?3
+                "#,
+            )?;
+            let rows = statement.query_map(
+                params![
+                    last_global_event_id,
+                    upper_bound_global_event_id,
+                    EVENT_OBSERVABILITY_RECONCILIATION_BATCH_SIZE as i64
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let Some(last_enqueued_id) = candidate_ids.last().copied() else {
+            self.connection.execute(
+                r#"
+                UPDATE store_reconciliation_cursors
+                SET status = 'completed',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE cursor_key = ?1
+                "#,
+                params![EVENT_OBSERVABILITY_RECONCILIATION_CURSOR],
+            )?;
+            return Ok(false);
+        };
+        for global_event_id in candidate_ids {
+            self.connection.execute(
+                r#"
+                INSERT OR IGNORE INTO event_observability_reconciliation_queue (global_event_id)
+                VALUES (?1)
+                "#,
+                params![global_event_id],
+            )?;
+        }
+        let next_status = if last_enqueued_id >= upper_bound_global_event_id {
+            "completed"
+        } else {
+            "pending"
+        };
+        self.connection.execute(
+            r#"
+            UPDATE store_reconciliation_cursors
+            SET last_global_event_id = ?2,
+                status = ?3,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE cursor_key = ?1
+            "#,
+            params![
+                EVENT_OBSERVABILITY_RECONCILIATION_CURSOR,
+                last_enqueued_id,
+                next_status
+            ],
+        )?;
+        Ok(true)
+    }
+
+    fn enqueue_missing_event_observability_records(&self) -> Result<()> {
+        let missing: bool = self.connection.query_row(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM global_events g
+                LEFT JOIN event_observability_index o
+                  ON o.global_event_id = g.id
+                LEFT JOIN event_observability_reconciliation_queue q
+                  ON q.global_event_id = g.id
+                WHERE o.global_event_id IS NULL
+                  AND q.global_event_id IS NULL
+                LIMIT 1
+            )
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+        if !missing {
+            return Ok(());
+        }
+        self.connection.execute(
+            r#"
+            INSERT OR IGNORE INTO event_observability_reconciliation_queue (global_event_id)
+            SELECT g.id
+            FROM global_events g
+            LEFT JOIN event_observability_index o
+              ON o.global_event_id = g.id
+            LEFT JOIN event_observability_reconciliation_queue q
+              ON q.global_event_id = g.id
+            WHERE o.global_event_id IS NULL
+              AND q.global_event_id IS NULL
+            ORDER BY g.id ASC
+            LIMIT ?1
+            "#,
+            params![EVENT_OBSERVABILITY_RECONCILIATION_BATCH_SIZE as i64],
+        )?;
+        Ok(())
+    }
+
+    fn backfill_queued_event_observability_records(&self) -> Result<()> {
+        let upper_bound: Option<i64> = self.connection.query_row(
+            "SELECT max(global_event_id) FROM event_observability_reconciliation_queue",
+            [],
+            |row| row.get(0),
+        )?;
+        let Some(upper_bound) = upper_bound else {
+            return Ok(());
+        };
+
+        for _ in 0..EVENT_OBSERVABILITY_RECONCILIATION_BATCH_SIZE {
+            let candidate_id = self
+                .connection
+                .query_row(
+                    r#"
+                    SELECT global_event_id
+                    FROM event_observability_reconciliation_queue
+                    WHERE global_event_id <= ?1
+                    ORDER BY global_event_id ASC
+                    LIMIT 1
+                    "#,
+                    params![upper_bound],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            let Some(candidate_id) = candidate_id else {
+                break;
+            };
+            self.reconcile_queued_event_observability_record(candidate_id)?;
+        }
+
+        Ok(())
+    }
+
+    fn reconcile_queued_event_observability_record(&self, global_event_id: i64) -> Result<bool> {
+        if self.connection.is_autocommit() {
+            return self.with_transaction(|| {
+                self.reconcile_queued_event_observability_record_in_transaction(global_event_id)
+            });
+        }
+        self.reconcile_queued_event_observability_record_in_transaction(global_event_id)
+    }
+
+    fn reconcile_queued_event_observability_record_in_transaction(
+        &self,
+        global_event_id: i64,
+    ) -> Result<bool> {
+        let record = self
+            .connection
+            .query_row(
                 r#"
                 SELECT g.id, g.source, g.source_id, g.workflow_id, g.kind, g.origin, g.status,
                        g.organization_id, g.brand_id, g.product_id, g.user_id, g.channel_id,
                        g.tenant_context_json, g.data_json, g.created_at
-                FROM global_events g
-                ORDER BY g.id ASC
+                FROM event_observability_reconciliation_queue q
+                JOIN global_events g ON g.id = q.global_event_id
+                WHERE q.global_event_id = ?1
                 "#,
-            )?;
-            let rows = statement.query_map([], stored_global_event_from_row)?;
-            let mut records = Vec::new();
-            for row in rows {
-                records.push(row?);
-            }
-            records
+                params![global_event_id],
+                stored_global_event_from_row,
+            )
+            .optional()?;
+        let Some(record) = record else {
+            self.complete_event_observability_reconciliation(global_event_id)?;
+            return Ok(false);
         };
-        for record in records {
-            self.upsert_event_observability_index_record(EventObservabilityIndexWrite {
-                global_event_id: record.id,
-                workflow_id: record.workflow_id.as_deref(),
-                kind: &record.kind,
-                origin: &record.origin,
-                source: &record.source,
-                organization_id: &record.organization_id,
-                brand_id: &record.brand_id,
-                product_id: &record.product_id,
-                data: &record.data,
-                created_at: &record.created_at,
-            })?;
+
+        self.upsert_event_observability_index_record(EventObservabilityIndexWrite {
+            global_event_id: record.id,
+            workflow_id: record.workflow_id.as_deref(),
+            kind: &record.kind,
+            origin: &record.origin,
+            source: &record.source,
+            organization_id: &record.organization_id,
+            brand_id: &record.brand_id,
+            product_id: &record.product_id,
+            data: &record.data,
+            created_at: &record.created_at,
+        })?;
+        self.complete_event_observability_reconciliation(global_event_id)?;
+        Ok(true)
+    }
+
+    fn reconcile_event_observability_record(
+        &self,
+        write: EventObservabilityIndexWrite<'_>,
+    ) -> Result<()> {
+        if self.connection.is_autocommit() {
+            return self.with_transaction(|| {
+                self.reconcile_event_observability_record_in_transaction(write)
+            });
         }
+        self.reconcile_event_observability_record_in_transaction(write)
+    }
+
+    fn reconcile_event_observability_record_in_transaction(
+        &self,
+        write: EventObservabilityIndexWrite<'_>,
+    ) -> Result<()> {
+        let global_event_id = write.global_event_id;
+        let queued: bool = self.connection.query_row(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM event_observability_reconciliation_queue
+                WHERE global_event_id = ?1
+            )
+            "#,
+            params![global_event_id],
+            |row| row.get(0),
+        )?;
+        if !queued {
+            return Ok(());
+        }
+        self.upsert_event_observability_index_record(write)?;
+        self.complete_event_observability_reconciliation(global_event_id)
+    }
+
+    fn complete_event_observability_reconciliation(&self, global_event_id: i64) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM event_observability_reconciliation_queue WHERE global_event_id = ?1",
+            params![global_event_id],
+        )?;
         Ok(())
+    }
+
+    fn global_event_has_durable_observability_state(&self, global_event_id: i64) -> Result<bool> {
+        self.connection
+            .query_row(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM global_events g
+                    WHERE g.id = ?1
+                      AND (
+                          EXISTS (
+                              SELECT 1
+                              FROM event_observability_reconciliation_queue q
+                              WHERE q.global_event_id = g.id
+                          )
+                          OR EXISTS (
+                              SELECT 1
+                              FROM event_observability_index o
+                              WHERE o.global_event_id = g.id
+                          )
+                      )
+                )
+                "#,
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn try_save_event_service(&self, service: EventServiceWrite<'_>) -> Result<bool> {
@@ -2714,6 +4716,7 @@ impl ForgeStore {
     }
 
     fn insert_global_event(&self, write: GlobalEventWrite<'_>) -> Result<i64> {
+        let can_defer_observability_reconciliation = self.connection.is_autocommit();
         let organization_id = tenant_context_identity_id(write.tenant_context, "organization");
         let brand_id = tenant_context_identity_id(write.tenant_context, "brand");
         let product_id = tenant_context_identity_id(write.tenant_context, "product");
@@ -2750,18 +4753,29 @@ impl ForgeStore {
             params![global_event_id],
             |row| row.get(0),
         )?;
-        self.upsert_event_observability_index_record(EventObservabilityIndexWrite {
-            global_event_id,
-            workflow_id: write.workflow_id,
-            kind: write.kind,
-            origin: write.origin,
-            source: write.source,
-            organization_id: &organization_id,
-            brand_id: &brand_id,
-            product_id: &product_id,
-            data: write.data,
-            created_at: &created_at,
-        })?;
+        let reconciliation =
+            self.reconcile_event_observability_record(EventObservabilityIndexWrite {
+                global_event_id,
+                workflow_id: write.workflow_id,
+                kind: write.kind,
+                origin: write.origin,
+                source: write.source,
+                organization_id: &organization_id,
+                brand_id: &brand_id,
+                product_id: &product_id,
+                data: write.data,
+                created_at: &created_at,
+            });
+        if let Err(error) = reconciliation {
+            if can_defer_observability_reconciliation
+                && self
+                    .global_event_has_durable_observability_state(global_event_id)
+                    .is_ok_and(|durable| durable)
+            {
+                return Ok(global_event_id);
+            }
+            return Err(error);
+        }
         Ok(global_event_id)
     }
 
@@ -4506,6 +6520,114 @@ impl ForgeStore {
         Ok(states)
     }
 
+    pub fn save_worktree_state(
+        &self,
+        id: &str,
+        repository_root: &str,
+        worktree_root: &str,
+        branch: Option<&str>,
+        head: &str,
+        data: &serde_json::Value,
+    ) -> Result<()> {
+        self.connection.execute(
+            r#"
+            INSERT INTO worktree_states (
+                id,
+                repository_root,
+                worktree_root,
+                branch,
+                head,
+                data_json,
+                created_at,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                repository_root=excluded.repository_root,
+                worktree_root=excluded.worktree_root,
+                branch=excluded.branch,
+                head=excluded.head,
+                data_json=excluded.data_json,
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+            params![
+                id,
+                repository_root,
+                worktree_root,
+                branch,
+                head,
+                serde_json::to_string(data)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_worktree_states(&self) -> Result<Vec<serde_json::Value>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT data_json FROM worktree_states ORDER BY worktree_root")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut states = Vec::new();
+        for row in rows {
+            states.push(serde_json::from_str(&row?)?);
+        }
+        Ok(states)
+    }
+
+    pub fn save_worktree_sandbox_state(
+        &self,
+        id: &str,
+        worktree_id: &str,
+        status: &str,
+        data: &serde_json::Value,
+    ) -> Result<()> {
+        self.connection.execute(
+            r#"
+            INSERT INTO worktree_sandbox_states (
+                id,
+                worktree_id,
+                status,
+                data_json,
+                created_at,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                worktree_id=excluded.worktree_id,
+                status=excluded.status,
+                data_json=excluded.data_json,
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+            params![id, worktree_id, status, serde_json::to_string(data)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_worktree_sandbox_state(&self, id: &str) -> Result<Option<serde_json::Value>> {
+        let data = self
+            .connection
+            .query_row(
+                "SELECT data_json FROM worktree_sandbox_states WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        data.map(|data| serde_json::from_str(&data).map_err(Into::into))
+            .transpose()
+    }
+
+    pub fn load_worktree_sandbox_states(&self) -> Result<Vec<serde_json::Value>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT data_json FROM worktree_sandbox_states ORDER BY created_at, id")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut states = Vec::new();
+        for row in rows {
+            states.push(serde_json::from_str(&row?)?);
+        }
+        Ok(states)
+    }
+
     pub fn save_run(
         &self,
         id: &str,
@@ -4856,6 +6978,10 @@ fn default_operating_context_json() -> serde_json::Value {
     serde_json::to_value(OperatingContextSpec::default()).unwrap_or_else(|_| serde_json::json!({}))
 }
 
+fn runtime_secret_vault_key(workflow_id: &str, vault_reference: &str) -> String {
+    format!("{workflow_id}:{vault_reference}")
+}
+
 struct OperationalTenantColumns {
     organization_id: String,
     brand_id: String,
@@ -5106,4 +7232,1220 @@ fn extract_event_origin(data: &serde_json::Value) -> String {
         }
     }
     "forge".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ensure_wal, event_observability_trigger_count, event_observability_triggers_are_valid,
+        open_configured_connection, operational_tenant_columns, runtime_secret_fallback_key_path,
+        ForgeStore, GlobalEventWrite, RuntimeSecretKey, RuntimeSecretVaultAccess,
+        RuntimeSecretVaultWrite, EVENT_OBSERVABILITY_RECONCILIATION_BATCH_SIZE,
+        RUNTIME_SECRET_ENVELOPE_PREFIX, STORE_SCHEMA_VERSION,
+    };
+    use rusqlite::{params, Connection};
+    use std::path::{Path, PathBuf};
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::thread;
+    use std::time::Duration;
+
+    fn save_test_runtime_secret<'a>(
+        store: &ForgeStore,
+        secret: &'a str,
+        tenant_context: &'a serde_json::Value,
+    ) {
+        let value_sha256 = crate::artifact::hex_sha256(secret.as_bytes());
+        store
+            .save_runtime_secret(RuntimeSecretVaultWrite {
+                vault_reference: "project.test.default",
+                workflow_id: Some("wf-secret-test"),
+                scope: "project",
+                provider: "test",
+                kind: "api_key",
+                classification: "secret",
+                secret_value: secret,
+                value_sha256: &value_sha256,
+                value_len: secret.len(),
+                source: "test",
+                origin: "storage_test",
+                tenant_context,
+            })
+            .unwrap();
+    }
+
+    fn resolve_test_runtime_secret(
+        store: &ForgeStore,
+        tenant_context: &serde_json::Value,
+    ) -> anyhow::Result<super::RuntimeSecretVaultResolve> {
+        store.resolve_runtime_secret(RuntimeSecretVaultAccess {
+            vault_reference: "project.test.default",
+            workflow_id: Some("wf-secret-test"),
+            requester: "storage_test",
+            allowed: true,
+            origin: "storage_test",
+            tenant_context,
+        })
+    }
+
+    #[test]
+    fn runtime_secret_vault_persists_only_authenticated_envelopes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("forge.sqlite");
+        let tenant_context = serde_json::json!({});
+        let secret = "runtime-secret-value-123456";
+        let store = ForgeStore::open(&path).unwrap();
+
+        save_test_runtime_secret(&store, secret, &tenant_context);
+
+        let stored: String = store
+            .connection
+            .query_row(
+                "SELECT secret_value FROM runtime_secret_vault WHERE vault_reference = 'project.test.default'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored.starts_with(RUNTIME_SECRET_ENVELOPE_PREFIX));
+        assert!(!stored.contains(secret));
+        let resolved = resolve_test_runtime_secret(&store, &tenant_context).unwrap();
+        assert_eq!(resolved.secret_value, secret);
+
+        let plaintext_update = store.connection.execute(
+            "UPDATE runtime_secret_vault SET secret_value = 'plaintext-forbidden'",
+            [],
+        );
+        assert!(plaintext_update.is_err());
+    }
+
+    #[test]
+    fn runtime_secret_vault_migrates_legacy_plaintext_without_serializing_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("forge.sqlite");
+        let tenant_context = serde_json::json!({});
+        let secret = "legacy-runtime-secret-123456";
+        let store = ForgeStore::open(&path).unwrap();
+        save_test_runtime_secret(&store, secret, &tenant_context);
+        drop(store);
+
+        let legacy = Connection::open(&path).unwrap();
+        legacy
+            .execute_batch(
+                r#"
+                DROP TRIGGER trg_runtime_secret_vault_encrypted_insert;
+                DROP TRIGGER trg_runtime_secret_vault_encrypted_update;
+                "#,
+            )
+            .unwrap();
+        legacy
+            .execute(
+                "UPDATE runtime_secret_vault SET secret_value = ?1",
+                params![secret],
+            )
+            .unwrap();
+        drop(legacy);
+
+        let migrated = ForgeStore::open(&path).unwrap();
+        let stored: String = migrated
+            .connection
+            .query_row(
+                "SELECT secret_value FROM runtime_secret_vault WHERE vault_reference = 'project.test.default'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored.starts_with(RUNTIME_SECRET_ENVELOPE_PREFIX));
+        assert!(!stored.contains(secret));
+        assert_eq!(
+            resolve_test_runtime_secret(&migrated, &tenant_context)
+                .unwrap()
+                .secret_value,
+            secret
+        );
+    }
+
+    #[test]
+    fn runtime_secret_vault_rotates_from_a_previous_key_on_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("forge.sqlite");
+        let key_path = runtime_secret_fallback_key_path(&path);
+        let tenant_context = serde_json::json!({});
+        let secret = "rotated-runtime-secret-123456";
+        let store = ForgeStore::open(&path).unwrap();
+        save_test_runtime_secret(&store, secret, &tenant_context);
+        drop(store);
+
+        let previous_key = zeroize::Zeroizing::new(std::fs::read_to_string(&key_path).unwrap());
+        let current_key = RuntimeSecretKey::parse(&"11".repeat(32), "rotation test key").unwrap();
+        let current_key_id = current_key.id.clone();
+        let encoded_current = current_key.encoded();
+        std::fs::write(
+            &key_path,
+            format!("{}\n{}", encoded_current.as_str(), previous_key.trim()),
+        )
+        .unwrap();
+
+        let rotated = ForgeStore::open(&path).unwrap();
+        let stored: String = rotated
+            .connection
+            .query_row(
+                "SELECT secret_value FROM runtime_secret_vault WHERE vault_reference = 'project.test.default'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored.contains(&format!(":{current_key_id}:")));
+        assert!(!stored.contains(secret));
+        assert_eq!(
+            resolve_test_runtime_secret(&rotated, &tenant_context)
+                .unwrap()
+                .secret_value,
+            secret
+        );
+    }
+
+    #[test]
+    fn runtime_secret_vault_fails_closed_for_tampered_ciphertext() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("forge.sqlite");
+        let tenant_context = serde_json::json!({});
+        let secret = "tamper-detection-secret-123456";
+        let store = ForgeStore::open(&path).unwrap();
+        save_test_runtime_secret(&store, secret, &tenant_context);
+        let mut stored: String = store
+            .connection
+            .query_row(
+                "SELECT secret_value FROM runtime_secret_vault WHERE vault_reference = 'project.test.default'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let replacement = if stored.ends_with('0') { "1" } else { "0" };
+        stored.replace_range(stored.len() - 1.., replacement);
+        store
+            .connection
+            .execute(
+                "UPDATE runtime_secret_vault SET secret_value = ?1",
+                params![stored],
+            )
+            .unwrap();
+
+        let error = resolve_test_runtime_secret(&store, &tenant_context)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("authentication failed"));
+        assert!(!error.contains(secret));
+    }
+
+    #[test]
+    fn runtime_secret_vault_fails_closed_when_local_key_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("forge.sqlite");
+        let key_path = runtime_secret_fallback_key_path(&path);
+        let tenant_context = serde_json::json!({});
+        let store = ForgeStore::open(&path).unwrap();
+        save_test_runtime_secret(&store, "missing-key-secret-123456", &tenant_context);
+        drop(store);
+        std::fs::remove_file(key_path).unwrap();
+
+        let error = ForgeStore::open(&path).err().unwrap().to_string();
+        assert!(error.contains("encryption key is unavailable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forge_store_secures_directory_database_sidecars_and_key_material() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store_dir = temp.path().join(".forge");
+        std::fs::create_dir(&store_dir).unwrap();
+        std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let path = store_dir.join("forge.sqlite");
+        std::fs::write(&path, []).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        let _store = ForgeStore::open(&path).unwrap();
+
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&store_dir), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&runtime_secret_fallback_key_path(&path)), 0o600);
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
+            assert!(sidecar.exists());
+            assert_eq!(mode(&sidecar), 0o600);
+        }
+    }
+
+    #[test]
+    fn forge_store_open_accepts_sqlite_memory_journal() {
+        let store = ForgeStore::open(":memory:").unwrap();
+
+        let mode: String = store
+            .connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "memory");
+    }
+
+    #[test]
+    fn forge_store_open_accepts_sqlite_shared_memory_uri() {
+        let store = ForgeStore::open("file:forge_store_memory?mode=memory&cache=shared").unwrap();
+
+        let mode: String = store
+            .connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        let database_path: String = store
+            .connection
+            .query_row(
+                "SELECT file FROM pragma_database_list WHERE name = 'main'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode, "memory");
+        assert!(database_path.is_empty());
+    }
+
+    #[test]
+    fn configured_connection_enforces_sqlite_security_pragmas() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("sqlite-security-pragmas.sqlite");
+        let store = ForgeStore::open(&path).unwrap();
+
+        let foreign_keys: i64 = store
+            .connection
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .unwrap();
+        let secure_delete: i64 = store
+            .connection
+            .pragma_query_value(None, "secure_delete", |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(secure_delete, 1);
+    }
+
+    #[test]
+    fn raw_global_event_insert_is_reconciled_from_persistent_queue_on_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("raw-event-reconciliation.sqlite");
+        let store = ForgeStore::open(&path).unwrap();
+        assert_eq!(store.store_schema_version().unwrap(), STORE_SCHEMA_VERSION);
+        drop(store);
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                r#"
+                INSERT INTO global_events (
+                    source, source_id, workflow_id, kind, origin, status,
+                    organization_id, brand_id, product_id, user_id, channel_id,
+                    tenant_context_json, data_json
+                )
+                VALUES (
+                    'raw_test', 'raw-event-001', NULL, 'raw_event_recorded', 'test', 'recorded',
+                    'org-test', 'brand-test', 'product-test', 'user-test', 'channel-test',
+                    '{}', '{"node_id":"raw-node"}'
+                )
+                "#,
+                [],
+            )
+            .unwrap();
+        let global_event_id = connection.last_insert_rowid();
+        let queued: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 1);
+        drop(connection);
+
+        let reopened = ForgeStore::open(&path).unwrap();
+        let indexed: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_index WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queued: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1);
+        assert_eq!(queued, 0);
+    }
+
+    #[test]
+    fn deleted_observability_index_row_is_reconciled_on_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("deleted-observability-index.sqlite");
+        let store = ForgeStore::open(&path).unwrap();
+        let tenant_context = serde_json::json!({
+            "organization": {"id": "org-test"},
+            "brand": {"id": "brand-test"},
+            "product": {"id": "product-test"},
+            "user": {"id": "user-test"},
+            "channel": {"id": "channel-test"}
+        });
+        let event_data = serde_json::json!({"node_id": "deleted-index-node"});
+        let global_event_id = store
+            .record_global_event(GlobalEventWrite {
+                source: "deleted_index_test",
+                source_id: "deleted-index-event-001",
+                workflow_id: None,
+                kind: "deleted_index_event_recorded",
+                origin: "test",
+                status: "recorded",
+                data: &event_data,
+                tenant_context: &tenant_context,
+            })
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "DELETE FROM event_observability_index WHERE global_event_id = ?1",
+                params![global_event_id],
+            )
+            .unwrap();
+        let queued: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 1);
+        drop(store);
+
+        let reopened = ForgeStore::open(&path).unwrap();
+        let indexed: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_index WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queued: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1);
+        assert_eq!(queued, 0);
+    }
+
+    #[test]
+    fn observability_reconciliation_failure_is_deferred_after_durable_enqueue() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp
+            .path()
+            .join("atomic-observability-reconciliation.sqlite");
+        let store = ForgeStore::open(&path).unwrap();
+        store
+            .connection
+            .execute_batch(
+                r#"
+                CREATE TRIGGER reject_observability_queue_ack
+                BEFORE DELETE ON event_observability_reconciliation_queue
+                BEGIN
+                    SELECT RAISE(ABORT, 'queue ack blocked for atomicity test');
+                END;
+                "#,
+            )
+            .unwrap();
+        let tenant_context = serde_json::json!({
+            "organization": {"id": "org-test"},
+            "brand": {"id": "brand-test"},
+            "product": {"id": "product-test"},
+            "user": {"id": "user-test"},
+            "channel": {"id": "channel-test"}
+        });
+        let event_data = serde_json::json!({"node_id": "atomic-reconciliation-node"});
+
+        let global_event_id = store
+            .record_global_event(GlobalEventWrite {
+                source: "atomic_reconciliation_test",
+                source_id: "atomic-reconciliation-event-001",
+                workflow_id: None,
+                kind: "atomic_reconciliation_event_recorded",
+                origin: "test",
+                status: "recorded",
+                data: &event_data,
+                tenant_context: &tenant_context,
+            })
+            .unwrap();
+        let global_events: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM global_events WHERE source_id = 'atomic-reconciliation-event-001'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let indexed: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_index WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queued: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(global_events, 1, "the durable event must be recorded once");
+        assert_eq!(indexed, 0, "the upsert must roll back when its ack fails");
+        assert_eq!(queued, 1, "the durable queue entry must remain retryable");
+
+        store
+            .connection
+            .execute_batch("DROP TRIGGER reject_observability_queue_ack")
+            .unwrap();
+        drop(store);
+
+        let reopened = ForgeStore::open(&path).unwrap();
+        let global_events: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM global_events WHERE source_id = 'atomic-reconciliation-event-001'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let indexed: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_index WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queued: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(global_events, 1);
+        assert_eq!(indexed, 1);
+        assert_eq!(queued, 0);
+    }
+
+    #[test]
+    fn concurrent_openers_claim_each_observability_queue_entry_once() {
+        const EVENT_COUNT: i64 = 32;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("concurrent-observability-openers.sqlite");
+        let store = ForgeStore::open(&path).unwrap();
+        store
+            .connection
+            .execute_batch(
+                r#"
+                CREATE TABLE observability_reconciliation_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    global_event_id INTEGER NOT NULL,
+                    operation TEXT NOT NULL
+                );
+                CREATE TRIGGER audit_observability_insert
+                AFTER INSERT ON event_observability_index
+                BEGIN
+                    INSERT INTO observability_reconciliation_audit (global_event_id, operation)
+                    VALUES (NEW.global_event_id, 'insert');
+                END;
+                CREATE TRIGGER audit_observability_update
+                AFTER UPDATE ON event_observability_index
+                BEGIN
+                    INSERT INTO observability_reconciliation_audit (global_event_id, operation)
+                    VALUES (NEW.global_event_id, 'update');
+                END;
+                "#,
+            )
+            .unwrap();
+        let tenant_context = serde_json::json!({
+            "organization": {"id": "org-test"},
+            "brand": {"id": "brand-test"},
+            "product": {"id": "product-test"},
+            "user": {"id": "user-test"},
+            "channel": {"id": "channel-test"}
+        });
+        let tenant_context_json = serde_json::to_string(&tenant_context).unwrap();
+        let payload = "x".repeat(64 * 1024);
+        store
+            .with_transaction(|| {
+                for index in 0..EVENT_COUNT {
+                    let source_id = format!("concurrent-queued-event-{index:03}");
+                    let data_json = serde_json::to_string(&serde_json::json!({
+                        "index": index,
+                        "payload": &payload
+                    }))?;
+                    store.connection.execute(
+                        r#"
+                        INSERT INTO global_events (
+                            source, source_id, workflow_id, kind, origin, status,
+                            organization_id, brand_id, product_id, user_id, channel_id,
+                            tenant_context_json, data_json
+                        )
+                        VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                        "#,
+                        params![
+                            "concurrent_opener_test",
+                            source_id,
+                            "concurrent_opener_event_recorded",
+                            "test",
+                            "recorded",
+                            "org-test",
+                            "brand-test",
+                            "product-test",
+                            "user-test",
+                            "channel-test",
+                            &tenant_context_json,
+                            data_json,
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let queued: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, EVENT_COUNT);
+        drop(store);
+
+        let barrier = Arc::new(Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let worker_barrier = Arc::clone(&barrier);
+            let worker_path = path.clone();
+            handles.push(thread::spawn(move || {
+                worker_barrier.wait();
+                ForgeStore::open(worker_path).map(drop)
+            }));
+        }
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+
+        let connection = Connection::open(&path).unwrap();
+        let global_events: i64 = connection
+            .query_row("SELECT count(*) FROM global_events", [], |row| row.get(0))
+            .unwrap();
+        let indexed: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_index",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queued: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let materializations: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM observability_reconciliation_audit",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(global_events, EVENT_COUNT);
+        assert_eq!(indexed, EVENT_COUNT);
+        assert_eq!(queued, 0);
+        assert_eq!(
+            materializations, EVENT_COUNT,
+            "each queued event must be materialized exactly once"
+        );
+    }
+
+    #[test]
+    fn store_open_materializes_at_most_one_observability_batch_per_invocation() {
+        const EXTRA_EVENTS: usize = 3;
+        let event_count = EVENT_OBSERVABILITY_RECONCILIATION_BATCH_SIZE + EXTRA_EVENTS;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp
+            .path()
+            .join("bounded-observability-reconciliation.sqlite");
+        let store = ForgeStore::open(&path).unwrap();
+        store
+            .with_transaction(|| {
+                for index in 0..event_count {
+                    store.connection.execute(
+                        r#"
+                        INSERT INTO global_events (
+                            source, source_id, workflow_id, kind, origin, status,
+                            organization_id, brand_id, product_id, user_id, channel_id,
+                            tenant_context_json, data_json
+                        )
+                        VALUES (?1, ?2, NULL, ?3, ?4, ?5, '', '', '', '', '', '{}', ?6)
+                        "#,
+                        params![
+                            "bounded_reconciliation_test",
+                            format!("bounded-reconciliation-event-{index:03}"),
+                            "bounded_reconciliation_event_recorded",
+                            "test",
+                            "recorded",
+                            serde_json::json!({"index": index}).to_string(),
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+
+        let reopened = ForgeStore::open(&path).unwrap();
+        let indexed: usize = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_index",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queued: usize = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, EVENT_OBSERVABILITY_RECONCILIATION_BATCH_SIZE);
+        assert_eq!(queued, EXTRA_EVENTS);
+        drop(reopened);
+
+        let fully_reconciled = ForgeStore::open(&path).unwrap();
+        let indexed: usize = fully_reconciled
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_index",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queued: usize = fully_reconciled
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, event_count);
+        assert_eq!(queued, 0);
+    }
+
+    #[test]
+    fn legacy_migration_enqueues_and_reconciles_observability_in_bounded_batches() {
+        const EXTRA_EVENTS: usize = 3;
+        let event_count = EVENT_OBSERVABILITY_RECONCILIATION_BATCH_SIZE + EXTRA_EVENTS;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bounded-observability-migration.sqlite");
+        let store = ForgeStore::open(&path).unwrap();
+        store
+            .connection
+            .execute_batch(
+                r#"
+                DROP TRIGGER trg_global_events_observability_queue;
+                DROP TRIGGER trg_event_observability_delete_queue;
+                PRAGMA user_version = 1;
+                "#,
+            )
+            .unwrap();
+        store
+            .with_transaction(|| {
+                for index in 0..event_count {
+                    store.connection.execute(
+                        r#"
+                        INSERT INTO global_events (
+                            source, source_id, workflow_id, kind, origin, status,
+                            organization_id, brand_id, product_id, user_id, channel_id,
+                            tenant_context_json, data_json
+                        )
+                        VALUES (?1, ?2, NULL, ?3, ?4, ?5, '', '', '', '', '', '{}', ?6)
+                        "#,
+                        params![
+                            "bounded_migration_test",
+                            format!("bounded-migration-event-{index:03}"),
+                            "bounded_migration_event_recorded",
+                            "test",
+                            "recorded",
+                            serde_json::json!({"index": index}).to_string(),
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let queued: usize = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 0);
+        drop(store);
+
+        let reopened = ForgeStore::open(&path).unwrap();
+        let indexed: usize = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_index",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let missing: usize = reopened
+            .connection
+            .query_row(
+                r#"
+                SELECT count(*)
+                FROM global_events g
+                LEFT JOIN event_observability_index o
+                  ON o.global_event_id = g.id
+                WHERE o.global_event_id IS NULL
+                "#,
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, EVENT_OBSERVABILITY_RECONCILIATION_BATCH_SIZE);
+        assert_eq!(missing, EXTRA_EVENTS);
+        assert_eq!(
+            event_observability_trigger_count(&reopened.connection).unwrap(),
+            2
+        );
+        drop(reopened);
+
+        let fully_reconciled = ForgeStore::open(&path).unwrap();
+        let indexed: usize = fully_reconciled
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_index",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queued: usize = fully_reconciled
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, event_count);
+        assert_eq!(queued, 0);
+    }
+
+    #[test]
+    fn missing_observability_trigger_is_recreated_and_gap_is_reconciled() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing-observability-trigger.sqlite");
+        let store = ForgeStore::open(&path).unwrap();
+        store
+            .connection
+            .execute_batch("DROP TRIGGER trg_global_events_observability_queue")
+            .unwrap();
+        store
+            .connection
+            .execute(
+                r#"
+                INSERT INTO global_events (
+                    source, source_id, workflow_id, kind, origin, status,
+                    organization_id, brand_id, product_id, user_id, channel_id,
+                    tenant_context_json, data_json
+                )
+                VALUES (
+                    'trigger_repair_test', 'trigger-gap-001', NULL,
+                    'trigger_gap_recorded', 'test', 'recorded',
+                    'org-test', 'brand-test', 'product-test', 'user-test', 'channel-test',
+                    '{}', '{"node_id":"trigger-repair-node"}'
+                )
+                "#,
+                [],
+            )
+            .unwrap();
+        let global_event_id = store.connection.last_insert_rowid();
+        assert_eq!(
+            event_observability_trigger_count(&store.connection).unwrap(),
+            1
+        );
+        let queued: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 0);
+        drop(store);
+
+        let reopened = ForgeStore::open(&path).unwrap();
+        assert_eq!(
+            event_observability_trigger_count(&reopened.connection).unwrap(),
+            2
+        );
+        let queued: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let indexed: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_index WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 0);
+        assert_eq!(indexed, 1);
+    }
+
+    #[test]
+    fn malformed_observability_trigger_is_replaced_and_gap_is_reconciled() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("malformed-observability-trigger.sqlite");
+        let store = ForgeStore::open(&path).unwrap();
+        assert!(event_observability_triggers_are_valid(&store.connection).unwrap());
+        store
+            .connection
+            .execute_batch(
+                r#"
+                DROP TRIGGER trg_global_events_observability_queue;
+                CREATE TRIGGER trg_global_events_observability_queue
+                AFTER INSERT ON global_events
+                BEGIN
+                    SELECT 1;
+                END;
+                "#,
+            )
+            .unwrap();
+        assert_eq!(
+            event_observability_trigger_count(&store.connection).unwrap(),
+            2
+        );
+        assert!(!event_observability_triggers_are_valid(&store.connection).unwrap());
+        store
+            .connection
+            .execute(
+                r#"
+                INSERT INTO global_events (
+                    source, source_id, workflow_id, kind, origin, status,
+                    organization_id, brand_id, product_id, user_id, channel_id,
+                    tenant_context_json, data_json
+                )
+                VALUES (
+                    'malformed_trigger_test', 'malformed-trigger-gap-001', NULL,
+                    'malformed_trigger_gap_recorded', 'test', 'recorded',
+                    'org-test', 'brand-test', 'product-test', 'user-test', 'channel-test',
+                    '{}', '{"node_id":"malformed-trigger-repair-node"}'
+                )
+                "#,
+                [],
+            )
+            .unwrap();
+        let global_event_id = store.connection.last_insert_rowid();
+        drop(store);
+
+        let reopened = ForgeStore::open(&path).unwrap();
+        assert!(event_observability_triggers_are_valid(&reopened.connection).unwrap());
+        let indexed: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_index WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queued: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1);
+        assert_eq!(queued, 0);
+    }
+
+    #[test]
+    fn reopen_with_empty_observability_queue_does_not_rewrite_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("empty-observability-queue.sqlite");
+        let store = ForgeStore::open(&path).unwrap();
+        let tenant_context = serde_json::json!({
+            "organization": {"id": "org-test"},
+            "brand": {"id": "brand-test"},
+            "product": {"id": "product-test"},
+            "user": {"id": "user-test"},
+            "channel": {"id": "channel-test"}
+        });
+        let event_data = serde_json::json!({"node_id": "steady-state-node"});
+        let global_event_id = store
+            .record_global_event(GlobalEventWrite {
+                source: "steady_state_test",
+                source_id: "steady-event-001",
+                workflow_id: None,
+                kind: "steady_state_event_recorded",
+                origin: "test",
+                status: "recorded",
+                data: &event_data,
+                tenant_context: &tenant_context,
+            })
+            .unwrap();
+        let queued: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_reconciliation_queue",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 0);
+        store
+            .connection
+            .execute_batch(
+                r#"
+                CREATE TRIGGER reject_steady_state_observability_rewrite
+                BEFORE UPDATE ON event_observability_index
+                BEGIN
+                    SELECT RAISE(ABORT, 'steady-state reopen rewrote observability index');
+                END;
+                "#,
+            )
+            .unwrap();
+        drop(store);
+
+        let reopened = ForgeStore::open(&path).unwrap();
+        let indexed: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM event_observability_index WHERE global_event_id = ?1",
+                params![global_event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1);
+    }
+
+    #[test]
+    fn orphaned_operational_tenant_rows_are_repaired_once_then_reopen_read_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("orphaned-operational-tenant.sqlite");
+        let store = ForgeStore::open(&path).unwrap();
+        store
+            .connection
+            .execute_batch(
+                r#"
+                INSERT INTO runs (id, workflow_id, status, data_json)
+                VALUES ('run-orphan', 'wf-missing', 'accepted', '{}');
+                INSERT INTO task_leases (
+                    workflow_id, task_id, lease_id, executor,
+                    acquired_at, expires_at, data_json
+                )
+                VALUES (
+                    'wf-missing', 'task-orphan', 'lease-orphan', 'audit',
+                    '2026-07-23T00:00:00Z', '2026-07-23T00:05:00Z', '{}'
+                );
+                INSERT INTO task_checkpoints (
+                    id, workflow_id, task_id, executor, state, created_at, data_json
+                )
+                VALUES (
+                    'checkpoint-orphan', 'wf-missing', 'task-orphan', 'audit',
+                    'saved', '2026-07-23T00:00:00Z', '{}'
+                );
+                "#,
+            )
+            .unwrap();
+        drop(store);
+
+        let repaired = ForgeStore::open(&path).unwrap();
+        let default_tenant = operational_tenant_columns(None);
+        for table in ["runs", "task_leases", "task_checkpoints"] {
+            let tenant = repaired
+                .connection
+                .query_row(
+                    &format!(
+                        "SELECT organization_id, brand_id, product_id, user_id, channel_id FROM {table}"
+                    ),
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(tenant.0, default_tenant.organization_id);
+            assert_eq!(tenant.1, default_tenant.brand_id);
+            assert_eq!(tenant.2, default_tenant.product_id);
+            assert_eq!(tenant.3, default_tenant.user_id);
+            assert_eq!(tenant.4, default_tenant.channel_id);
+        }
+        drop(repaired);
+
+        let blocker = Connection::open(&path).unwrap();
+        let mode: String = blocker
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let (sender, receiver) = mpsc::channel();
+        let worker_path = path.clone();
+        let handle = thread::spawn(move || {
+            sender
+                .send(ForgeStore::open(worker_path).map(|_| ()))
+                .unwrap();
+        });
+        let reopened = match receiver.recv_timeout(Duration::from_secs(1)) {
+            Ok(result) => result,
+            Err(error) => {
+                blocker.execute_batch("ROLLBACK").unwrap();
+                handle.join().unwrap();
+                panic!(
+                    "steady-state reopen attempted a write while WAL writer was active: {error}"
+                );
+            }
+        };
+        blocker.execute_batch("ROLLBACK").unwrap();
+        handle.join().unwrap();
+        reopened.unwrap();
+    }
+
+    #[test]
+    fn ensure_wal_retries_a_transient_exclusive_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("wal-retry.sqlite");
+        let bootstrap = Connection::open(&path).unwrap();
+        bootstrap
+            .execute_batch("CREATE TABLE marker(id INTEGER); PRAGMA journal_mode=DELETE;")
+            .unwrap();
+        drop(bootstrap);
+
+        let blocker = Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let (sender, receiver) = mpsc::channel();
+        let worker_barrier = Arc::clone(&barrier);
+        let worker_path = path.clone();
+        let handle = thread::spawn(move || {
+            let connection = Connection::open(&worker_path).unwrap();
+            connection.busy_timeout(Duration::ZERO).unwrap();
+            worker_barrier.wait();
+            let result =
+                ensure_wal(&connection, &worker_path, Duration::from_secs(1)).and_then(|_| {
+                    connection
+                        .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+                        .map_err(Into::into)
+                });
+            sender.send(result).unwrap();
+        });
+
+        barrier.wait();
+        assert!(
+            matches!(
+                receiver.recv_timeout(Duration::from_millis(150)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "ensure_wal returned before the transient lock was released"
+        );
+        blocker.execute_batch("ROLLBACK").unwrap();
+        let mode = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn configured_connection_confirms_wal_after_a_transient_exclusive_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("configured-wal-retry.sqlite");
+        let bootstrap = Connection::open(&path).unwrap();
+        bootstrap
+            .execute_batch("CREATE TABLE marker(id INTEGER); PRAGMA journal_mode=DELETE;")
+            .unwrap();
+        drop(bootstrap);
+
+        let blocker = Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let (sender, receiver) = mpsc::channel();
+        let worker_barrier = Arc::clone(&barrier);
+        let worker_path = path.clone();
+        let handle = thread::spawn(move || {
+            worker_barrier.wait();
+            let result = open_configured_connection(&worker_path).and_then(|connection| {
+                connection
+                    .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+                    .map_err(Into::into)
+            });
+            sender.send(result).unwrap();
+        });
+
+        barrier.wait();
+        assert!(
+            matches!(
+                receiver.recv_timeout(Duration::from_millis(150)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "configured connection returned before the transient lock was released"
+        );
+        blocker.execute_batch("ROLLBACK").unwrap();
+        let mode = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        handle.join().unwrap();
+    }
 }

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.5.0 - 2026-07-24
+
+### Production profile
+
+- Promoted the single-host, trusted-operator runtime with an encrypted secret
+  vault, authenticated loopback Ops service, real stdio MCP server, and
+  integrity-checked store backup and restore.
+- Added pinned CI and tag-release gates for formatting, Clippy, tests, release
+  build, dependency advisories/licenses/sources, full-history secret scanning,
+  bounded production smoke, minimal Cargo packaging, SBOM, checksums, keyless
+  signature, and GitHub provenance.
+- Added checksum-enforcing installers and hardened systemd service, credential,
+  backup timer, upgrade, rollback, and incident runbooks.
+- Multi-tenant operation, high availability, and public exposure of the built-in
+  Ops server remain outside the v0.5 support profile.
+
 ### Added
 
 - Added `forge teamwork` strategy metadata that mirrors the observed Antigravity `agy` `/teamwork-preview` flow with prompt review, delegated execution wave, auditor promotion gates, explicit agent count and max parallel agents.

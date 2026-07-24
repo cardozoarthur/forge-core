@@ -1,4 +1,14 @@
 /target/
+/.local/
+/.serena/
+/artifacts/
+/dist/
+/chat_*.json
+*.sqlite-secret.key
+*.sqlite.secret.key
+*.sqlite-shm
+*.sqlite-wal
+.forge/*.secret.key
 /.forge/*
 !/.forge/connected-brain-runtimes.json
 !/.forge/harness.json
@@ -9,10 +19,17 @@
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.sqlite.secret.key
+*.secret.key
+*.keyring
+/.forge/keyring*
 /.DS_Store
 /.idea/
 /.vscode/
 *.log
+/bom.json
+/bom.xml
+/*.cdx.json
 
 # Local ad-hoc workflow outputs and delivery receipts.
 docs/reports/simplex-*

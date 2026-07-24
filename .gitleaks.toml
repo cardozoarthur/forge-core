@@ -1,0 +1,45 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Ignore local build and runtime state that is never distributed"
+paths = [
+    '''^\.forge/artifacts/''',
+    '''^\.serena/''',
+    '''^target/''',
+]
+
+[[allowlists]]
+description = "Forge context routing cache keys are content hashes, not credentials"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^docs/reports/worktree-sandbox-hardening-2026-07-22/context-package\.json$''']
+regexTarget = "line"
+regexes = ['''context_routing_cache_key"\s*:\s*"[0-9a-f]{64}"''']
+
+[[allowlists]]
+description = "Secret scanner fixture for a private-key delimiter"
+condition = "AND"
+targetRules = ["private-key"]
+paths = ['''^src/security\.rs$''']
+regexTarget = "line"
+regexes = ['''-----BEGIN OPENSSH PRIVATE KEY-----''']
+
+[[allowlists]]
+description = "Secret scanner fixture for a synthetic JWT"
+condition = "AND"
+targetRules = ["jwt"]
+paths = ['''^src/security\.rs$''']
+regexTarget = "line"
+regexes = ['''AUTHORIZATION=Bearer eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0In0\.signature123''']
+
+[[allowlists]]
+description = "Secret scanner fixtures for synthetic entropy"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^src/security\.rs$''']
+regexTarget = "line"
+regexes = [
+    '''^\s*let secret = "N7vQ9xL4pR2sT8wY6zA3bC5dE1fG0hJ";\s*$''',
+    '''^\s*let secret = "Abc123456789";\s*$''',
+]

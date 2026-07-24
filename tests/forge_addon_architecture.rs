@@ -67,7 +67,7 @@ fn test_hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn test_hmac_sha256_header(secret: &str, body: &str) -> String {
+fn test_hmac_sha256_header(secret: &str, timestamp: &str, nonce: &str, body: &str) -> String {
     let mut key = secret.as_bytes().to_vec();
     if key.len() > 64 {
         key = Sha256::digest(&key).to_vec();
@@ -81,6 +81,10 @@ fn test_hmac_sha256_header(secret: &str, body: &str) -> String {
     }
     let mut inner = Sha256::new();
     inner.update(&inner_key_pad);
+    inner.update(timestamp.as_bytes());
+    inner.update(b".");
+    inner.update(nonce.as_bytes());
+    inner.update(b".");
     inner.update(body.as_bytes());
     let inner_hash = inner.finalize();
     let mut outer = Sha256::new();
@@ -573,7 +577,26 @@ fn start_signed_event_egress_server(
             }
             let body = &request[header_end..header_end + content_length];
             let body_text = String::from_utf8(body.to_vec()).unwrap();
-            let expected_signature = test_hmac_sha256_header(&secret, &body_text);
+            let timestamp = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.trim()
+                        .eq_ignore_ascii_case("X-Forge-Timestamp")
+                        .then(|| value.trim().to_string())
+                })
+                .expect("signed event egress request should include timestamp");
+            let nonce = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.trim()
+                        .eq_ignore_ascii_case("X-Forge-Nonce")
+                        .then(|| value.trim().to_string())
+                })
+                .expect("signed event egress request should include nonce");
+            let expected_signature =
+                test_hmac_sha256_header(&secret, &timestamp, &nonce, &body_text);
             let observed_signature = headers
                 .lines()
                 .filter_map(|line| {
@@ -7353,6 +7376,8 @@ capabilities:
             documentation_task["id"].as_str().unwrap(),
             "--budget",
             "3200",
+            "--view",
+            "full",
             "--output",
             "json",
         ])
@@ -11492,6 +11517,7 @@ event_adapters:
     .unwrap();
     let port = reserve_local_port();
     let child = StdCommand::new(assert_cmd::cargo::cargo_bin("forge"))
+        .env("FORGE_ALLOW_INSECURE_LOCAL_WEBHOOK", "true")
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -11688,7 +11714,7 @@ event_adapters:
     .unwrap();
 
     let port = reserve_local_port();
-    let secret = "forge-test-webhook-secret";
+    let secret = "forge-test-webhook-secret-32-bytes-minimum";
     let child = StdCommand::new(assert_cmd::cargo::cargo_bin("forge"))
         .env("FORGE_TEST_WEBHOOK_SECRET", secret)
         .args([
@@ -11712,7 +11738,7 @@ event_adapters:
             temp.path().to_str().unwrap(),
             "--route",
             "--max-requests",
-            "2",
+            "3",
             "--hmac-secret-env",
             "FORGE_TEST_WEBHOOK_SECRET",
             "--signature-header",
@@ -11726,27 +11752,55 @@ event_adapters:
         .unwrap();
 
     let bad_body = r#"{"data":{"goal":"This request must not route"}}"#;
+    let bad_timestamp = Utc::now().timestamp().to_string();
+    let bad_nonce = "bad-request-nonce-0001";
     let bad_response = post_json_with_retry_headers(
         port,
         "/partner",
         bad_body,
-        &[("X-Test-Signature", "sha256=00")],
+        &[
+            ("X-Test-Signature", "sha256=00"),
+            ("X-Forge-Timestamp", &bad_timestamp),
+            ("X-Forge-Nonce", bad_nonce),
+        ],
     );
-    assert!(bad_response.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(
+        bad_response.starts_with("HTTP/1.1 401 Unauthorized"),
+        "unexpected bad webhook response: {bad_response}"
+    );
     assert!(bad_response.contains("webhook_ingress_failed"));
     assert!(bad_response.contains("webhook HMAC signature mismatch"));
 
     let signed_body =
         r#"{"data":{"goal":"Create a signed partner workflow from webhook","customer":"acme"}}"#;
-    let signature = test_hmac_sha256_header(secret, signed_body);
+    let signed_timestamp = Utc::now().timestamp().to_string();
+    let signed_nonce = "signed-request-nonce-0001";
+    let signature = test_hmac_sha256_header(secret, &signed_timestamp, signed_nonce, signed_body);
     let signed_response = post_json_with_retry_headers(
         port,
         "/partner",
         signed_body,
-        &[("X-Test-Signature", signature.as_str())],
+        &[
+            ("X-Test-Signature", signature.as_str()),
+            ("X-Forge-Timestamp", &signed_timestamp),
+            ("X-Forge-Nonce", signed_nonce),
+        ],
     );
     assert!(signed_response.starts_with("HTTP/1.1 202 Accepted"));
     assert!(signed_response.contains("webhook_event_ingested_and_routed"));
+
+    let replay_response = post_json_with_retry_headers(
+        port,
+        "/partner",
+        signed_body,
+        &[
+            ("X-Test-Signature", signature.as_str()),
+            ("X-Forge-Timestamp", &signed_timestamp),
+            ("X-Forge-Nonce", signed_nonce),
+        ],
+    );
+    assert!(replay_response.starts_with("HTTP/1.1 409 Conflict"));
+    assert!(replay_response.contains("webhook replay detected"));
 
     let output = child.wait_with_output().unwrap();
     assert!(
@@ -11765,17 +11819,24 @@ event_adapters:
     assert_eq!(report["auth"]["scheme"], "hmac_sha256");
     assert_eq!(report["auth"]["signature_header"], "X-Test-Signature");
     assert_eq!(report["auth"]["secret_env"], "FORGE_TEST_WEBHOOK_SECRET");
-    assert_eq!(report["request_count"], 2);
+    assert_eq!(report["auth"]["timestamp_header"], "x-forge-timestamp");
+    assert_eq!(report["auth"]["nonce_header"], "x-forge-nonce");
+    assert_eq!(report["auth"]["max_clock_skew_seconds"], 300);
+    assert_eq!(report["auth"]["replay_protection"], true);
+    assert_eq!(report["auth"]["rate_limit_per_minute"], 60);
+    assert_eq!(report["request_count"], 3);
     assert_eq!(report["ingested_count"], 1);
     assert_eq!(report["routed_count"], 1);
-    assert_eq!(report["failed_count"], 1);
+    assert_eq!(report["failed_count"], 2);
 
-    assert_eq!(report["events"][0]["http_status"], 400);
+    assert_eq!(report["events"][0]["http_status"], 401);
     assert_eq!(report["events"][0]["auth_verified"], false);
     assert!(report["events"][0]["event_id"].is_null());
     assert_eq!(report["events"][1]["http_status"], 202);
     assert_eq!(report["events"][1]["auth_verified"], true);
     assert_eq!(report["events"][1]["event"]["data"]["auth_verified"], true);
+    assert_eq!(report["events"][2]["http_status"], 409);
+    assert_eq!(report["events"][2]["auth_verified"], false);
     assert_eq!(
         report["events"][1]["route"]["adapter_policy"]["status"],
         "matched"
@@ -11860,6 +11921,7 @@ fn event_service_plan_models_managed_worker_and_webhook_contracts_for_cli_and_mc
     })
     .to_string();
     let webhook_output = forge()
+        .env("FORGE_ALLOW_INSECURE_LOCAL_WEBHOOK", "true")
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -13754,6 +13816,10 @@ fn event_worker_and_service_run_honor_cooperative_stop_file() {
 
     let webhook_port = reserve_local_port();
     let webhook_output = forge()
+        .env(
+            "FORGE_TEST_STOP_WEBHOOK_SECRET",
+            "forge-test-stop-webhook-secret-32-bytes",
+        )
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -13771,6 +13837,8 @@ fn event_worker_and_service_run_honor_cooperative_stop_file() {
             "start_workflow",
             "--max-requests",
             "1",
+            "--hmac-secret-env",
+            "FORGE_TEST_STOP_WEBHOOK_SECRET",
             "--stop-file",
             stop_file.to_str().unwrap(),
             "--output",
@@ -13809,6 +13877,7 @@ fn event_worker_and_service_run_honor_cooperative_stop_file() {
     })
     .to_string();
     let webhook_service_output = forge()
+        .env("FORGE_ALLOW_INSECURE_LOCAL_WEBHOOK", "true")
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -13925,6 +13994,7 @@ event_adapters:
 
     let cli_port = reserve_local_port();
     let cli_child = StdCommand::new(assert_cmd::cargo::cargo_bin("forge"))
+        .env("FORGE_ALLOW_INSECURE_LOCAL_WEBHOOK", "true")
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -14026,6 +14096,7 @@ event_adapters:
     })
     .to_string();
     let mcp_child = StdCommand::new(assert_cmd::cargo::cargo_bin("forge"))
+        .env("FORGE_ALLOW_INSECURE_LOCAL_WEBHOOK", "true")
         .args([
             "--store",
             store.to_str().unwrap(),

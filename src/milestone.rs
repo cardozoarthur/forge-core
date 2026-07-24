@@ -1,4 +1,10 @@
 use crate::artifact::hex_sha256;
+use crate::cli_integration::{
+    build_cli_wrapper_plan, build_harness_bootstrap_report, build_headroom_stats_report,
+    run_cli_harness_exec, CliHarnessExecOptions, CliWrapperPlanOptions, CliWrapperPlanReport,
+    HarnessBootstrapOptions, HeadroomStatsOptions, HeadroomStatsReport,
+    CLI_HARNESS_HEADROOM_RUNTIME_PLAN_SCHEMA_VERSION, CLI_WRAPPER_PLAN_SCHEMA_VERSION,
+};
 use crate::executor::{
     load_executors, record_brain_session_lifecycle, record_shell_session_plan, BrainCandidate,
     BrainRouterReport, BrainSessionLifecycleOptions, BrainShellSessionSpec, ShellLaunchPlanOptions,
@@ -7,12 +13,6 @@ use crate::graph::{
     create_workflow, task, ExecutorKind, NodeBrainAgentSlotSpec, NodeBrainRoutingSpec,
 };
 use crate::handoff::build_task_handoff_with_project;
-use crate::harness::{
-    build_cli_wrapper_plan, build_harness_bootstrap_report, build_headroom_stats_report,
-    run_cli_harness_exec, CliHarnessExecOptions, CliWrapperPlanOptions, CliWrapperPlanReport,
-    HarnessBootstrapOptions, HeadroomStatsOptions, HeadroomStatsReport,
-    CLI_HARNESS_HEADROOM_RUNTIME_PLAN_SCHEMA_VERSION, CLI_WRAPPER_PLAN_SCHEMA_VERSION,
-};
 use crate::intent::parse_intent;
 use crate::interactive::{build_interactive_harness, InteractiveHarnessOptions};
 use crate::ir::{
@@ -75,6 +75,7 @@ pub struct MilestoneCapability {
     pub id: String,
     pub title: String,
     pub status: String,
+    pub required_for_promotion: bool,
     pub evidence: String,
     pub gap_before_promotion: String,
 }
@@ -472,7 +473,9 @@ pub fn build_milestone_status(version: &str) -> Result<MilestoneStatusReport> {
     let summary = summarize_capabilities(&capabilities);
     let blocked_by = capabilities
         .iter()
-        .filter(|capability| !is_promotion_ready_status(&capability.status))
+        .filter(|capability| {
+            capability.required_for_promotion && !is_promotion_ready_status(&capability.status)
+        })
         .map(|capability| capability.id.clone())
         .collect::<Vec<_>>();
     let promotable = blocked_by.is_empty();
@@ -481,7 +484,7 @@ pub fn build_milestone_status(version: &str) -> Result<MilestoneStatusReport> {
         schema_version: MILESTONE_STATUS_SCHEMA_VERSION.to_string(),
         milestone: SUPPORTED_MILESTONE.to_string(),
         release_line_boundary:
-            "0.4.x may ship scheduler, lineage, interactive and validation groundwork; 0.5 is the first line allowed to claim the AI-first creative runtime."
+            "0.5 is the first production-supported single-host Forge Core line. Replacement-grade CLI and multimodal runtimes remain optional adoption capabilities and do not block the secure orchestration core."
                 .to_string(),
         status_vocabulary: status_vocabulary(),
         summary,
@@ -498,10 +501,10 @@ pub fn build_milestone_status(version: &str) -> Result<MilestoneStatusReport> {
                     .to_string()
             },
             next_action: if promotable {
-                "Run an explicit human-controlled release promotion, version-boundary update and artifact bundle before changing the package line to 0.5."
+                "Run the production smoke, create an immutable signed tag and publish the verified release artifact bundle."
                     .to_string()
             } else {
-                "Implement the next planned creative runtime capability with tests, demos and milestone evidence before reconsidering 0.5 promotion."
+                "Close the next required core capability with tests and milestone evidence before reconsidering 0.5 promotion."
                     .to_string()
             },
         },
@@ -604,7 +607,7 @@ pub fn build_milestone_manifest_with_store(
             capability_id: capability.id.clone(),
             status: capability.status.clone(),
             summary: capability.evidence.clone(),
-            required_for_promotion: true,
+            required_for_promotion: capability.required_for_promotion,
         })
         .collect::<Vec<_>>();
     let known_gaps = status
@@ -624,7 +627,8 @@ pub fn build_milestone_manifest_with_store(
         .capabilities
         .iter()
         .filter(|capability| {
-            !capability_promotion_ready(capability, &validated_attached_evidence_kind_map)
+            capability.required_for_promotion
+                && !capability_promotion_ready(capability, &validated_attached_evidence_kind_map)
         })
         .map(|capability| capability.id.clone())
         .collect::<Vec<_>>();
@@ -3397,8 +3401,8 @@ pub fn build_replacement_cli_demo_with_options(
                 completed_through_forge: true,
                 commands: vec![
                     "forge plan --goal \"Demonstrate coding task\" --output json".to_string(),
-                    "forge context --workflow <workflow-id> --task <task-id> --budget 1200 --strict --output json".to_string(),
-                    "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --output json".to_string(),
+                    "forge context --workflow <workflow-id> --task <task-id> --budget 1200 --strict --view compact --output json".to_string(),
+                    "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --view compact --output json".to_string(),
                     "forge workflow attach-artifact --workflow <workflow-id> --path <diff-review.md> --kind cli_demo --origin forge_cli --output json".to_string(),
                     "forge validate --workflow <workflow-id> --output json".to_string(),
                     "forge inspect <workflow-id> --verbose --output json".to_string(),
@@ -3731,8 +3735,8 @@ fn build_replacement_cli_brain_handoff_demo(
     .to_string();
     let commands = vec![
         "forge workflow update-node-brain --workflow <workflow-id> --task <task-id> --default-brain codex --agent-slot agent-codex-primary=codex:primary_node_agent:handoff-rehearsal --agent-slot agent-codex-review=codex:review_agent:handoff-rehearsal --max-parallel-agents 2 --origin forge_cli --output json".to_string(),
-        "forge context --workflow <workflow-id> --task <task-id> --project-root <project-root> --budget 1200 --strict --output json".to_string(),
-        "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --output json".to_string(),
+        "forge context --workflow <workflow-id> --task <task-id> --project-root <project-root> --budget 1200 --strict --view compact --output json".to_string(),
+        "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --view compact --output json".to_string(),
         "forge shells --executor codex --workflow <workflow-id> --task <task-id> --run <run-id> --record-session --origin forge_cli --output json".to_string(),
         "forge sessions lifecycle --session codex-shell --state opened --workflow <workflow-id> --task <task-id> --run <run-id> --origin forge_cli --output json".to_string(),
         "forge sessions history --session codex-shell --output json".to_string(),
@@ -3967,6 +3971,8 @@ grep -q 'research artifacts' docs/research/findings.md
         require_token_headroom_for_forge_first: true,
         dry_run: false,
         allow_exec: true,
+        secret_env: &[],
+        secret_permissions: &[],
         project_root: Some(&project_root),
         cwd: Some(&project_root),
     })?;
@@ -4053,7 +4059,7 @@ grep -q 'research artifacts' docs/research/findings.md
         completed_through_forge: true,
         commands: vec![
             "forge workflow update-node-brain --workflow <workflow-id> --task <task-id> --default-brain codex --agent-slot agent-codex-coder=codex:project_coder:real-project-demo --agent-slot agent-codex-researcher=codex:project_researcher:real-project-demo --max-parallel-agents 2 --origin forge_cli --output json".to_string(),
-            "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --output json".to_string(),
+        "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --view compact --output json".to_string(),
             "forge harness bootstrap --executor sh --shim-dir <project-root>/.forge/shims --project-root <project-root> --apply --approved-by forge_cli_demo --output json".to_string(),
             "forge harness exec --executor sh --project-root <project-root> --workflow <workflow-id> --task <task-id> --run <run-id> --forge-first --execute --allow-exec -- /bin/sh -c <real-project-code-and-research-script>".to_string(),
             "forge harness retrieve-headroom --ref <stdout-retrieval-ref> --output json".to_string(),
@@ -4350,6 +4356,8 @@ printf 'connected_external_brain_stub_ok\n'
         require_token_headroom_for_forge_first: true,
         dry_run: false,
         allow_exec: true,
+        secret_env: &[],
+        secret_permissions: &[],
         project_root: Some(&project_root),
         cwd: Some(&project_root),
     })?;
@@ -4582,7 +4590,7 @@ printf 'connected_external_brain_stub_ok\n'
             "forge workflow update-node-brain --workflow <workflow-id> --task <task-id> --default-brain {brain_id} --agent-slot agent-external-brain-coder={brain_id}:connected_adapter_coder:connected-external-brain-demo --agent-slot agent-external-brain-researcher={brain_id}:connected_adapter_researcher:connected-external-brain-demo --max-parallel-agents 2 --origin forge_cli --output json"
         ),
         format!(
-            "forge task handoff --workflow <workflow-id> --task <task-id> --executor {brain_id} --project-root <project-root> --output json"
+            "forge task handoff --workflow <workflow-id> --task <task-id> --executor {brain_id} --project-root <project-root> --view compact --output json"
         ),
         "forge harness bootstrap --executor sh --shim-dir <project-root>/.forge/shims --project-root <project-root> --apply --approved-by forge_cli_demo --output json".to_string(),
         if provider_selection.is_some() {
@@ -4663,6 +4671,7 @@ fn rehearsal_brain_router() -> BrainRouterReport {
             "A workflow run can switch the active execution brain through Forge-owned routing without losing workflow lineage."
                 .to_string(),
         selected_brain: Some("codex".to_string()),
+        model_decision: None,
         forge_controlled_surfaces: vec![
             "workflow_graph".to_string(),
             "memory".to_string(),
@@ -4947,6 +4956,8 @@ fn build_replacement_cli_executor_project_demo(
         require_token_headroom_for_forge_first: true,
         dry_run: false,
         allow_exec: true,
+        secret_env: &[],
+        secret_permissions: &[],
         project_root: Some(&project_root),
         cwd: Some(&project_root),
     })?;
@@ -5243,14 +5254,14 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
             "0.4.130 adds `forge milestone export-demo` as a structured export/demo surface that creates a scheduled daily research workflow with a screen creative artifact, a document creative artifact and a design token collection, proving design/tokens/component export lineage. The demo workflow can be inspected, its creative artifacts listed/inspected and its design tokens resolved/promoted. Daily Goal smoke produces Markdown/PDF artifacts and Telegram delivery records through Forge-owned workflow semantics across all cycles.",
             "Full rendered previews and richer browser-based editing demos remain for a later 0.5 milestone iteration.",
         ),
-        capability(
+        optional_capability(
             "replacement_grade_cli",
             "Replacement-grade Forge CLI",
             "groundwork",
             "0.4.x validates the no-argument interactive home, slash commands, conversational routing, human decisions, async run handoff and observability surfaces. 0.4.144 adds `forge milestone cli-demo` and MCP tool `forge.milestone.cli_demo`, which generate deterministic Forge-first demo evidence for coding, harness/headroom/session lifecycle control, research/artifact and long-running async flows, including `forge.milestone.patch_lifecycle_demo.v1` with plan/review/diff/apply/revert/restore artifact lineage in an isolated fixture repo. 0.4.145 adds executor-aware, runtime-aware and cost-sensitive routing classification to the interactive conversational router, plus creative artifact and design token dependency fields to `forge inspect` output. 0.4.146 adds registry-level run health summaries so `forge list` and `forge inspect` expose running, stale and missing-heartbeat runs even when `active_run_count` is zero. 0.4.148 adds process-liveness-aware run activity so a recorded live executor PID keeps long-running handoffs active after heartbeat TTL expiry instead of forcing stale recovery. 0.4.150 adds `forge patch plan` and MCP tool `forge.patch.plan` as a plan-only file-editing contract with repo-relative permission gates, file snapshots, diff-review commands, validation commands and workflow artifact lineage. 0.4.151 adds apply artifacts and guarded revert proposals so rollback intent is recorded without silently executing destructive file restores. 0.4.152 adds in-TUI `/patch plan`, `/patch apply` and `/patch revert` slash commands to the interactive REPL with human approval prompts before execution, plus two-token slash command routing support. 0.4.153 adds in-TUI `/context` and `/handoff` commands so operators can inspect bounded context routes and explicitly approve executor handoff lease acquisition from inside `forge`. 0.4.154 exposes `forge.interactive.home`, `forge.interactive.slash_commands` and `forge.interactive.route` through MCP so agents can inspect and use the same interactive command/chat routing model without taking over orchestration. The patch lifecycle now includes `forge patch review`, MCP `forge.patch.review` and `/patch review`, which persist `forge.patch_review.v1` evidence with Git diff/status/check summaries before apply approval while keeping source files unchanged, `forge patch diff`, MCP `forge.patch.diff` and `/patch diff`, which persist `forge.patch_diff.v1` evidence for read-only multi-file diff navigation, and `forge patch restore`, MCP `forge.patch.restore` and `/patch restore`, which persist `forge.patch_restore.v1` evidence for explicit, approved repo-local file restoration from a revert artifact. The interactive home now carries `forge.interactive.ui_composition.v1` with ordered regions, Core widgets, safe Addon widgets and refresh/inspection commands for TUI/web/agent dashboard composition, plus `forge.interactive.structured_logs.v1` with recent event sequence, workflow, category, severity, origin, correlation, observability and payload preview for timeline drill-downs; the dedicated `forge interactive readiness`/`forge.interactive.readiness` surface exposes executor, runtime, brain, shell, Forge-controlled surface and harness readiness with corrective commands before shell or handoff without loading the full home, the dedicated `forge interactive harness`/`forge.interactive.harness` surface exposes a consolidated harness center with mode, doctor, shim status, wrap-plan, `headroom_plan`, `session_lifecycle_plan` and token-headroom preview without loading the full home or executing child CLIs, the dedicated `forge interactive sessions`/`forge.interactive.sessions` surface exposes provider/session readiness, lifecycle state, per-session `operation_plan`, shell history commands and next lifecycle controls without opening or attaching shells, the dedicated `forge interactive command-palette`/`forge.interactive.command_palette` surface exposes grouped contextual navigation, workflow, patch, permission, harness, session and observability actions with mutation and approval flags without mutating state, `forge interactive action-registry`/`forge.interactive.action_registry` plus `/actions [query]` expose a strict action registry for TUI/web/agent clients, `forge interactive action-invocation`/`forge.interactive.action_invocation` plus `/action <action-id>` resolve one selected action into a non-executing invocation plan, the dedicated `forge interactive autocomplete`/`forge.interactive.autocomplete` surface exposes read-only slash-command, command-palette and `/action <partial>` action-id suggestions for partial operator input with score, source panel, mutation and approval flags, the dedicated `forge interactive patch-workbench`/`forge.interactive.patch_workbench` surface exposes Git status, file lanes, bounded inline `diff_preview`, multi-file `diff_review_queue`, `forge.interactive.patch_edit_intake.v1` required inputs and form readiness, diff stat/check, explicit `approval_flow` review/approval/rollback gates and permission-gated patch lifecycle commands for native file-editing and rich diff-review UI without mutating files, the dedicated `forge interactive permissions`/`forge.interactive.permissions` surface exposes tenant memberships, Addon permission authorizations, pending/timed-out human approvals and granular next-action commands without mutating state, the dedicated `forge interactive workflow-dag`/`forge.interactive.workflow_dag` surface exposes dependency nodes, edges, readiness, human waits and drill-down commands without loading the full home, the dedicated `forge interactive structured-logs`/`forge.interactive.structured_logs` surface exposes the same log contract without loading the full home, and the home plus dedicated `forge interactive task-board`/`forge.interactive.task_board` surface also carry `forge.interactive.task_board.v1`, giving TUI/web/agent dashboards workflow lanes, operable per-task cards, ready handoffs, checkpoint resume candidates, human waits, artifacts and direct next-action commands. The harness also emits guarded CLI execution receipts with Forge-first wrapper env, workflow/task/run lineage, non-destructive PATH shim installation, automatic native CLI discovery that excludes the shim directory, read-only shim status audits for PATH precedence/ownership/recursion, executor-sync projection of Forge-first shim readiness into brain/shell entrypoints, plan-only `forge shells` / MCP `forge.shell.launch_plan` launch reports with readiness/preflight/context/handoff/heartbeat gates, `forge.shell.record_plan` receipts that write `shell_launch_planned` global events, `forge sessions` / MCP `forge.sessions` reports with session lifecycle state, `forge.brain_session_operation_plan.v1` recommendations, `forge sessions lifecycle` / MCP `forge.session.lifecycle` audit-only lifecycle receipts, ordered transition policy with `previous_state`, `lifecycle_sequence`, invalid transition rejection, `lifecycle_policy.allowed_next_states`, next lifecycle commands and provider/state/readiness filters in `forge sessions` plus MCP `forge.sessions`, and `forge sessions history`, MCP `forge.session.history` and `/sessions history` for per-session chronological audit history, `forge.harness.exec_event.v1` global events for guarded CLI receipts with task/node correlation, output hashes/excerpts and reversible stdout/stderr token-headroom reports for authorized real child execution, project `.forge/harness.json` `require_lineage_for_exec` policy that returns `harness_exec_blocked_by_project_policy` when real child execution lacks workflow/task/run lineage, `forge harness doctor` plus MCP `forge.harness.doctor` consolidated readiness audits and the interactive home `harness_doctor_panel`, `forge harness mode --project-root` plus MCP `forge.harness.mode` `project_root` diagnostics for auditing another project before launching a brain CLI, and `forge harness wrap-plan --project-root` plus MCP `forge.harness.wrap_plan` `project_root` support so wrapper planning respects a remote project's Forge-first defaults before shell execution, and `forge harness install-shims --project-root` plus MCP `forge.harness.install_shims` `project_root` support so shim installation uses the same remote project defaults, and `forge harness exec --project-root` plus MCP `forge.harness.exec` `project_root` support so execution uses remote defaults and policy without changing child `cwd`. The `forge milestone cli-demo` output now also includes `forge.milestone.executor_project_demo.v1`, proving a deterministic executor can mutate an isolated project only after governed harness bootstrap, lineage-required execution, event recording and stdout token-headroom retrieval, `forge.milestone.brain_handoff_demo.v1`, proving Forge-owned context, node-brain routing, task handoff, plan-only shell launch and audit-only session lifecycle for Codex without child CLI/model execution, `forge.milestone.headroom_runtime_wrapper_demo.v1`, proving the non-executing Forge-first wrapper contract with Headroom interception points, content routes, reversible retrieval store, MCP retrieval tool and env overlay, plus `forge.milestone.connected_external_brain_provider.v1`, proving provider-output schema validation, command/stdout hashes, `.forge/connected-brain-runtimes.json` project-manifest selection and explicit no-real-provider-execution evidence unless the manifest/output declare and approve model execution. This is enabling groundwork, not proof that `forge` can replace Codex/OpenCode for daily permission-gated shell work and end-to-end coding/research workflows.",
             "Continue from deterministic `forge.milestone.real_project_workflow_demo.v1`, connected `forge.milestone.connected_external_brain_demo.v1` adapter evidence and `forge.milestone.connected_external_brain_provider.v1` provider-contract validation into real external model/provider execution on broader project coding/research workflows, and continue hardening terminal file editing UX before promoting this beyond groundwork.",
         ),
-        capability(
+        optional_capability(
             "experimental_multimodal_runtime",
             "Experimental multimodal runtime",
             "groundwork",
@@ -5892,9 +5903,22 @@ fn capability(
         id: id.to_string(),
         title: title.to_string(),
         status: status.to_string(),
+        required_for_promotion: true,
         evidence: evidence.to_string(),
         gap_before_promotion: gap_before_promotion.to_string(),
     }
+}
+
+fn optional_capability(
+    id: &str,
+    title: &str,
+    status: &str,
+    evidence: &str,
+    gap_before_promotion: &str,
+) -> MilestoneCapability {
+    let mut capability = capability(id, title, status, evidence, gap_before_promotion);
+    capability.required_for_promotion = false;
+    capability
 }
 
 fn summarize_capabilities(capabilities: &[MilestoneCapability]) -> MilestoneStatusSummary {

@@ -67,6 +67,17 @@ fn forge() -> Command {
     Command::cargo_bin("forge").expect("forge binary should build")
 }
 
+fn stored_run_id_for_workflow(store_path: &std::path::Path, workflow_id: &str) -> String {
+    let connection = Connection::open(store_path).unwrap();
+    connection
+        .query_row(
+            "SELECT id FROM runs WHERE workflow_id = ?1",
+            [workflow_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 // ============================================================================
 // FEATURE 1: CLI & Output Formatting
 // ============================================================================
@@ -571,7 +582,6 @@ fn test_f3_cognitive_task_handoff_halts() {
             "teamwork",
             "--goal",
             "Perform research write up and analysis on system metrics",
-            "--detached",
             "--output",
             "json",
         ])
@@ -582,7 +592,9 @@ fn test_f3_cognitive_task_handoff_halts() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let run_id = json["run_id"].as_str().unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let run_id = stored_run_id_for_workflow(&store_path, workflow_id);
+    let run_id = run_id.as_str();
 
     let mut step_json: serde_json::Value = serde_json::Value::Null;
     for _ in 0..10 {
@@ -622,7 +634,6 @@ fn test_f3_task_lease_acquisition() {
             "teamwork",
             "--goal",
             "Run parallel code audits",
-            "--detached",
             "--output",
             "json",
         ])
@@ -633,8 +644,9 @@ fn test_f3_task_lease_acquisition() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let run_id = json["run_id"].as_str().unwrap();
     let workflow_id = json["workflow_id"].as_str().unwrap();
+    let run_id = stored_run_id_for_workflow(&store_path, workflow_id);
+    let run_id = run_id.as_str();
 
     let step_output = forge()
         .arg("--store")
@@ -686,7 +698,6 @@ fn test_f3_checkpoint_saving_and_update() {
             "teamwork",
             "--goal",
             "Generate layout and compile code",
-            "--detached",
             "--output",
             "json",
         ])
@@ -697,8 +708,9 @@ fn test_f3_checkpoint_saving_and_update() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let run_id = json["run_id"].as_str().unwrap();
     let workflow_id = json["workflow_id"].as_str().unwrap();
+    let run_id = stored_run_id_for_workflow(&store_path, workflow_id);
+    let run_id = run_id.as_str();
     let first_task_id = "task-005";
     wait_for_task_ready(&store_path, run_id, first_task_id);
 
@@ -2098,7 +2110,7 @@ fn test_t4_scenario_1_jwt_auth() {
     let output = forge()
         .arg("--store")
         .arg(store_path.to_str().unwrap())
-        .args(["teamwork", "--goal", goal, "--detached", "--output", "json"])
+        .args(["teamwork", "--goal", goal, "--output", "json"])
         .assert()
         .success()
         .get_output()
@@ -2107,7 +2119,8 @@ fn test_t4_scenario_1_jwt_auth() {
 
     let plan_json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = plan_json["workflow_id"].as_str().unwrap();
-    let run_id = plan_json["run_id"].as_str().unwrap();
+    let run_id = stored_run_id_for_workflow(&store_path, workflow_id);
+    let run_id = run_id.as_str();
 
     // Verify Roster
     let roles = plan_json["roster"]["roles"].as_array().unwrap();
@@ -2235,7 +2248,7 @@ fn test_t4_scenario_2_csv_pipeline() {
     let output = forge()
         .arg("--store")
         .arg(store_path.to_str().unwrap())
-        .args(["teamwork", "--goal", goal, "--detached", "--output", "json"])
+        .args(["teamwork", "--goal", goal, "--output", "json"])
         .assert()
         .success()
         .get_output()
@@ -2244,7 +2257,8 @@ fn test_t4_scenario_2_csv_pipeline() {
 
     let plan_json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = plan_json["workflow_id"].as_str().unwrap();
-    let run_id = plan_json["run_id"].as_str().unwrap();
+    let run_id = stored_run_id_for_workflow(&store_path, workflow_id);
+    let run_id = run_id.as_str();
 
     // 2. Attach source CSV
     let csv_file_path = temp.path().join("source.csv");
@@ -2503,7 +2517,7 @@ fn test_t4_scenario_5_adversarial_audit() {
     let output = forge()
         .arg("--store")
         .arg(store_path.to_str().unwrap())
-        .args(["teamwork", "--goal", goal, "--detached", "--output", "json"])
+        .args(["teamwork", "--goal", goal, "--output", "json"])
         .assert()
         .success()
         .get_output()
@@ -2512,7 +2526,8 @@ fn test_t4_scenario_5_adversarial_audit() {
 
     let plan_json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = plan_json["workflow_id"].as_str().unwrap();
-    let run_id = plan_json["run_id"].as_str().unwrap();
+    let run_id = stored_run_id_for_workflow(&store_path, workflow_id);
+    let run_id = run_id.as_str();
 
     // Verify Roster contains Orchestrator and Auditor
     let roles = plan_json["roster"]["roles"].as_array().unwrap();

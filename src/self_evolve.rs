@@ -3,7 +3,9 @@ use crate::graph::{
     create_workflow, task, ExecutorKind, LoopSpec, ProductDecision, Workflow, WorkflowRevision,
 };
 use crate::intent::parse_intent;
-use crate::request::{create_run_record, heartbeat_request, save_run_record, update_run_status};
+use crate::request::{
+    create_run_record, heartbeat_request, save_run_record, update_run_and_workflow_status,
+};
 use crate::storage::ForgeStore;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -1022,10 +1024,6 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                 std::process::id().into(),
                 "forge_cli",
             )?;
-            if let Ok(mut wf) = store.load_workflow(&workflow.id) {
-                wf.status = "running".to_string();
-                let _ = store.save_workflow(&wf);
-            }
             let execution = match execute_cycle_with_fallback(
                 store,
                 &options.repo,
@@ -1036,11 +1034,8 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             ) {
                 Ok(execution) => execution,
                 Err(e) => {
-                    let _ = update_run_status(store, &run.run_id, "failed", "forge_cli");
-                    if let Ok(mut wf) = store.load_workflow(&workflow.id) {
-                        wf.status = "failed".to_string();
-                        let _ = store.save_workflow(&wf);
-                    }
+                    let _ =
+                        update_run_and_workflow_status(store, &run.run_id, "failed", "forge_cli");
                     return Err(e.context(format!("executor cycle {cycle} failed")));
                 }
             };
@@ -1066,10 +1061,6 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                 std::process::id().into(),
                 "forge_cli",
             )?;
-            if let Ok(mut wf) = store.load_workflow(&workflow.id) {
-                wf.status = cycle_workflow_status.to_string();
-                let _ = store.save_workflow(&wf);
-            }
             if validation_passed {
                 self_update = run_self_update(&options.repo, &options)?;
                 if has_changes(&options.repo)? {
@@ -1187,11 +1178,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
     let has_failures = cycle_reports.iter().any(|r| !r.validation_passed);
     if !options.dry_run {
         let final_status = if has_failures { "failed" } else { "completed" };
-        update_run_status(store, &run.run_id, final_status, "forge_cli")?;
-        if let Ok(mut wf) = store.load_workflow(&workflow.id) {
-            wf.status = final_status.to_string();
-            let _ = store.save_workflow(&wf);
-        }
+        update_run_and_workflow_status(store, &run.run_id, final_status, "forge_cli")?;
     }
 
     let publication = cycle_reports

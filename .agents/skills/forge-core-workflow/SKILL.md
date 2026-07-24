@@ -22,7 +22,7 @@ This returns a workflow ID and a list of structured tasks.
 
 Before invoking any task execution node, load and bind context data. Bounded context packages must stay small and respect local budget limits:
 ```bash
-forge context --workflow <workflow-id> --task <task-id> --project-root <project-root> --budget 1200 --strict --output json
+forge context --workflow <workflow-id> --task <task-id> --project-root <project-root> --budget 1200 --strict --view compact --output json
 ```
 
 This commands Forge to route relevant memory, environment variables, and state markers to the executing agent.

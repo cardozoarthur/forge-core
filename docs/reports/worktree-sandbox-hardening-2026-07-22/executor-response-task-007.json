@@ -1,0 +1,22 @@
+{
+  "schema_version": "forge.executor_response.v1",
+  "task_id": "task-007",
+  "status": "completed",
+  "artifacts": [
+    "docs/reports/worktree-sandbox-hardening-2026-07-22/artifact-manifest.json"
+  ],
+  "trace_ref": "docs/reports/worktree-sandbox-hardening-2026-07-22/execution-trace.md",
+  "cost": {
+    "estimated_usd": 0.0,
+    "tokens_in": 0,
+    "tokens_out": 0
+  },
+  "validation_evidence": [
+    {
+      "command": "jq -r '.artifacts[] | \"\\(.sha256)  \\(.path)\"' artifact-manifest.json | sha256sum -c -",
+      "exit_code": 0,
+      "summary": "Os seis artefatos estáveis existem nos caminhos relativos registrados e todos os hashes SHA-256 conferem."
+    }
+  ],
+  "rework_items": []
+}

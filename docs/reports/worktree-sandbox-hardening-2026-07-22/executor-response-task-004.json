@@ -1,0 +1,22 @@
+{
+  "schema_version": "forge.executor_response.v1",
+  "task_id": "task-004",
+  "status": "completed",
+  "artifacts": [
+    "docs/reports/worktree-sandbox-hardening-2026-07-22/context-package.json"
+  ],
+  "trace_ref": "docs/reports/worktree-sandbox-hardening-2026-07-22/execution-trace.md",
+  "cost": {
+    "estimated_usd": 0.0,
+    "tokens_in": 0,
+    "tokens_out": 0
+  },
+  "validation_evidence": [
+    {
+      "command": "jq -e '(.packages | length == 4) and ([.packages[].context_ready] | all) and ([.packages[].dependency_ready] | all) and ([.packages[].omitted_required_sections | length] | all(. == 0))' context-package.json",
+      "exit_code": 0,
+      "summary": "Quatro context packages são task-local, content-addressed, dependency-ready e bounded; o pacote task-004 foi expandido somente até 1.646 bytes conforme reparos recomendados."
+    }
+  ],
+  "rework_items": []
+}

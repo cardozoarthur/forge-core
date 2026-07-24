@@ -15,7 +15,7 @@ Forge Core is the workflow orchestration authority. Use `forge plan --goal "<obj
 ## Required First Steps
 
 1. Run `forge plan --goal "<human objective>" --output json`.
-2. Use `forge context --workflow <id> --task <task-id> --project-root <project-root> --budget <bytes> --strict --output json` before giving an agent task-specific context.
+2. Use `forge context --workflow <id> --task <task-id> --project-root <project-root> --budget <bytes> --strict --view compact --output json` before giving an agent task-specific context.
 3. Use `forge validate --workflow <id> --output json` before promotion.
 
 ## Domain Skill Index
@@ -23,7 +23,8 @@ Forge Core is the workflow orchestration authority. Use `forge plan --goal "<obj
 - `forge-core-runtime`: durable workflows, request lifecycle, handoff, schedules, validation and rework.
 - `forge-core-context`: bounded context, memory policy/search, deferred discovery and node-scoped context routing.
 - `forge-core-artifacts`: workflow artifacts, tags, documents, reports, fetch/list and lineage.
-- `forge-core-executors`: brains, sessions, harness, executor quota, `ai-limits`, CLI factory and model fallback.
+- `forge-core-executors`: brains, sessions, CLI integration through the stable `forge harness` compatibility namespace, executor quota, `ai-limits`, CLI factory and model fallback.
+- `forge-core-workspaces`: Git worktree registration/binding, `.forge/worktree.toml`, path guardrails, blocking predecessor tasks and preview/test sandboxes.
 - `forge-core-addons-ui`: Addons, renderer events, operational TUI/web surfaces and interactive panels.
 - `forge-core-documentation`: standards for documenting workflows, tasks, and nodes, including schemas and contract definitions.
 - `forge-core-agent`: agent configuration, brain/soul profiles, executor options, and adapter credentials/quotas.

@@ -1057,7 +1057,8 @@ fn create_chat_session_state(project_root: Option<&Path>) -> Result<ForgeChatSes
         updated_at: now,
         conversation_history: Vec::new(),
     };
-    persist_chat_session_record(project_root, &record)?;
+    let session_path = chat_session_path(project_root, &record.chat_session_code);
+    persist_chat_session_record(Some(&session_path), &record)?;
     Ok(record)
 }
 
@@ -2175,6 +2176,24 @@ mod tests {
         assert_eq!(context.len(), 2);
         assert_eq!(context[0], "user: Meu nome é Arthur");
         assert_eq!(context[1], "assistant: Prazer");
+    }
+
+    #[test]
+    fn new_chat_session_is_persisted_only_in_chat_session_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+
+        let session = create_chat_session_state(Some(project_root)).unwrap();
+
+        let session_dir = chat_session_directory(Some(project_root));
+        assert!(session_dir
+            .join(format!("{}.json", session.chat_session_code))
+            .is_file());
+        assert!(session_dir.join(CHAT_SESSION_LATEST_FILENAME).is_file());
+        assert!(!project_root
+            .join(format!("{}.json", session.chat_session_code))
+            .exists());
+        assert!(!project_root.join(CHAT_SESSION_LATEST_FILENAME).exists());
     }
 
     #[test]

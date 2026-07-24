@@ -5,40 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub const SKILL_NAME: &str = "forge-core";
 
-pub const SKILL_MD: &str = r#"---
-name: forge-core
-description: Lightweight Forge Core entrypoint. Load the domain skill that matches the node before loading detailed instructions.
-license: MIT
-compatibility: codex, opencode, agy, claude
-metadata:
-  runtime: rust
-  cli: forge
----
-
-## What Forge Core Does
-
-Forge Core is the workflow orchestration authority. Use `forge plan --goal "<objective>" --output json` to turn work into an auditable workflow, then load only the domain skill needed by the current node.
-
-## Required First Steps
-
-1. Run `forge plan --goal "<human objective>" --output json`.
-2. Use `forge context --workflow <id> --task <task-id> --project-root <project-root> --budget <bytes> --strict --output json` before giving an agent task-specific context.
-3. Use `forge validate --workflow <id> --output json` before promotion.
-
-## Domain Skill Index
-
-- `forge-core-runtime`: durable workflows, request lifecycle, handoff, schedules, validation and rework.
-- `forge-core-context`: bounded context, memory policy/search, deferred discovery and node-scoped context routing.
-- `forge-core-artifacts`: workflow artifacts, tags, documents, reports, fetch/list and lineage.
-- `forge-core-executors`: brains, sessions, harness, executor quota, `ai-limits`, CLI factory and model fallback.
-- `forge-core-addons-ui`: Addons, renderer events, operational TUI/web surfaces and interactive panels.
-
-Do not load every domain skill by default. Load the smallest skill matching the current workflow node, then ask Forge for explicit expansion commands when more information is required.
-
-## Skill Modularity Rule
-
-Do not grow Forge into a giant all-purpose skill. Keep the entrypoint and each domain skill compact. When a skill starts covering multiple domains, unrelated behaviors or a long command encyclopedia, split it into smaller domain skills or single-function skills and keep this entrypoint as the router.
-"#;
+pub const SKILL_MD: &str = include_str!("../.agents/skills/forge-core/SKILL.md");
 
 pub const AGENT_REFERENCE_MD: &str = r#"---
 name: forge-core
@@ -54,6 +21,8 @@ metadata:
 
 Forge Core is an operational, strategic and visual assisted-operations runtime, not a chatbot wrapper and not a human-flow builder. Use it when an objective needs to become a persistent execution graph that can mix AI steps, deterministic non-AI steps, scheduled waits/cron, notifications, code/subworkflow execution, live human/AI modification, visual tasks/subtasks and Forge-owned creative artifacts such as whiteboards, screens, components, wireframes, flows and design tokens.
 
+The internal Rust layer that integrates external brain CLIs is `cli_integration`. The existing `forge harness` commands, `forge.harness.*` schemas/MCP tools and Rust alias remain stable compatibility contracts; they are not a second orchestration authority.
+
 ## Required Workflow
 
 1. Run `forge plan --goal "<human objective>" --output json`.
@@ -62,7 +31,7 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 4. Inspect the generated atomic tasks, task goals, subtasks, impediments, async policy and validation rules.
 5. Use `forge workflow update-goal ... --origin codex|opencode|agy|forge_cli|skill` when the human changes direction during execution.
 6. Use `forge workflow attach-artifact ... --tag <tag> --origin codex|opencode|agy|forge_cli|skill` when new artifacts appear during execution; tags should describe artifact kind, domain, customer/account, workflow stage and search intent.
-7. Use `forge context --workflow <id> --task <task-id> --project-root <project-root> --budget <bytes> --strict --output json` before giving an agent task-specific context; include `--project-root` whenever project `.forge/memory-governance.json` should affect the context memory policy. Read `context_router` (`forge.context.router.v1`) and `deferred_discovery` (`forge.context.deferred_discovery.v1`) before discovering MCP servers, skills, memory or CRM records: only router-selected sources belong in the current node packet, and deferred route groups must wait for a later node or an explicit Forge expansion command.
+7. Use `forge context --workflow <id> --task <task-id> --project-root <project-root> --budget <bytes> --strict --view compact --output json` before giving an agent task-specific context; include `--project-root` whenever project `.forge/memory-governance.json` should affect the context memory policy. Read the compact `selected_source_ids`, `deferred_source_ids`, `expand_commands` and `guardrail` before discovering MCP servers, skills, memory or CRM records: only router-selected sources belong in the current node packet, and deferred sources must wait for a later node or an explicit Forge expansion command. When blocked, work only the bounded predecessor frontier in `guardrail.next_commands`, then request compact context again after state changes; never hand off the still-blocked current task. For full-view routing audits, inspect `context_router` (`forge.context.router.v1`) and `deferred_discovery` (`forge.context.deferred_discovery.v1`), including its `deferred_sources`; request the full context view only for routing audit or replay diagnostics.
 8. Use `forge memory policy --project-root <project-root> --output json` and `forge memory search --workflow <workflow-id> --query "<query>" --memory-level none|session|short_term|standard|full|admin --scope global|organization|project|processing --organization <organization-id> --audience public|internal|manager|private --output json` before loading broad historical context. Forge memory is file-first, level-scoped, workflow/tenant-bound when a workflow is supplied, and visibility-gated; search returns snippets and line ranges, not whole files. Configure project defaults explicitly with `forge memory configure --project-root <project-root> ... --approved-by <operator> --reason "<reason>"` or MCP `forge.memory.configure`; when `memory_level`, `scope` and `audience` are omitted, search uses `.forge/memory-governance.json` defaults for that project.
 9. Run `forge validate --workflow <id> --output json` before promotion. If `rework_tasks` is not empty, return those tasks to work.
 10. Run `forge improve candidates --output json` or `forge.improve.candidates` before choosing a workflow to mutate; use its run/event/outcome/parallelization/cost evidence to decide whether to recover a stale run, parallelize ready handoffs, replace avoidable AI work with command nodes, or generate a controlled experiment.
@@ -334,7 +303,7 @@ forge runtimes --output json
 forge workflow update-goal --workflow <workflow-id> --goal "new goal" --origin codex --output json
 forge workflow attach-artifact --workflow <workflow-id> --path ./artifact.md --kind report --tag <tag> --origin opencode --output json
 forge mcp call forge.workflow.attach_artifact --input '{"workflow_id":"<workflow-id>","path":"./artifact.md","kind":"report","tags":["report","crm"],"origin":"codex"}' --output json
-forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","task_id":"task-001","budget":1200,"project_root":"<project-root>"}' --output json
+forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","task_id":"task-001","budget":1200,"project_root":"<project-root>","view":"compact"}' --output json
 forge mcp call forge.task.handoff --input '{"workflow_id":"<workflow-id>","task_id":"task-001","executor":"codex","budget":1200,"project_root":"<project-root>"}' --output json
 /context --workflow <workflow-id> --task task-001 --budget 1200 --strict
 /handoff --workflow <workflow-id> --task task-001 --executor codex --budget 1200
@@ -368,7 +337,7 @@ forge mcp call forge.schedule.scan_due --input '{"executor":"mcp-scheduler","ttl
 forge runtime guard --substrate knative --resource service/forge-node --namespace forge --action update --owner forge --output json
 forge list --output json
 forge status --workflow <workflow-id> --output json
-forge context --workflow <workflow-id> --task task-001 --project-root <project-root> --budget 1200 --strict --output json
+forge context --workflow <workflow-id> --task task-001 --project-root <project-root> --budget 1200 --strict --view compact --output json
 forge run --workflow <workflow-id> --simulate --output json
 forge validate --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
@@ -432,7 +401,7 @@ Use:
 ```bash
 forge request start --goal "<objective>" --origin codex --output json
 forge request step --run <run-id> --executor codex --ttl-seconds 300 --origin codex --output json
-forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --output json
+forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --view compact --output json
 forge mcp call forge.task.handoff --input '{"workflow_id":"<workflow-id>","task_id":"<task-id>","executor":"codex"}' --output json
 forge request complete-task --run <run-id> --task <task-id> --executor codex --summary "<validated evidence>" --origin codex --output json
 forge schedule worker-status --output json
@@ -442,28 +411,11 @@ forge validate --workflow <workflow-id> --output json
 Completion means the task goal is definitively ready and validation has no rework tasks. If validation fails, return the task to work with the rework reason.
 "#;
 
-const CONTEXT_SKILL_MD: &str = r#"---
-name: forge-core-context
-description: Forge Core bounded context, memory, deferred discovery and node-scoped context routing.
-license: MIT
-compatibility: codex, opencode, agy, claude
----
-
-## Context Contract
-
-Do not rediscover all MCP servers, skills, memory or CRM records for every node. Ask Forge for a bounded context packet and obey its router.
-
-Use:
-
-```bash
-forge context --workflow <workflow-id> --task <task-id> --project-root <project-root> --budget 1200 --strict --output json
-forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","task_id":"<task-id>","project_root":"<project-root>","strict":true}' --output json
-forge memory policy --project-root <project-root> --output json
-forge memory search --workflow <workflow-id> --query "<query>" --scope project --audience manager --memory-level short_term --output json
-```
-
-Read `forge.context.router.v1`, `context_router`, `deferred_discovery`, `selected_source_ids`, `deferred_source_ids`, `search_tags` and `expand_commands` before loading more context. CRM/user records require a bound subject marker such as `bound_crm_subject`, `user_id`, `lead_id`, `contact_id` or `account_id`.
-"#;
+const CONTEXT_SKILL_MD: &str = include_str!("../.agents/skills/forge-core-context/SKILL.md");
+const DOCUMENTATION_SKILL_MD: &str =
+    include_str!("../.agents/skills/forge-core-documentation/SKILL.md");
+const AGENT_SKILL_MD: &str = include_str!("../.agents/skills/forge-core-agent/SKILL.md");
+const WORKFLOW_SKILL_MD: &str = include_str!("../.agents/skills/forge-core-workflow/SKILL.md");
 
 const ARTIFACT_SKILL_MD: &str = r#"---
 name: forge-core-artifacts
@@ -490,7 +442,7 @@ Use tags for artifact kind, workflow stage, account/customer, domain and search 
 
 const EXECUTOR_SKILL_MD: &str = r#"---
 name: forge-core-executors
-description: Forge Core executor/brain routing, sessions, harness, quota policy, ai-limits and CLI factory.
+description: Forge Core executor/brain routing, sessions, CLI integration, quota policy, ai-limits and CLI factory.
 license: MIT
 compatibility: codex, opencode, agy, claude
 ---
@@ -498,6 +450,8 @@ compatibility: codex, opencode, agy, claude
 ## Executor Contract
 
 Forge chooses and audits execution engines. Do not use a detected CLI until executor policy marks it allowed.
+
+The internal module is `cli_integration`. `forge harness` and `forge.harness.*` remain the stable CLI/schema/MCP compatibility namespace for this layer.
 
 Use:
 
@@ -513,6 +467,54 @@ forge cli create --name <name> --goal "<goal>" --source <source> --command <comm
 ```
 
 Use `ai-limits` evidence to stop or fall back before burning exhausted Codex/Antigravity quota. Model providers remain interchangeable; Forge keeps workflow state and validation gates.
+"#;
+
+const WORKSPACES_SKILL_MD: &str = r#"---
+name: forge-core-workspaces
+description: Git worktree binding, approved path policy, and preview/test sandbox execution for Forge Core.
+license: MIT
+compatibility: codex, opencode, agy, claude
+---
+
+## Workspace Contract
+
+Git owns checkout state. Forge's central store owns worktree bindings, revisions, context, handoffs and sandbox receipts. Keep one absolute store outside disposable worktrees; a task binding overrides the workflow binding.
+
+## Required Flow
+
+```bash
+STORE=/absolute/path/to/forge.sqlite
+WT=<worktree-id-or-path>
+WF=<workflow-id>
+TASK=<task-id>
+
+forge --store "$STORE" worktree discover --repository <repository-root> --output json
+forge --store "$STORE" worktree create --repository <repository-root> --path <worktree-root> --branch <branch> --start-point <git-ref> --allow-repository-mutation --output json
+forge --store "$STORE" worktree register --path <existing-worktree> --output json
+forge --store "$STORE" worktree init --worktree "$WT" --allow-worktree-write --output json
+forge --store "$STORE" worktree approve-config --worktree "$WT" --allow-guardrail-update --approved-by <operator-id> --output json
+forge --store "$STORE" plan --goal "<goal>" --worktree "$WT" --output json
+forge --store "$STORE" worktree bind --worktree "$WT" --workflow "$WF" --task "$TASK" --origin codex --output json
+forge --store "$STORE" worktree guard check --worktree "$WT" --operation modify --path <relative-path> --reason "<objective>" --workflow "$WF" --task "$TASK" --output json
+forge --store "$STORE" worktree guard create-predecessor --worktree "$WT" --workflow "$WF" --task "$TASK" --path <relative-path> --goal "<path-specific goal and validation>" --allow-workflow-mutation --approved-by <operator-id> --origin codex --output json
+forge --store "$STORE" worktree sandbox plan --worktree "$WT" --purpose test --workflow "$WF" --task "$TASK" --output json -- <command>
+forge --store "$STORE" worktree sandbox run --worktree "$WT" --purpose test --workflow "$WF" --task "$TASK" --allow-exec --output json -- <command>
+forge --store "$STORE" worktree inspect --worktree "$WT" --output json
+```
+
+Review `.forge/worktree.toml`; any edit invalidates its approved SHA-256. Paths must be relative, contained and symlink-free; protected scopes override modifiable scopes. Config, path, branch, command, binding, runtime and network decisions must all pass. `forge --store "$STORE" request start --goal "<goal>" --worktree "$WT" --origin codex --output json` is the asynchronous alternative to `plan`.
+
+## Isolation And Blocking Rules
+
+The `process` runtime bounds cwd, environment, time, output and evidence, but is not a security boundary and enforces neither filesystem nor network isolation. `bubblewrap` mounts the worktree read-only at `/workspace` and only its internal sandbox root writable; HOME/tmp map to sandbox directories. Payloads must use system mounts and write outputs under the runtime sandbox root. `FORGE_STORE_PATH` is an unmounted host locator (`forge_store_path_mounted=false`), so nested Forge mutations run outside. Add `network="deny"` for network isolation.
+
+Check paths before writes. Delegate a protected/non-modifiable scope only through the approved, objective predecessor. Forge blocks the current task, then returns it to `Pending` after validated dependencies complete; it does not edit or approve the path. Reapprove the manifest if predecessor work changes it.
+
+Use preview/test receipts as separate validation gates. Block handoff on plan blockers, missing `--allow-exec`, timeout or non-zero exit.
+
+`sandbox start --allow-exec`, read-only `status`, and `stop --allow-stop` manage persistent preview/test via `forge.worktree.sandbox_lifecycle.v1`; receipts expose `execution_attempted`, sanitized `error`, and stream `redaction_count`.
+
+All mutating commands above require their shown approvals. Approver/origin values are provenance, not authentication. Keep secrets out of the manifest; Forge has no worktree removal command.
 "#;
 
 const ADDONS_UI_SKILL_MD: &str = r#"---
@@ -539,7 +541,7 @@ forge interactive action-dispatch --action <action-id> --project-root <project-r
 forge mcp call forge.interactive.action_dispatch --input '{"action_id":"<action-id>","project_root":"<project-root>","payload":{"goal":"Run the action hook workflow"}}' --output json
 ```
 
-Before rendering CRM or other product UIs, resolve Addon capability boundaries and keep mutations routed through Forge workflows, permissions and events. Use action dispatch only for Forge-owned hook routing: workflow hooks start Forge workflows, while CLI brain hooks are routed as Forge harness plans and are not executed directly.
+Before rendering CRM or other product UIs, resolve Addon capability boundaries and keep mutations routed through Forge workflows, permissions and events. Use action dispatch only for Forge-owned hook routing: workflow hooks start Forge workflows, while CLI brain hooks are routed through the Forge `cli_integration` layer using the stable `forge harness` compatibility namespace and are not executed directly.
 "#;
 
 #[derive(Debug, Clone, Copy)]
@@ -566,8 +568,24 @@ const SKILL_MODULES: &[SkillModule] = &[
         markdown: EXECUTOR_SKILL_MD,
     },
     SkillModule {
+        name: "forge-core-workspaces",
+        markdown: WORKSPACES_SKILL_MD,
+    },
+    SkillModule {
         name: "forge-core-addons-ui",
         markdown: ADDONS_UI_SKILL_MD,
+    },
+    SkillModule {
+        name: "forge-core-documentation",
+        markdown: DOCUMENTATION_SKILL_MD,
+    },
+    SkillModule {
+        name: "forge-core-agent",
+        markdown: AGENT_SKILL_MD,
+    },
+    SkillModule {
+        name: "forge-core-workflow",
+        markdown: WORKFLOW_SKILL_MD,
     },
 ];
 

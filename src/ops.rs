@@ -2,6 +2,7 @@ use crate::addon::{
     addon_observability_report, default_addon_dirs, list_addon_views,
     load_addon_catalog_from_store, AddonObservabilityReport, AddonViewReport,
 };
+use crate::artifact::hex_sha256;
 use crate::identity::ensure_workflow_policy;
 use crate::improve::{rank_improvement_candidates, OrchestratorImprovementCandidatesReport};
 use crate::memory::{project_memory_governance_report, ProjectMemoryGovernanceReport};
@@ -30,9 +31,13 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::env;
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -54,6 +59,15 @@ const OPS_WORKFLOW_LIVE_STATE_SCHEMA_VERSION: &str = "forge.ops.workflow_live_st
 const OPS_MODIFIER_PROPOSAL_CREATED_EVENT: &str = "ops_modifier_proposal_created";
 const OPS_MODIFIER_PROPOSAL_APPLIED_EVENT: &str = "ops_modifier_proposal_applied";
 const MAX_HTTP_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
+const OPS_BEARER_TOKEN_ENV: &str = "FORGE_OPS_BEARER_TOKEN";
+const OPS_BEARER_TOKEN_FILE_ENV: &str = "FORGE_OPS_BEARER_TOKEN_FILE";
+const OPS_ALLOW_REMOTE_ENV: &str = "FORGE_OPS_ALLOW_REMOTE";
+const OPS_ALLOWED_ORIGINS_ENV: &str = "FORGE_OPS_ALLOWED_ORIGINS";
+const OPS_PRODUCTION_MODE_ENV: &str = "FORGE_PRODUCTION_MODE";
+const OPS_SESSION_COOKIE_NAME: &str = "forge_ops_session";
+const MIN_OPS_BEARER_TOKEN_BYTES: usize = 32;
+const MAX_OPS_BEARER_TOKEN_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OpsSnapshot {
@@ -481,6 +495,10 @@ pub struct OpsServeReport {
     pub bind_addr: String,
     pub url: String,
     pub local_only: bool,
+    pub auth_required_for_mutations: bool,
+    pub auth_required_for_reads: bool,
+    pub csrf_protection: String,
+    pub allowed_origin_count: usize,
     pub routes: Vec<OpsActionSpec>,
 }
 
@@ -522,7 +540,24 @@ pub struct OpsHttpResponse {
     pub status_code: u16,
     pub reason: String,
     pub content_type: String,
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct OpsHttpSecurityPolicy {
+    bearer_token: Option<Vec<u8>>,
+    session_cookie: Option<Vec<u8>>,
+    allowed_origins: BTreeSet<String>,
+    require_auth_for_reads: bool,
+    secure_cookie: bool,
+}
+
+#[derive(Debug)]
+struct OpsHttpAuthorizationError {
+    status_code: u16,
+    reason: &'static str,
+    message: String,
 }
 
 pub fn build_ops_snapshot(store: &ForgeStore) -> Result<OpsSnapshot> {
@@ -638,6 +673,8 @@ fn build_memory_context_governance(
                 default_context_command.push("--project-root".to_string());
                 default_context_command.push(project_root.clone());
             }
+            default_context_command.push("--view".to_string());
+            default_context_command.push("compact".to_string());
             default_context_command.push("--output".to_string());
             default_context_command.push("json".to_string());
 
@@ -2228,15 +2265,27 @@ pub fn serve_ops_console_with_addon_dirs_and_project(
     addon_dirs: &[PathBuf],
     project_root: Option<PathBuf>,
 ) -> Result<OpsServeReport> {
-    let listener = TcpListener::bind((host, port))
+    let allow_remote = env_flag(OPS_ALLOW_REMOTE_ENV);
+    let bearer_token = load_ops_bearer_token()?;
+    let requested_addresses = resolve_ops_bind_addresses(host, port)?;
+    let requested_local_only = requested_addresses
+        .iter()
+        .all(|addr| addr.ip().is_loopback());
+    validate_ops_bind_security(requested_local_only, allow_remote, bearer_token.is_some())?;
+    let listener = TcpListener::bind(requested_addresses.as_slice())
         .with_context(|| format!("failed to bind Forge ops server on {host}:{port}"))?;
     let addr = listener.local_addr()?;
+    let security = OpsHttpSecurityPolicy::for_server(addr.ip(), addr.port(), bearer_token)?;
     let report = OpsServeReport {
         status: "listening".to_string(),
         schema_version: "forge.ops.serve.v1".to_string(),
         bind_addr: addr.to_string(),
         url: format!("http://{addr}/"),
         local_only: addr.ip().is_loopback(),
+        auth_required_for_mutations: true,
+        auth_required_for_reads: security.require_auth_for_reads,
+        csrf_protection: "bearer_token_and_origin_validation".to_string(),
+        allowed_origin_count: security.allowed_origins.len(),
         routes: ops_actions(),
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -2248,6 +2297,7 @@ pub fn serve_ops_console_with_addon_dirs_and_project(
                     &store_path,
                     addon_dirs,
                     project_root.as_deref(),
+                    &security,
                     &mut stream,
                 ) {
                     let response = error_response(500, "Internal Server Error", &error.to_string());
@@ -2290,20 +2340,131 @@ fn handle_stream(
     store_path: &PathBuf,
     addon_dirs: &[PathBuf],
     project_root: Option<&Path>,
+    security: &OpsHttpSecurityPolicy,
     stream: &mut TcpStream,
 ) -> Result<()> {
-    let mut buffer = vec![0; MAX_HTTP_REQUEST_BYTES];
-    let bytes_read = stream.read(&mut buffer)?;
-    let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(15)))?;
+    let request = read_ops_http_request(stream)?;
     let store = ForgeStore::open(store_path)?;
-    let response = handle_ops_http_request_with_addon_dirs_and_project(
-        &store,
-        &request,
-        addon_dirs,
-        project_root,
-    );
+    let response =
+        handle_secured_ops_http_request(&store, &request, addon_dirs, project_root, security);
     stream.write_all(&response.to_http_bytes())?;
     Ok(())
+}
+
+fn read_ops_http_request(stream: &mut TcpStream) -> Result<String> {
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let header_end = loop {
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            bail!("Forge ops request closed before headers");
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            let header_end = index + 4;
+            if header_end > MAX_HTTP_HEADER_BYTES {
+                bail!("Forge ops request headers exceeded 16KiB");
+            }
+            break header_end;
+        }
+        if request.len() > MAX_HTTP_HEADER_BYTES {
+            bail!("Forge ops request headers exceeded 16KiB");
+        }
+    };
+    let headers = String::from_utf8_lossy(&request[..header_end]);
+    if headers.lines().skip(1).any(|line| {
+        line.split_once(':')
+            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("transfer-encoding"))
+    }) {
+        bail!("Forge ops does not accept Transfer-Encoding requests");
+    }
+    let content_lengths = headers
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then_some(value.trim())
+        })
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .context("invalid Forge ops Content-Length")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if content_lengths.len() > 1 {
+        bail!("Forge ops request must not contain duplicate Content-Length headers");
+    }
+    let content_length = content_lengths.first().copied().unwrap_or(0);
+    if content_length > MAX_HTTP_REQUEST_BYTES {
+        bail!("Forge ops request body exceeded configured byte limit");
+    }
+    while request.len() < header_end.saturating_add(content_length) {
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            bail!("Forge ops request closed before body was complete");
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.len() > header_end.saturating_add(MAX_HTTP_REQUEST_BYTES) {
+            bail!("Forge ops request exceeded configured byte limit");
+        }
+    }
+    request.truncate(header_end + content_length);
+    Ok(String::from_utf8_lossy(&request).to_string())
+}
+
+fn handle_secured_ops_http_request(
+    store: &ForgeStore,
+    request: &str,
+    addon_dirs: &[PathBuf],
+    project_root: Option<&Path>,
+    security: &OpsHttpSecurityPolicy,
+) -> OpsHttpResponse {
+    let parsed = match ParsedRequest::parse(request) {
+        Ok(parsed) => parsed,
+        Err(error) => return error_response(400, "Bad Request", &error.to_string()),
+    };
+    match (parsed.method.as_str(), parsed.path.as_str()) {
+        ("GET", "/auth/login") => return ops_login_response(),
+        ("POST", "/auth/login") => {
+            let token = match parsed.required("token") {
+                Ok(token) => token,
+                Err(error) => return error_response(400, "Bad Request", &error.to_string()),
+            };
+            return match security.authenticate_login(&parsed, token) {
+                Ok(cookie_value) => {
+                    let mut response = redirect_response("/");
+                    let secure = if security.secure_cookie {
+                        "; Secure"
+                    } else {
+                        ""
+                    };
+                    response.headers.push((
+                        "Set-Cookie".to_string(),
+                        format!(
+                            "{OPS_SESSION_COOKIE_NAME}={cookie_value}; HttpOnly; SameSite=Strict; Path=/{secure}"
+                        ),
+                    ));
+                    response
+                }
+                Err(error) => error_response(error.status_code, error.reason, &error.message),
+            };
+        }
+        _ => {}
+    }
+    if let Err(error) = security.authorize(&parsed) {
+        if error.status_code == 401 && parsed.method == "GET" && parsed.path == "/" {
+            return redirect_response("/auth/login");
+        }
+        return error_response(error.status_code, error.reason, &error.message);
+    }
+    match route_parsed_ops_http_request(store, &parsed, addon_dirs, project_root) {
+        Ok(response) => response,
+        Err(error) => error_response(400, "Bad Request", &error.to_string()),
+    }
 }
 
 fn route_ops_http_request(
@@ -2313,6 +2474,15 @@ fn route_ops_http_request(
     project_root: Option<&Path>,
 ) -> Result<OpsHttpResponse> {
     let parsed = ParsedRequest::parse(request)?;
+    route_parsed_ops_http_request(store, &parsed, addon_dirs, project_root)
+}
+
+fn route_parsed_ops_http_request(
+    store: &ForgeStore,
+    parsed: &ParsedRequest,
+    addon_dirs: &[PathBuf],
+    project_root: Option<&Path>,
+) -> Result<OpsHttpResponse> {
     match (parsed.method.as_str(), parsed.path.as_str()) {
         ("GET", "/") => {
             let snapshot =
@@ -3251,6 +3421,7 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
 <body>
   <h1>Forge Ops</h1>
   <p>Operação assistida local: humano e IA podem observar workflows, dirigir runs e alterar objetivos em tempo real.</p>
+  <p><a href="/auth/login">Autenticar ou renovar a sessão do navegador</a></p>
   <div class="summary">
     <span class="pill">workflows: {}</span>
     <span class="pill">running: {}</span>
@@ -3406,6 +3577,7 @@ fn json_response<T: Serialize>(value: &T) -> Result<OpsHttpResponse> {
         status_code: 200,
         reason: "OK".to_string(),
         content_type: "application/json; charset=utf-8".to_string(),
+        headers: Vec::new(),
         body: serde_json::to_vec_pretty(value)?,
     })
 }
@@ -3415,7 +3587,52 @@ fn html_response(html: String) -> OpsHttpResponse {
         status_code: 200,
         reason: "OK".to_string(),
         content_type: "text/html; charset=utf-8".to_string(),
+        headers: Vec::new(),
         body: html.into_bytes(),
+    }
+}
+
+fn ops_login_response() -> OpsHttpResponse {
+    html_response(
+        r#"<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Autenticação — Forge Ops</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 24px; color: #18212f; background: #f7f8fb; }
+    main { max-width: 520px; padding: 24px; background: white; border: 1px solid #d9deea; border-radius: 10px; }
+    h1 { margin-top: 0; }
+    form { display: grid; gap: 12px; }
+    label { font-size: 13px; font-weight: 650; color: #344054; }
+    input, button { font: inherit; padding: 10px 12px; border: 1px solid #cbd3df; border-radius: 6px; }
+    button { width: fit-content; background: #1f6feb; color: white; border-color: #1f6feb; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Forge Ops</h1>
+    <p>Informe o Bearer token configurado pelo operador. O token será trocado por um cookie de sessão HttpOnly e não será incluído na URL.</p>
+    <form method="post" action="/auth/login">
+      <label for="token">Bearer token</label>
+      <input id="token" name="token" type="password" autocomplete="current-password" required autofocus>
+      <button type="submit">Entrar</button>
+    </form>
+  </main>
+</body>
+</html>"#
+            .to_string(),
+    )
+}
+
+fn redirect_response(location: &str) -> OpsHttpResponse {
+    OpsHttpResponse {
+        status_code: 303,
+        reason: "See Other".to_string(),
+        content_type: "text/plain; charset=utf-8".to_string(),
+        headers: vec![("Location".to_string(), location.to_string())],
+        body: Vec::new(),
     }
 }
 
@@ -3424,6 +3641,7 @@ fn error_response(status_code: u16, reason: &str, message: &str) -> OpsHttpRespo
         status_code,
         reason: reason.to_string(),
         content_type: "application/json; charset=utf-8".to_string(),
+        headers: Vec::new(),
         body: serde_json::json!({
             "status": "error",
             "schema_version": "forge.ops.error.v1",
@@ -3436,12 +3654,36 @@ fn error_response(status_code: u16, reason: &str, message: &str) -> OpsHttpRespo
 
 impl OpsHttpResponse {
     fn to_http_bytes(&self) -> Vec<u8> {
+        let extra_headers = self
+            .headers
+            .iter()
+            .filter(|(name, value)| {
+                !name.contains('\r')
+                    && !name.contains('\n')
+                    && !value.contains('\r')
+                    && !value.contains('\n')
+            })
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect::<String>();
         let header = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            concat!(
+                "HTTP/1.1 {} {}\r\n",
+                "Content-Type: {}\r\n",
+                "Content-Length: {}\r\n",
+                "Cache-Control: no-store\r\n",
+                "X-Content-Type-Options: nosniff\r\n",
+                "Content-Security-Policy: default-src 'self'; script-src 'none'; ",
+                "style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; ",
+                "form-action 'self'; base-uri 'none'\r\n",
+                "Referrer-Policy: no-referrer\r\n",
+                "{}",
+                "Connection: close\r\n\r\n"
+            ),
             self.status_code,
             self.reason,
             self.content_type,
-            self.body.len()
+            self.body.len(),
+            extra_headers
         );
         let mut bytes = header.into_bytes();
         bytes.extend_from_slice(&self.body);
@@ -3453,6 +3695,7 @@ impl OpsHttpResponse {
 struct ParsedRequest {
     method: String,
     path: String,
+    headers: BTreeMap<String, String>,
     params: BTreeMap<String, String>,
 }
 
@@ -3468,9 +3711,30 @@ impl ParsedRequest {
         if method == "POST" {
             params.extend(parse_form(body));
         }
+        let mut headers = BTreeMap::new();
+        for line in head.lines().skip(1) {
+            let (name, value) = line
+                .split_once(':')
+                .with_context(|| "malformed Forge ops HTTP header")?;
+            let name = name.trim().to_ascii_lowercase();
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                bail!("malformed Forge ops HTTP header name");
+            }
+            if headers
+                .insert(name.clone(), value.trim().to_string())
+                .is_some()
+            {
+                bail!("duplicate Forge ops HTTP header `{name}`");
+            }
+        }
         Ok(Self {
             method,
             path: path.to_string(),
+            headers,
             params,
         })
     }
@@ -3482,6 +3746,333 @@ impl ParsedRequest {
             .filter(|value| !value.trim().is_empty())
             .with_context(|| format!("missing required parameter `{key}`"))
     }
+}
+
+impl OpsHttpSecurityPolicy {
+    fn for_server(bind_ip: IpAddr, port: u16, bearer_token: Option<Vec<u8>>) -> Result<Self> {
+        let mut allowed_origins = BTreeSet::new();
+        allowed_origins.insert(format!(
+            "http://{}",
+            std::net::SocketAddr::new(bind_ip, port)
+        ));
+        if bind_ip.is_loopback() {
+            allowed_origins.insert(format!("http://localhost:{port}"));
+            allowed_origins.insert(format!("http://127.0.0.1:{port}"));
+            allowed_origins.insert(format!("http://[::1]:{port}"));
+        }
+        if let Ok(configured) = env::var(OPS_ALLOWED_ORIGINS_ENV) {
+            for origin in configured
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                validate_ops_origin(origin)?;
+                allowed_origins.insert(origin.trim_end_matches('/').to_string());
+            }
+        }
+        let session_cookie = bearer_token
+            .as_deref()
+            .map(ops_session_cookie_value)
+            .map(String::into_bytes);
+        let require_auth_for_reads = bearer_token.is_some();
+        Ok(Self {
+            bearer_token,
+            session_cookie,
+            allowed_origins,
+            require_auth_for_reads,
+            secure_cookie: !bind_ip.is_loopback(),
+        })
+    }
+
+    #[cfg(test)]
+    fn for_test(token: Option<&str>, allowed_origins: &[&str]) -> Self {
+        let bearer_token = token.map(|value| value.as_bytes().to_vec());
+        let session_cookie = bearer_token
+            .as_deref()
+            .map(ops_session_cookie_value)
+            .map(String::into_bytes);
+        let require_auth_for_reads = bearer_token.is_some();
+        Self {
+            bearer_token,
+            session_cookie,
+            allowed_origins: allowed_origins
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            require_auth_for_reads,
+            secure_cookie: false,
+        }
+    }
+
+    fn authorize(
+        &self,
+        request: &ParsedRequest,
+    ) -> std::result::Result<(), OpsHttpAuthorizationError> {
+        let mutating = !matches!(request.method.as_str(), "GET" | "HEAD" | "OPTIONS");
+        if !mutating && !self.require_auth_for_reads {
+            return Ok(());
+        }
+        let Some(expected_token) = self.bearer_token.as_deref() else {
+            return Err(OpsHttpAuthorizationError {
+                status_code: 401,
+                reason: "Unauthorized",
+                message: format!(
+                    "Forge ops requires a bearer token configured through {OPS_BEARER_TOKEN_ENV} or {OPS_BEARER_TOKEN_FILE_ENV}"
+                ),
+            });
+        };
+        let provided_bearer = request
+            .headers
+            .get("authorization")
+            .and_then(|value| value.split_once(' '))
+            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+            .map(|(_, token)| token.trim())
+            .map(str::as_bytes)
+            .unwrap_or_default();
+        let provided_session = request
+            .headers
+            .get("cookie")
+            .and_then(|cookies| ops_cookie_value(cookies, OPS_SESSION_COOKIE_NAME))
+            .map(str::as_bytes)
+            .unwrap_or_default();
+        let bearer_valid = constant_time_bytes_eq(provided_bearer, expected_token);
+        let session_valid = self
+            .session_cookie
+            .as_deref()
+            .is_some_and(|expected| constant_time_bytes_eq(provided_session, expected));
+        if !bearer_valid && !session_valid {
+            return Err(OpsHttpAuthorizationError {
+                status_code: 401,
+                reason: "Unauthorized",
+                message: "missing or invalid Forge ops bearer token".to_string(),
+            });
+        }
+        self.validate_origin(request)
+    }
+
+    fn validate_origin(
+        &self,
+        request: &ParsedRequest,
+    ) -> std::result::Result<(), OpsHttpAuthorizationError> {
+        if let Some(fetch_site) = request.headers.get("sec-fetch-site") {
+            if fetch_site.eq_ignore_ascii_case("cross-site") {
+                return Err(OpsHttpAuthorizationError {
+                    status_code: 403,
+                    reason: "Forbidden",
+                    message: "cross-site Forge ops mutation denied".to_string(),
+                });
+            }
+        }
+        if let Some(origin) = request.headers.get("origin") {
+            let origin = origin.trim_end_matches('/');
+            if !self.allowed_origins.contains(origin) {
+                return Err(OpsHttpAuthorizationError {
+                    status_code: 403,
+                    reason: "Forbidden",
+                    message: "Forge ops request origin is not allowed".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn authenticate_login(
+        &self,
+        request: &ParsedRequest,
+        token: &str,
+    ) -> std::result::Result<String, OpsHttpAuthorizationError> {
+        self.validate_origin(request)?;
+        let Some(expected_token) = self.bearer_token.as_deref() else {
+            return Err(OpsHttpAuthorizationError {
+                status_code: 503,
+                reason: "Service Unavailable",
+                message: "Forge ops authentication is not configured".to_string(),
+            });
+        };
+        if !constant_time_bytes_eq(token.as_bytes(), expected_token) {
+            return Err(OpsHttpAuthorizationError {
+                status_code: 401,
+                reason: "Unauthorized",
+                message: "invalid Forge ops bearer token".to_string(),
+            });
+        }
+        self.session_cookie
+            .as_deref()
+            .map(|value| String::from_utf8_lossy(value).to_string())
+            .ok_or_else(|| OpsHttpAuthorizationError {
+                status_code: 503,
+                reason: "Service Unavailable",
+                message: "Forge ops browser session is unavailable".to_string(),
+            })
+    }
+}
+
+fn ops_session_cookie_value(token: &[u8]) -> String {
+    let mut input = b"forge.ops.session.v1\0".to_vec();
+    input.extend_from_slice(token);
+    hex_sha256(&input)
+}
+
+fn ops_cookie_value<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
+    cookies.split(';').find_map(|cookie| {
+        let (cookie_name, value) = cookie.trim().split_once('=')?;
+        (cookie_name == name).then_some(value.trim())
+    })
+}
+
+fn resolve_ops_bind_addresses(host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>> {
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("failed to resolve Forge ops bind host `{host}`"))?
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        bail!("Forge ops bind host `{host}` did not resolve");
+    }
+    Ok(addresses)
+}
+
+fn validate_ops_bind_security(
+    local_only: bool,
+    allow_remote: bool,
+    bearer_token_configured: bool,
+) -> Result<()> {
+    if !local_only && !allow_remote {
+        bail!("refusing non-loopback Forge ops bind without {OPS_ALLOW_REMOTE_ENV}=true");
+    }
+    if !local_only && !bearer_token_configured {
+        bail!(
+            "refusing non-loopback Forge ops bind without a strong bearer token in {OPS_BEARER_TOKEN_ENV} or {OPS_BEARER_TOKEN_FILE_ENV}"
+        );
+    }
+    Ok(())
+}
+
+fn load_ops_bearer_token() -> Result<Option<Vec<u8>>> {
+    let inline_token = env::var(OPS_BEARER_TOKEN_ENV)
+        .ok()
+        .filter(|value| !value.is_empty());
+    let token_file = env::var(OPS_BEARER_TOKEN_FILE_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if inline_token.is_some() && token_file.is_some() {
+        bail!("configure only one of {OPS_BEARER_TOKEN_ENV} or {OPS_BEARER_TOKEN_FILE_ENV}");
+    }
+    if inline_token.is_some() && env_flag(OPS_PRODUCTION_MODE_ENV) {
+        bail!(
+            "{OPS_PRODUCTION_MODE_ENV}=true requires {OPS_BEARER_TOKEN_FILE_ENV}; inline bearer secrets are disabled"
+        );
+    }
+    let token = if let Some(path) = token_file {
+        read_ops_bearer_token_file(Path::new(&path))?
+    } else if let Some(token) = inline_token {
+        token.into_bytes()
+    } else {
+        return Ok(None);
+    };
+    validate_ops_bearer_token(&token)?;
+    Ok(Some(token))
+}
+
+fn read_ops_bearer_token_file(path: &Path) -> Result<Vec<u8>> {
+    if !path.is_absolute() {
+        bail!("{OPS_BEARER_TOKEN_FILE_ENV} must point to an absolute path");
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options.open(path).with_context(|| {
+        format!("failed to open bearer token file declared by {OPS_BEARER_TOKEN_FILE_ENV}")
+    })?;
+    let metadata = file
+        .metadata()
+        .context("failed to inspect Forge ops bearer token file")?;
+    if !metadata.is_file() {
+        bail!("{OPS_BEARER_TOKEN_FILE_ENV} must reference a regular file");
+    }
+    #[cfg(unix)]
+    {
+        let mode = metadata.permissions().mode();
+        if mode & 0o077 != 0 || mode & 0o400 == 0 {
+            bail!(
+                "{OPS_BEARER_TOKEN_FILE_ENV} must be owner-readable and inaccessible to group/other (0600 or stricter)"
+            );
+        }
+    }
+    if metadata.len() > (MAX_OPS_BEARER_TOKEN_BYTES + 2) as u64 {
+        bail!("{OPS_BEARER_TOKEN_FILE_ENV} exceeds the bounded token size");
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take((MAX_OPS_BEARER_TOKEN_BYTES + 3) as u64)
+        .read_to_end(&mut bytes)
+        .context("failed to read Forge ops bearer token file")?;
+    if bytes.len() > MAX_OPS_BEARER_TOKEN_BYTES + 2 {
+        bail!("{OPS_BEARER_TOKEN_FILE_ENV} exceeds the bounded token size");
+    }
+    while matches!(bytes.last(), Some(b'\r' | b'\n')) {
+        bytes.pop();
+    }
+    Ok(bytes)
+}
+
+fn validate_ops_bearer_token(token: &[u8]) -> Result<()> {
+    if !(MIN_OPS_BEARER_TOKEN_BYTES..=MAX_OPS_BEARER_TOKEN_BYTES).contains(&token.len()) {
+        bail!(
+            "Forge ops bearer token must contain {MIN_OPS_BEARER_TOKEN_BYTES}-{MAX_OPS_BEARER_TOKEN_BYTES} bytes"
+        );
+    }
+    if !token
+        .iter()
+        .all(|byte| byte.is_ascii_graphic() && !byte.is_ascii_whitespace())
+    {
+        bail!("Forge ops bearer token must contain visible ASCII without whitespace");
+    }
+    Ok(())
+}
+
+fn validate_ops_origin(origin: &str) -> Result<()> {
+    let normalized = origin.trim_end_matches('/');
+    if normalized.contains('\r')
+        || normalized.contains('\n')
+        || (!normalized.starts_with("http://") && !normalized.starts_with("https://"))
+    {
+        bail!("{OPS_ALLOWED_ORIGINS_ENV} entries must be absolute HTTP(S) origins without CR/LF");
+    }
+    let authority_start = normalized.find("://").map(|index| index + 3).unwrap_or(0);
+    let authority = &normalized[authority_start..];
+    if authority.is_empty()
+        || authority.contains('/')
+        || authority.contains('?')
+        || authority.contains('#')
+        || authority.contains('@')
+    {
+        bail!(
+            "{OPS_ALLOWED_ORIGINS_ENV} entries must contain only an HTTP(S) scheme and authority"
+        );
+    }
+    Ok(())
+}
+
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn constant_time_bytes_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut difference = left.len() ^ right.len();
+    for index in 0..left.len().max(right.len()) {
+        let left_byte = left.get(index).copied().unwrap_or(0);
+        let right_byte = right.get(index).copied().unwrap_or(0);
+        difference |= usize::from(left_byte ^ right_byte);
+    }
+    difference == 0
 }
 
 fn parse_form(input: &str) -> BTreeMap<String, String> {
@@ -3672,5 +4263,228 @@ fn action(
         path: path.to_string(),
         description: description.to_string(),
         mutates_workflow,
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use tempfile::tempdir;
+
+    const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn ops_http_mutations_require_bearer_auth_and_same_origin() {
+        let temp = tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let policy = OpsHttpSecurityPolicy::for_test(Some(TEST_TOKEN), &["http://127.0.0.1:8787"]);
+
+        let missing = handle_secured_ops_http_request(
+            &store,
+            "POST /unknown HTTP/1.1\r\nHost: 127.0.0.1:8787\r\n\r\n",
+            &[],
+            None,
+            &policy,
+        );
+        assert_eq!(missing.status_code, 401);
+
+        let cross_site = handle_secured_ops_http_request(
+            &store,
+            &format!(
+                "POST /unknown HTTP/1.1\r\nHost: 127.0.0.1:8787\r\nAuthorization: Bearer {TEST_TOKEN}\r\nOrigin: https://evil.example\r\nSec-Fetch-Site: cross-site\r\n\r\n"
+            ),
+            &[],
+            None,
+            &policy,
+        );
+        assert_eq!(cross_site.status_code, 403);
+
+        let authorized = handle_secured_ops_http_request(
+            &store,
+            &format!(
+                "POST /unknown HTTP/1.1\r\nHost: 127.0.0.1:8787\r\nAuthorization: Bearer {TEST_TOKEN}\r\nOrigin: http://127.0.0.1:8787\r\n\r\n"
+            ),
+            &[],
+            None,
+            &policy,
+        );
+        assert_eq!(authorized.status_code, 404);
+    }
+
+    #[test]
+    fn ops_browser_login_exchanges_bearer_for_hardened_session_cookie() {
+        let temp = tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let mut policy =
+            OpsHttpSecurityPolicy::for_test(Some(TEST_TOKEN), &["https://ops.example.com"]);
+        policy.secure_cookie = true;
+
+        let login_page = handle_secured_ops_http_request(
+            &store,
+            "GET /auth/login HTTP/1.1\r\nHost: ops.example.com\r\n\r\n",
+            &[],
+            None,
+            &policy,
+        );
+        assert_eq!(login_page.status_code, 200);
+        assert!(String::from_utf8_lossy(&login_page.body).contains("type=\"password\""));
+        assert!(!String::from_utf8_lossy(&login_page.body).contains(TEST_TOKEN));
+
+        let unauthenticated_root = handle_secured_ops_http_request(
+            &store,
+            "GET / HTTP/1.1\r\nHost: ops.example.com\r\n\r\n",
+            &[],
+            None,
+            &policy,
+        );
+        assert_eq!(unauthenticated_root.status_code, 303);
+        assert!(unauthenticated_root
+            .headers
+            .contains(&("Location".to_string(), "/auth/login".to_string())));
+
+        let rejected = handle_secured_ops_http_request(
+            &store,
+            "POST /auth/login HTTP/1.1\r\nHost: ops.example.com\r\nOrigin: https://ops.example.com\r\n\r\ntoken=wrong",
+            &[],
+            None,
+            &policy,
+        );
+        assert_eq!(rejected.status_code, 401);
+        assert!(rejected
+            .headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("set-cookie")));
+
+        let login = handle_secured_ops_http_request(
+            &store,
+            &format!(
+                "POST /auth/login HTTP/1.1\r\nHost: ops.example.com\r\nOrigin: https://ops.example.com\r\n\r\ntoken={TEST_TOKEN}"
+            ),
+            &[],
+            None,
+            &policy,
+        );
+        assert_eq!(login.status_code, 303);
+        let set_cookie = login
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+            .map(|(_, value)| value)
+            .unwrap();
+        assert!(set_cookie.starts_with(&format!("{OPS_SESSION_COOKIE_NAME}=")));
+        assert!(set_cookie.contains("; HttpOnly"));
+        assert!(set_cookie.contains("; SameSite=Strict"));
+        assert!(set_cookie.contains("; Path=/"));
+        assert!(set_cookie.contains("; Secure"));
+        assert!(!set_cookie.contains(TEST_TOKEN));
+
+        let cookie_pair = set_cookie.split(';').next().unwrap();
+        let session_authorized = handle_secured_ops_http_request(
+            &store,
+            &format!(
+                "POST /unknown HTTP/1.1\r\nHost: ops.example.com\r\nOrigin: https://ops.example.com\r\nCookie: {cookie_pair}\r\n\r\n"
+            ),
+            &[],
+            None,
+            &policy,
+        );
+        assert_eq!(session_authorized.status_code, 404);
+
+        let bearer_read = handle_secured_ops_http_request(
+            &store,
+            &format!(
+                "GET /api/snapshot HTTP/1.1\r\nHost: ops.example.com\r\nAuthorization: Bearer {TEST_TOKEN}\r\n\r\n"
+            ),
+            &[],
+            None,
+            &policy,
+        );
+        assert_eq!(bearer_read.status_code, 200);
+    }
+
+    #[test]
+    fn ops_loopback_snapshot_requires_configured_bearer_or_session() {
+        let temp = tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let policy = OpsHttpSecurityPolicy::for_server(
+            "127.0.0.1".parse().unwrap(),
+            8787,
+            Some(TEST_TOKEN.as_bytes().to_vec()),
+        )
+        .unwrap();
+        assert!(policy.require_auth_for_reads);
+
+        let missing = handle_secured_ops_http_request(
+            &store,
+            "GET /api/snapshot HTTP/1.1\r\nHost: 127.0.0.1:8787\r\n\r\n",
+            &[],
+            None,
+            &policy,
+        );
+        assert_eq!(missing.status_code, 401);
+
+        let incorrect = handle_secured_ops_http_request(
+            &store,
+            "GET /api/snapshot HTTP/1.1\r\nHost: 127.0.0.1:8787\r\nAuthorization: Bearer incorrect\r\n\r\n",
+            &[],
+            None,
+            &policy,
+        );
+        assert_eq!(incorrect.status_code, 401);
+
+        let bearer = handle_secured_ops_http_request(
+            &store,
+            &format!(
+                "GET /api/snapshot HTTP/1.1\r\nHost: 127.0.0.1:8787\r\nAuthorization: Bearer {TEST_TOKEN}\r\n\r\n"
+            ),
+            &[],
+            None,
+            &policy,
+        );
+        assert_eq!(bearer.status_code, 200);
+
+        let session_cookie = String::from_utf8(policy.session_cookie.clone().unwrap()).unwrap();
+        let session = handle_secured_ops_http_request(
+            &store,
+            &format!(
+                "GET /api/snapshot HTTP/1.1\r\nHost: 127.0.0.1:8787\r\nCookie: {OPS_SESSION_COOKIE_NAME}={session_cookie}\r\n\r\n"
+            ),
+            &[],
+            None,
+            &policy,
+        );
+        assert_eq!(session.status_code, 200);
+    }
+
+    #[test]
+    fn ops_remote_bind_requires_explicit_opt_in_and_token() {
+        assert!(validate_ops_bind_security(false, false, true).is_err());
+        assert!(validate_ops_bind_security(false, true, false).is_err());
+        assert!(validate_ops_bind_security(false, true, true).is_ok());
+        assert!(validate_ops_bind_security(true, false, false).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ops_bearer_token_file_is_bounded_private_and_nofollow() {
+        let temp = tempdir().unwrap();
+        let token_path = temp.path().join("ops-token");
+        fs::write(&token_path, format!("{TEST_TOKEN}\n")).unwrap();
+        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_ops_bearer_token_file(&token_path).unwrap(),
+            TEST_TOKEN.as_bytes()
+        );
+
+        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_ops_bearer_token_file(&token_path).is_err());
+        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let symlink_path = temp.path().join("ops-token-link");
+        symlink(&token_path, &symlink_path).unwrap();
+        assert!(read_ops_bearer_token_file(&symlink_path).is_err());
     }
 }

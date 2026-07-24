@@ -1331,21 +1331,21 @@ impl RegistryQualityAction {
             );
         }
 
-        if quality.budget_pressure > 0 {
-            return Self::new(
-                "increase_context_budget",
-                "warning",
-                quality.budget_pressure,
-                "routing quality reports budget pressure for one or more tasks",
-            );
-        }
-
         if handoff.blocked_dependencies > 0 {
             return Self::new(
                 "wait_for_dependencies",
                 "blocking",
                 handoff.blocked_dependencies,
                 "dependency tasks must complete before executor handoff",
+            );
+        }
+
+        if quality.budget_pressure > 0 {
+            return Self::new(
+                "increase_context_budget",
+                "warning",
+                quality.budget_pressure,
+                "routing quality reports budget pressure for one or more tasks",
             );
         }
 

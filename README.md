@@ -11,6 +11,8 @@ The intended architecture is hybrid:
 - Forge can also call those CLIs as bounded execution engines for long-running tasks.
 - Native integrations/plugins are useful when they make the developer experience simpler, but the operational authority remains in Forge: graph state, context routing, retries, validation, scheduling, costs and persistence.
 
+Internamente, a integração com CLIs externas vive em `src/cli_integration.rs`: Forge já é o harness/orquestrador. O namespace público `forge harness`, os schemas/MCP `forge.harness.*` e o alias Rust continuam estáveis por compatibilidade, não como uma segunda autoridade de runtime.
+
 - decomposition;
 - scheduling;
 - context routing;
@@ -42,13 +44,21 @@ O fluxo mental é simples:
 13. `forge smoke replacement-cli-evidence --output json` prova que o gate de CLI substituta coleta as evidências prontas, reporta os skips que dependem de manifesto aprovado e não promove o milestone automaticamente.
 14. `forge smoke multimodal-runtime-evidence --output json` prova que o runtime multimodal continua Addon-owned, coleta `production_runtime_benchmark` só quando o manifesto aprovado está pronto e deixa a promoção no release gate.
 
+Para trabalho de código, o workflow também pode começar vinculado a um Git worktree: `forge plan --goal "<objetivo>" --worktree <id-ou-path>`. O vínculo entra no contexto e no handoff; preview e testes passam por um plano de sandbox separado antes de qualquer execução. Veja [Worktrees And Sandboxes](docs/worktrees-and-sandboxes.md).
+
 Use `j`/`k` para mover o foco no REPL, `enter` para abrir o painel focado, `m` para alternar modo de visualização, `t` para alternar tema e `q`, `quit`, `exit`, `/quit` ou `/exit` para sair sem criar workflow. Os comandos slash como `/guided-cockpit`, `/guide`, `/cockpit`, `/ui-composition`, `/architecture`, `/task-board`, `/workflow-mutation`, `/operating-context`, `/improvement-loop`, `/readiness`, `/addons`, `/sessions`, `/logs`, `/permissions` e `/dag` renderizam painéis dentro do próprio REPL.
 
 ## Status
 
-Current version: `0.4.177`
+Current version: `0.5.0`
 
-This is the first functional CLI + Skill version:
+Forge v0.5 is production-supported for one trusted operator on one host, with a
+local SQLite store and loopback-only Ops service. Multi-tenant operation, high
+availability, and direct public exposure of the built-in HTTP service are
+outside this release profile. See
+[`docs/production-single-host.md`](docs/production-single-host.md).
+
+This release includes:
 
 - Rust CLI binary: `forge`
 - SQLite persistence
@@ -56,7 +66,7 @@ This is the first functional CLI + Skill version:
 - versioned, sharded bounded context package generation with subflow-aware routing
 - strict context readiness gates for executor handoff
 - validation gates
-- simulated execution runtime
+- durable mixed AI and deterministic execution runtime
 - autonomous mixed AI/non-AI workflow planning
 - native cron/wait task representation with timezone, next-run, missed-run policy, run history and scale-to-zero metadata
 - explicit loop primitives for loop-over-items, bounded repeat, retry/backoff, while/until and infinite recurring subflow semantics
@@ -77,6 +87,7 @@ This is the first functional CLI + Skill version:
 - Forge-owned execution policy metadata for deterministic local Python/Node.js code nodes
 - node-scoped Personality/Soul Routing profiles, metadata and validation gates for human-facing artifacts
 - controlled improvement proposal generation
+- registered Git worktrees with revisioned workflow/task bindings, approved config hashes, modification-path decisions/predecessors, and guarded preview/test plans and receipts
 - Codex/OpenCode-compatible `forge-core` skill
 - executor sync that detects installed/configured CLIs and persists human authorization policy
 - runtime sync that detects Docker/Kubernetes/Knative and persists human authorization policy
@@ -144,10 +155,10 @@ This is the first functional CLI + Skill version:
 - Addon planner execution for external `planning_strategy`/`replanning_strategy` workers, with Core reference plans, result validation and replacement-readiness equivalence audits
 - Addon validator execution for external `validator` workers, with standardized subject/input/context envelopes, decision validation and result audit over the same dispatch ledger
 - Addon executor execution for external `executor` workers, with standardized task/input/context envelopes, generic result validation and artifact/event/output audit over the same dispatch ledger
-- harness utilities for token-headroom analysis, Forge-first CLI wrapper planning, read-only shell activation profiles, non-destructive PATH shim installation, shim status auditing, reversible stdout/stderr headroom receipts and workflow/task/run timeline events across Codex, Claude, Gemini and OpenCode-style executors
-- harness executor compatibility reports embedded in `forge interactive harness` / MCP `forge.interactive.harness`, exposing canonical Codex, Claude, Gemini and OpenCode adapter families plus readiness for env overlay, PATH shim, guarded exec, token headroom, session lifecycle, context/memory/skill/MCP routing and credential-vault boundaries
-- Forge-first adoption readiness embedded in `forge interactive harness` / MCP `forge.interactive.harness` as `forge.interactive.harness_forge_first_adoption.v1`, showing whether Forge can be the default CLI front door, which shim/headroom/lineage gates still block adoption, which prompt/context routes Forge controls, which token-headroom interception points apply and which commands unblock the operator next
-- Forge-first harness smoke through `forge smoke forge-first-harness`, proving persisted reversible headroom, read-only adoption-plan, approval-gated bootstrap dry-run, isolated Forge-owned shim installation, shim audit, one-shot PATH activation and `harness exec` dry-run without executing or mutating the external CLI
+- CLI-integration utilities for token-headroom analysis, Forge-first CLI wrapper planning, read-only shell activation profiles, non-destructive PATH shim installation, shim status auditing, reversible stdout/stderr headroom receipts and workflow/task/run timeline events across Codex, Claude, Gemini and OpenCode-style executors; commands remain under the compatible `forge harness` namespace
+- CLI-integration compatibility reports embedded in `forge interactive harness` / MCP `forge.interactive.harness`, exposing canonical Codex, Claude, Gemini and OpenCode adapter families plus readiness for env overlay, PATH shim, guarded exec, token headroom, session lifecycle, context/memory/skill/MCP routing and credential-vault boundaries
+- Forge-first CLI-integration adoption readiness embedded in `forge interactive harness` / MCP `forge.interactive.harness` as `forge.interactive.harness_forge_first_adoption.v1`, showing whether Forge can be the default CLI front door, which shim/headroom/lineage gates still block adoption, which prompt/context routes Forge controls, which token-headroom interception points apply and which commands unblock the operator next
+- Forge-first CLI-integration smoke through the compatible command `forge smoke forge-first-harness`, proving persisted reversible headroom, read-only adoption-plan, approval-gated bootstrap dry-run, isolated Forge-owned shim installation, shim audit, one-shot PATH activation and `forge harness exec` dry-run without executing or mutating the external CLI
 - replacement-grade CLI evidence smoke through `forge smoke replacement-cli-evidence`, proving `collect-ready-evidence` attaches ready coding/research and terminal file-editing receipts while skipping provider/runtime evidence until approved project manifests exist
 - multimodal runtime evidence smoke through `forge smoke multimodal-runtime-evidence`, proving the Addon-owned multimodal runtime gate reports missing manifests without collecting, then attaches `production_runtime_benchmark` evidence only for approved connected runtime manifests without auto-promotion
 - intent v2 records workflow mode, event policy, operating context, required capabilities, active addons and capability resolution
@@ -175,6 +186,14 @@ This is the first functional CLI + Skill version:
 
 ## Install
 
+Install a checksum-verified release archive with the platform scripts in
+[`installer/README.md`](installer/README.md). Linux release binaries require
+kernel 4.18 or newer and glibc 2.34 or newer. The scripts do not edit `PATH`;
+their documentation shows the default binary directory and the one-time shell
+activation.
+
+To build and install the current source tree instead:
+
 ```bash
 cargo install --path .
 ```
@@ -184,6 +203,91 @@ cargo install --path .
 ```bash
 forge plan --goal "Create a delivery platform" --output json
 ```
+
+### Git worktree, preview e teste
+
+Use um store central absoluto e externo ao worktree. O mesmo store deve acompanhar descoberta, vínculo, contexto, sandbox e execução assíncrona:
+
+```bash
+FORGE_WORKTREE_STORE=/absolute/path/to/forge.sqlite
+
+forge --store "$FORGE_WORKTREE_STORE" worktree discover \
+  --repository /absolute/path/to/repository \
+  --output json
+
+forge --store "$FORGE_WORKTREE_STORE" worktree create \
+  --repository /absolute/path/to/repository \
+  --path /absolute/path/to/worktrees/feature-preview \
+  --branch feature/preview \
+  --start-point main \
+  --allow-repository-mutation \
+  --output json
+
+forge --store "$FORGE_WORKTREE_STORE" worktree init \
+  --worktree <worktree-id> \
+  --allow-worktree-write \
+  --output json
+
+# Após revisar/editar .forge/worktree.toml, aprove o novo hash:
+forge --store "$FORGE_WORKTREE_STORE" worktree approve-config \
+  --worktree <worktree-id> \
+  --allow-guardrail-update \
+  --approved-by <operator-id> \
+  --output json
+
+forge --store "$FORGE_WORKTREE_STORE" plan \
+  --goal "Implement and validate the change" \
+  --worktree <worktree-id> \
+  --output json
+
+forge --store "$FORGE_WORKTREE_STORE" worktree guard check \
+  --worktree <worktree-id> \
+  --operation modify \
+  --path src/lib.rs \
+  --reason "Implement the approved change" \
+  --workflow <workflow-id> \
+  --task <task-id> \
+  --output json
+
+forge --store "$FORGE_WORKTREE_STORE" worktree sandbox plan \
+  --worktree <worktree-id> \
+  --purpose test \
+  --workflow <workflow-id> \
+  --task <task-id> \
+  --output json \
+  -- cargo test
+
+forge --store "$FORGE_WORKTREE_STORE" worktree sandbox run \
+  --worktree <worktree-id> \
+  --purpose test \
+  --workflow <workflow-id> \
+  --task <task-id> \
+  --allow-exec \
+  --output json \
+  -- cargo test
+
+forge --store "$FORGE_WORKTREE_STORE" worktree sandbox start \
+  --worktree <worktree-id> \
+  --purpose preview \
+  --workflow <workflow-id> \
+  --task <task-id> \
+  --allow-exec \
+  --output json \
+  -- <long-running-preview-command>
+
+forge --store "$FORGE_WORKTREE_STORE" worktree sandbox status \
+  --sandbox <sandbox-id> \
+  --output json
+
+forge --store "$FORGE_WORKTREE_STORE" worktree sandbox stop \
+  --sandbox <sandbox-id> \
+  --allow-stop \
+  --output json
+```
+
+`create`, `init`, `approve-config`, `guard create-predecessor`, `sandbox run`, `sandbox start` e `sandbox stop` exigem as autorizações explícitas mostradas. `sandbox start` persiste `forge.worktree.sandbox_lifecycle.v1` e retorna um `sandbox_id`; `status` não lança comandos nem exige aprovação e, se o supervisor desapareceu, encerra o grupo e os descendentes rastreados antes de persistir `sandbox_execution_failed`. `stop --allow-stop` encerra o grupo, os descendentes rastreados e, após o prazo de cooperação, o supervisor. Recibos distinguem `execution_attempted` de `executed`, sanitizam `error` e conteúdo capturado, e registram `redaction_count` em cada stream. `.forge/worktree.toml` mantém scopes modificáveis/protegidos, caminhos de sandbox relativos ao checkout, allowlists de branch/comando, política de limpeza, timeout, limite de saída e vínculo obrigatório. Após qualquer edição, o novo SHA-256 precisa de `approve-config`; `--approved-by` registra proveniência, não autentica identidade. O runtime `process` limita cwd, ambiente, tempo, saída e evidência, mas não impõe isolamento de filesystem/rede. `bubblewrap` monta o worktree read-only em `/workspace`, deixa apenas o sandbox interno gravável e, com `network="deny"`, separa a rede; o `FORGE_STORE_PATH` externo permanece apenas um locator host não montado no guest, exposto como `forge_store_path_mounted=false`.
+
+`guard check` é read-only e deve preceder a escrita: caminhos protegidos ou fora de `modifiable_paths` podem virar uma predecessora objetiva somente via `guard create-predecessor --allow-workflow-mutation --approved-by ...`. Essa mutação revisionada bloqueia a tarefa atual; a conclusão validada da predecessora a devolve a `Pending` quando todas as dependências terminam. Se ela mudar o manifesto, o hash resultante precisa de nova revisão/`approve-config`. Separadamente, quando preview/teste deve bloquear implementação ou promoção, modele o receipt como gate e só libere a dependente após `sandbox_completed` com `exit_code=0`. O [contrato completo](docs/worktrees-and-sandboxes.md) e o [exemplo reproduzível](examples/worktree-sandbox/README.md) detalham paths, bindings, bloqueios e receipts.
 
 Use the returned `workflow_id`:
 
@@ -304,7 +408,7 @@ forge schedule pause --workflow <workflow-id> --task task-010 --origin codex --o
 forge schedule resume --workflow <workflow-id> --task task-010 --origin codex --output json
 forge schedule run-due --workflow <workflow-id> --output json
 forge task validate-response --workflow <workflow-id> --task task-001 --response ./executor-response.json --output json
-forge context --workflow <workflow-id> --task task-001 --budget 1200 --output json
+forge context --workflow <workflow-id> --task task-001 --budget 1200 --view compact --output json
 forge run --workflow <workflow-id> --simulate --output json
 forge validate --workflow <workflow-id> --output json
 forge improve candidates --output json
@@ -325,7 +429,9 @@ forge multimodal benchmark-template --capability image_understanding --output js
 forge multimodal demo-plan --demo local_image_recognition --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v30`) with a deterministic
+The compact command above emits `forge.context.compact.v2`, the bounded executor
+envelope. Use `--view full` when an audit needs the versioned full context packet
+(`forge.context.v30`) with the deterministic
 `task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_shard_selection_audit_v30` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, project `operating_context`, persona routing metadata for
@@ -398,23 +504,24 @@ terminal diagram to the selected task.
 Use strict context mode when handing a package to an executor:
 
 ```bash
-forge context --workflow <workflow-id> --task task-001 --budget 1200 --strict --output json
+forge context --workflow <workflow-id> --task task-001 --budget 1200 --strict --view compact --output json
 ```
 
-Strict mode still prints the replayable context package, but exits non-zero if
-`handoff_ready=false`.
+Strict mode prints the selected response view, but exits non-zero if
+`handoff_ready=false`. Compact responses expose an executable `guardrail` and a
+full-context expansion command; request `--view full` for replay diagnostics.
 
 Acquire an executor handoff packet when a bounded adapter is ready to work:
 
 ```bash
-forge task handoff --workflow <workflow-id> --task task-001 --executor codex --budget 1200 --ttl-seconds 900 --output json
+forge task handoff --workflow <workflow-id> --task task-001 --executor codex --budget 1200 --ttl-seconds 900 --view compact --output json
 ```
 
-The command reuses the strict context readiness contract, acquires a Forge task
-lease only when `handoff_ready=true`, and returns `forge.executor_handoff.v8`
-with the selected executor, task executor kind, lease id, context SHA-256,
-routing fingerprint schema, routing cache key, lineage hash, expected output,
-context routing quality, execution policy mode, full execution policy and validation gate. Human-facing
+The compact command reuses the strict context readiness contract, acquires a
+Forge task lease only when `handoff_ready=true`, and returns
+`forge.executor_handoff.compact.v1` with bounded context, lease and execution
+fields. Request `--view full` for `forge.executor_handoff.v8`, including routing
+fingerprints, lineage, full execution policy and audit metadata. Human-facing
 persona nodes also carry a versioned `persona_contract` with the derived profile id,
 profile checksum, node-scoped mode, voice, tone, brand voice/tone/values, design token source,
 operating policy, instruction source, source model summaries, persona validation gate and lineage hashes so adapters do not have to
@@ -432,9 +539,10 @@ forge task validate-response --workflow <workflow-id> --task task-001 --response
 
 The response must use `forge.executor_response.v1`, match the task id, include a
 replayable `trace_ref`, report non-negative cost/token values and, when marked
-`completed`, include at least one passing validation evidence item. The command is
-read-only with respect to task state: it records an audit event and exits non-zero
-for rejected responses instead of silently promoting work.
+`completed`, include at least one passing validation evidence item. The command
+records an audit event and exits non-zero for rejected responses. An accepted
+response is a promotion boundary: Forge updates the task/workflow state, records a
+checkpoint and persists an `executor_response_promoted` event.
 
 Skill-style async handoff:
 
@@ -751,8 +859,11 @@ The installer writes:
 The repository also includes project-local skill definitions:
 
 - `.agents/skills/forge-core/SKILL.md`
+- `.agents/skills/forge-core-workspaces/SKILL.md`
 - `.opencode/skills/forge-core/SKILL.md`
 - `skills/forge-core/SKILL.md`
+
+O instalador mantém `forge-core` como router enxuto e instala os módulos de domínio ao lado dele, incluindo `forge-core-workspaces` para worktrees, sandbox e gates de preview/teste.
 
 ## Validation
 
@@ -776,7 +887,8 @@ The current test suite validates:
 - workflow registry listing preserves initial requests and lifecycle state;
 - workflow inspection renders terminal DAGs with dependency, lifecycle, persona and context next-action annotations;
 - context routing carries proposed child-subflow bindings for reusable deterministic nodes;
-- simulated execution can complete the graph and unlock validation;
+- deterministic local execution can complete the graph and unlock validation;
+- worktree contracts cover creation/config authorization, workflow/task binding precedence, approved manifest hashing, modifiable/protected path decisions, revisioned predecessor blocking/unblocking, path escape rejection, blocked sandbox plans and bounded test receipts;
 - skill installation works for Codex and OpenCode paths.
 
 ## Self-Improvement Model

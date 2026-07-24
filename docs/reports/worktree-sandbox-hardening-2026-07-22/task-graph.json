@@ -1,0 +1,56 @@
+{
+  "schema_version": "forge.worktree_hardening.task_graph.v1",
+  "workflow_id": "wf_cf8a1698f266442981479112786f00b0",
+  "acyclic": true,
+  "missing_dependencies": [],
+  "nodes": [
+    {
+      "id": "task-001",
+      "title": "Parse intent",
+      "dependencies": [],
+      "output": "intent.json"
+    },
+    {
+      "id": "task-002",
+      "title": "Extract requirements",
+      "dependencies": ["task-001"],
+      "output": "requirements.md"
+    },
+    {
+      "id": "task-003",
+      "title": "Build atomic task graph",
+      "dependencies": ["task-002"],
+      "output": "task-graph.json"
+    },
+    {
+      "id": "task-004",
+      "title": "Route minimal context",
+      "dependencies": ["task-003"],
+      "output": "context-package.json"
+    },
+    {
+      "id": "task-005",
+      "title": "Execute isolated task",
+      "dependencies": ["task-004"],
+      "output": "execution-trace.md"
+    },
+    {
+      "id": "task-006",
+      "title": "Validate build",
+      "dependencies": ["task-005"],
+      "output": "validation-report.md"
+    },
+    {
+      "id": "task-007",
+      "title": "Integrate artifacts",
+      "dependencies": ["task-006"],
+      "output": "artifact-manifest.json"
+    },
+    {
+      "id": "task-008",
+      "title": "Generate documentation",
+      "dependencies": ["task-007"],
+      "output": "operational-report.md"
+    }
+  ]
+}

@@ -1,9 +1,14 @@
 use crate::adapter::{validate_executor_response_file, ExecutorResponseValidationReport};
 use crate::addon::{default_addon_dirs, load_addon_catalog_from_store};
-use crate::artifact::{list_workflow_artifacts, write_json_artifact};
+use crate::artifact::{hex_sha256, list_workflow_artifacts, write_json_artifact};
 use crate::checkpoint::{load_workflow_checkpoints, TaskCheckpoint};
 use crate::context::{
-    build_context_handoff_summary, ContextHandoffSummary, ContextHandoffTask,
+    build_context_handoff_summary_for_task_ids_with_task_projects,
+    build_context_handoff_summary_with_task_projects, compact_text, compact_validation_rule,
+    summarize_context_handoff_tasks, unresolved_predecessor_frontier, ContextHandoffBlocker,
+    ContextHandoffSummary, ContextHandoffTask, COMPACT_EXPECTED_OUTPUT_BYTE_LIMIT,
+    COMPACT_PREDECESSOR_TASK_LIMIT, COMPACT_PREDECESSOR_VALIDATION_RULE_LIMIT,
+    COMPACT_TASK_GOAL_BYTE_LIMIT, COMPACT_TASK_ID_BYTE_LIMIT, COMPACT_TASK_TITLE_BYTE_LIMIT,
     DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
@@ -23,18 +28,24 @@ use crate::outcome::{
 use crate::registry::{
     attach_reuse_candidates_as_child_subflows, find_reuse_candidates, WorkflowReuseCandidate,
 };
+use crate::security::sanitize_workflow_secrets_for_storage;
 use crate::storage::ForgeStore;
-use crate::workflow::ArtifactAttachReport;
-use anyhow::{Context, Result};
+use crate::workflow::{
+    prepare_workflow_artifact_attach, record_prepared_workflow_artifact, ArtifactAttachReport,
+    PreparedArtifactAttach,
+};
+use crate::worktree::{resolve_bound_worktree_root, WorktreeContextReport};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const COMPLETION_AUDIT_HANDOFF_CONTEXT_BUDGET: usize = 12000;
 const REWORK_HANDOFF_CONTEXT_BUDGET: usize = 4096;
+const REQUEST_CONTEXT_FRONTIER_LIMIT: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
@@ -78,6 +89,8 @@ pub struct RequestStartReport {
     pub handoff_contract: AgentHandoffContract,
     pub reuse_candidates: Vec<WorkflowReuseCandidate>,
     pub attached_subflows: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeContextReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -207,6 +220,26 @@ pub struct RequestDriveBlockedTask {
     pub title: String,
     pub handoff_status: String,
     pub blocking_refs: Vec<String>,
+    pub handoff_blockers: Vec<ContextHandoffBlocker>,
+    pub routing_action: String,
+    pub recommended_budget_bytes: usize,
+    pub predecessor_tasks: Vec<RequestDrivePredecessorTask>,
+    pub predecessor_tasks_total: usize,
+    pub predecessor_tasks_included: usize,
+    pub predecessor_tasks_omitted: usize,
+    pub predecessor_validation_rules_omitted: usize,
+    pub next_commands: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestDrivePredecessorTask {
+    pub task_id: String,
+    pub title: String,
+    pub goal: String,
+    pub status: String,
+    pub expected_output: String,
+    pub validation_rules: Vec<ValidationRule>,
+    pub validation_rules_omitted: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -641,6 +674,7 @@ pub fn start_pm_session(
 
     let reuse_candidates = Vec::new(); // PM sessions are unique
     let attached_subflows = 0;
+    let _ = sanitize_workflow_secrets_for_storage(store, &mut workflow, origin)?;
     let flow_resolution =
         build_flow_resolution_report(&workflow, &reuse_candidates, attached_subflows);
     let run = create_run_record(&workflow, origin, "accepted");
@@ -654,7 +688,7 @@ pub fn start_pm_session(
             "objective": objective,
         }),
     )?;
-    let handoff_contract = build_agent_handoff_contract(&run, flow_resolution.clone());
+    let handoff_contract = build_agent_handoff_contract(store, &run, flow_resolution.clone());
     Ok(RequestStartReport {
         status: run.status,
         run_id: run.run_id,
@@ -666,6 +700,7 @@ pub fn start_pm_session(
         handoff_contract,
         reuse_candidates,
         attached_subflows,
+        worktree: None,
     })
 }
 
@@ -675,11 +710,21 @@ pub fn start_async_request(
     origin: &str,
 ) -> Result<RequestStartReport> {
     let project_root = std::env::current_dir()?;
+    start_async_request_with_project(store, goal, origin, &project_root)
+}
+
+pub fn start_async_request_with_project(
+    store: &ForgeStore,
+    goal: &str,
+    origin: &str,
+    project_root: &Path,
+) -> Result<RequestStartReport> {
     let addon_catalog = load_addon_catalog_from_store(store, &default_addon_dirs())?;
-    let operating_context = load_project_operating_context(&project_root)?;
+    let operating_context = load_project_operating_context(project_root)?;
     ensure_operating_context_policy(store, &operating_context, "request start")?;
     let intent = parse_intent_with_catalog_and_context(goal, &addon_catalog, operating_context);
     let mut workflow = create_workflow(intent);
+    let _ = sanitize_workflow_secrets_for_storage(store, &mut workflow, origin)?;
     let reuse_candidates = find_reuse_candidates(store, &workflow)?;
     let attached_subflows =
         attach_reuse_candidates_as_child_subflows(&mut workflow, &reuse_candidates);
@@ -696,7 +741,7 @@ pub fn start_async_request(
             "flow_resolution": flow_resolution,
         }),
     )?;
-    let handoff_contract = build_agent_handoff_contract(&run, flow_resolution.clone());
+    let handoff_contract = build_agent_handoff_contract(store, &run, flow_resolution.clone());
     Ok(RequestStartReport {
         status: run.status,
         run_id: run.run_id,
@@ -708,6 +753,7 @@ pub fn start_async_request(
         handoff_contract,
         reuse_candidates,
         attached_subflows,
+        worktree: None,
     })
 }
 
@@ -806,23 +852,129 @@ pub fn update_run_status(
     status: &str,
     origin: &str,
 ) -> Result<RunRecord> {
-    let mut run = load_run_record_for_action(store, run_id, "run status update")?;
-    let previous_status = run.status.clone();
-    run.status = status.to_string();
-    run.updated_at = Utc::now();
-    save_run_record(store, &run)?;
-    store.record_event(
-        &run.workflow_id,
-        &format!("run_status_{status}"),
-        &serde_json::json!({
-            "run_id": run.run_id,
-            "origin": origin,
-            "previous_status": previous_status,
-            "new_status": status,
-            "updated_at": run.updated_at,
-        }),
-    )?;
-    Ok(run)
+    store.with_transaction(|| {
+        let mut run = load_run_record_for_action(store, run_id, "run status update")?;
+        let workflow = store.load_workflow(&run.workflow_id)?;
+        if let (Some(run_terminal), Some(workflow_terminal)) = (
+            terminal_request_status(&run.status),
+            terminal_request_status(&workflow.status),
+        ) {
+            if run_terminal != workflow_terminal {
+                anyhow::bail!(
+                    "cannot update request {} because run status {} conflicts with terminal workflow {} status {}",
+                    run.run_id,
+                    run.status,
+                    workflow.id,
+                    workflow.status
+                );
+            }
+        }
+        if run.status == status {
+            return Ok(run);
+        }
+        if is_terminal_run_status(&run.status) {
+            anyhow::bail!(
+                "cannot change terminal request {} from status {} to {}",
+                run.run_id,
+                run.status,
+                status
+            );
+        }
+        if let Some(target_terminal) = terminal_request_status(status) {
+            if let Some(workflow_terminal) = terminal_request_status(&workflow.status) {
+                if target_terminal != workflow_terminal {
+                    anyhow::bail!(
+                        "cannot change request {} to terminal status {} because workflow {} is terminal in status {}",
+                        run.run_id,
+                        status,
+                        workflow.id,
+                        workflow.status
+                    );
+                }
+            }
+        } else {
+            ensure_request_mutation_is_active(&run, &workflow, "update status for")?;
+        }
+        let previous_status = run.status.clone();
+        run.status = status.to_string();
+        run.updated_at = Utc::now();
+        save_run_record(store, &run)?;
+        store.record_event(
+            &run.workflow_id,
+            &format!("run_status_{status}"),
+            &serde_json::json!({
+                "run_id": run.run_id,
+                "origin": origin,
+                "previous_status": previous_status,
+                "new_status": status,
+                "updated_at": run.updated_at,
+            }),
+        )?;
+        Ok(run)
+    })
+}
+
+pub(crate) fn update_run_and_workflow_status(
+    store: &ForgeStore,
+    run_id: &str,
+    status: &str,
+    origin: &str,
+) -> Result<RunRecord> {
+    let Some(target_terminal) = terminal_request_status(status) else {
+        anyhow::bail!(
+            "cannot atomically terminalize request {run_id} with non-terminal status {status}"
+        );
+    };
+    store.with_transaction(|| {
+        let mut run = load_run_record_for_action(store, run_id, "run and workflow status update")?;
+        let mut workflow = store.load_workflow(&run.workflow_id)?;
+        if terminal_request_status(&run.status).is_some_and(|current| current != target_terminal) {
+            anyhow::bail!(
+                "cannot change terminal request {} from status {} to {}",
+                run.run_id,
+                run.status,
+                status
+            );
+        }
+        if terminal_request_status(&workflow.status)
+            .is_some_and(|current| current != target_terminal)
+        {
+            anyhow::bail!(
+                "cannot change terminal workflow {} from status {} to {}",
+                workflow.id,
+                workflow.status,
+                status
+            );
+        }
+        if terminal_request_status(&run.status) == Some(target_terminal)
+            && terminal_request_status(&workflow.status) == Some(target_terminal)
+        {
+            return Ok(run);
+        }
+
+        let previous_status = run.status.clone();
+        let previous_workflow_status = workflow.status.clone();
+        let updated_at = Utc::now();
+        run.status = status.to_string();
+        run.updated_at = updated_at;
+        workflow.status = status.to_string();
+        save_run_record(store, &run)?;
+        store.save_workflow(&workflow)?;
+        store.record_event(
+            &run.workflow_id,
+            &format!("run_status_{status}"),
+            &serde_json::json!({
+                "run_id": run.run_id,
+                "origin": origin,
+                "previous_status": previous_status,
+                "new_status": status,
+                "previous_workflow_status": previous_workflow_status,
+                "new_workflow_status": workflow.status,
+                "updated_at": updated_at,
+            }),
+        )?;
+        Ok(run)
+    })
 }
 
 fn mark_run_needs_attention_for_terminal_outcome(
@@ -832,40 +984,208 @@ fn mark_run_needs_attention_for_terminal_outcome(
     origin: &str,
     reason: &str,
 ) -> Result<RunRecord> {
-    let attention_at = Utc::now();
-    let previous_status = run.status.clone();
-    let previous_workflow_status = workflow.status.clone();
-    let mut attention_run = run.clone();
-    attention_run.status = "needs_attention".to_string();
-    attention_run.active_executor = None;
-    attention_run.executor_pid = None;
-    attention_run.progress_summary = Some(reason.to_string());
-    attention_run.last_heartbeat_at = None;
-    attention_run.heartbeat_expires_at = None;
-    attention_run.heartbeat_ttl_seconds = None;
-    attention_run.updated_at = attention_at;
-    save_run_record(store, &attention_run)?;
+    store.with_transaction(|| {
+        let (mut attention_run, mut attention_workflow) =
+            load_current_request_snapshot_for_completion(
+                store,
+                run,
+                workflow,
+                "mark needs attention",
+            )?;
+        let attention_at = Utc::now();
+        let previous_status = attention_run.status.clone();
+        let previous_workflow_status = attention_workflow.status.clone();
+        attention_run.status = "needs_attention".to_string();
+        attention_run.active_executor = None;
+        attention_run.executor_pid = None;
+        attention_run.progress_summary = Some(reason.to_string());
+        attention_run.last_heartbeat_at = None;
+        attention_run.heartbeat_expires_at = None;
+        attention_run.heartbeat_ttl_seconds = None;
+        attention_run.updated_at = attention_at;
+        attention_workflow.status = "needs_attention".to_string();
+        save_run_record(store, &attention_run)?;
+        store.save_workflow(&attention_workflow)?;
+        store.record_event(
+            &attention_workflow.id,
+            "terminal_outcome_needs_attention",
+            &serde_json::json!({
+                "run_id": attention_run.run_id,
+                "origin": origin,
+                "previous_status": previous_status,
+                "new_status": attention_run.status,
+                "previous_workflow_status": previous_workflow_status,
+                "new_workflow_status": attention_workflow.status,
+                "reason": reason,
+                "updated_at": attention_at,
+            }),
+        )?;
+        Ok(attention_run)
+    })
+}
 
-    let mut attention_workflow = workflow.clone();
-    attention_workflow.status = "needs_attention".to_string();
-    store.save_workflow(&attention_workflow)?;
+fn mark_run_blocked(
+    store: &ForgeStore,
+    run: &RunRecord,
+    workflow: &Workflow,
+    checkpoints: &[TaskCheckpoint],
+    origin: &str,
+    reason: &str,
+) -> Result<RunRecord> {
+    store.with_transaction(|| {
+        let (mut blocked, _) = load_current_request_snapshot(store, run, workflow, "mark blocked")?;
+        ensure_request_checkpoints_match(store, &workflow.id, checkpoints, "mark blocked")?;
+        if blocked.status == "blocked"
+            && blocked.progress_summary.as_deref() == Some(reason)
+            && blocked.last_heartbeat_at.is_none()
+            && blocked.heartbeat_expires_at.is_none()
+            && blocked.executor_pid.is_none()
+        {
+            return Ok(blocked);
+        }
+        let blocked_at = Utc::now();
+        let previous_status = blocked.status.clone();
+        blocked.status = "blocked".to_string();
+        blocked.active_executor = None;
+        blocked.executor_pid = None;
+        blocked.progress_summary = Some(reason.to_string());
+        blocked.last_heartbeat_at = None;
+        blocked.heartbeat_expires_at = None;
+        blocked.heartbeat_ttl_seconds = None;
+        blocked.updated_at = blocked_at;
+        save_run_record(store, &blocked)?;
+        store.record_event(
+            &blocked.workflow_id,
+            "async_request_blocked",
+            &serde_json::json!({
+                "run_id": blocked.run_id,
+                "origin": origin,
+                "previous_status": previous_status,
+                "new_status": blocked.status,
+                "reason": reason,
+                "blocked_at": blocked_at,
+            }),
+        )?;
+        Ok(blocked)
+    })
+}
 
-    store.record_event(
-        &attention_workflow.id,
-        "terminal_outcome_needs_attention",
-        &serde_json::json!({
-            "run_id": attention_run.run_id,
-            "origin": origin,
-            "previous_status": previous_status,
-            "new_status": attention_run.status,
-            "previous_workflow_status": previous_workflow_status,
-            "new_workflow_status": attention_workflow.status,
-            "reason": reason,
-            "updated_at": attention_at,
-        }),
-    )?;
+fn is_terminal_run_status(status: &str) -> bool {
+    terminal_request_status(status).is_some()
+}
 
-    Ok(attention_run)
+fn terminal_request_status(status: &str) -> Option<&'static str> {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "complete" | "completed" => Some("complete"),
+        "cancelled" => Some("cancelled"),
+        "failed" => Some("failed"),
+        _ => None,
+    }
+}
+
+fn ensure_request_mutation_is_active(
+    run: &RunRecord,
+    workflow: &Workflow,
+    action: &str,
+) -> Result<()> {
+    if is_terminal_run_status(&run.status) {
+        anyhow::bail!(
+            "cannot {action} terminal request {} in status {}; start a new active request instead",
+            run.run_id,
+            run.status
+        );
+    }
+    if is_terminal_run_status(&workflow.status) {
+        anyhow::bail!(
+            "cannot {action} request {} because workflow {} is terminal in status {}; start a new active workflow instead",
+            run.run_id,
+            workflow.id,
+            workflow.status
+        );
+    }
+    Ok(())
+}
+
+fn load_current_request_snapshot(
+    store: &ForgeStore,
+    expected_run: &RunRecord,
+    expected_workflow: &Workflow,
+    action: &str,
+) -> Result<(RunRecord, Workflow)> {
+    let current_run = load_run_record_for_action(store, &expected_run.run_id, action)?;
+    let current_workflow = store.load_workflow(&expected_run.workflow_id)?;
+    ensure_request_mutation_is_active(&current_run, &current_workflow, action)?;
+    if serde_json::to_value(&current_run)? != serde_json::to_value(expected_run)?
+        || serde_json::to_value(&current_workflow)? != serde_json::to_value(expected_workflow)?
+    {
+        anyhow::bail!(
+            "cannot {action} request {} because its run or workflow changed concurrently; reload current state and retry",
+            expected_run.run_id
+        );
+    }
+    Ok((current_run, current_workflow))
+}
+
+fn load_current_request_snapshot_for_completion(
+    store: &ForgeStore,
+    expected_run: &RunRecord,
+    expected_workflow: &Workflow,
+    action: &str,
+) -> Result<(RunRecord, Workflow)> {
+    let current_run = load_run_record_for_action(store, &expected_run.run_id, action)?;
+    let current_workflow = store.load_workflow(&expected_run.workflow_id)?;
+    if is_terminal_run_status(&current_run.status) {
+        anyhow::bail!(
+            "cannot {action} terminal request {} in status {}; start a new active request instead",
+            current_run.run_id,
+            current_run.status
+        );
+    }
+    if terminal_request_status(&current_workflow.status).is_some_and(|status| status != "complete")
+    {
+        anyhow::bail!(
+            "cannot {action} request {} because workflow {} is terminal in status {}; start a new active workflow instead",
+            current_run.run_id,
+            current_workflow.id,
+            current_workflow.status
+        );
+    }
+    if terminal_request_status(&current_workflow.status) == Some("complete")
+        && current_workflow
+            .tasks
+            .iter()
+            .any(|task| task.status != TaskStatus::Completed)
+    {
+        anyhow::bail!(
+            "cannot {action} request {} because workflow {} is completed with unfinished tasks",
+            current_run.run_id,
+            current_workflow.id
+        );
+    }
+    if serde_json::to_value(&current_run)? != serde_json::to_value(expected_run)?
+        || serde_json::to_value(&current_workflow)? != serde_json::to_value(expected_workflow)?
+    {
+        anyhow::bail!(
+            "cannot {action} request {} because its run or workflow changed concurrently; reload current state and retry",
+            expected_run.run_id
+        );
+    }
+    Ok((current_run, current_workflow))
+}
+
+fn ensure_request_checkpoints_match(
+    store: &ForgeStore,
+    workflow_id: &str,
+    expected_checkpoints: &[TaskCheckpoint],
+    action: &str,
+) -> Result<()> {
+    let current_checkpoints = load_workflow_checkpoints(store, workflow_id)?;
+    if serde_json::to_value(&current_checkpoints)? != serde_json::to_value(expected_checkpoints)? {
+        anyhow::bail!(
+            "cannot {action} request for workflow {workflow_id} because its checkpoints changed concurrently; reload current state and retry"
+        );
+    }
+    Ok(())
 }
 
 pub fn heartbeat_request(
@@ -877,43 +1197,85 @@ pub fn heartbeat_request(
     pid: Option<u32>,
     origin: &str,
 ) -> Result<RequestHeartbeatReport> {
-    let mut run = load_run_record_for_action(store, run_id, "request heartbeat")?;
-    let previous_status = run.status.clone();
-    let heartbeat_at = Utc::now();
-    let ttl_seconds = ttl_seconds.max(1);
-    let expires_at = heartbeat_at + Duration::seconds(ttl_seconds.min(i64::MAX as u64) as i64);
-    run.status = "running".to_string();
-    run.active_executor = Some(executor.to_string());
-    run.executor_pid = pid;
-    run.progress_summary = Some(summary.to_string());
-    run.last_heartbeat_at = Some(heartbeat_at);
-    run.heartbeat_expires_at = Some(expires_at);
-    run.heartbeat_ttl_seconds = Some(ttl_seconds);
-    run.updated_at = heartbeat_at;
-    save_run_record(store, &run)?;
-    if let Ok(mut workflow) = store.load_workflow(&run.workflow_id) {
+    heartbeat_request_with_expected_snapshot(
+        store,
+        run_id,
+        executor,
+        summary,
+        ttl_seconds,
+        pid,
+        origin,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn heartbeat_request_with_expected_snapshot(
+    store: &ForgeStore,
+    run_id: &str,
+    executor: &str,
+    summary: &str,
+    ttl_seconds: u64,
+    pid: Option<u32>,
+    origin: &str,
+    expected_snapshot: Option<(&RunRecord, &Workflow, &[TaskCheckpoint])>,
+) -> Result<RequestHeartbeatReport> {
+    let (run, previous_status, heartbeat_at) = store.with_transaction(|| {
+        let mut run = load_run_record_for_action(store, run_id, "request heartbeat")?;
+        let mut workflow = store.load_workflow(&run.workflow_id)?;
+        ensure_request_mutation_is_active(&run, &workflow, "heartbeat")?;
+        if let Some((expected_run, expected_workflow, expected_checkpoints)) = expected_snapshot {
+            if serde_json::to_value(&run)? != serde_json::to_value(expected_run)?
+                || serde_json::to_value(&workflow)? != serde_json::to_value(expected_workflow)?
+            {
+                anyhow::bail!(
+                    "cannot heartbeat request {} because its run or workflow changed concurrently; reload current state and retry",
+                    run.run_id
+                );
+            }
+            ensure_request_checkpoints_match(
+                store,
+                &workflow.id,
+                expected_checkpoints,
+                "heartbeat",
+            )?;
+        }
+        let previous_status = run.status.clone();
+        let heartbeat_at = Utc::now();
+        let ttl_seconds = ttl_seconds.max(1);
+        let expires_at = heartbeat_at + Duration::seconds(ttl_seconds.min(i64::MAX as u64) as i64);
+        run.status = "running".to_string();
+        run.active_executor = Some(executor.to_string());
+        run.executor_pid = pid;
+        run.progress_summary = Some(summary.to_string());
+        run.last_heartbeat_at = Some(heartbeat_at);
+        run.heartbeat_expires_at = Some(expires_at);
+        run.heartbeat_ttl_seconds = Some(ttl_seconds);
+        run.updated_at = heartbeat_at;
+        save_run_record(store, &run)?;
         if workflow.status != "running" {
             workflow.status = "running".to_string();
             store.save_workflow(&workflow)?;
         }
-    }
-    let activity = build_run_activity_at(&run, heartbeat_at);
-    store.record_event(
-        &run.workflow_id,
-        "async_request_heartbeat",
-        &serde_json::json!({
-            "run_id": run.run_id,
-            "origin": origin,
-            "previous_status": previous_status,
-            "new_status": run.status,
-            "executor": executor,
-            "pid": pid,
-            "summary": summary,
-            "last_heartbeat_at": heartbeat_at,
-            "heartbeat_expires_at": expires_at,
-            "heartbeat_ttl_seconds": ttl_seconds,
-        }),
-    )?;
+        store.record_event(
+            &run.workflow_id,
+            "async_request_heartbeat",
+            &serde_json::json!({
+                "run_id": run.run_id,
+                "origin": origin,
+                "previous_status": previous_status,
+                "new_status": run.status,
+                "executor": executor,
+                "pid": pid,
+                "summary": summary,
+                "last_heartbeat_at": heartbeat_at,
+                "heartbeat_expires_at": expires_at,
+                "heartbeat_ttl_seconds": ttl_seconds,
+            }),
+        )?;
+        Ok((run, previous_status, heartbeat_at))
+    })?;
+    let activity = build_run_activity_at_with_store(store, &run, heartbeat_at);
     Ok(RequestHeartbeatReport {
         status: run.status,
         run_id: run.run_id,
@@ -944,17 +1306,69 @@ fn drive_request_with_context_budget(
     context_budget_override: Option<usize>,
 ) -> Result<RequestDriveReport> {
     let run = load_run_record_for_action(store, run_id, "request drive")?;
-    let workflow = store.load_workflow(&run.workflow_id)?;
+    let mut workflow = store.load_workflow(&run.workflow_id)?;
     let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
-    let context_budget =
-        context_budget_override.unwrap_or_else(|| request_drive_context_budget(&workflow));
     let latest_checkpoint = latest_actionable_checkpoint(&workflow, &checkpoints);
-    let task_summary = summarize_tasks(&workflow);
-    let handoff_summary = build_context_handoff_summary(&workflow, context_budget, &checkpoints)?;
-    let outcome_status = request_outcome_status(store, &workflow)?;
+    let mut task_summary = summarize_tasks(&workflow);
+    let mut outcome_status = request_outcome_status(store, &workflow)?;
+
+    if is_terminal_run_status(&run.status)
+        || matches!(
+            terminal_request_status(&workflow.status),
+            Some("failed" | "cancelled")
+        )
+    {
+        let run_terminal = terminal_request_status(&run.status);
+        let workflow_terminal = terminal_request_status(&workflow.status);
+        if let (Some(run_terminal), Some(workflow_terminal)) = (run_terminal, workflow_terminal) {
+            if run_terminal != workflow_terminal {
+                anyhow::bail!(
+                    "cannot drive request {} because run status {} conflicts with workflow {} status {}",
+                    run.run_id,
+                    run.status,
+                    workflow.id,
+                    workflow.status
+                );
+            }
+        }
+        let terminal_status = run_terminal.or(workflow_terminal).unwrap_or("failed");
+        let reason = match terminal_status {
+            "complete" => "Request is already complete; no context refresh or heartbeat is needed.",
+            "cancelled" => "Request is cancelled; no context refresh or heartbeat is allowed.",
+            _ => "Request is failed; no context refresh or heartbeat is allowed.",
+        };
+        return Ok(RequestDriveReport {
+            schema_version: "forge.request_drive.v1".to_string(),
+            status: terminal_status.to_string(),
+            action: "none".to_string(),
+            run_id: run.run_id.clone(),
+            workflow_id: workflow.id.clone(),
+            executor: executor.to_string(),
+            origin: origin.to_string(),
+            activity: build_run_activity_with_store(store, &run),
+            task_summary,
+            outcome_status,
+            checkpoint_count: checkpoints.len(),
+            latest_checkpoint,
+            rework: None,
+            handoff_task: None,
+            parallel_handoff_tasks: Vec::new(),
+            blocked_tasks: Vec::new(),
+            next_command: Vec::new(),
+            parallel_next_commands: Vec::new(),
+            final_delivery_package: None,
+            reason: reason.to_string(),
+            updated_at: run.updated_at,
+        });
+    }
+
+    let mut context_budget =
+        context_budget_override.unwrap_or_else(|| request_drive_context_budget(&workflow));
+    let (mut handoff_summary, mut project_roots) =
+        build_request_context_frontier(store, &workflow, context_budget, &checkpoints)?;
 
     if let Some(rework) = latest_open_rework(store, &workflow)? {
-        let heartbeat = heartbeat_request(
+        let heartbeat = heartbeat_request_with_expected_snapshot(
             store,
             run_id,
             executor,
@@ -962,30 +1376,22 @@ fn drive_request_with_context_budget(
             ttl_seconds,
             None,
             origin,
+            Some((&run, &workflow, &checkpoints)),
         )?;
-        let next_command = vec![
-            "forge".to_string(),
-            "task".to_string(),
-            "handoff".to_string(),
-            "--workflow".to_string(),
-            workflow.id.clone(),
-            "--task".to_string(),
-            rework.task_id.clone(),
-            "--executor".to_string(),
-            executor.to_string(),
-            "--ttl-seconds".to_string(),
-            ttl_seconds.max(1).to_string(),
-            "--budget".to_string(),
-            REWORK_HANDOFF_CONTEXT_BUDGET.to_string(),
-            "--output".to_string(),
-            "json".to_string(),
-        ];
+        let next_command = handoff_command(
+            store,
+            &workflow.id,
+            &rework.task_id,
+            executor,
+            ttl_seconds,
+            REWORK_HANDOFF_CONTEXT_BUDGET,
+        );
         return Ok(RequestDriveReport {
             schema_version: "forge.request_drive.v1".to_string(),
             status: "rework_required".to_string(),
             action: "rework_task".to_string(),
             run_id: run.run_id,
-            workflow_id: workflow.id,
+            workflow_id: workflow.id.clone(),
             executor: executor.to_string(),
             origin: origin.to_string(),
             activity: heartbeat.activity,
@@ -996,7 +1402,14 @@ fn drive_request_with_context_budget(
             rework: Some(rework),
             handoff_task: None,
             parallel_handoff_tasks: Vec::new(),
-            blocked_tasks: drive_blocked_tasks(&handoff_summary.tasks),
+            blocked_tasks: drive_blocked_tasks(
+                store,
+                &workflow,
+                &handoff_summary.tasks,
+                &project_roots,
+                executor,
+                ttl_seconds,
+            ),
             next_command,
             parallel_next_commands: Vec::new(),
             final_delivery_package: None,
@@ -1019,9 +1432,9 @@ fn drive_request_with_context_budget(
             origin,
             attention_reason,
         )?;
-        let activity = build_run_activity(&attention_run);
-        let next_command = vec![
-            "forge".to_string(),
+        let activity = build_run_activity_with_store(store, &attention_run);
+        let mut next_command = forge_command_prefix(store);
+        next_command.extend([
             "workflow".to_string(),
             "update-goal".to_string(),
             "--workflow".to_string(),
@@ -1032,13 +1445,13 @@ fn drive_request_with_context_budget(
             origin.to_string(),
             "--output".to_string(),
             "json".to_string(),
-        ];
+        ]);
         return Ok(RequestDriveReport {
             schema_version: "forge.request_drive.v1".to_string(),
             status: "blocked".to_string(),
             action: outcome_status.action.clone(),
             run_id: run.run_id,
-            workflow_id: workflow.id,
+            workflow_id: workflow.id.clone(),
             executor: executor.to_string(),
             origin: origin.to_string(),
             activity,
@@ -1049,7 +1462,14 @@ fn drive_request_with_context_budget(
             rework: None,
             handoff_task: None,
             parallel_handoff_tasks: Vec::new(),
-            blocked_tasks: drive_blocked_tasks(&handoff_summary.tasks),
+            blocked_tasks: drive_blocked_tasks(
+                store,
+                &workflow,
+                &handoff_summary.tasks,
+                &project_roots,
+                executor,
+                ttl_seconds,
+            ),
             next_command,
             parallel_next_commands: Vec::new(),
             final_delivery_package: None,
@@ -1058,74 +1478,53 @@ fn drive_request_with_context_budget(
         });
     }
 
-    let heartbeat = heartbeat_request(
-        store,
-        run_id,
-        executor,
-        "forge drive evaluating next runnable action",
-        ttl_seconds,
-        None,
-        origin,
-    )?;
-    let run = load_run_record(store, run_id)?;
-    let mut workflow = store.load_workflow(&run.workflow_id)?;
-    let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
-    let mut context_budget =
-        context_budget_override.unwrap_or_else(|| request_drive_context_budget(&workflow));
-    let latest_checkpoint = latest_actionable_checkpoint(&workflow, &checkpoints);
-    let mut task_summary = summarize_tasks(&workflow);
-    let mut handoff_summary =
-        build_context_handoff_summary(&workflow, context_budget, &checkpoints)?;
-    let mut outcome_status = request_outcome_status(store, &workflow)?;
-
     if task_summary.completed == task_summary.total && task_summary.total > 0 {
         if let Some(reason) = final_completion_audit_block_reason(store, &workflow)? {
             if let Some(updated_workflow) =
-                ensure_final_completion_audit_task(store, &workflow, origin, &reason)?
+                ensure_final_completion_audit_task(store, Some(&run), &workflow, origin, &reason)?
             {
                 workflow = updated_workflow;
                 context_budget = context_budget_override
                     .unwrap_or_else(|| request_drive_context_budget(&workflow));
                 task_summary = summarize_tasks(&workflow);
-                handoff_summary =
-                    build_context_handoff_summary(&workflow, context_budget, &checkpoints)?;
+                (handoff_summary, project_roots) =
+                    build_request_context_frontier(store, &workflow, context_budget, &checkpoints)?;
                 outcome_status = request_outcome_status(store, &workflow)?;
             } else {
-                let next_command = vec![
-                    "forge".to_string(),
-                    "workflow".to_string(),
-                    "attach-artifact".to_string(),
-                    "--workflow".to_string(),
-                    workflow.id.clone(),
-                    "--path".to_string(),
-                    "<final-completion-audit.json>".to_string(),
-                    "--kind".to_string(),
-                    FINAL_COMPLETION_AUDIT_KIND.to_string(),
-                    "--origin".to_string(),
-                    origin.to_string(),
-                    "--output".to_string(),
-                    "json".to_string(),
-                ];
-                store.record_event(
-                    &workflow.id,
-                    "completion_audit_required",
-                    &serde_json::json!({
-                        "run_id": run.run_id.clone(),
-                        "origin": origin,
-                        "reason": reason.clone(),
-                        "required_artifact_kind": FINAL_COMPLETION_AUDIT_KIND,
-                        "updated_at": heartbeat.updated_at,
-                    }),
-                )?;
+                let next_command =
+                    final_completion_audit_attach_command(store, &workflow.id, origin);
+                let updated_at = Utc::now();
+                let event_data = serde_json::json!({
+                    "run_id": run.run_id.clone(),
+                    "origin": origin,
+                    "reason": reason.clone(),
+                    "required_artifact_kind": FINAL_COMPLETION_AUDIT_KIND,
+                    "updated_at": updated_at,
+                });
+                store.with_transaction(|| {
+                    load_current_request_snapshot_for_completion(
+                        store,
+                        &run,
+                        &workflow,
+                        "record completion audit requirement",
+                    )?;
+                    ensure_request_checkpoints_match(
+                        store,
+                        &workflow.id,
+                        &checkpoints,
+                        "record completion audit requirement",
+                    )?;
+                    store.record_event(&workflow.id, "completion_audit_required", &event_data)
+                })?;
                 return Ok(RequestDriveReport {
                     schema_version: "forge.request_drive.v1".to_string(),
                     status: "completion_audit_required".to_string(),
                     action: "attach_final_completion_audit".to_string(),
-                    run_id: run.run_id,
+                    run_id: run.run_id.clone(),
                     workflow_id: workflow.id,
                     executor: executor.to_string(),
                     origin: origin.to_string(),
-                    activity: heartbeat.activity,
+                    activity: build_run_activity_with_store(store, &run),
                     task_summary,
                     outcome_status,
                     checkpoint_count: checkpoints.len(),
@@ -1138,7 +1537,7 @@ fn drive_request_with_context_budget(
                     parallel_next_commands: Vec::new(),
                     final_delivery_package: None,
                     reason,
-                    updated_at: heartbeat.updated_at,
+                    updated_at,
                 });
             }
         }
@@ -1150,37 +1549,49 @@ fn drive_request_with_context_budget(
         let previous_status = completed_run.status.clone();
         completed_run.status = "completed".to_string();
         completed_run.updated_at = completed_at;
-        save_run_record(store, &completed_run)?;
-
         let mut completed_workflow = workflow.clone();
         let previous_workflow_status = completed_workflow.status.clone();
         completed_workflow.status = "completed".to_string();
-        store.save_workflow(&completed_workflow)?;
-
-        store.record_event(
-            &completed_workflow.id,
-            "async_request_completed",
-            &serde_json::json!({
-                "run_id": completed_run.run_id.clone(),
-                "origin": origin,
-                "previous_status": previous_status,
-                "new_status": completed_run.status.clone(),
-                "previous_workflow_status": previous_workflow_status,
-                "new_workflow_status": completed_workflow.status.clone(),
-                "completed_at": completed_at,
-            }),
+        let prepared_final_delivery_package = prepare_final_delivery_package(
+            store,
+            &completed_run,
+            &completed_workflow,
+            &workflow,
+            origin,
         )?;
-        let activity = build_run_activity_at(&completed_run, completed_at);
+        let final_delivery_transaction = store.with_transaction(|| {
+            load_current_request_snapshot_for_completion(
+                store,
+                &run,
+                &workflow,
+                "complete request with final delivery package",
+            )?;
+            prepared_final_delivery_package.revalidate_snapshot(store)?;
+            save_run_record(store, &completed_run)?;
+            store.save_workflow(&completed_workflow)?;
+            store.record_event(
+                &completed_workflow.id,
+                "async_request_completed",
+                &serde_json::json!({
+                    "run_id": completed_run.run_id.clone(),
+                    "origin": origin,
+                    "previous_status": previous_status,
+                    "new_status": completed_run.status.clone(),
+                    "previous_workflow_status": previous_workflow_status,
+                    "new_workflow_status": completed_workflow.status.clone(),
+                    "completed_at": completed_at,
+                }),
+            )?;
+            prepared_final_delivery_package.commit(store)
+        });
+        let final_delivery_package = prepared_final_delivery_package
+            .finish_transaction(store, final_delivery_transaction)?;
+        let activity = build_run_activity_at_with_store(store, &completed_run, completed_at);
         let completion_reason = if workflow_requires_final_completion_audit(&completed_workflow) {
             "All workflow tasks are completed and final completion audit passed.".to_string()
         } else {
             "All workflow tasks are completed.".to_string()
         };
-        let final_delivery_package = Some(create_final_delivery_package(
-            store,
-            &completed_run.run_id,
-            origin,
-        )?);
         return Ok(RequestDriveReport {
             schema_version: "forge.request_drive.v1".to_string(),
             status: "complete".to_string(),
@@ -1200,7 +1611,7 @@ fn drive_request_with_context_budget(
             blocked_tasks: Vec::new(),
             next_command: Vec::new(),
             parallel_next_commands: Vec::new(),
-            final_delivery_package,
+            final_delivery_package: Some(final_delivery_package),
             reason: completion_reason,
             updated_at: completed_at,
         });
@@ -1208,9 +1619,20 @@ fn drive_request_with_context_budget(
 
     let parallel_handoff_tasks = ready_handoff_tasks(&workflow, &handoff_summary.tasks);
     if let Some(task) = parallel_handoff_tasks.first().cloned() {
+        let heartbeat = heartbeat_request_with_expected_snapshot(
+            store,
+            run_id,
+            executor,
+            "forge drive selected a runnable handoff",
+            ttl_seconds,
+            None,
+            origin,
+            Some((&run, &workflow, &checkpoints)),
+        )?;
         let handoff_budget = context_budget_override
             .unwrap_or_else(|| handoff_context_budget_for_task(&workflow, &task.task_id));
         let next_command = handoff_command(
+            store,
             &workflow.id,
             &task.task_id,
             executor,
@@ -1221,6 +1643,7 @@ fn drive_request_with_context_budget(
             .iter()
             .map(|task| {
                 handoff_command(
+                    store,
                     &workflow.id,
                     &task.task_id,
                     executor,
@@ -1249,7 +1672,7 @@ fn drive_request_with_context_budget(
             status: "ready_for_handoff".to_string(),
             action: action.to_string(),
             run_id: run.run_id,
-            workflow_id: workflow.id,
+            workflow_id: workflow.id.clone(),
             executor: executor.to_string(),
             origin: origin.to_string(),
             activity: heartbeat.activity,
@@ -1260,7 +1683,14 @@ fn drive_request_with_context_budget(
             rework: None,
             handoff_task: Some(task),
             parallel_handoff_tasks,
-            blocked_tasks: drive_blocked_tasks(&handoff_summary.tasks),
+            blocked_tasks: drive_blocked_tasks(
+                store,
+                &workflow,
+                &handoff_summary.tasks,
+                &project_roots,
+                executor,
+                ttl_seconds,
+            ),
             next_command,
             parallel_next_commands,
             final_delivery_package: None,
@@ -1269,15 +1699,42 @@ fn drive_request_with_context_budget(
         });
     }
 
+    let reason = "No pending task is currently ready for handoff.";
+    let blocked_tasks = drive_blocked_tasks(
+        store,
+        &workflow,
+        &handoff_summary.tasks,
+        &project_roots,
+        executor,
+        ttl_seconds,
+    );
+    let next_command = blocked_tasks
+        .iter()
+        .find_map(|task| task.next_commands.first())
+        .cloned()
+        .unwrap_or_else(|| {
+            let mut command = forge_command_prefix(store);
+            command.extend([
+                "request".to_string(),
+                "status".to_string(),
+                "--run".to_string(),
+                run_id.to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]);
+            command
+        });
+    let blocked_run = mark_run_blocked(store, &run, &workflow, &checkpoints, origin, reason)?;
+
     Ok(RequestDriveReport {
         schema_version: "forge.request_drive.v1".to_string(),
         status: "blocked".to_string(),
         action: "wait_or_repair_dependencies".to_string(),
-        run_id: run.run_id,
-        workflow_id: workflow.id,
+        run_id: blocked_run.run_id.clone(),
+        workflow_id: workflow.id.clone(),
         executor: executor.to_string(),
         origin: origin.to_string(),
-        activity: heartbeat.activity,
+        activity: build_run_activity_with_store(store, &blocked_run),
         task_summary,
         outcome_status,
         checkpoint_count: checkpoints.len(),
@@ -1285,20 +1742,12 @@ fn drive_request_with_context_budget(
         rework: None,
         handoff_task: None,
         parallel_handoff_tasks: Vec::new(),
-        blocked_tasks: drive_blocked_tasks(&handoff_summary.tasks),
-        next_command: vec![
-            "forge".to_string(),
-            "request".to_string(),
-            "status".to_string(),
-            "--run".to_string(),
-            run_id.to_string(),
-            "--output".to_string(),
-            "json".to_string(),
-        ],
+        blocked_tasks,
+        next_command,
         parallel_next_commands: Vec::new(),
         final_delivery_package: None,
-        reason: "No pending task is currently ready for handoff.".to_string(),
-        updated_at: heartbeat.updated_at,
+        reason: reason.to_string(),
+        updated_at: blocked_run.updated_at,
     })
 }
 
@@ -1315,10 +1764,13 @@ pub fn step_request(
     let activity = drive_before.activity.clone();
     let updated_at = drive_before.updated_at;
     let Some(stepped_task) = drive_before.handoff_task.clone() else {
+        let status = drive_before.status.clone();
+        let action = drive_before.action.clone();
+        let reason = drive_before.reason.clone();
         return Ok(RequestStepReport {
             schema_version: "forge.request_step.v1".to_string(),
-            status: "skipped".to_string(),
-            action: "none".to_string(),
+            status,
+            action,
             run_id: run.run_id,
             workflow_id: workflow.id,
             executor: executor.to_string(),
@@ -1330,7 +1782,7 @@ pub fn step_request(
             validation: None,
             drive_before,
             drive_after: None,
-            reason: "request drive did not return a ready handoff task".to_string(),
+            reason,
             updated_at,
         });
     };
@@ -1385,6 +1837,18 @@ pub fn step_request(
         origin,
     )?;
 
+    let mut auto_step_evidence_command = forge_command_prefix(store);
+    auto_step_evidence_command.extend([
+        "request".to_string(),
+        "step".to_string(),
+        "--run".to_string(),
+        run_id.to_string(),
+        "--executor".to_string(),
+        executor.to_string(),
+        "--ttl-seconds".to_string(),
+        ttl_seconds.max(1).to_string(),
+    ]);
+    let auto_step_evidence_command = render_forge_command(&auto_step_evidence_command);
     let response_payload = serde_json::json!({
         "schema_version": "forge.executor_response.v1",
         "task_id": task.id,
@@ -1398,7 +1862,7 @@ pub fn step_request(
         },
         "validation_evidence": [
             {
-                "command": format!("forge request step --run {run_id} --executor {executor} --ttl-seconds {}", ttl_seconds.max(1)),
+                "command": auto_step_evidence_command,
                 "exit_code": 0,
                 "summary": format!("Forge auto-stepped deterministic task {} and attached replayable output artifact {}.", task.id, output_artifact.artifact.path)
             }
@@ -1548,6 +2012,7 @@ pub fn complete_ready_task(
     let generated_at = Utc::now();
     let timestamp = generated_at.format("%Y%m%dT%H%M%SZ");
     let trace_payload = build_execution_trace_payload(ExecutionTracePayloadInput {
+        store,
         workflow: &workflow,
         task,
         handoff_task: &handoff_task,
@@ -1579,16 +2044,31 @@ pub fn complete_ready_task(
             .map(|artifact| artifact.artifact.path.clone()),
     );
 
-    let evidence_command = input.evidence_command.map(str::to_string).unwrap_or_else(|| {
-        let budget_arg = input
-            .context_budget
-            .map(|budget| format!(" --budget {budget}"))
-            .unwrap_or_default();
-        format!(
-            "forge request complete-task --run {run_id} --task {} --executor {} --summary <executor-summary> --ttl-seconds {}{} --output json",
-            input.task_id, input.executor, input.ttl_seconds, budget_arg
-        )
-    });
+    let evidence_command = input
+        .evidence_command
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let mut command = forge_command_prefix(store);
+            command.extend([
+                "request".to_string(),
+                "complete-task".to_string(),
+                "--run".to_string(),
+                run_id.to_string(),
+                "--task".to_string(),
+                input.task_id.to_string(),
+                "--executor".to_string(),
+                input.executor.to_string(),
+                "--summary".to_string(),
+                "<executor-summary>".to_string(),
+                "--ttl-seconds".to_string(),
+                input.ttl_seconds.to_string(),
+            ]);
+            if let Some(budget) = input.context_budget {
+                command.extend(["--budget".to_string(), budget.to_string()]);
+            }
+            command.extend(["--output".to_string(), "json".to_string()]);
+            render_forge_command(&command)
+        });
     let evidence_summary = input
         .evidence_summary
         .filter(|summary| !summary.trim().is_empty())
@@ -1664,6 +2144,194 @@ pub fn complete_ready_task(
     })
 }
 
+#[derive(Debug)]
+struct StagedFinalDeliveryArtifact {
+    staging_path: PathBuf,
+    final_path: PathBuf,
+    prepared: PreparedArtifactAttach,
+}
+
+#[derive(Debug)]
+struct PreparedFinalDeliveryPackage {
+    run_id: String,
+    workflow_id: String,
+    origin: String,
+    readiness: String,
+    action: String,
+    reason: String,
+    outcome_status: OutcomeStatusReport,
+    task_summary: TaskStatusSummary,
+    latest_validation_evidence: Option<ValidationEvidenceSummary>,
+    generated_at: DateTime<Utc>,
+    expected_workflow: FinalDeliveryWorkflowStamp,
+    staging_dir: PathBuf,
+    recovery_manifest_path: PathBuf,
+    json: StagedFinalDeliveryArtifact,
+    markdown: StagedFinalDeliveryArtifact,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FinalDeliveryWorkflowStamp {
+    status: String,
+    revisions: Vec<(u64, String)>,
+    tasks: Vec<(String, u64, TaskStatus)>,
+    artifacts: Vec<(String, String, String)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalDeliveryCommitVisibility {
+    RolledBack,
+    Committed,
+    Inconsistent,
+}
+
+impl PreparedFinalDeliveryPackage {
+    fn revalidate_snapshot(&self, store: &ForgeStore) -> Result<()> {
+        let current = store.load_workflow(&self.workflow_id)?;
+        let current_stamp = final_delivery_workflow_stamp(&current);
+        if current_stamp != self.expected_workflow {
+            anyhow::bail!(
+                "workflow {} changed while final delivery package was staged; discard staged package and retry from current workflow state",
+                self.workflow_id
+            );
+        }
+        Ok(())
+    }
+
+    fn promote_files(&self) -> Result<()> {
+        for artifact in [&self.json, &self.markdown] {
+            if artifact.final_path.exists() {
+                anyhow::bail!(
+                    "refusing to overwrite prepared final delivery artifact {}",
+                    artifact.final_path.display()
+                );
+            }
+            fs::rename(&artifact.staging_path, &artifact.final_path).with_context(|| {
+                format!(
+                    "failed to promote staged final delivery artifact {} to {}",
+                    artifact.staging_path.display(),
+                    artifact.final_path.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn commit(&self, store: &ForgeStore) -> Result<RequestFinalDeliveryPackageReport> {
+        self.promote_files()?;
+        let json_artifact =
+            record_prepared_workflow_artifact(store, &self.workflow_id, &self.json.prepared)?;
+        let markdown_artifact =
+            record_prepared_workflow_artifact(store, &self.workflow_id, &self.markdown.prepared)?;
+        store.record_event(
+            &self.workflow_id,
+            "final_delivery_package_created",
+            &serde_json::json!({
+                "run_id": &self.run_id,
+                "origin": &self.origin,
+                "readiness": &self.readiness,
+                "markdown_artifact": &markdown_artifact.artifact.path,
+                "json_artifact": &json_artifact.artifact.path,
+                "generated_at": self.generated_at,
+            }),
+        )?;
+
+        Ok(RequestFinalDeliveryPackageReport {
+            schema_version: "forge.request_final_delivery_package.v1".to_string(),
+            status: "final_delivery_package_created".to_string(),
+            action: self.action.clone(),
+            run_id: self.run_id.clone(),
+            workflow_id: self.workflow_id.clone(),
+            origin: self.origin.clone(),
+            readiness: self.readiness.clone(),
+            outcome_status: self.outcome_status.clone(),
+            task_summary: self.task_summary.clone(),
+            markdown_artifact,
+            json_artifact,
+            latest_validation_evidence: self.latest_validation_evidence.clone(),
+            reason: self.reason.clone(),
+            generated_at: self.generated_at,
+        })
+    }
+
+    fn commit_visibility(&self, store: &ForgeStore) -> Result<FinalDeliveryCommitVisibility> {
+        let workflow = store.load_workflow(&self.workflow_id)?;
+        let json_present = workflow
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.id == self.json.prepared.artifact_id());
+        let markdown_present = workflow
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.id == self.markdown.prepared.artifact_id());
+        Ok(match (json_present, markdown_present) {
+            (false, false) => FinalDeliveryCommitVisibility::RolledBack,
+            (true, true) => FinalDeliveryCommitVisibility::Committed,
+            _ => FinalDeliveryCommitVisibility::Inconsistent,
+        })
+    }
+
+    fn cleanup_staging(&self) -> Result<()> {
+        remove_directory_if_present(&self.staging_dir)
+    }
+
+    fn cleanup_after_rollback(&self) -> Result<()> {
+        let mut cleanup_errors = Vec::new();
+        for path in [&self.json.final_path, &self.markdown.final_path] {
+            if let Err(error) = remove_file_if_present(path) {
+                cleanup_errors.push(error.to_string());
+            }
+        }
+        if let Err(error) = self.cleanup_staging() {
+            cleanup_errors.push(error.to_string());
+        }
+        if cleanup_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "failed to clean rolled-back final delivery package: {}",
+                cleanup_errors.join("; ")
+            ))
+        }
+    }
+
+    fn finish_transaction(
+        &self,
+        store: &ForgeStore,
+        result: Result<RequestFinalDeliveryPackageReport>,
+    ) -> Result<RequestFinalDeliveryPackageReport> {
+        match result {
+            Ok(report) => {
+                let _ = self.cleanup_staging();
+                Ok(report)
+            }
+            Err(error) => match self.commit_visibility(store) {
+                Ok(FinalDeliveryCommitVisibility::RolledBack) => {
+                    if let Err(cleanup_error) = self.cleanup_after_rollback() {
+                        Err(error.context(cleanup_error))
+                    } else {
+                        Err(error)
+                    }
+                }
+                Ok(FinalDeliveryCommitVisibility::Committed) => {
+                    let _ = self.cleanup_staging();
+                    Err(error.context(
+                        "SQLite reported a final delivery package transaction failure after both artifact records became visible; final files were retained",
+                    ))
+                }
+                Ok(FinalDeliveryCommitVisibility::Inconsistent) => Err(error.context(format!(
+                    "final delivery package commit visibility is inconsistent; recovery manifest retained at {}",
+                    self.recovery_manifest_path.display()
+                ))),
+                Err(visibility_error) => Err(error.context(format!(
+                    "could not verify final delivery package rollback ({visibility_error:#}); recovery manifest retained at {}",
+                    self.recovery_manifest_path.display()
+                ))),
+            },
+        }
+    }
+}
+
 pub fn create_final_delivery_package(
     store: &ForgeStore,
     run_id: &str,
@@ -1671,18 +2339,34 @@ pub fn create_final_delivery_package(
 ) -> Result<RequestFinalDeliveryPackageReport> {
     let run = load_run_record_for_action(store, run_id, "final delivery package")?;
     let workflow = store.load_workflow(&run.workflow_id)?;
+    let prepared = prepare_final_delivery_package(store, &run, &workflow, &workflow, origin)?;
+    let transaction_result = store.with_transaction(|| {
+        prepared.revalidate_snapshot(store)?;
+        prepared.commit(store)
+    });
+    prepared.finish_transaction(store, transaction_result)
+}
+
+fn prepare_final_delivery_package(
+    store: &ForgeStore,
+    run: &RunRecord,
+    workflow: &Workflow,
+    expected_workflow: &Workflow,
+    origin: &str,
+) -> Result<PreparedFinalDeliveryPackage> {
+    ensure_workflow_policy(store, &workflow.id, "workflow artifact attach")?;
     let generated_at = Utc::now();
     let timestamp = generated_at.format("%Y%m%dT%H%M%SZ");
-    let outcome_status = request_outcome_status(store, &workflow)?;
-    let task_summary = summarize_tasks(&workflow);
+    let outcome_status = request_outcome_status(store, workflow)?;
+    let task_summary = summarize_tasks(workflow);
     let latest_validation_evidence = load_latest_validation_evidence(store, &workflow.id)?;
     let listed_artifacts = list_workflow_artifacts(&store.base_dir(), &workflow.id)?;
     let (readiness, action, reason) =
         final_delivery_readiness(&outcome_status, &task_summary, &workflow.status);
 
     let package_context = FinalDeliveryPackageContext {
-        run: &run,
-        workflow: &workflow,
+        run,
+        workflow,
         outcome_status: &outcome_status,
         task_summary: &task_summary,
         latest_validation_evidence: latest_validation_evidence.as_ref(),
@@ -1693,67 +2377,189 @@ pub fn create_final_delivery_package(
     };
 
     let package_payload = build_final_delivery_payload(&package_context);
-    let json_relative_path = format!(
-        "tmp/{}/final-delivery-package-{}.json",
-        workflow.id, timestamp
-    );
-    let (json_path, _) =
-        write_json_artifact(&store.base_dir(), &json_relative_path, &package_payload)?;
-    let json_artifact = crate::workflow::attach_workflow_artifact(
-        store,
-        &workflow.id,
-        &json_path,
-        "final_delivery_package_json",
-        origin,
-    )?;
-
     let markdown = render_final_delivery_markdown(&package_context);
-    let markdown_relative_path = format!(
-        "tmp/{}/final-delivery-package-{}.md",
-        workflow.id, timestamp
-    );
-    let markdown_path = write_text_artifact(
-        &store.base_dir(),
-        &markdown_relative_path,
-        markdown.as_str(),
-    )?;
-    let markdown_artifact = crate::workflow::attach_workflow_artifact(
-        store,
-        &workflow.id,
-        &markdown_path,
-        "final_delivery_package",
-        origin,
-    )?;
+    let package_nonce = Uuid::new_v4().to_string().replace('-', "");
+    let package_key = format!("{timestamp}-{package_nonce}");
+    let staging_relative_dir = format!("tmp/{}/.final-delivery-staging/{package_key}", workflow.id);
+    let base_dir = store.base_dir();
+    let staging_dir = base_dir.join(&staging_relative_dir);
+    let final_dir = base_dir.join("artifacts").join(&workflow.id);
+    fs::create_dir_all(&staging_dir).with_context(|| {
+        format!(
+            "failed to create final delivery staging directory {}",
+            staging_dir.display()
+        )
+    })?;
 
-    store.record_event(
-        &workflow.id,
-        "final_delivery_package_created",
-        &serde_json::json!({
-            "run_id": &run.run_id,
-            "origin": origin,
-            "readiness": &readiness,
-            "markdown_artifact": &markdown_artifact.artifact.path,
-            "json_artifact": &json_artifact.artifact.path,
-            "generated_at": generated_at,
+    let prepared: Result<PreparedFinalDeliveryPackage> = (|| {
+        fs::create_dir_all(&final_dir).with_context(|| {
+            format!(
+                "failed to create final delivery artifact directory {}",
+                final_dir.display()
+            )
+        })?;
+
+        let json_staging_relative_path = format!("{staging_relative_dir}/package.json");
+        let (json_staging_path, json_sha256) =
+            write_json_artifact(&base_dir, &json_staging_relative_path, &package_payload)?;
+        let json_bytes = fs::metadata(&json_staging_path)
+            .with_context(|| {
+                format!(
+                    "failed to stat staged final delivery JSON {}",
+                    json_staging_path.display()
+                )
+            })?
+            .len();
+
+        let markdown_staging_relative_path = format!("{staging_relative_dir}/package.md");
+        let markdown_staging_path = write_text_artifact(
+            &base_dir,
+            &markdown_staging_relative_path,
+            markdown.as_str(),
+        )?;
+        let markdown_sha256 = hex_sha256(markdown.as_bytes());
+        let markdown_bytes = markdown.len() as u64;
+
+        let json_relative_path = format!(
+            "artifacts/{}/attached-final_delivery_package_json-final-delivery-package-{package_key}.json",
+            workflow.id
+        );
+        let markdown_relative_path = format!(
+            "artifacts/{}/attached-final_delivery_package-final-delivery-package-{package_key}.md",
+            workflow.id
+        );
+        let json_prepared = prepare_workflow_artifact_attach(
+            "final_delivery_package_json",
+            &json_relative_path,
+            &json_sha256,
+            json_bytes,
+            origin,
+            &[],
+            format!("staged final delivery package JSON {package_key}"),
+        );
+        let markdown_prepared = prepare_workflow_artifact_attach(
+            "final_delivery_package",
+            &markdown_relative_path,
+            &markdown_sha256,
+            markdown_bytes,
+            origin,
+            &[],
+            format!("staged final delivery package Markdown {package_key}"),
+        );
+        let recovery_manifest_relative_path =
+            format!("{staging_relative_dir}/recovery-manifest.json");
+        let recovery_manifest_path = write_json_artifact(
+            &base_dir,
+            &recovery_manifest_relative_path,
+            &serde_json::json!({
+                "schema_version": "forge.request_final_delivery_staging.v1",
+                "run_id": &run.run_id,
+                "workflow_id": &workflow.id,
+                "generated_at": generated_at,
+                "json": {
+                    "artifact_id": json_prepared.artifact_id(),
+                    "staging_path": &json_staging_relative_path,
+                    "final_path": &json_relative_path,
+                    "sha256": &json_sha256,
+                    "bytes": json_bytes,
+                },
+                "markdown": {
+                    "artifact_id": markdown_prepared.artifact_id(),
+                    "staging_path": &markdown_staging_relative_path,
+                    "final_path": &markdown_relative_path,
+                    "sha256": &markdown_sha256,
+                    "bytes": markdown_bytes,
+                },
+            }),
+        )?
+        .0;
+
+        Ok(PreparedFinalDeliveryPackage {
+            run_id: run.run_id.clone(),
+            workflow_id: workflow.id.clone(),
+            origin: origin.to_string(),
+            readiness,
+            action,
+            reason,
+            outcome_status,
+            task_summary,
+            latest_validation_evidence,
+            generated_at,
+            expected_workflow: final_delivery_workflow_stamp(expected_workflow),
+            staging_dir: staging_dir.clone(),
+            recovery_manifest_path,
+            json: StagedFinalDeliveryArtifact {
+                staging_path: json_staging_path,
+                final_path: base_dir.join(&json_relative_path),
+                prepared: json_prepared,
+            },
+            markdown: StagedFinalDeliveryArtifact {
+                staging_path: markdown_staging_path,
+                final_path: base_dir.join(&markdown_relative_path),
+                prepared: markdown_prepared,
+            },
+        })
+    })();
+
+    match prepared {
+        Ok(prepared) => Ok(prepared),
+        Err(error) => {
+            if let Err(cleanup_error) = remove_directory_if_present(&staging_dir) {
+                Err(error.context(cleanup_error))
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+fn final_delivery_workflow_stamp(workflow: &Workflow) -> FinalDeliveryWorkflowStamp {
+    FinalDeliveryWorkflowStamp {
+        status: workflow.status.clone(),
+        revisions: workflow
+            .revisions
+            .iter()
+            .map(|revision| (revision.revision, revision.change_type.clone()))
+            .collect(),
+        tasks: workflow
+            .tasks
+            .iter()
+            .map(|task| (task.id.clone(), task.version, task.status.clone()))
+            .collect(),
+        artifacts: workflow
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.id.clone(),
+                    artifact.path.clone(),
+                    artifact.sha256.clone(),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn remove_file_if_present(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to remove final delivery file {}", path.display())),
+    }
+}
+
+fn remove_directory_if_present(path: &Path) -> Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to remove final delivery directory {}",
+                path.display()
+            )
         }),
-    )?;
-
-    Ok(RequestFinalDeliveryPackageReport {
-        schema_version: "forge.request_final_delivery_package.v1".to_string(),
-        status: "final_delivery_package_created".to_string(),
-        action,
-        run_id: run.run_id,
-        workflow_id: workflow.id,
-        origin: origin.to_string(),
-        readiness,
-        outcome_status,
-        task_summary,
-        markdown_artifact,
-        json_artifact,
-        latest_validation_evidence,
-        reason,
-        generated_at,
-    })
+    }
 }
 
 pub fn ensure_final_audit(
@@ -1808,7 +2614,7 @@ pub fn ensure_final_audit(
     }
 
     let maybe_updated =
-        ensure_final_completion_audit_task(store, &workflow, origin, &block_reason)?;
+        ensure_final_completion_audit_task(store, None, &workflow, origin, &block_reason)?;
     let active_workflow = maybe_updated.as_ref().unwrap_or(&workflow);
     let audit_task_created = maybe_updated.is_some() && existing_audit_task_id.is_none();
     let audit_task_repaired = maybe_updated.is_some() && existing_audit_task_id.is_some();
@@ -1821,9 +2627,10 @@ pub fn ensure_final_audit(
             .map(|task| task.status == TaskStatus::Completed)
             .unwrap_or(false);
         if audit_task_is_completed {
-            final_completion_audit_attach_command(&active_workflow.id, origin)
+            final_completion_audit_attach_command(store, &active_workflow.id, origin)
         } else if final_completion_audit_dependencies_completed(active_workflow, task_id) {
             final_completion_audit_handoff_command(
+                store,
                 &active_workflow.id,
                 task_id,
                 executor,
@@ -1833,7 +2640,7 @@ pub fn ensure_final_audit(
             Vec::new()
         }
     } else {
-        final_completion_audit_attach_command(&active_workflow.id, origin)
+        final_completion_audit_attach_command(store, &active_workflow.id, origin)
     };
     let audit_waits_for_dependencies = audit_task_id.as_deref().is_some_and(|task_id| {
         !final_completion_audit_dependencies_completed(active_workflow, task_id)
@@ -2209,6 +3016,7 @@ fn build_auto_step_output_payload(
 }
 
 struct ExecutionTracePayloadInput<'a> {
+    store: &'a ForgeStore,
     workflow: &'a Workflow,
     task: &'a AtomicTask,
     handoff_task: &'a RequestDriveTask,
@@ -2225,6 +3033,26 @@ fn build_execution_trace_payload(input: ExecutionTracePayloadInput<'_>) -> serde
     let handoff_task = input.handoff_task;
     let completion = input.completion;
     let drive_before = input.drive_before;
+    let mut status_command = forge_command_prefix(input.store);
+    status_command.extend([
+        "request".to_string(),
+        "status".to_string(),
+        "--run".to_string(),
+        input.run_id.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]);
+    let mut drive_command = forge_command_prefix(input.store);
+    drive_command.extend([
+        "request".to_string(),
+        "drive".to_string(),
+        "--run".to_string(),
+        input.run_id.to_string(),
+        "--executor".to_string(),
+        completion.executor.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]);
     serde_json::json!({
         "schema_version": "forge.execution_trace.v1",
         "run_id": input.run_id,
@@ -2266,8 +3094,8 @@ fn build_execution_trace_payload(input: ExecutionTracePayloadInput<'_>) -> serde
             })
         }).collect::<Vec<_>>(),
         "replay": {
-            "status_command": ["forge", "request", "status", "--run", input.run_id, "--output", "json"],
-            "drive_command": ["forge", "request", "drive", "--run", input.run_id, "--executor", completion.executor, "--output", "json"],
+            "status_command": status_command,
+            "drive_command": drive_command,
             "response_path_kind": "executor_response"
         },
         "completion_policy": {
@@ -2293,6 +3121,14 @@ fn latest_open_rework(
             .and_then(|value| value.as_str())
             .unwrap_or_default();
         if response_status != "needs_retry" {
+            return Ok(None);
+        }
+        let has_structured_rework_tasks = event
+            .data
+            .get("generated_rework_task_ids")
+            .and_then(|value| value.as_array())
+            .is_some_and(|task_ids| !task_ids.is_empty());
+        if has_structured_rework_tasks {
             return Ok(None);
         }
         let task_id = event
@@ -2351,18 +3187,133 @@ fn ready_handoff_tasks(
                 context_routing_cache_key: None,
             })
         })
+        .take(REQUEST_CONTEXT_FRONTIER_LIMIT)
         .collect()
 }
 
+fn request_context_frontier_task_ids(workflow: &Workflow) -> Vec<String> {
+    let pending = workflow
+        .tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Pending)
+        .collect::<Vec<_>>();
+    let ready = pending
+        .iter()
+        .copied()
+        .filter(|task| {
+            task.dependencies.iter().all(|dependency_id| {
+                workflow
+                    .tasks
+                    .iter()
+                    .find(|candidate| candidate.id == *dependency_id)
+                    .is_some_and(|dependency| dependency.status == TaskStatus::Completed)
+            })
+        })
+        // Context/profile readiness is evaluated after this dependency-only pass. Truncating
+        // here can permanently hide a runnable candidate behind earlier context blockers.
+        .map(|task| task.id.clone())
+        .collect::<Vec<_>>();
+    if !ready.is_empty() {
+        return ready;
+    }
+    pending
+        .into_iter()
+        .take(REQUEST_CONTEXT_FRONTIER_LIMIT)
+        .map(|task| task.id.clone())
+        .collect()
+}
+
+fn build_request_context_frontier(
+    store: &ForgeStore,
+    workflow: &Workflow,
+    budget: usize,
+    checkpoints: &[TaskCheckpoint],
+) -> Result<(ContextHandoffSummary, BTreeMap<String, PathBuf>)> {
+    let candidate_task_ids = request_context_frontier_task_ids(workflow);
+    let mut retained_tasks = Vec::new();
+    let mut retained_project_roots = BTreeMap::new();
+    let mut ready_count = 0usize;
+    let mut blocked_count = 0usize;
+
+    for task_id in candidate_task_ids {
+        let singleton_task_ids = vec![task_id];
+        let project_roots =
+            worktree_project_roots_for_task_ids(store, workflow, &singleton_task_ids)?;
+        let mut summary = build_context_handoff_summary_for_task_ids_with_task_projects(
+            workflow,
+            budget,
+            checkpoints,
+            &project_roots,
+            &singleton_task_ids,
+        )?;
+        let Some(handoff_task) = summary.tasks.pop() else {
+            continue;
+        };
+        let retain = if handoff_task.handoff_ready {
+            ready_count += 1;
+            true
+        } else if blocked_count < REQUEST_CONTEXT_FRONTIER_LIMIT {
+            blocked_count += 1;
+            true
+        } else {
+            false
+        };
+        if retain {
+            retained_project_roots.extend(project_roots);
+            retained_tasks.push(handoff_task);
+        }
+        if ready_count == REQUEST_CONTEXT_FRONTIER_LIMIT {
+            break;
+        }
+    }
+
+    Ok((
+        summarize_context_handoff_tasks(retained_tasks),
+        retained_project_roots,
+    ))
+}
+
+fn worktree_project_roots(
+    store: &ForgeStore,
+    workflow: &Workflow,
+) -> Result<BTreeMap<String, PathBuf>> {
+    let task_ids = workflow
+        .tasks
+        .iter()
+        .map(|task| task.id.clone())
+        .collect::<Vec<_>>();
+    worktree_project_roots_for_task_ids(store, workflow, &task_ids)
+}
+
+fn worktree_project_roots_for_task_ids(
+    store: &ForgeStore,
+    workflow: &Workflow,
+    task_ids: &[String],
+) -> Result<BTreeMap<String, PathBuf>> {
+    let selected = task_ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let mut roots = BTreeMap::new();
+    for task in workflow
+        .tasks
+        .iter()
+        .filter(|task| selected.contains(task.id.as_str()))
+    {
+        if let Some(root) = resolve_bound_worktree_root(store, &workflow.id, Some(&task.id))? {
+            roots.insert(task.id.clone(), root);
+        }
+    }
+    Ok(roots)
+}
+
 fn handoff_command(
+    store: &ForgeStore,
     workflow_id: &str,
     task_id: &str,
     executor: &str,
     ttl_seconds: u64,
     budget: usize,
 ) -> Vec<String> {
-    vec![
-        "forge".to_string(),
+    let mut command = forge_command_prefix(store);
+    command.extend([
         "task".to_string(),
         "handoff".to_string(),
         "--workflow".to_string(),
@@ -2375,22 +3326,167 @@ fn handoff_command(
         ttl_seconds.max(1).to_string(),
         "--budget".to_string(),
         budget.to_string(),
+        "--view".to_string(),
+        "compact".to_string(),
         "--output".to_string(),
         "json".to_string(),
-    ]
+    ]);
+    command
 }
 
-fn drive_blocked_tasks(handoff_tasks: &[ContextHandoffTask]) -> Vec<RequestDriveBlockedTask> {
+fn context_repair_command(
+    store: &ForgeStore,
+    workflow_id: &str,
+    task_id: &str,
+    budget: usize,
+    project_root: Option<&Path>,
+) -> Vec<String> {
+    let mut command = forge_command_prefix(store);
+    command.extend([
+        "context".to_string(),
+        "--workflow".to_string(),
+        workflow_id.to_string(),
+        "--task".to_string(),
+        task_id.to_string(),
+    ]);
+    if let Some(project_root) = project_root {
+        command.extend([
+            "--project-root".to_string(),
+            project_root.display().to_string(),
+        ]);
+    }
+    command.extend([
+        "--budget".to_string(),
+        budget.to_string(),
+        "--strict".to_string(),
+        "--view".to_string(),
+        "compact".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]);
+    command
+}
+
+fn drive_blocked_tasks(
+    store: &ForgeStore,
+    workflow: &Workflow,
+    handoff_tasks: &[ContextHandoffTask],
+    project_roots: &BTreeMap<String, PathBuf>,
+    executor: &str,
+    ttl_seconds: u64,
+) -> Vec<RequestDriveBlockedTask> {
     handoff_tasks
         .iter()
-        .filter(|task| !task.handoff_ready)
-        .map(|task| RequestDriveBlockedTask {
-            task_id: task.task_id.clone(),
-            title: task.title.clone(),
-            handoff_status: task.handoff_status.clone(),
-            blocking_refs: task.blocking_refs.clone(),
+        .filter(|task| {
+            !task.handoff_ready
+                && workflow.tasks.iter().any(|candidate| {
+                    candidate.id == task.task_id && candidate.status == TaskStatus::Pending
+                })
+        })
+        .take(REQUEST_CONTEXT_FRONTIER_LIMIT)
+        .map(|task| {
+            let predecessor_frontier = unresolved_predecessor_frontier(workflow, &task.task_id);
+            let predecessor_tasks_total = predecessor_frontier.len();
+            let predecessor_tasks_omitted =
+                predecessor_tasks_total.saturating_sub(COMPACT_PREDECESSOR_TASK_LIMIT);
+            let predecessor_validation_rules_total = predecessor_frontier
+                .iter()
+                .map(|predecessor| predecessor.validation_rules.len())
+                .sum::<usize>();
+            let predecessor_validation_rules_included = predecessor_frontier
+                .iter()
+                .take(COMPACT_PREDECESSOR_TASK_LIMIT)
+                .map(|predecessor| {
+                    predecessor
+                        .validation_rules
+                        .len()
+                        .min(COMPACT_PREDECESSOR_VALIDATION_RULE_LIMIT)
+                })
+                .sum::<usize>();
+            let predecessor_tasks = predecessor_frontier
+                .iter()
+                .take(COMPACT_PREDECESSOR_TASK_LIMIT)
+                .map(|predecessor| RequestDrivePredecessorTask {
+                    task_id: compact_text(&predecessor.id, COMPACT_TASK_ID_BYTE_LIMIT),
+                    title: compact_text(&predecessor.title, COMPACT_TASK_TITLE_BYTE_LIMIT),
+                    goal: compact_text(&predecessor.goal, COMPACT_TASK_GOAL_BYTE_LIMIT),
+                    status: request_task_status(&predecessor.status).to_string(),
+                    expected_output: compact_text(
+                        &predecessor.expected_output,
+                        COMPACT_EXPECTED_OUTPUT_BYTE_LIMIT,
+                    ),
+                    validation_rules: predecessor
+                        .validation_rules
+                        .iter()
+                        .take(COMPACT_PREDECESSOR_VALIDATION_RULE_LIMIT)
+                        .map(compact_validation_rule)
+                        .collect(),
+                    validation_rules_omitted: predecessor
+                        .validation_rules
+                        .len()
+                        .saturating_sub(COMPACT_PREDECESSOR_VALIDATION_RULE_LIMIT),
+                })
+                .collect::<Vec<_>>();
+            let mut next_commands = Vec::new();
+            if task.routing_action == "increase_context_budget" && predecessor_frontier.is_empty() {
+                next_commands.push(context_repair_command(
+                    store,
+                    &workflow.id,
+                    &task.task_id,
+                    task.recommended_budget_bytes,
+                    project_roots.get(&task.task_id).map(PathBuf::as_path),
+                ));
+            }
+            next_commands.extend(
+                predecessor_frontier
+                    .iter()
+                    .take(COMPACT_PREDECESSOR_TASK_LIMIT)
+                    .filter(|predecessor| predecessor.status == TaskStatus::Pending)
+                    .map(|predecessor| {
+                        let predecessor_budget = handoff_tasks
+                            .iter()
+                            .find(|candidate| candidate.task_id == predecessor.id)
+                            .map(|candidate| candidate.recommended_budget_bytes)
+                            .unwrap_or(task.recommended_budget_bytes);
+                        handoff_command(
+                            store,
+                            &workflow.id,
+                            &predecessor.id,
+                            executor,
+                            ttl_seconds,
+                            predecessor_budget,
+                        )
+                    }),
+            );
+
+            RequestDriveBlockedTask {
+                task_id: task.task_id.clone(),
+                title: task.title.clone(),
+                handoff_status: task.handoff_status.clone(),
+                blocking_refs: task.blocking_refs.clone(),
+                handoff_blockers: task.handoff_blockers.clone(),
+                routing_action: task.routing_action.clone(),
+                recommended_budget_bytes: task.recommended_budget_bytes,
+                predecessor_tasks_included: predecessor_tasks.len(),
+                predecessor_tasks,
+                predecessor_tasks_total,
+                predecessor_tasks_omitted,
+                predecessor_validation_rules_omitted: predecessor_validation_rules_total
+                    .saturating_sub(predecessor_validation_rules_included),
+                next_commands,
+            }
         })
         .collect()
+}
+
+fn request_task_status(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Pending => "pending",
+        TaskStatus::Running => "running",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Blocked => "blocked",
+        TaskStatus::Failed => "failed",
+    }
 }
 
 pub fn switch_request_executor(
@@ -2398,83 +3494,100 @@ pub fn switch_request_executor(
     run_id: &str,
     input: RequestExecutorSwitchInput,
 ) -> Result<RequestExecutorSwitchReport> {
-    let mut run = load_run_record_for_action(store, run_id, "request switch executor")?;
-    let previous_status = run.status.clone();
-    let previous_executor = run.active_executor.clone();
-    let previous_pid = run.executor_pid;
-    let previous_heartbeat_at = run.last_heartbeat_at;
-    let switched_at = Utc::now();
-    let ttl_seconds = input.ttl_seconds.max(1);
-    let expires_at = switched_at + Duration::seconds(ttl_seconds.min(i64::MAX as u64) as i64);
     let fallback_executors =
         normalize_executor_fallbacks(&input.executor, &input.fallback_executors);
-    let continuity_policy = ExecutorSwitchContinuityPolicy {
-        preserve_run_id: true,
-        preserve_workflow_id: true,
-        preserve_checkpoints: true,
-        keep_workflow_running: true,
-        old_executor_shutdown_required: false,
-        user_directives_remain_authoritative: true,
-    };
-    let executor_switch = ExecutorSwitchRecord {
-        schema_version: "forge.executor_switch.v1".to_string(),
-        from_executor: previous_executor.clone(),
-        to_executor: input.executor.clone(),
-        from_pid: previous_pid,
-        to_pid: input.pid,
-        fallback_executors: fallback_executors.clone(),
-        previous_heartbeat_at,
-        switched_at,
-        origin: input.origin.clone(),
-        reason: input.reason.clone(),
-        summary: input.summary.clone(),
-        continuity_policy,
-    };
+    let (run, workflow, previous_status, previous_executor, executor_switch, switched_at) =
+        store.with_transaction(|| {
+            let mut run = load_run_record_for_action(store, run_id, "request switch executor")?;
+            let mut workflow = store.load_workflow(&run.workflow_id)?;
+            ensure_request_mutation_is_active(&run, &workflow, "switch executor for")?;
+            let previous_status = run.status.clone();
+            let previous_executor = run.active_executor.clone();
+            let previous_pid = run.executor_pid;
+            let previous_heartbeat_at = run.last_heartbeat_at;
+            let switched_at = Utc::now();
+            let ttl_seconds = input.ttl_seconds.max(1);
+            let expires_at =
+                switched_at + Duration::seconds(ttl_seconds.min(i64::MAX as u64) as i64);
+            let continuity_policy = ExecutorSwitchContinuityPolicy {
+                preserve_run_id: true,
+                preserve_workflow_id: true,
+                preserve_checkpoints: true,
+                keep_workflow_running: true,
+                old_executor_shutdown_required: false,
+                user_directives_remain_authoritative: true,
+            };
+            let executor_switch = ExecutorSwitchRecord {
+                schema_version: "forge.executor_switch.v1".to_string(),
+                from_executor: previous_executor.clone(),
+                to_executor: input.executor.clone(),
+                from_pid: previous_pid,
+                to_pid: input.pid,
+                fallback_executors: fallback_executors.clone(),
+                previous_heartbeat_at,
+                switched_at,
+                origin: input.origin.clone(),
+                reason: input.reason.clone(),
+                summary: input.summary.clone(),
+                continuity_policy,
+            };
 
-    run.status = "running".to_string();
-    run.active_executor = Some(input.executor.clone());
-    run.executor_pid = input.pid;
-    run.progress_summary = Some(input.summary.clone());
-    run.last_heartbeat_at = Some(switched_at);
-    run.heartbeat_expires_at = Some(expires_at);
-    run.heartbeat_ttl_seconds = Some(ttl_seconds);
-    run.executor_fallbacks = fallback_executors.clone();
-    run.updated_at = switched_at;
-    run.executor_switches.push(executor_switch.clone());
-    save_run_record(store, &run)?;
-
-    let mut workflow = store.load_workflow(&run.workflow_id)?;
-    workflow.status = "running".to_string();
-    store.save_workflow(&workflow)?;
+            run.status = "running".to_string();
+            run.active_executor = Some(input.executor.clone());
+            run.executor_pid = input.pid;
+            run.progress_summary = Some(input.summary.clone());
+            run.last_heartbeat_at = Some(switched_at);
+            run.heartbeat_expires_at = Some(expires_at);
+            run.heartbeat_ttl_seconds = Some(ttl_seconds);
+            run.executor_fallbacks = fallback_executors.clone();
+            run.updated_at = switched_at;
+            run.executor_switches.push(executor_switch.clone());
+            workflow.status = "running".to_string();
+            save_run_record(store, &run)?;
+            store.save_workflow(&workflow)?;
+            store.record_event(
+                &run.workflow_id,
+                "async_request_executor_switched",
+                &serde_json::json!({
+                    "schema_version": "forge.request_executor_switch.v1",
+                    "run_id": run.run_id,
+                    "workflow_id": run.workflow_id,
+                    "origin": input.origin.clone(),
+                    "previous_status": previous_status,
+                    "new_status": run.status,
+                    "previous_executor": previous_executor,
+                    "new_executor": input.executor.clone(),
+                    "fallback_executors": fallback_executors,
+                    "previous_pid": previous_pid,
+                    "new_pid": input.pid,
+                    "summary": input.summary.clone(),
+                    "reason": input.reason.clone(),
+                    "switched_at": switched_at,
+                    "heartbeat_expires_at": expires_at,
+                    "heartbeat_ttl_seconds": ttl_seconds,
+                    "continuity_policy": executor_switch.continuity_policy.clone(),
+                }),
+            )?;
+            Ok((
+                run,
+                workflow,
+                previous_status,
+                previous_executor,
+                executor_switch,
+                switched_at,
+            ))
+        })?;
 
     let checkpoints = load_workflow_checkpoints(store, &run.workflow_id)?;
     let latest_checkpoint = checkpoints.last().cloned();
-    let handoff_summary =
-        build_context_handoff_summary(&workflow, DEFAULT_CONTEXT_BUDGET, &checkpoints)?;
-    let activity = build_run_activity_at(&run, switched_at);
-    store.record_event(
-        &run.workflow_id,
-        "async_request_executor_switched",
-        &serde_json::json!({
-            "schema_version": "forge.request_executor_switch.v1",
-            "run_id": run.run_id,
-            "workflow_id": run.workflow_id,
-            "origin": input.origin.clone(),
-            "previous_status": previous_status,
-            "new_status": run.status,
-            "previous_executor": previous_executor,
-            "new_executor": input.executor.clone(),
-            "fallback_executors": fallback_executors,
-            "previous_pid": previous_pid,
-            "new_pid": input.pid,
-            "summary": input.summary.clone(),
-            "reason": input.reason.clone(),
-            "switched_at": switched_at,
-            "heartbeat_expires_at": expires_at,
-            "heartbeat_ttl_seconds": ttl_seconds,
-            "continuity_policy": executor_switch.continuity_policy,
-        }),
+    let project_roots = worktree_project_roots(store, &workflow)?;
+    let handoff_summary = build_context_handoff_summary_with_task_projects(
+        &workflow,
+        DEFAULT_CONTEXT_BUDGET,
+        &checkpoints,
+        &project_roots,
     )?;
+    let activity = build_run_activity_at_with_store(store, &run, switched_at);
 
     Ok(RequestExecutorSwitchReport {
         status: run.status,
@@ -2497,19 +3610,22 @@ pub fn switch_request_executor(
                 .continuity_policy
                 .user_directives_remain_authoritative,
             node_brain_routing_source: "workflow.tasks[].node_brain_routing".to_string(),
-            node_brain_routing_mutation_command: vec![
-                "forge".to_string(),
-                "workflow".to_string(),
-                "update-node-brain".to_string(),
-                "--workflow".to_string(),
-                "<workflow-id>".to_string(),
-                "--task".to_string(),
-                "<task-id>".to_string(),
-                "--default-brain".to_string(),
-                "<brain-id>".to_string(),
-                "--output".to_string(),
-                "json".to_string(),
-            ],
+            node_brain_routing_mutation_command: {
+                let mut command = forge_command_prefix(store);
+                command.extend([
+                    "workflow".to_string(),
+                    "update-node-brain".to_string(),
+                    "--workflow".to_string(),
+                    "<workflow-id>".to_string(),
+                    "--task".to_string(),
+                    "<task-id>".to_string(),
+                    "--default-brain".to_string(),
+                    "<brain-id>".to_string(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ]);
+                command
+            },
         },
         fallback_executors,
         activity,
@@ -2545,6 +3661,26 @@ pub fn build_run_activity(run: &RunRecord) -> RunActivity {
 }
 
 fn build_run_activity_at(run: &RunRecord, now: DateTime<Utc>) -> RunActivity {
+    build_run_activity_at_optional_store(None, run, now)
+}
+
+fn build_run_activity_with_store(store: &ForgeStore, run: &RunRecord) -> RunActivity {
+    build_run_activity_at_with_store(store, run, Utc::now())
+}
+
+fn build_run_activity_at_with_store(
+    store: &ForgeStore,
+    run: &RunRecord,
+    now: DateTime<Utc>,
+) -> RunActivity {
+    build_run_activity_at_optional_store(Some(store), run, now)
+}
+
+fn build_run_activity_at_optional_store(
+    store: Option<&ForgeStore>,
+    run: &RunRecord,
+    now: DateTime<Utc>,
+) -> RunActivity {
     let process_alive = run.executor_pid.and_then(process_alive);
     let process_status = match (run.executor_pid, process_alive) {
         (None, _) => "not_recorded",
@@ -2574,7 +3710,7 @@ fn build_run_activity_at(run: &RunRecord, now: DateTime<Utc>) -> RunActivity {
     } else {
         None
     };
-    let recovery = recovery_recommendation(run, heartbeat_status);
+    let recovery = recovery_recommendation(store, run, heartbeat_status);
     RunActivity {
         schema_version: "forge.run_activity.v1".to_string(),
         active,
@@ -2609,43 +3745,60 @@ fn process_alive(pid: u32) -> Option<bool> {
     }
 }
 
-fn recovery_recommendation(run: &RunRecord, heartbeat_status: &str) -> RunRecoveryRecommendation {
+fn recovery_recommendation(
+    store: Option<&ForgeStore>,
+    run: &RunRecord,
+    heartbeat_status: &str,
+) -> RunRecoveryRecommendation {
     match heartbeat_status {
-        "stale" => RunRecoveryRecommendation {
-            schema_version: "forge.run_recovery_recommendation.v1".to_string(),
-            action: "mark_needs_attention".to_string(),
-            target_status: "needs_attention".to_string(),
-            reason: "Heartbeat is stale; Forge should stop presenting this run as active and require resume, cancel or inspect before more executor work.".to_string(),
-            confidence: 0.91,
-            requires_human_approval: false,
-            command: vec![
-                "forge".to_string(),
-                "request".to_string(),
-                "recover-stale".to_string(),
-                "--run".to_string(),
-                run.run_id.clone(),
-            ],
-        },
-        "needs_attention" => RunRecoveryRecommendation {
-            schema_version: "forge.run_recovery_recommendation.v1".to_string(),
-            action: "resume_cancel_or_inspect".to_string(),
-            target_status: "needs_attention".to_string(),
-            reason: "Run already needs attention; preserve lineage while a human or executor chooses resume, cancel or inspect.".to_string(),
-            confidence: 0.88,
-            requires_human_approval: false,
-            command: vec![
-                "forge".to_string(),
-                "request".to_string(),
-                "status".to_string(),
-                "--run".to_string(),
-                run.run_id.clone(),
-            ],
-        },
+        "stale" => {
+            let command = store.map_or_else(Vec::new, |store| {
+                let mut command = forge_command_prefix(store);
+                command.extend([
+                    "request".to_string(),
+                    "recover-stale".to_string(),
+                    "--run".to_string(),
+                    run.run_id.clone(),
+                ]);
+                command
+            });
+            RunRecoveryRecommendation {
+                schema_version: "forge.run_recovery_recommendation.v1".to_string(),
+                action: "mark_needs_attention".to_string(),
+                target_status: "needs_attention".to_string(),
+                reason: "Heartbeat is stale; Forge should stop presenting this run as active and require resume, cancel or inspect before more executor work.".to_string(),
+                confidence: 0.91,
+                requires_human_approval: false,
+                command,
+            }
+        }
+        "needs_attention" => {
+            let command = store.map_or_else(Vec::new, |store| {
+                let mut command = forge_command_prefix(store);
+                command.extend([
+                    "request".to_string(),
+                    "status".to_string(),
+                    "--run".to_string(),
+                    run.run_id.clone(),
+                ]);
+                command
+            });
+            RunRecoveryRecommendation {
+                schema_version: "forge.run_recovery_recommendation.v1".to_string(),
+                action: "resume_cancel_or_inspect".to_string(),
+                target_status: "needs_attention".to_string(),
+                reason: "Run already needs attention; preserve lineage while a human or executor chooses resume, cancel or inspect.".to_string(),
+                confidence: 0.88,
+                requires_human_approval: false,
+                command,
+            }
+        }
         _ => RunRecoveryRecommendation {
             schema_version: "forge.run_recovery_recommendation.v1".to_string(),
             action: "none".to_string(),
             target_status: run.status.clone(),
-            reason: "No stale heartbeat recovery is required for the current run state.".to_string(),
+            reason: "No stale heartbeat recovery is required for the current run state."
+                .to_string(),
             confidence: 1.0,
             requires_human_approval: false,
             command: Vec::new(),
@@ -2672,14 +3825,19 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
     let latest_executor_policy = load_latest_executor_policy_summary(store, &workflow.id)?;
     let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
     let latest_checkpoint = latest_actionable_checkpoint(&workflow, &checkpoints);
-    let handoff_summary =
-        build_context_handoff_summary(&workflow, DEFAULT_CONTEXT_BUDGET, &checkpoints)?;
+    let project_roots = worktree_project_roots(store, &workflow)?;
+    let handoff_summary = build_context_handoff_summary_with_task_projects(
+        &workflow,
+        DEFAULT_CONTEXT_BUDGET,
+        &checkpoints,
+        &project_roots,
+    )?;
     let workflow_revision = workflow
         .revisions
         .last()
         .map(|revision| revision.revision)
         .unwrap_or(0);
-    let activity = build_run_activity(&run);
+    let activity = build_run_activity_with_store(store, &run);
     Ok(RequestStatusReport {
         status: run.status,
         run_id: run.run_id,
@@ -2851,8 +4009,53 @@ fn handoff_context_budget_for_task(workflow: &Workflow, task_id: &str) -> usize 
         .unwrap_or(DEFAULT_CONTEXT_BUDGET)
 }
 
+fn save_workflow_revision_event_if_snapshot(
+    store: &ForgeStore,
+    expected_run: Option<&RunRecord>,
+    expected_workflow: &Workflow,
+    updated_workflow: &Workflow,
+    event_kind: &str,
+    event_data: &serde_json::Value,
+) -> Result<()> {
+    store.with_transaction(|| {
+        let current_workflow = if let Some(expected_run) = expected_run {
+            load_current_request_snapshot_for_completion(
+                store,
+                expected_run,
+                expected_workflow,
+                event_kind,
+            )?
+            .1
+        } else {
+            let current_workflow = store.load_workflow(&expected_workflow.id)?;
+            if serde_json::to_value(&current_workflow)?
+                != serde_json::to_value(expected_workflow)?
+            {
+                anyhow::bail!(
+                    "cannot {event_kind} for workflow {} because it changed concurrently; reload current state and retry",
+                    expected_workflow.id
+                );
+            }
+            current_workflow
+        };
+        if terminal_request_status(&current_workflow.status)
+            .is_some_and(|status| status != "complete")
+        {
+            anyhow::bail!(
+                "cannot {event_kind} for terminal workflow {} in status {}",
+                current_workflow.id,
+                current_workflow.status
+            );
+        }
+        store.save_workflow(updated_workflow)?;
+        store.record_event(&updated_workflow.id, event_kind, event_data)?;
+        Ok(())
+    })
+}
+
 fn ensure_final_completion_audit_task(
     store: &ForgeStore,
+    expected_run: Option<&RunRecord>,
     workflow: &Workflow,
     origin: &str,
     block_reason: &str,
@@ -2887,19 +4090,22 @@ fn ensure_final_completion_audit_task(
             ),
             created_at: Utc::now(),
         });
-        store.save_workflow(&updated)?;
-        store.record_event(
-            &updated.id,
+        let event_data = serde_json::json!({
+            "origin": origin,
+            "task_id": task_id,
+            "previous_dependency_count": previous_dependency_count,
+            "dependency_count": expected_dependency_ids.len(),
+            "dependencies": expected_dependency_ids,
+            "reason": block_reason,
+            "revision": revision,
+        });
+        save_workflow_revision_event_if_snapshot(
+            store,
+            expected_run,
+            workflow,
+            &updated,
             "completion_audit_dependencies_repaired",
-            &serde_json::json!({
-                "origin": origin,
-                "task_id": task_id,
-                "previous_dependency_count": previous_dependency_count,
-                "dependency_count": expected_dependency_ids.len(),
-                "dependencies": expected_dependency_ids,
-                "reason": block_reason,
-                "revision": revision,
-            }),
+            &event_data,
         )?;
         return Ok(Some(updated));
     }
@@ -2908,6 +4114,20 @@ fn ensure_final_completion_audit_task(
     let task_id = format!("task-{:03}", updated.tasks.len() + 1);
     let dependency_ids = expected_dependency_ids;
     let dependency_refs: Vec<&str> = dependency_ids.iter().map(String::as_str).collect();
+    let mut audit_validation_command = forge_command_prefix(store);
+    audit_validation_command.extend([
+        "workflow".to_string(),
+        "attach-artifact".to_string(),
+        "--workflow".to_string(),
+        updated.id.clone(),
+        "--path".to_string(),
+        "<final-completion-audit.json>".to_string(),
+        "--kind".to_string(),
+        FINAL_COMPLETION_AUDIT_KIND.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]);
+    let audit_validation_command = render_forge_command(&audit_validation_command);
     let mut audit_task = task(
         &task_id,
         "Audit final completion criteria",
@@ -2920,10 +4140,7 @@ fn ensure_final_completion_audit_task(
         ],
         vec![ValidationRule {
             kind: "artifact".to_string(),
-            command: Some(format!(
-                "forge workflow attach-artifact --workflow {} --path <final-completion-audit.json> --kind {FINAL_COMPLETION_AUDIT_KIND} --output json",
-                updated.id
-            )),
+            command: Some(audit_validation_command),
             expected: "Attach a JSON final completion audit with status passed, goal_fully_satisfied true, non-empty evidence and no open_items or missing_criteria."
                 .to_string(),
         }],
@@ -2949,19 +4166,22 @@ fn ensure_final_completion_audit_task(
         ),
         created_at: Utc::now(),
     });
-    store.save_workflow(&updated)?;
-    store.record_event(
-        &updated.id,
+    let event_data = serde_json::json!({
+        "origin": origin,
+        "task_id": task_id,
+        "reason": block_reason,
+        "dependency_count": dependency_ids.len(),
+        "dependencies": dependency_ids,
+        "required_artifact_kind": FINAL_COMPLETION_AUDIT_KIND,
+        "revision": revision,
+    });
+    save_workflow_revision_event_if_snapshot(
+        store,
+        expected_run,
+        workflow,
+        &updated,
         "completion_audit_task_added",
-        &serde_json::json!({
-            "origin": origin,
-            "task_id": task_id,
-            "reason": block_reason,
-            "dependency_count": dependency_ids.len(),
-            "dependencies": dependency_ids,
-            "required_artifact_kind": FINAL_COMPLETION_AUDIT_KIND,
-            "revision": revision,
-        }),
+        &event_data,
     )?;
     Ok(Some(updated))
 }
@@ -3041,13 +4261,14 @@ fn is_final_completion_audit_task(task: &AtomicTask) -> bool {
 }
 
 fn final_completion_audit_handoff_command(
+    store: &ForgeStore,
     workflow_id: &str,
     task_id: &str,
     executor: &str,
     budget: usize,
 ) -> Vec<String> {
-    vec![
-        "forge".to_string(),
+    let mut command = forge_command_prefix(store);
+    command.extend([
         "task".to_string(),
         "handoff".to_string(),
         "--workflow".to_string(),
@@ -3058,14 +4279,21 @@ fn final_completion_audit_handoff_command(
         executor.to_string(),
         "--budget".to_string(),
         budget.to_string(),
+        "--view".to_string(),
+        "compact".to_string(),
         "--output".to_string(),
         "json".to_string(),
-    ]
+    ]);
+    command
 }
 
-fn final_completion_audit_attach_command(workflow_id: &str, origin: &str) -> Vec<String> {
-    vec![
-        "forge".to_string(),
+fn final_completion_audit_attach_command(
+    store: &ForgeStore,
+    workflow_id: &str,
+    origin: &str,
+) -> Vec<String> {
+    let mut command = forge_command_prefix(store);
+    command.extend([
         "workflow".to_string(),
         "attach-artifact".to_string(),
         "--workflow".to_string(),
@@ -3078,7 +4306,47 @@ fn final_completion_audit_attach_command(workflow_id: &str, origin: &str) -> Vec
         origin.to_string(),
         "--output".to_string(),
         "json".to_string(),
+    ]);
+    command
+}
+
+fn forge_command_prefix(store: &ForgeStore) -> Vec<String> {
+    let store_path = if store.path().is_absolute() {
+        store.path().to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|directory| directory.join(store.path()))
+            .unwrap_or_else(|_| store.path().to_path_buf())
+    };
+    vec![
+        "forge".to_string(),
+        "--store".to_string(),
+        store_path.display().to_string(),
     ]
+}
+
+fn render_forge_command(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|argument| shell_quote_command_argument(argument))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote_command_argument(argument: &str) -> String {
+    if !argument.is_empty()
+        && argument.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '_' | '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '-'
+                )
+        })
+    {
+        argument.to_string()
+    } else {
+        format!("'{}'", argument.replace('\'', "'\"'\"'"))
+    }
 }
 
 pub(crate) fn final_completion_audit_block_reason(
@@ -3224,7 +4492,7 @@ pub fn list_requests(store: &ForgeStore, status_filter: Option<&str>) -> Result<
             if let Some(filter) = status_filter {
                 let normalized = filter.trim().to_ascii_lowercase();
                 if normalized == "stale" {
-                    return build_run_activity(run).heartbeat_status == "stale";
+                    return build_run_activity_with_store(store, run).heartbeat_status == "stale";
                 }
                 matches!(
                     normalized.as_str(),
@@ -3235,6 +4503,7 @@ pub fn list_requests(store: &ForgeStore, status_filter: Option<&str>) -> Result<
                         | "completed"
                         | "failed"
                         | "cancelled"
+                        | "blocked"
                         | "planned"
                 )
                 .then_some(run.status == normalized)
@@ -3244,7 +4513,7 @@ pub fn list_requests(store: &ForgeStore, status_filter: Option<&str>) -> Result<
             }
         })
         .map(|run| RequestListRow {
-            activity: build_run_activity(&run),
+            activity: build_run_activity_with_store(store, &run),
             run_id: run.run_id,
             workflow_id: run.workflow_id,
             status: run.status,
@@ -3277,29 +4546,57 @@ pub fn cancel_request(
     run_id: &str,
     origin: &str,
 ) -> Result<RequestCancelReport> {
-    let mut run = load_run_record_for_action(store, run_id, "request cancel")?;
-    let previous_status = run.status.clone();
-    run.status = "cancelled".to_string();
-    let cancelled_at = Utc::now();
-    run.updated_at = cancelled_at;
-    save_run_record(store, &run)?;
-    store.record_event(
-        &run.workflow_id,
-        "async_request_cancelled",
-        &serde_json::json!({
-            "run_id": run.run_id,
-            "origin": origin,
-            "previous_status": previous_status,
-            "cancelled_at": cancelled_at
-        }),
-    )?;
-    Ok(RequestCancelReport {
-        status: "cancelled".to_string(),
-        run_id: run.run_id,
-        workflow_id: run.workflow_id,
-        previous_status,
-        origin: origin.to_string(),
-        cancelled_at,
+    store.with_transaction(|| {
+        let mut run = load_run_record_for_action(store, run_id, "request cancel")?;
+        let workflow = store.load_workflow(&run.workflow_id)?;
+        if terminal_request_status(&workflow.status).is_some_and(|status| status != "cancelled") {
+            anyhow::bail!(
+                "cannot cancel request {} because workflow {} is terminal in status {}",
+                run.run_id,
+                workflow.id,
+                workflow.status
+            );
+        }
+        if run.status == "cancelled" {
+            return Ok(RequestCancelReport {
+                status: "cancelled".to_string(),
+                run_id: run.run_id,
+                workflow_id: run.workflow_id,
+                previous_status: "cancelled".to_string(),
+                origin: origin.to_string(),
+                cancelled_at: run.updated_at,
+            });
+        }
+        if is_terminal_run_status(&run.status) {
+            anyhow::bail!(
+                "cannot cancel terminal request {} in status {}",
+                run.run_id,
+                run.status
+            );
+        }
+        let previous_status = run.status.clone();
+        run.status = "cancelled".to_string();
+        let cancelled_at = Utc::now();
+        run.updated_at = cancelled_at;
+        save_run_record(store, &run)?;
+        store.record_event(
+            &run.workflow_id,
+            "async_request_cancelled",
+            &serde_json::json!({
+                "run_id": run.run_id,
+                "origin": origin,
+                "previous_status": previous_status,
+                "cancelled_at": cancelled_at
+            }),
+        )?;
+        Ok(RequestCancelReport {
+            status: "cancelled".to_string(),
+            run_id: run.run_id,
+            workflow_id: run.workflow_id,
+            previous_status,
+            origin: origin.to_string(),
+            cancelled_at,
+        })
     })
 }
 
@@ -3308,20 +4605,25 @@ pub fn resume_async_request(
     run_id: &str,
     origin: &str,
 ) -> Result<RequestResumeReport> {
-    let mut run = load_run_record_for_action(store, run_id, "request resume")?;
-    let resumed_at = Utc::now();
-    run.status = "resumed".to_string();
-    run.updated_at = resumed_at;
-    save_run_record(store, &run)?;
-    store.record_event(
-        &run.workflow_id,
-        "async_request_resumed",
-        &serde_json::json!({
-            "run_id": run.run_id,
-            "origin": origin,
-            "resumed_at": resumed_at
-        }),
-    )?;
+    let (run, resumed_at) = store.with_transaction(|| {
+        let mut run = load_run_record_for_action(store, run_id, "request resume")?;
+        let workflow = store.load_workflow(&run.workflow_id)?;
+        ensure_request_mutation_is_active(&run, &workflow, "resume")?;
+        let resumed_at = Utc::now();
+        run.status = "resumed".to_string();
+        run.updated_at = resumed_at;
+        save_run_record(store, &run)?;
+        store.record_event(
+            &run.workflow_id,
+            "async_request_resumed",
+            &serde_json::json!({
+                "run_id": run.run_id,
+                "origin": origin,
+                "resumed_at": resumed_at
+            }),
+        )?;
+        Ok((run, resumed_at))
+    })?;
     let request_status = load_request_status(store, run_id)?;
     Ok(RequestResumeReport {
         status: "resumed".to_string(),
@@ -3338,28 +4640,44 @@ pub fn recover_stale_request(
     run_id: &str,
     origin: &str,
 ) -> Result<RequestStaleRecoveryReport> {
-    let mut run = load_run_record_for_action(store, run_id, "request recover stale")?;
-    let before_activity = build_run_activity(&run);
-    if run.status != "running" || before_activity.heartbeat_status != "stale" {
-        anyhow::bail!(
-            "run {run_id} is not a stale running request; heartbeat_status={} status={}",
-            before_activity.heartbeat_status,
-            run.status
-        );
-    }
-
-    let previous_status = run.status.clone();
-    let updated_at = Utc::now();
-    run.status = "needs_attention".to_string();
-    run.updated_at = updated_at;
-    save_run_record(store, &run)?;
-
-    let mut workflow = store.load_workflow(&run.workflow_id)?;
-    let previous_workflow_status = workflow.status.clone();
-    workflow.status = "needs_attention".to_string();
-    store.save_workflow(&workflow)?;
-
-    let activity = build_run_activity_at(&run, updated_at);
+    let (run, previous_status, previous_workflow_status, updated_at) =
+        store.with_transaction(|| {
+            let mut run = load_run_record_for_action(store, run_id, "request recover stale")?;
+            let mut workflow = store.load_workflow(&run.workflow_id)?;
+            ensure_request_mutation_is_active(&run, &workflow, "recover stale")?;
+            let before_activity = build_run_activity_with_store(store, &run);
+            if run.status != "running" || before_activity.heartbeat_status != "stale" {
+                anyhow::bail!(
+                    "run {run_id} is not a stale running request; heartbeat_status={} status={}",
+                    before_activity.heartbeat_status,
+                    run.status
+                );
+            }
+            let previous_status = run.status.clone();
+            let previous_workflow_status = workflow.status.clone();
+            let updated_at = Utc::now();
+            run.status = "needs_attention".to_string();
+            run.updated_at = updated_at;
+            workflow.status = "needs_attention".to_string();
+            save_run_record(store, &run)?;
+            store.save_workflow(&workflow)?;
+            store.record_event(
+                &run.workflow_id,
+                "async_request_needs_attention",
+                &serde_json::json!({
+                    "run_id": run.run_id,
+                    "origin": origin,
+                    "previous_status": previous_status,
+                    "new_status": run.status,
+                    "previous_workflow_status": previous_workflow_status,
+                    "new_workflow_status": workflow.status,
+                    "heartbeat_status": before_activity.heartbeat_status,
+                    "updated_at": updated_at,
+                }),
+            )?;
+            Ok((run, previous_status, previous_workflow_status, updated_at))
+        })?;
+    let activity = build_run_activity_at_with_store(store, &run, updated_at);
     let recovery = RunRecoveryRecommendation {
         schema_version: "forge.run_recovery_recommendation.v1".to_string(),
         action: "resume_cancel_or_inspect".to_string(),
@@ -3367,28 +4685,17 @@ pub fn recover_stale_request(
         reason: "Heartbeat is stale; Forge moved the run to needs_attention so a human or executor can resume, cancel or inspect without losing lineage.".to_string(),
         confidence: 0.93,
         requires_human_approval: false,
-        command: vec![
-            "forge".to_string(),
+        command: {
+            let mut command = forge_command_prefix(store);
+            command.extend([
             "request".to_string(),
             "status".to_string(),
             "--run".to_string(),
             run.run_id.clone(),
-        ],
+            ]);
+            command
+        },
     };
-    store.record_event(
-        &run.workflow_id,
-        "async_request_needs_attention",
-        &serde_json::json!({
-            "run_id": run.run_id,
-            "origin": origin,
-            "previous_status": previous_status,
-            "new_status": run.status,
-            "previous_workflow_status": previous_workflow_status,
-            "new_workflow_status": workflow.status,
-            "heartbeat_status": before_activity.heartbeat_status,
-            "updated_at": updated_at,
-        }),
-    )?;
 
     Ok(RequestStaleRecoveryReport {
         status: run.status,
@@ -3405,6 +4712,7 @@ pub fn recover_stale_request(
 }
 
 fn build_agent_handoff_contract(
+    store: &ForgeStore,
     run: &RunRecord,
     flow_resolution: FlowResolutionReport,
 ) -> AgentHandoffContract {
@@ -3425,18 +4733,21 @@ fn build_agent_handoff_contract(
         },
         allowed_context: AgentAllowedContext {
             tool: "forge.context.request".to_string(),
-            command: vec![
-                "forge".to_string(),
-                "context".to_string(),
-                "--workflow".to_string(),
-                run.workflow_id.clone(),
-                "--task".to_string(),
-                "<task-id>".to_string(),
-                "--budget".to_string(),
-                DEFAULT_CONTEXT_BUDGET.to_string(),
-                "--output".to_string(),
-                "json".to_string(),
-            ],
+            command: {
+                let mut command = forge_command_prefix(store);
+                command.extend([
+                    "context".to_string(),
+                    "--workflow".to_string(),
+                    run.workflow_id.clone(),
+                    "--task".to_string(),
+                    "<task-id>".to_string(),
+                    "--budget".to_string(),
+                    DEFAULT_CONTEXT_BUDGET.to_string(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ]);
+                command
+            },
             default_budget: DEFAULT_CONTEXT_BUDGET,
             strict_by_default: false,
             allowed_scope: "task_local_bounded_context".to_string(),
@@ -3454,15 +4765,18 @@ fn build_agent_handoff_contract(
         artifact_refs: Vec::new(),
         status_poll: AgentStatusPoll {
             tool: "forge.run.status".to_string(),
-            command: vec![
-                "forge".to_string(),
-                "request".to_string(),
-                "status".to_string(),
-                "--run".to_string(),
-                run.run_id.clone(),
-                "--output".to_string(),
-                "json".to_string(),
-            ],
+            command: {
+                let mut command = forge_command_prefix(store);
+                command.extend([
+                    "request".to_string(),
+                    "status".to_string(),
+                    "--run".to_string(),
+                    run.run_id.clone(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ]);
+                command
+            },
             returns: vec![
                 "workflow_status".to_string(),
                 "workflow_revision".to_string(),

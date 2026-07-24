@@ -1,0 +1,23 @@
+{
+  "schema_version": "forge.executor_response.v1",
+  "task_id": "task-001",
+  "status": "completed",
+  "artifacts": [
+    "docs/reports/worktree-sandbox-hardening-2026-07-22/intent.json",
+    "artifacts/wf_cf8a1698f266442981479112786f00b0/attached-intent-intent.json"
+  ],
+  "trace_ref": "docs/reports/worktree-sandbox-hardening-2026-07-22/execution-trace.md",
+  "cost": {
+    "estimated_usd": 0.0,
+    "tokens_in": 0,
+    "tokens_out": 0
+  },
+  "validation_evidence": [
+    {
+      "command": "jq -e '.goal != \"\" and (.constraints | length > 0) and (.deliverables | length > 0) and (.risks | length > 0) and (.unknowns | length > 0)' intent.json",
+      "exit_code": 0,
+      "summary": "IntentSpec contém goal, constraints, deliverables, risks e unknowns com resoluções verificáveis. Custos de modelo não se aplicam ao gate local determinístico."
+    }
+  ],
+  "rework_items": []
+}

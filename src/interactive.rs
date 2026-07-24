@@ -7,18 +7,7 @@ use crate::addon::{
 };
 use crate::artifact::list_workflow_artifacts;
 use crate::checkpoint::TaskCheckpoint;
-use crate::context::{build_context_package_with_checkpoint_and_project, DEFAULT_CONTEXT_BUDGET};
-use crate::cost::{build_cost_ledger, CostLedgerReport};
-use crate::event::{
-    build_global_event_timeline, list_event_services, list_inbound_event_inbox_for_context,
-    GlobalEventTimelineReport, WorkflowEventEnvelope,
-};
-use crate::executor::{
-    build_brain_sessions_report_with_options, load_executors, BrainSessionOperationPlan,
-    BrainSessionState, BrainSessionsReport, BrainSessionsReportOptions,
-};
-use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
-use crate::harness::{
+use crate::cli_integration::{
     analyze_token_headroom, build_harness_activation_profile, build_harness_adoption_plan,
     build_harness_bootstrap_report, build_harness_doctor_report,
     build_harness_executor_compatibility_report, build_harness_headroom_plan,
@@ -35,6 +24,17 @@ use crate::harness::{
     HarnessSessionLifecyclePlan, HeadroomStatsContentKindBucket, HeadroomStatsOptions,
     HeadroomStatsReport, HeadroomStatsSourceBucket, TokenHeadroomReport,
 };
+use crate::context::{build_context_package_with_checkpoint_and_project, DEFAULT_CONTEXT_BUDGET};
+use crate::cost::{build_cost_ledger, CostLedgerReport};
+use crate::event::{
+    build_global_event_timeline, list_event_services, list_inbound_event_inbox_for_context,
+    GlobalEventTimelineReport, WorkflowEventEnvelope,
+};
+use crate::executor::{
+    build_brain_sessions_report_with_options, load_executors, BrainSessionOperationPlan,
+    BrainSessionState, BrainSessionsReport, BrainSessionsReportOptions,
+};
+use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
 use crate::identity::{
     audit_tenant_index, inspect_project_operating_context, list_identity_links,
     list_identity_memberships, list_identity_registry, load_project_operating_context,
@@ -3125,7 +3125,7 @@ pub struct ForgeFirstHarnessSmokeReport {
     pub shim_install: CliShimInstallReport,
     pub shim_status: CliShimStatusReport,
     pub activated_shim_status: CliShimStatusReport,
-    pub exec_receipt: crate::harness::CliHarnessExecReceipt,
+    pub exec_receipt: crate::cli_integration::CliHarnessExecReceipt,
     pub checks: Vec<OperationalTuiSmokeCheck>,
     pub commands: Vec<String>,
 }
@@ -4511,7 +4511,7 @@ fn architecture_execution_plan(
                 "forge interactive identity --output json",
                 "forge interactive context-memory --output json",
                 "forge memory policy --project-root . --output json",
-                "forge context --workflow <id> --task <task-id> --project-root . --strict --output json",
+                "forge context --workflow <id> --task <task-id> --project-root . --strict --view compact --output json",
             ],
             &[
                 "Não vazar memória privada para contexto global ou público.",
@@ -5333,6 +5333,8 @@ pub fn build_forge_first_harness_smoke(
         require_token_headroom_for_forge_first,
         dry_run: true,
         allow_exec: false,
+        secret_env: &[],
+        secret_permissions: &[],
         project_root: Some(&smoke_project_root),
         cwd: Some(&smoke_project_root),
     })?;
@@ -5685,9 +5687,11 @@ pub fn build_replacement_cli_evidence_smoke(
             "forge interactive release-gates --version 0.5 --output json",
         ),
         operational_tui_smoke_check(
-            "does_not_auto_promote",
-            "Evidence collection does not auto-promote Forge 0.5",
-            !collect_ready.promotion_ready_after_collection && !release_gates.promotion_ready,
+            "preserves_core_promotion_decision",
+            "Optional evidence collection preserves the promotable Forge 0.5 core decision",
+            collect_ready.promotion_ready_after_collection
+                && release_gates.promotion_ready
+                && release_gates.promotion_decision.decision == "promote",
             format!(
                 "collection promotion {}; release promotion {}; decision {}",
                 collect_ready.promotion_ready_after_collection,
@@ -9678,6 +9682,7 @@ fn patch_workbench_ignored_paths(store: &ForgeStore, repository_path: &str) -> B
         PathBuf::from(format!("{}-wal", store_path.display())),
         PathBuf::from(format!("{}-shm", store_path.display())),
         PathBuf::from(format!("{}-journal", store_path.display())),
+        PathBuf::from(format!("{}.secret.key", store_path.display())),
     ] {
         if let Some(relative) = repo_relative_display_path(&path, &root) {
             ignored.insert(relative);
@@ -13086,8 +13091,8 @@ fn build_operating_context_panel(
             .iter()
             .any(|gate| gate == "company_work_decision_required"),
         evidence_commands: vec![
-            "forge context --workflow <workflow-id> --task <task-id> --project-root <project-root> --strict --output json".to_string(),
-            "forge task handoff --workflow <workflow-id> --task <task-id> --executor <executor> --project-root <project-root> --output json".to_string(),
+            "forge context --workflow <workflow-id> --task <task-id> --project-root <project-root> --strict --view compact --output json".to_string(),
+            "forge task handoff --workflow <workflow-id> --task <task-id> --executor <executor> --project-root <project-root> --view compact --output json".to_string(),
         ],
     };
     let company_work_contract = InteractiveOperatingCompanyWorkContract {
@@ -13440,6 +13445,8 @@ fn operating_context_commands(project_root: &Path) -> InteractiveOperatingContex
             "--project-root".to_string(),
             project_root.clone(),
             "--strict".to_string(),
+            "--view".to_string(),
+            "compact".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -13455,6 +13462,8 @@ fn operating_context_commands(project_root: &Path) -> InteractiveOperatingContex
             "<executor>".to_string(),
             "--project-root".to_string(),
             project_root,
+            "--view".to_string(),
+            "compact".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -13478,7 +13487,7 @@ fn operating_context_next_actions(
         );
     }
     actions.push(
-        "Use forge context --workflow <id> --task <id> --project-root <project-root> --strict --output json before external brain handoff.".to_string(),
+        "Use forge context --workflow <id> --task <id> --project-root <project-root> --strict --view compact --output json before external brain handoff.".to_string(),
     );
     actions
 }
@@ -13544,6 +13553,8 @@ fn context_memory_context_commands(project_root: &Path) -> BTreeMap<String, Vec<
             "--budget".to_string(),
             "1200".to_string(),
             "--strict".to_string(),
+            "--view".to_string(),
+            "compact".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -13555,7 +13566,7 @@ fn context_memory_next_actions(project_root: &Path) -> Vec<String> {
     vec![
         format!("forge memory policy --project-root {project_root} --output json"),
         format!(
-            "forge context --workflow <workflow-id> --task <task-id> --project-root {project_root} --budget 1200 --strict --output json"
+        "forge context --workflow <workflow-id> --task <task-id> --project-root {project_root} --budget 1200 --strict --view compact --output json"
         ),
         format!(
             "forge memory search --workflow <workflow-id> --query <query> --project-root {project_root} --output json"
@@ -14949,7 +14960,9 @@ pub fn route_interactive_input_with_context(
         return Ok(route_slash_command(trimmed));
     }
 
-    if let Some(answer) = deterministic_direct_interactive_answer(store, trimmed) {
+    if let Some(answer) =
+        deterministic_direct_interactive_answer(store, trimmed, conversation_context)
+    {
         return Ok(InteractiveRouteReport {
             status: "routed".to_string(),
             schema_version: INTERACTIVE_ROUTE_SCHEMA_VERSION.to_string(),
@@ -15038,7 +15051,11 @@ pub fn route_interactive_input_with_context(
     })
 }
 
-fn deterministic_direct_interactive_answer(store: &ForgeStore, input: &str) -> Option<String> {
+fn deterministic_direct_interactive_answer(
+    store: &ForgeStore,
+    input: &str,
+    conversation_context: &[String],
+) -> Option<String> {
     let lower = input.trim().to_lowercase();
     if lower.is_empty() {
         return Some("Diga o que você quer saber ou executar no Forge.".to_string());
@@ -15056,13 +15073,46 @@ fn deterministic_direct_interactive_answer(store: &ForgeStore, input: &str) -> O
     if is_date_question(&lower) {
         return Some(format!("Hoje é {} em UTC.", Utc::now().date_naive()));
     }
+    if let Some(name) = declared_user_name(input) {
+        return Some(format!(
+            "Prazer, {name}. Vou considerar esse nome durante esta conversa."
+        ));
+    }
     if is_identity_question(&lower) {
+        if let Some(name) = conversation_context
+            .iter()
+            .rev()
+            .filter_map(|line| line.strip_prefix("user: "))
+            .find_map(declared_user_name)
+        {
+            return Some(format!("Seu nome é {name}."));
+        }
         return Some(
             "Eu conheço o contexto operacional desta sessão pelo Forge, mas não invento dados pessoais que não estejam registrados no runtime."
                 .to_string(),
         );
     }
     None
+}
+
+fn declared_user_name(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    let lower = trimmed.to_lowercase();
+    let prefixes = ["meu nome é ", "meu nome e ", "meu nome eh ", "my name is "];
+    let prefix = prefixes
+        .into_iter()
+        .find(|prefix| lower.starts_with(prefix))?;
+    let name = trimmed
+        .get(prefix.len()..)?
+        .trim()
+        .trim_end_matches(['.', '!', '?'])
+        .trim();
+    let valid = !name.is_empty()
+        && name.chars().count() <= 80
+        && name
+            .chars()
+            .all(|character| character.is_alphabetic() || " '-".contains(character));
+    valid.then(|| name.to_string())
 }
 
 fn is_forge_status_question(lower: &str) -> bool {
@@ -18433,7 +18483,7 @@ fn build_operational_cockpit_panel(
             "forge interactive task-board --output json",
             vec![
                 "forge interactive readiness --output json".to_string(),
-                "forge context --workflow <workflow-id> --task <task-id> --strict --output json"
+                "forge context --workflow <workflow-id> --task <task-id> --strict --view compact --output json"
                     .to_string(),
             ],
         ),
@@ -21261,6 +21311,8 @@ fn build_workflow_mutation_panel(
                 "--task".to_string(),
                 "<task-id>".to_string(),
                 "--strict".to_string(),
+                "--view".to_string(),
+                "compact".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -21273,6 +21325,8 @@ fn build_workflow_mutation_panel(
                 "<task-id>".to_string(),
                 "--executor".to_string(),
                 "<executor>".to_string(),
+                "--view".to_string(),
+                "compact".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -21450,6 +21504,8 @@ fn workflow_mutation_card(
                 "--task".to_string(),
                 context_task.clone(),
                 "--strict".to_string(),
+                "--view".to_string(),
+                "compact".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -21462,6 +21518,8 @@ fn workflow_mutation_card(
                 context_task,
                 "--executor".to_string(),
                 handoff_executor,
+                "--view".to_string(),
+                "compact".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -22937,6 +22995,8 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
                 "--task",
                 "<task-id>",
                 "--strict",
+                "--view",
+                "compact",
             ],
             false,
             "low",
@@ -22955,6 +23015,8 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
                 "<task-id>",
                 "--executor",
                 "<executor>",
+                "--view",
+                "compact",
             ],
             true,
             "medium",
@@ -25434,6 +25496,30 @@ mod tests {
         let answer = name.answer.unwrap();
         assert_ne!(answer, "não sei");
         assert!(!answer.trim().is_empty());
+    }
+
+    #[test]
+    fn declared_name_stays_in_direct_conversation_context_without_workflow() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let introduction =
+            route_interactive_input_with_context(&store, "Meu nome é Arthur.", "test", &[])
+                .unwrap();
+        assert!(!introduction.workflow_created);
+        assert_eq!(introduction.routing_decision, "direct_answer");
+        assert!(introduction.answer.unwrap().contains("Arthur"));
+
+        let context = vec![
+            "user: Meu nome é Arthur.".to_string(),
+            "assistant: Prazer, Arthur.".to_string(),
+            "user: Você sabe meu nome?".to_string(),
+        ];
+        let question =
+            route_interactive_input_with_context(&store, "Você sabe meu nome?", "test", &context)
+                .unwrap();
+        assert!(!question.workflow_created);
+        assert_eq!(question.routing_decision, "direct_answer");
+        assert!(question.answer.unwrap().contains("Arthur"));
     }
 
     #[test]
