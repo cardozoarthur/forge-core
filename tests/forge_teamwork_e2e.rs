@@ -618,7 +618,7 @@ fn test_f3_cognitive_task_handoff_halts() {
     assert!(step_json["reason"]
         .as_str()
         .unwrap()
-        .contains("requires an external executor"));
+        .contains("requires a real executor execution receipt"));
 }
 
 /// Test 13: Executing request steps acquires an active lease inside task_leases
@@ -728,6 +728,10 @@ fn test_f3_checkpoint_saving_and_update() {
             "codex",
             "--summary",
             "Task completed successfully",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "teamwork checkpoint receipt passed",
             "--estimated-usd",
             "0.01",
             "--tokens-in",
@@ -1590,6 +1594,10 @@ fn test_t2_f3_complete_task_extreme_values() {
             "codex",
             "--summary",
             "Extreme completion",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "extreme-value completion receipt passed",
             "--estimated-usd",
             "999999999.99",
             "--tokens-in",
@@ -1876,6 +1884,10 @@ fn test_t3_heuristics_execution_cost_ledger_updates() {
             "codex",
             "--summary",
             "Completed task for cost",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "cost-ledger completion receipt passed",
             "--estimated-usd",
             "0.15",
             "--tokens-in",
@@ -2056,6 +2068,10 @@ fn wait_for_task_ready(store_path: &std::path::Path, run_id: &str, expected_task
         if current_task_id == expected_task_id {
             break;
         }
+        if step_json["status"] == "handoff_required" && !current_task_id.is_empty() {
+            complete_task_with_test_receipt(store_path, run_id, &current_task_id);
+            continue;
+        }
 
         std::thread::sleep(std::time::Duration::from_millis(100));
         attempts += 1;
@@ -2066,6 +2082,32 @@ fn wait_for_task_ready(store_path: &std::path::Path, run_id: &str, expected_task
             );
         }
     }
+}
+
+fn complete_task_with_test_receipt(store_path: &std::path::Path, run_id: &str, task_id: &str) {
+    forge()
+        .arg("--store")
+        .arg(store_path.to_str().unwrap())
+        .args([
+            "request",
+            "complete-task",
+            "--run",
+            run_id,
+            "--task",
+            task_id,
+            "--executor",
+            "forge_cli",
+            "--summary",
+            "Teamwork test executor completed the delegated task.",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "teamwork test execution receipt passed",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
 }
 
 fn wait_for_run_completed(store_path: &std::path::Path, run_id: &str) {
@@ -2087,6 +2129,16 @@ fn wait_for_run_completed(store_path: &std::path::Path, run_id: &str) {
             || step_json["drive_before"]["status"] == "complete"
         {
             break;
+        }
+        let current_task_id = step_json["stepped_task"]["task_id"]
+            .as_str()
+            .or_else(|| step_json["handoff_task"]["task_id"].as_str())
+            .or_else(|| step_json["drive_before"]["handoff_task"]["task_id"].as_str());
+        if step_json["status"] == "handoff_required" {
+            if let Some(task_id) = current_task_id {
+                complete_task_with_test_receipt(store_path, run_id, task_id);
+                continue;
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
         attempts += 1;
@@ -2183,6 +2235,10 @@ fn test_t4_scenario_1_jwt_auth() {
             "codex",
             "--summary",
             "Worker successfully implemented Rust JWT signing and verification code module",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "JWT implementation receipt passed",
             "--output",
             "json",
         ])
@@ -2205,6 +2261,10 @@ fn test_t4_scenario_1_jwt_auth() {
             "antigravity",
             "--summary",
             "Validation run successful",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "JWT validation receipt passed",
             "--output",
             "json",
         ])
@@ -2227,6 +2287,10 @@ fn test_t4_scenario_1_jwt_auth() {
             "opencode",
             "--summary",
             "Auditor reviewed and verified JWT module logic passes security constraints",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "JWT audit receipt passed",
             "--output",
             "json",
         ])
@@ -2339,6 +2403,10 @@ fn test_t4_scenario_2_csv_pipeline() {
             "antigravity",
             "--summary",
             "CSV pipeline task executed and completed successfully",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "CSV implementation receipt passed",
             "--output",
             "json",
         ])
@@ -2361,6 +2429,10 @@ fn test_t4_scenario_2_csv_pipeline() {
             "antigravity",
             "--summary",
             "Validation run successful",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "CSV validation receipt passed",
             "--output",
             "json",
         ])
@@ -2383,6 +2455,10 @@ fn test_t4_scenario_2_csv_pipeline() {
             "antigravity",
             "--summary",
             "CSV pipeline documentation generated",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "CSV documentation receipt passed",
             "--output",
             "json",
         ])
@@ -2557,6 +2633,10 @@ fn test_t4_scenario_5_adversarial_audit() {
             "codex",
             "--summary",
             "Worker implemented constant-time comparison helper (constant_time_compare) to secure signatures",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "security implementation receipt passed",
             "--output",
             "json"
         ])
@@ -2579,6 +2659,10 @@ fn test_t4_scenario_5_adversarial_audit() {
             "opencode",
             "--summary",
             "Validation run successful",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "security validation receipt passed",
             "--output",
             "json",
         ])
@@ -2601,6 +2685,10 @@ fn test_t4_scenario_5_adversarial_audit() {
             "opencode",
             "--summary",
             "Auditor verified that the constant-time comparison fix successfully mitigates the signature timing side-channel attack",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "security audit receipt passed",
             "--output",
             "json"
         ])

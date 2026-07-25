@@ -99,8 +99,8 @@ fn test_stress_cognitive_tasks_halting() {
         )
         .unwrap();
 
-    // Step the run repeatedly. task-005 (Execute isolated task) is of Mixed executor type,
-    // which is not auto-steppable, so it should halt and return handoff_required.
+    // Step repeatedly until the first task that requires a real executor
+    // receipt. The supervised step boundary must never fabricate execution.
     let mut step_json: Value = Value::Null;
     for _ in 0..10 {
         let step_output = forge()
@@ -129,8 +129,8 @@ fn test_stress_cognitive_tasks_halting() {
     assert_eq!(step_json["status"], "handoff_required");
     let reason = step_json["reason"].as_str().unwrap();
     assert!(
-        reason.contains("requires an external executor")
-            || reason.contains("explicit validation command"),
+        reason.contains("requires a real executor execution receipt")
+            && reason.contains("will not fabricate"),
         "Unexpected handoff reason: {}",
         reason
     );

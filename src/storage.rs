@@ -7028,7 +7028,66 @@ impl ForgeStore {
         Ok(states)
     }
 
-    pub fn save_run(
+    pub(crate) fn insert_run(
+        &self,
+        id: &str,
+        workflow_id: &str,
+        status: &str,
+        data: &serde_json::Value,
+    ) -> Result<()> {
+        let workflow = self.load_workflow(workflow_id).ok();
+        let tenant = operational_tenant_columns(workflow.as_ref());
+        self.connection
+            .execute(
+                r#"
+                INSERT INTO runs (
+                    id,
+                    workflow_id,
+                    organization_id,
+                    brand_id,
+                    product_id,
+                    user_id,
+                    channel_id,
+                    status,
+                    data_json,
+                    updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, CURRENT_TIMESTAMP)
+                "#,
+                params![
+                    id,
+                    workflow_id,
+                    tenant.organization_id,
+                    tenant.brand_id,
+                    tenant.product_id,
+                    tenant.user_id,
+                    tenant.channel_id,
+                    status,
+                    serde_json::to_string(data)?
+                ],
+            )
+            .with_context(|| {
+                format!(
+                    "cannot insert run {id}; public run persistence is insert-only and the run id must be new"
+                )
+            })?;
+        if let Some(workflow) = workflow {
+            self.save_tenant_index_record(
+                "run",
+                id,
+                workflow_id,
+                &workflow,
+                "runs",
+                &serde_json::json!({
+                    "run_id": id,
+                    "status": status,
+                }),
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn save_run(
         &self,
         id: &str,
         workflow_id: &str,

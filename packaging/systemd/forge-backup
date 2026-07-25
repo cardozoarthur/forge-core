@@ -28,7 +28,8 @@ if [[ "$test_mode" = 1 ]]; then
     fail "test overrides are forbidden when FORGE_PRODUCTION_MODE is enabled"
   [[ -z "${FORGE_BACKUP_OFFHOST_COMMAND_FILE:-}" &&
     -z "${FORGE_BACKUP_OFFHOST_DESTINATION_FILE:-}" &&
-    -z "${FORGE_BACKUP_OFFHOST_GENERATION_FILE:-}" ]] ||
+    -z "${FORGE_BACKUP_OFFHOST_GENERATION_FILE:-}" &&
+    -z "${FORGE_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE:-}" ]] ||
     fail "test mode derives all configuration paths from FORGE_BACKUP_TEST_ROOT"
 
   test_root="${FORGE_BACKUP_TEST_ROOT:-}"
@@ -57,6 +58,7 @@ if [[ "$test_mode" = 1 ]]; then
   default_offhost_command_file="$test_root/config/offhost-command"
   default_offhost_destination_file="$test_root/config/offhost-destination"
   default_offhost_generation_file="$test_root/config/offhost-generation"
+  default_offhost_mount_identity_file="$test_root/config/offhost-mount-identity"
 else
   [[ -z "${FORGE_BACKUP_TEST_ROOT:-}" &&
     -z "${FORGE_BACKUP_TEST_TIMESTAMP:-}" ]] ||
@@ -68,6 +70,7 @@ else
   default_offhost_command_file="/etc/forge/backup-offhost-command"
   default_offhost_destination_file="/etc/forge/backup-offhost-destination"
   default_offhost_generation_file="/etc/forge/backup-offhost-generation"
+  default_offhost_mount_identity_file="/etc/forge/backup-offhost-mount-identity"
 fi
 
 readonly forge_binary
@@ -76,6 +79,7 @@ readonly backup_dir
 readonly offhost_command_file="${FORGE_BACKUP_OFFHOST_COMMAND_FILE:-$default_offhost_command_file}"
 readonly offhost_destination_file="${FORGE_BACKUP_OFFHOST_DESTINATION_FILE:-$default_offhost_destination_file}"
 readonly offhost_generation_file="${FORGE_BACKUP_OFFHOST_GENERATION_FILE:-$default_offhost_generation_file}"
+readonly offhost_mount_identity_file="${FORGE_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE:-$default_offhost_mount_identity_file}"
 readonly local_retention_days=14
 
 read_single_line_config() {
@@ -100,6 +104,147 @@ offhost_destination="$(
 offhost_generation="$(
   read_single_line_config "$offhost_generation_file" "off-host generation"
 )"
+
+validate_file_destination_path() {
+  local destination_value="$1"
+  local candidate_path=""
+  local canonical_path=""
+
+  [[ "$destination_value" == file:///* &&
+    "$destination_value" != *$'\n'* &&
+    "$destination_value" != *$'\r'* ]] ||
+    fail "directory destination must be file:///absolute/path"
+  candidate_path="${destination_value#file://}"
+  [[ "$candidate_path" =~ ^/[A-Za-z0-9._/@:+,-]+$ &&
+    "$candidate_path" != *"//"* &&
+    "$candidate_path" != *"/./"* &&
+    "$candidate_path" != *"/../"* &&
+    "$candidate_path" != */"." &&
+    "$candidate_path" != */".." &&
+    "$candidate_path" != */ &&
+    -d "$candidate_path" &&
+    ! -L "$candidate_path" ]] ||
+    fail "directory destination must be an existing canonical non-symlink path"
+  canonical_path="$(realpath -e -- "$candidate_path")" ||
+    fail "cannot resolve directory destination: $candidate_path"
+  [[ "$canonical_path" = "$candidate_path" ]] ||
+    fail "directory destination must contain no symlink or traversal"
+
+  printf '%s' "$candidate_path"
+}
+
+read_mount_field() {
+  local destination_path="$1"
+  local field="$2"
+  local -a field_lines=()
+
+  mapfile -t field_lines < <(
+    findmnt \
+      --noheadings \
+      --raw \
+      --first-only \
+      --output "$field" \
+      --target "$destination_path"
+  )
+  [[ ${#field_lines[@]} -eq 1 && -n "${field_lines[0]}" ]] ||
+    fail "cannot resolve current mount $field for directory destination"
+  [[ "${field_lines[0]}" != *$'\r'* ]] ||
+    fail "current mount $field contains a carriage return"
+
+  printf '%s' "${field_lines[0]}"
+}
+
+load_directory_mount_identity() {
+  local identity_path="$1"
+  local canonical_identity_path=""
+  local -a identity_lines=()
+
+  [[ "$identity_path" = /* &&
+    -f "$identity_path" &&
+    ! -L "$identity_path" &&
+    -r "$identity_path" ]] ||
+    fail "directory mount identity must be a readable absolute non-symlink regular file"
+  canonical_identity_path="$(realpath -e -- "$identity_path")" ||
+    fail "cannot resolve directory mount identity file"
+  [[ "$canonical_identity_path" = "$identity_path" ]] ||
+    fail "directory mount identity file must contain no symlink or traversal"
+  mapfile -t identity_lines <"$identity_path"
+  [[ ${#identity_lines[@]} -eq 5 &&
+    "${identity_lines[0]}" = "forge-directory-mount-v1" &&
+    "${identity_lines[1]}" = target=* &&
+    "${identity_lines[2]}" = source=* &&
+    "${identity_lines[3]}" = fstype=* &&
+    "${identity_lines[4]}" = fsid=* ]] ||
+    fail "directory mount identity file has an invalid schema"
+
+  directory_mount_target="${identity_lines[1]#target=}"
+  directory_mount_source="${identity_lines[2]#source=}"
+  directory_mount_fstype="${identity_lines[3]#fstype=}"
+  directory_mount_fsid="${identity_lines[4]#fsid=}"
+  [[ "$directory_mount_target" = /* &&
+    "$directory_mount_target" != "/" &&
+    "$directory_mount_target" =~ ^/[A-Za-z0-9._/@:+,-]+$ &&
+    "$directory_mount_target" != *"//"* &&
+    "$directory_mount_target" != *"/./"* &&
+    "$directory_mount_target" != *"/../"* &&
+    "$directory_mount_target" != */"." &&
+    "$directory_mount_target" != */".." &&
+    "$directory_mount_target" != */ &&
+    -n "$directory_mount_source" &&
+    "$directory_mount_source" != *$'\r'* &&
+    "$directory_mount_fstype" =~ ^[A-Za-z0-9._+-]+$ &&
+    "$directory_mount_fsid" =~ ^[0-9A-Fa-f]+$ ]] ||
+    fail "directory mount identity contains invalid values"
+}
+
+directory_destination_path=""
+directory_mount_target=""
+directory_mount_source=""
+directory_mount_fstype=""
+directory_mount_fsid=""
+if [[ "$offhost_destination" == file://* ]]; then
+  directory_destination_path="$(
+    validate_file_destination_path "$offhost_destination"
+  )"
+  load_directory_mount_identity "$offhost_mount_identity_file"
+  case "$directory_destination_path" in
+    "$directory_mount_target"/*) ;;
+    *)
+      fail "directory destination must be below its persisted mount target"
+      ;;
+  esac
+fi
+
+require_current_directory_mount_identity() {
+  local current_target=""
+  local current_source=""
+  local current_fstype=""
+  local current_fsid_before=""
+  local current_fsid_after=""
+
+  [[ -n "$directory_destination_path" ]] || return 0
+
+  current_fsid_before="$(stat -f -c '%i' -- "$directory_destination_path")" ||
+    fail "directory destination filesystem identity is unavailable"
+  current_target="$(
+    read_mount_field "$directory_mount_target" TARGET
+  )"
+  current_source="$(
+    read_mount_field "$directory_mount_target" SOURCE
+  )"
+  current_fstype="$(
+    read_mount_field "$directory_mount_target" FSTYPE
+  )"
+  current_fsid_after="$(stat -f -c '%i' -- "$directory_destination_path")" ||
+    fail "directory destination filesystem identity is unavailable"
+
+  [[ "$current_target" = "$directory_mount_target" &&
+    "$current_source" = "$directory_mount_source" &&
+    "$current_fstype" = "$directory_mount_fstype" &&
+    "$current_fsid_before" = "$directory_mount_fsid" &&
+    "$current_fsid_after" = "$directory_mount_fsid" ]] ||
+    fail "directory destination mount identity changed or is unavailable"
+}
 
 audit_uploader_path() {
   local candidate="$1"
@@ -207,11 +352,14 @@ read_exact_sha256_file() {
 }
 
 run_offhost_command() {
+  require_current_directory_mount_identity
+
   env \
     -u FORGE_SECRET_VAULT_KEY \
     -u FORGE_SECRET_VAULT_KEY_FILE \
     -u FORGE_SECRET_VAULT_PREVIOUS_KEYS \
     -u FORGE_SECRET_VAULT_PREVIOUS_KEY_FILES \
+    FORGE_DIRECTORY_MOUNT_IDENTITY_FILE="$offhost_mount_identity_file" \
     "$offhost_command" "$@"
 }
 
@@ -221,6 +369,8 @@ run_forge_command() {
     -u FORGE_BACKUP_OFFHOST_COMMAND_FILE \
     -u FORGE_BACKUP_OFFHOST_DESTINATION_FILE \
     -u FORGE_BACKUP_OFFHOST_GENERATION_FILE \
+    -u FORGE_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE \
+    -u FORGE_DIRECTORY_MOUNT_IDENTITY_FILE \
     "$forge_binary" "$@"
 }
 
@@ -414,6 +564,7 @@ object_name="forge-$timestamp.sqlite"
 destination="$backup_dir/$object_name"
 
 run_forge_command --store "$store" store check --output json
+require_current_directory_mount_identity
 run_forge_command --store "$store" store backup \
   --destination "$destination" \
   --output json

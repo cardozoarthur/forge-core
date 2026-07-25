@@ -40670,7 +40670,7 @@ fn request_heartbeat_marks_async_run_active_and_surfaces_it_in_status_list_and_i
 }
 
 #[test]
-fn request_step_auto_promotes_ready_deterministic_task_and_advances_drive() {
+fn request_step_requires_real_receipts_for_ready_deterministic_tasks() {
     let temp = tempdir().unwrap();
     let store_dir = temp.path().join("store with spaces");
     fs::create_dir_all(&store_dir).unwrap();
@@ -40721,40 +40721,18 @@ fn request_step_auto_promotes_ready_deterministic_task_and_advances_drive() {
         .clone();
     let stepped_json: Value = serde_json::from_slice(&stepped).unwrap();
     assert_eq!(stepped_json["schema_version"], "forge.request_step.v1");
-    assert_eq!(stepped_json["status"], "stepped");
-    assert_eq!(stepped_json["action"], "auto_promoted_task");
+    assert_eq!(stepped_json["status"], "handoff_required");
+    assert_eq!(stepped_json["action"], "start_handoff");
     assert_eq!(stepped_json["stepped_task"]["task_id"], "task-001");
-    assert_eq!(
-        stepped_json["output_artifact"]["status"],
-        "artifact_attached"
-    );
-    assert_eq!(
-        stepped_json["output_artifact"]["artifact"]["kind"],
-        "auto_step_output"
-    );
-    assert_eq!(stepped_json["validation"]["accepted"], true);
-    assert_eq!(
-        stepped_json["validation"]["validation_summary"]["passing"],
-        1
-    );
-    assert_eq!(stepped_json["drive_after"]["status"], "ready_for_handoff");
-    assert_eq!(
-        stepped_json["drive_after"]["handoff_task"]["task_id"],
-        "task-002"
-    );
-    assert_forge_store_prefix(&stepped_json["drive_before"]["next_command"], &store);
-    assert_forge_store_prefix(&stepped_json["drive_after"]["next_command"], &store);
-
-    let response_path = store
-        .parent()
-        .unwrap()
-        .join(stepped_json["response_artifact_path"].as_str().unwrap());
-    let response_json: Value = serde_json::from_slice(&fs::read(response_path).unwrap()).unwrap();
-    let expected_command_prefix = format!("forge --store '{}' ", store.display());
-    assert!(response_json["validation_evidence"][0]["command"]
+    assert_eq!(stepped_json["output_artifact"], Value::Null);
+    assert_eq!(stepped_json["response_artifact_path"], Value::Null);
+    assert_eq!(stepped_json["validation"], Value::Null);
+    assert_eq!(stepped_json["drive_after"], Value::Null);
+    assert!(stepped_json["reason"]
         .as_str()
         .unwrap()
-        .starts_with(&expected_command_prefix));
+        .contains("real executor execution receipt"));
+    assert_forge_store_prefix(&stepped_json["drive_before"]["next_command"], &store);
 
     let status = forge()
         .args([
@@ -40773,8 +40751,8 @@ fn request_step_auto_promotes_ready_deterministic_task_and_advances_drive() {
         .stdout
         .clone();
     let status_json: Value = serde_json::from_slice(&status).unwrap();
-    assert_eq!(status_json["task_summary"]["completed"], 1);
-    assert_eq!(status_json["artifact_count"], 1);
+    assert_eq!(status_json["task_summary"]["completed"], 0);
+    assert_eq!(status_json["artifact_count"], 0);
     assert_eq!(
         status_json["outcome_status"]["schema_version"],
         "forge.outcome_status.v1"
@@ -40865,7 +40843,7 @@ fn request_step_auto_promotes_ready_deterministic_task_and_advances_drive() {
     let mcp_step_json: Value = serde_json::from_slice(&mcp_step).unwrap();
     assert_eq!(mcp_step_json["status"], "ok");
     assert_eq!(mcp_step_json["tool_name"], "forge.run.step");
-    assert_eq!(mcp_step_json["result"]["status"], "stepped");
+    assert_eq!(mcp_step_json["result"]["status"], "handoff_required");
     assert_eq!(
         mcp_step_json["result"]["stepped_task"]["task_id"],
         "task-001"
@@ -40903,11 +40881,19 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
             "--store",
             store.to_str().unwrap(),
             "request",
-            "step",
+            "complete-task",
             "--run",
             run_id,
+            "--task",
+            "task-001",
             "--executor",
             "codex",
+            "--summary",
+            "Codex parsed the request and recorded an explicit execution receipt.",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "intent parsing receipt passed",
             "--origin",
             "codex",
             "--output",
@@ -40930,6 +40916,8 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
             "codex",
             "--summary",
             "Codex extracted requirements and recorded a replayable trace.",
+            "--evidence-command",
+            "true",
             "--evidence-summary",
             "requirements trace is present and retryable",
             "--tokens-in",
@@ -40995,7 +40983,7 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
     let evidence_command = response_json["validation_evidence"][0]["command"]
         .as_str()
         .unwrap();
-    assert!(evidence_command.starts_with(&format!("forge --store {} ", store.display())));
+    assert_eq!(evidence_command, "true");
 
     let trace_path = store.parent().unwrap().join(
         completed_json["trace_artifact"]["artifact"]["path"]
@@ -41068,11 +41056,19 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
             "--store",
             store.to_str().unwrap(),
             "request",
-            "step",
+            "complete-task",
             "--run",
             mcp_run_id,
+            "--task",
+            "task-001",
             "--executor",
             "codex",
+            "--summary",
+            "Codex parsed the MCP request with a real execution receipt.",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "MCP setup task receipt passed",
             "--origin",
             "codex",
             "--output",

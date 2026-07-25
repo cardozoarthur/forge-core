@@ -47,6 +47,13 @@ const COMPLETION_AUDIT_HANDOFF_CONTEXT_BUDGET: usize = 12000;
 const REWORK_HANDOFF_CONTEXT_BUDGET: usize = 4096;
 const REQUEST_CONTEXT_FRONTIER_LIMIT: usize = 4;
 
+#[cfg(test)]
+static FINAL_DELIVERY_PREPARATION_DELAY: std::sync::Mutex<Option<(String, u64)>> =
+    std::sync::Mutex::new(None);
+#[cfg(test)]
+static FINAL_DELIVERY_COMMIT_DELAY: std::sync::Mutex<Option<(String, u64)>> =
+    std::sync::Mutex::new(None);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
     pub run_id: String,
@@ -70,10 +77,24 @@ pub struct RunRecord {
     pub heartbeat_expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_ttl_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_lease_expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub supervisor_fencing_token: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub executor_fallbacks: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub executor_switches: Vec<ExecutorSwitchRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_start_idempotency: Option<RequestStartIdempotencyMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RequestSupervisorFence {
+    pub instance_id: String,
+    pub fencing_token: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,9 +112,11 @@ pub struct RequestStartReport {
     pub attached_subflows: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeContextReport>,
+    #[serde(skip)]
+    pub idempotent_replay: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowResolutionReport {
     pub schema_version: String,
     pub searched_existing_flows: bool,
@@ -109,12 +132,80 @@ pub struct FlowResolutionReport {
     pub policy: FlowResolutionPolicy,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowResolutionPolicy {
     pub reuse_existing_subflows_by_default: bool,
     pub create_new_flow_only_when_needed: bool,
     pub self_run_evolution_is_ordinary_flow: bool,
     pub preserve_user_requested_flow_scope: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestStartIdempotencyMetadata {
+    pub schema_version: String,
+    pub origin: String,
+    pub key_sha256: String,
+    pub request_fingerprint_sha256: String,
+    pub project_context_sha256: String,
+    pub flow_resolution: FlowResolutionReport,
+    pub reuse_candidates: Vec<serde_json::Value>,
+    pub attached_subflows: usize,
+}
+
+#[derive(Debug)]
+struct RequestStartIdempotencyAttempt {
+    origin: String,
+    key_sha256: String,
+    request_fingerprint_sha256: String,
+    project_context_sha256: String,
+}
+
+enum RequestStartTransactionOutcome {
+    Created {
+        run: RunRecord,
+        flow_resolution: FlowResolutionReport,
+        reuse_candidates: Vec<WorkflowReuseCandidate>,
+        attached_subflows: usize,
+    },
+    Replayed {
+        run: RunRecord,
+        metadata: RequestStartIdempotencyMetadata,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestStartReplayCandidate {
+    requested_task_id: String,
+    requested_title: String,
+    candidate_workflow_id: String,
+    candidate_task_id: String,
+    candidate_title: String,
+    reuse_key: String,
+    context_lineage_sha256: String,
+    policy_mode: String,
+    validation_gate: String,
+    candidate_lifecycle_state: String,
+    attachable_as_child_subflow: bool,
+    reason: String,
+}
+
+impl From<RequestStartReplayCandidate> for WorkflowReuseCandidate {
+    fn from(candidate: RequestStartReplayCandidate) -> Self {
+        Self {
+            requested_task_id: candidate.requested_task_id,
+            requested_title: candidate.requested_title,
+            candidate_workflow_id: candidate.candidate_workflow_id,
+            candidate_task_id: candidate.candidate_task_id,
+            candidate_title: candidate.candidate_title,
+            reuse_key: candidate.reuse_key,
+            context_lineage_sha256: candidate.context_lineage_sha256,
+            policy_mode: candidate.policy_mode,
+            validation_gate: candidate.validation_gate,
+            candidate_lifecycle_state: candidate.candidate_lifecycle_state,
+            attachable_as_child_subflow: candidate.attachable_as_child_subflow,
+            reason: candidate.reason,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -678,16 +769,19 @@ pub fn start_pm_session(
     let flow_resolution =
         build_flow_resolution_report(&workflow, &reuse_candidates, attached_subflows);
     let run = create_run_record(&workflow, origin, "accepted");
-    store.save_workflow(&workflow)?;
-    save_run_record(store, &run)?;
-    store.record_event(
-        &workflow.id,
-        "pm_session_started",
-        &serde_json::json!({
-            "run": run,
-            "objective": objective,
-        }),
-    )?;
+    store.with_transaction(|| {
+        store.save_workflow(&workflow)?;
+        save_run_record(store, &run)?;
+        store.record_event(
+            &workflow.id,
+            "pm_session_started",
+            &serde_json::json!({
+                "run": run,
+                "objective": objective,
+            }),
+        )?;
+        Ok(())
+    })?;
     let handoff_contract = build_agent_handoff_contract(store, &run, flow_resolution.clone());
     Ok(RequestStartReport {
         status: run.status,
@@ -701,7 +795,141 @@ pub fn start_pm_session(
         reuse_candidates,
         attached_subflows,
         worktree: None,
+        idempotent_replay: false,
     })
+}
+
+fn build_request_start_idempotency_attempt(
+    goal: &str,
+    origin: &str,
+    project_root: &Path,
+    idempotency_key: &str,
+) -> Result<RequestStartIdempotencyAttempt> {
+    let normalized_origin = origin.trim();
+    if normalized_origin.is_empty() {
+        anyhow::bail!("request start idempotency requires a non-empty origin");
+    }
+    let normalized_key = idempotency_key.trim();
+    if normalized_key.is_empty() {
+        anyhow::bail!("request start idempotency key cannot be empty");
+    }
+    if normalized_key.len() > 256 {
+        anyhow::bail!("request start idempotency key cannot exceed 256 bytes");
+    }
+
+    let canonical_project_root = fs::canonicalize(project_root).with_context(|| {
+        format!(
+            "failed to canonicalize request start project/worktree context {}",
+            project_root.display()
+        )
+    })?;
+    let canonical_project_root = canonical_project_root.to_str().with_context(|| {
+        format!(
+            "request start project/worktree context is not valid UTF-8: {}",
+            canonical_project_root.display()
+        )
+    })?;
+    let project_context = serde_json::json!({
+        "schema_version": "forge.request_start_project_context.v1",
+        "project_root": canonical_project_root,
+    });
+    let project_context_bytes = serde_json::to_vec(&project_context)?;
+    let project_context_sha256 = hex_sha256(&project_context_bytes);
+    let request_fingerprint = serde_json::json!({
+        "schema_version": "forge.request_start_fingerprint.v1",
+        "goal": goal,
+        "project_context_sha256": project_context_sha256,
+    });
+
+    Ok(RequestStartIdempotencyAttempt {
+        origin: normalized_origin.to_string(),
+        key_sha256: hex_sha256(
+            format!("forge.request_start_idempotency_key.v1\0{normalized_key}").as_bytes(),
+        ),
+        request_fingerprint_sha256: hex_sha256(&serde_json::to_vec(&request_fingerprint)?),
+        project_context_sha256,
+    })
+}
+
+fn find_idempotent_request_start(
+    store: &ForgeStore,
+    attempt: &RequestStartIdempotencyAttempt,
+) -> Result<Option<(RunRecord, RequestStartIdempotencyMetadata)>> {
+    let mut replay = None;
+    for value in store.load_runs()? {
+        let Some(metadata_value) = value.get("request_start_idempotency") else {
+            continue;
+        };
+        let Some(metadata_origin) = metadata_value
+            .get("origin")
+            .and_then(|value| value.as_str())
+        else {
+            anyhow::bail!("stored request start idempotency metadata is missing origin");
+        };
+        if metadata_origin != attempt.origin {
+            continue;
+        }
+        let Some(metadata_key_sha256) = metadata_value
+            .get("key_sha256")
+            .and_then(|value| value.as_str())
+        else {
+            anyhow::bail!(
+                "stored request start idempotency metadata for origin '{}' is missing key hash",
+                attempt.origin
+            );
+        };
+        if metadata_key_sha256 != attempt.key_sha256 {
+            continue;
+        }
+
+        let metadata: RequestStartIdempotencyMetadata =
+            serde_json::from_value(metadata_value.clone())
+                .context("failed to decode matching request start idempotency metadata")?;
+        if metadata.schema_version != "forge.request_start_idempotency.v1" {
+            anyhow::bail!(
+                "unsupported request start idempotency metadata schema: {}",
+                metadata.schema_version
+            );
+        }
+        if metadata.request_fingerprint_sha256 != attempt.request_fingerprint_sha256
+            || metadata.project_context_sha256 != attempt.project_context_sha256
+        {
+            anyhow::bail!(
+                "request start idempotency conflict: the origin and key were already used with a \
+                 different goal or project/worktree context"
+            );
+        }
+
+        let run: RunRecord = serde_json::from_value(value)
+            .context("failed to decode matching idempotent request run")?;
+        if !run.async_run
+            || run.origin.trim() != metadata.origin
+            || metadata.flow_resolution.created_workflow_id != run.workflow_id
+            || metadata.attached_subflows != metadata.flow_resolution.attached_subflow_count
+        {
+            anyhow::bail!(
+                "stored request start idempotency metadata does not match its run/workflow"
+            );
+        }
+        if replay.is_some() {
+            anyhow::bail!("multiple runs share the same request start idempotency origin and key");
+        }
+        replay = Some((run, metadata));
+    }
+    Ok(replay)
+}
+
+fn replay_request_start_candidates(
+    values: Vec<serde_json::Value>,
+) -> Result<Vec<WorkflowReuseCandidate>> {
+    values
+        .into_iter()
+        .map(|value| {
+            serde_json::from_value::<RequestStartReplayCandidate>(value)
+                .map(WorkflowReuseCandidate::from)
+                .context("failed to replay request start reuse candidate")
+        })
+        .collect()
 }
 
 pub fn start_async_request(
@@ -709,8 +937,23 @@ pub fn start_async_request(
     goal: &str,
     origin: &str,
 ) -> Result<RequestStartReport> {
+    start_async_request_with_idempotency(store, goal, origin, None)
+}
+
+pub fn start_async_request_with_idempotency(
+    store: &ForgeStore,
+    goal: &str,
+    origin: &str,
+    idempotency_key: Option<&str>,
+) -> Result<RequestStartReport> {
     let project_root = std::env::current_dir()?;
-    start_async_request_with_project(store, goal, origin, &project_root)
+    start_async_request_with_project_and_idempotency(
+        store,
+        goal,
+        origin,
+        &project_root,
+        idempotency_key,
+    )
 }
 
 pub fn start_async_request_with_project(
@@ -719,31 +962,112 @@ pub fn start_async_request_with_project(
     origin: &str,
     project_root: &Path,
 ) -> Result<RequestStartReport> {
-    let addon_catalog = load_addon_catalog_from_store(store, &default_addon_dirs())?;
-    let operating_context = load_project_operating_context(project_root)?;
-    ensure_operating_context_policy(store, &operating_context, "request start")?;
-    let intent = parse_intent_with_catalog_and_context(goal, &addon_catalog, operating_context);
-    let mut workflow = create_workflow(intent);
-    let _ = sanitize_workflow_secrets_for_storage(store, &mut workflow, origin)?;
-    let reuse_candidates = find_reuse_candidates(store, &workflow)?;
-    let attached_subflows =
-        attach_reuse_candidates_as_child_subflows(&mut workflow, &reuse_candidates);
-    let flow_resolution =
-        build_flow_resolution_report(&workflow, &reuse_candidates, attached_subflows);
-    let run = create_run_record(&workflow, origin, "accepted");
-    store.save_workflow(&workflow)?;
-    save_run_record(store, &run)?;
-    store.record_event(
-        &workflow.id,
-        "async_request_started",
-        &serde_json::json!({
-            "run": run,
-            "flow_resolution": flow_resolution,
-        }),
-    )?;
+    start_async_request_with_project_and_idempotency(store, goal, origin, project_root, None)
+}
+
+pub fn start_async_request_with_project_and_idempotency(
+    store: &ForgeStore,
+    goal: &str,
+    origin: &str,
+    project_root: &Path,
+    idempotency_key: Option<&str>,
+) -> Result<RequestStartReport> {
+    let idempotency_attempt = idempotency_key
+        .map(|key| build_request_start_idempotency_attempt(goal, origin, project_root, key))
+        .transpose()?;
+
+    let transaction_outcome = store.with_transaction(|| {
+        if let Some(attempt) = idempotency_attempt.as_ref() {
+            if let Some((replayed_run, metadata)) = find_idempotent_request_start(store, attempt)? {
+                store
+                    .load_workflow(&replayed_run.workflow_id)
+                    .with_context(|| {
+                        format!(
+                            "idempotent request start references missing workflow {}",
+                            replayed_run.workflow_id
+                        )
+                    })?;
+                return Ok(RequestStartTransactionOutcome::Replayed {
+                    run: replayed_run,
+                    metadata,
+                });
+            }
+        }
+
+        let addon_catalog = load_addon_catalog_from_store(store, &default_addon_dirs())?;
+        let operating_context = load_project_operating_context(project_root)?;
+        ensure_operating_context_policy(store, &operating_context, "request start")?;
+        let intent = parse_intent_with_catalog_and_context(goal, &addon_catalog, operating_context);
+        let mut workflow = create_workflow(intent);
+        let _ = sanitize_workflow_secrets_for_storage(store, &mut workflow, origin)?;
+        let reuse_candidates = find_reuse_candidates(store, &workflow)?;
+        let attached_subflows =
+            attach_reuse_candidates_as_child_subflows(&mut workflow, &reuse_candidates);
+        let flow_resolution =
+            build_flow_resolution_report(&workflow, &reuse_candidates, attached_subflows);
+        let mut run = create_run_record(&workflow, origin, "accepted");
+        if let Some(attempt) = idempotency_attempt.as_ref() {
+            run.request_start_idempotency = Some(RequestStartIdempotencyMetadata {
+                schema_version: "forge.request_start_idempotency.v1".to_string(),
+                origin: attempt.origin.clone(),
+                key_sha256: attempt.key_sha256.clone(),
+                request_fingerprint_sha256: attempt.request_fingerprint_sha256.clone(),
+                project_context_sha256: attempt.project_context_sha256.clone(),
+                flow_resolution: flow_resolution.clone(),
+                reuse_candidates: reuse_candidates
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<serde_json::Result<Vec<_>>>()?,
+                attached_subflows,
+            });
+        }
+
+        store.save_workflow(&workflow)?;
+        save_run_record(store, &run)?;
+        store.record_event(
+            &workflow.id,
+            "async_request_started",
+            &serde_json::json!({
+                "run": run,
+                "flow_resolution": flow_resolution,
+            }),
+        )?;
+        Ok(RequestStartTransactionOutcome::Created {
+            run,
+            flow_resolution,
+            reuse_candidates,
+            attached_subflows,
+        })
+    })?;
+
+    let (run, flow_resolution, reuse_candidates, attached_subflows, idempotent_replay) =
+        match transaction_outcome {
+            RequestStartTransactionOutcome::Created {
+                run,
+                flow_resolution,
+                reuse_candidates,
+                attached_subflows,
+            } => (
+                run,
+                flow_resolution,
+                reuse_candidates,
+                attached_subflows,
+                false,
+            ),
+            RequestStartTransactionOutcome::Replayed { run, metadata } => {
+                let reuse_candidates = replay_request_start_candidates(metadata.reuse_candidates)?;
+                (
+                    run,
+                    metadata.flow_resolution,
+                    reuse_candidates,
+                    metadata.attached_subflows,
+                    true,
+                )
+            }
+        };
     let handoff_contract = build_agent_handoff_contract(store, &run, flow_resolution.clone());
     Ok(RequestStartReport {
-        status: run.status,
+        status: "accepted".to_string(),
         run_id: run.run_id,
         workflow_id: run.workflow_id,
         goal: run.goal,
@@ -754,6 +1078,7 @@ pub fn start_async_request_with_project(
         reuse_candidates,
         attached_subflows,
         worktree: None,
+        idempotent_replay,
     })
 }
 
@@ -832,18 +1157,154 @@ pub fn create_run_record(workflow: &Workflow, origin: &str, status: &str) -> Run
         last_heartbeat_at: None,
         heartbeat_expires_at: None,
         heartbeat_ttl_seconds: None,
+        supervisor_instance_id: None,
+        supervisor_lease_expires_at: None,
+        supervisor_fencing_token: 0,
         executor_fallbacks: Vec::new(),
         executor_switches: Vec::new(),
+        request_start_idempotency: None,
     }
 }
 
 pub fn save_run_record(store: &ForgeStore, run: &RunRecord) -> Result<()> {
+    store.insert_run(
+        &run.run_id,
+        &run.workflow_id,
+        &run.status,
+        &serde_json::to_value(run)?,
+    )
+}
+
+pub(crate) fn update_run_record(store: &ForgeStore, run: &RunRecord) -> Result<()> {
     store.save_run(
         &run.run_id,
         &run.workflow_id,
         &run.status,
         &serde_json::to_value(run)?,
     )
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+pub(crate) fn clear_request_supervisor_lease(run: &mut RunRecord) {
+    run.supervisor_instance_id = None;
+    run.supervisor_lease_expires_at = None;
+}
+
+fn ensure_request_supervisor_fence(
+    run: &RunRecord,
+    fence: Option<&RequestSupervisorFence>,
+    action: &str,
+) -> Result<()> {
+    let now = Utc::now();
+    match (
+        run.supervisor_instance_id.as_deref(),
+        run.supervisor_lease_expires_at,
+    ) {
+        (None, None) => {
+            if fence.is_some() {
+                anyhow::bail!(
+                    "cannot {action} request {} with a supervisor fence because no supervisor lease is active",
+                    run.run_id
+                );
+            }
+            Ok(())
+        }
+        (None, Some(expires_at)) => {
+            anyhow::bail!(
+                "cannot {action} request {} because supervisor lease metadata is inconsistent: lease expiry {} has no owner",
+                run.run_id,
+                expires_at
+            );
+        }
+        (Some(owner), None) => {
+            anyhow::bail!(
+                "cannot {action} request {} because supervisor lease metadata is inconsistent: owner {} has no expiry",
+                run.run_id,
+                owner
+            );
+        }
+        (Some(owner), Some(expires_at)) => {
+            if expires_at <= now {
+                anyhow::bail!(
+                    "cannot {action} request {} because supervisor lease for instance {} expired at {}; recover or reconcile the run before mutation",
+                    run.run_id,
+                    owner,
+                    expires_at
+                );
+            }
+            let Some(fence) = fence else {
+                anyhow::bail!(
+                    "cannot {action} request {} while live supervisor lease {} holds fencing token {}; wait for the owning supervisor, or recover or reconcile the run after the lease expires",
+                    run.run_id,
+                    owner,
+                    run.supervisor_fencing_token
+                );
+            };
+            if run.supervisor_fencing_token == 0 {
+                anyhow::bail!(
+                    "cannot {action} request {} because live supervisor lease {} has an invalid zero fencing token",
+                    run.run_id,
+                    owner
+                );
+            }
+            if fence.instance_id != owner || fence.fencing_token != run.supervisor_fencing_token {
+                anyhow::bail!(
+                    "cannot {action} request {} because supervisor fence {}:{} does not match live lease {}:{}",
+                    run.run_id,
+                    fence.instance_id,
+                    fence.fencing_token,
+                    owner,
+                    run.supervisor_fencing_token
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn ensure_request_supervisor_lease_is_recoverable(
+    run: &RunRecord,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    match (
+        run.supervisor_instance_id.as_deref(),
+        run.supervisor_lease_expires_at,
+    ) {
+        (None, None) => Ok(()),
+        (None, Some(expires_at)) => {
+            anyhow::bail!(
+                "cannot recover stale request {} because supervisor lease metadata is inconsistent: lease expiry {} has no owner",
+                run.run_id,
+                expires_at
+            );
+        }
+        (Some(owner), None) => {
+            anyhow::bail!(
+                "cannot recover stale request {} because supervisor lease metadata is inconsistent: owner {} has no expiry",
+                run.run_id,
+                owner
+            );
+        }
+        (Some(owner), Some(expires_at)) if expires_at > now => {
+            anyhow::bail!(
+                "cannot recover stale request {} while live supervisor lease {} holds fencing token {}; wait until the lease expires",
+                run.run_id,
+                owner,
+                run.supervisor_fencing_token
+            );
+        }
+        (Some(owner), Some(_)) if run.supervisor_fencing_token == 0 => {
+            anyhow::bail!(
+                "cannot recover stale request {} because expired supervisor lease {} has an invalid zero fencing token",
+                run.run_id,
+                owner
+            );
+        }
+        (Some(_), Some(_)) => Ok(()),
+    }
 }
 
 pub fn update_run_status(
@@ -855,6 +1316,7 @@ pub fn update_run_status(
     store.with_transaction(|| {
         let mut run = load_run_record_for_action(store, run_id, "run status update")?;
         let workflow = store.load_workflow(&run.workflow_id)?;
+        ensure_request_supervisor_fence(&run, None, "update status for")?;
         if let (Some(run_terminal), Some(workflow_terminal)) = (
             terminal_request_status(&run.status),
             terminal_request_status(&workflow.status),
@@ -897,8 +1359,11 @@ pub fn update_run_status(
         }
         let previous_status = run.status.clone();
         run.status = status.to_string();
+        if status != "running" {
+            clear_request_supervisor_lease(&mut run);
+        }
         run.updated_at = Utc::now();
-        save_run_record(store, &run)?;
+        update_run_record(store, &run)?;
         store.record_event(
             &run.workflow_id,
             &format!("run_status_{status}"),
@@ -928,6 +1393,7 @@ pub(crate) fn update_run_and_workflow_status(
     store.with_transaction(|| {
         let mut run = load_run_record_for_action(store, run_id, "run and workflow status update")?;
         let mut workflow = store.load_workflow(&run.workflow_id)?;
+        ensure_request_supervisor_fence(&run, None, "update run and workflow status for")?;
         if terminal_request_status(&run.status).is_some_and(|current| current != target_terminal) {
             anyhow::bail!(
                 "cannot change terminal request {} from status {} to {}",
@@ -956,9 +1422,10 @@ pub(crate) fn update_run_and_workflow_status(
         let previous_workflow_status = workflow.status.clone();
         let updated_at = Utc::now();
         run.status = status.to_string();
+        clear_request_supervisor_lease(&mut run);
         run.updated_at = updated_at;
         workflow.status = status.to_string();
-        save_run_record(store, &run)?;
+        update_run_record(store, &run)?;
         store.save_workflow(&workflow)?;
         store.record_event(
             &run.workflow_id,
@@ -977,13 +1444,23 @@ pub(crate) fn update_run_and_workflow_status(
     })
 }
 
-fn mark_run_needs_attention_for_terminal_outcome(
+pub(crate) fn mark_run_needs_attention(
     store: &ForgeStore,
     run: &RunRecord,
     workflow: &Workflow,
+    supervisor_fence: Option<&RequestSupervisorFence>,
     origin: &str,
-    reason: &str,
+    reason_code: &str,
+    reason: &serde_json::Value,
 ) -> Result<RunRecord> {
+    if reason_code.trim().is_empty() {
+        anyhow::bail!("needs-attention reason code cannot be empty");
+    }
+    if !reason.is_object() {
+        anyhow::bail!("needs-attention reason must be a structured JSON object");
+    }
+    let progress_summary =
+        serde_json::to_string(reason).context("failed serialize needs-attention reason")?;
     store.with_transaction(|| {
         let (mut attention_run, mut attention_workflow) =
             load_current_request_snapshot_for_completion(
@@ -992,23 +1469,29 @@ fn mark_run_needs_attention_for_terminal_outcome(
                 workflow,
                 "mark needs attention",
             )?;
+        ensure_request_supervisor_fence(
+            &attention_run,
+            supervisor_fence,
+            "mark needs attention for",
+        )?;
         let attention_at = Utc::now();
         let previous_status = attention_run.status.clone();
         let previous_workflow_status = attention_workflow.status.clone();
         attention_run.status = "needs_attention".to_string();
         attention_run.active_executor = None;
         attention_run.executor_pid = None;
-        attention_run.progress_summary = Some(reason.to_string());
+        attention_run.progress_summary = Some(progress_summary.clone());
         attention_run.last_heartbeat_at = None;
         attention_run.heartbeat_expires_at = None;
         attention_run.heartbeat_ttl_seconds = None;
+        clear_request_supervisor_lease(&mut attention_run);
         attention_run.updated_at = attention_at;
         attention_workflow.status = "needs_attention".to_string();
-        save_run_record(store, &attention_run)?;
+        update_run_record(store, &attention_run)?;
         store.save_workflow(&attention_workflow)?;
         store.record_event(
             &attention_workflow.id,
-            "terminal_outcome_needs_attention",
+            "async_request_needs_attention",
             &serde_json::json!({
                 "run_id": attention_run.run_id,
                 "origin": origin,
@@ -1016,6 +1499,7 @@ fn mark_run_needs_attention_for_terminal_outcome(
                 "new_status": attention_run.status,
                 "previous_workflow_status": previous_workflow_status,
                 "new_workflow_status": attention_workflow.status,
+                "reason_code": reason_code,
                 "reason": reason,
                 "updated_at": attention_at,
             }),
@@ -1024,22 +1508,48 @@ fn mark_run_needs_attention_for_terminal_outcome(
     })
 }
 
+fn mark_run_needs_attention_for_terminal_outcome(
+    store: &ForgeStore,
+    run: &RunRecord,
+    workflow: &Workflow,
+    supervisor_fence: Option<&RequestSupervisorFence>,
+    origin: &str,
+    reason: &str,
+) -> Result<RunRecord> {
+    mark_run_needs_attention(
+        store,
+        run,
+        workflow,
+        supervisor_fence,
+        origin,
+        "terminal_outcome",
+        &serde_json::json!({
+            "message": reason,
+        }),
+    )
+}
+
 fn mark_run_blocked(
     store: &ForgeStore,
     run: &RunRecord,
     workflow: &Workflow,
     checkpoints: &[TaskCheckpoint],
+    supervisor_fence: Option<&RequestSupervisorFence>,
     origin: &str,
     reason: &str,
 ) -> Result<RunRecord> {
     store.with_transaction(|| {
         let (mut blocked, _) = load_current_request_snapshot(store, run, workflow, "mark blocked")?;
         ensure_request_checkpoints_match(store, &workflow.id, checkpoints, "mark blocked")?;
+        ensure_request_supervisor_fence(&blocked, supervisor_fence, "mark blocked")?;
         if blocked.status == "blocked"
             && blocked.progress_summary.as_deref() == Some(reason)
             && blocked.last_heartbeat_at.is_none()
             && blocked.heartbeat_expires_at.is_none()
             && blocked.executor_pid.is_none()
+            && blocked.active_executor.is_none()
+            && blocked.supervisor_instance_id.is_none()
+            && blocked.supervisor_lease_expires_at.is_none()
         {
             return Ok(blocked);
         }
@@ -1052,8 +1562,9 @@ fn mark_run_blocked(
         blocked.last_heartbeat_at = None;
         blocked.heartbeat_expires_at = None;
         blocked.heartbeat_ttl_seconds = None;
+        clear_request_supervisor_lease(&mut blocked);
         blocked.updated_at = blocked_at;
-        save_run_record(store, &blocked)?;
+        update_run_record(store, &blocked)?;
         store.record_event(
             &blocked.workflow_id,
             "async_request_blocked",
@@ -1206,6 +1717,7 @@ pub fn heartbeat_request(
         pid,
         origin,
         None,
+        None,
     )
 }
 
@@ -1219,11 +1731,13 @@ fn heartbeat_request_with_expected_snapshot(
     pid: Option<u32>,
     origin: &str,
     expected_snapshot: Option<(&RunRecord, &Workflow, &[TaskCheckpoint])>,
+    supervisor_fence: Option<&RequestSupervisorFence>,
 ) -> Result<RequestHeartbeatReport> {
     let (run, previous_status, heartbeat_at) = store.with_transaction(|| {
         let mut run = load_run_record_for_action(store, run_id, "request heartbeat")?;
         let mut workflow = store.load_workflow(&run.workflow_id)?;
         ensure_request_mutation_is_active(&run, &workflow, "heartbeat")?;
+        ensure_request_supervisor_fence(&run, supervisor_fence, "heartbeat")?;
         if let Some((expected_run, expected_workflow, expected_checkpoints)) = expected_snapshot {
             if serde_json::to_value(&run)? != serde_json::to_value(expected_run)?
                 || serde_json::to_value(&workflow)? != serde_json::to_value(expected_workflow)?
@@ -1244,6 +1758,9 @@ fn heartbeat_request_with_expected_snapshot(
         let heartbeat_at = Utc::now();
         let ttl_seconds = ttl_seconds.max(1);
         let expires_at = heartbeat_at + Duration::seconds(ttl_seconds.min(i64::MAX as u64) as i64);
+        if run.status == "running" && run.active_executor.as_deref() != Some(executor) {
+            clear_request_supervisor_lease(&mut run);
+        }
         run.status = "running".to_string();
         run.active_executor = Some(executor.to_string());
         run.executor_pid = pid;
@@ -1252,7 +1769,7 @@ fn heartbeat_request_with_expected_snapshot(
         run.heartbeat_expires_at = Some(expires_at);
         run.heartbeat_ttl_seconds = Some(ttl_seconds);
         run.updated_at = heartbeat_at;
-        save_run_record(store, &run)?;
+        update_run_record(store, &run)?;
         if workflow.status != "running" {
             workflow.status = "running".to_string();
             store.save_workflow(&workflow)?;
@@ -1294,7 +1811,16 @@ pub fn drive_request(
     ttl_seconds: u64,
     origin: &str,
 ) -> Result<RequestDriveReport> {
-    drive_request_with_context_budget(store, run_id, executor, ttl_seconds, origin, None)
+    drive_request_with_options(
+        store,
+        run_id,
+        executor,
+        ttl_seconds,
+        origin,
+        None,
+        None,
+        true,
+    )
 }
 
 fn drive_request_with_context_budget(
@@ -1305,7 +1831,31 @@ fn drive_request_with_context_budget(
     origin: &str,
     context_budget_override: Option<usize>,
 ) -> Result<RequestDriveReport> {
+    drive_request_with_options(
+        store,
+        run_id,
+        executor,
+        ttl_seconds,
+        origin,
+        context_budget_override,
+        None,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_request_with_options(
+    store: &ForgeStore,
+    run_id: &str,
+    executor: &str,
+    ttl_seconds: u64,
+    origin: &str,
+    context_budget_override: Option<usize>,
+    supervisor_fence: Option<&RequestSupervisorFence>,
+    finalize_delivery: bool,
+) -> Result<RequestDriveReport> {
     let run = load_run_record_for_action(store, run_id, "request drive")?;
+    ensure_request_supervisor_fence(&run, supervisor_fence, "drive")?;
     let mut workflow = store.load_workflow(&run.workflow_id)?;
     let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
     let latest_checkpoint = latest_actionable_checkpoint(&workflow, &checkpoints);
@@ -1377,6 +1927,7 @@ fn drive_request_with_context_budget(
             None,
             origin,
             Some((&run, &workflow, &checkpoints)),
+            supervisor_fence,
         )?;
         let next_command = handoff_command(
             store,
@@ -1429,6 +1980,7 @@ fn drive_request_with_context_budget(
             store,
             &run,
             &workflow,
+            supervisor_fence,
             origin,
             attention_reason,
         )?;
@@ -1543,11 +2095,54 @@ fn drive_request_with_context_budget(
         }
     }
 
+    if task_summary.completed == task_summary.total && task_summary.total > 0 && !finalize_delivery
+    {
+        let mut next_command = forge_command_prefix(store);
+        next_command.extend([
+            "request".to_string(),
+            "drive".to_string(),
+            "--run".to_string(),
+            run.run_id.clone(),
+            "--executor".to_string(),
+            executor.to_string(),
+            "--ttl-seconds".to_string(),
+            ttl_seconds.max(1).to_string(),
+            "--origin".to_string(),
+            origin.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
+        return Ok(RequestDriveReport {
+            schema_version: "forge.request_drive.v1".to_string(),
+            status: "completion_ready".to_string(),
+            action: "finalize_request".to_string(),
+            run_id: run.run_id.clone(),
+            workflow_id: workflow.id.clone(),
+            executor: executor.to_string(),
+            origin: origin.to_string(),
+            activity: build_run_activity_with_store(store, &run),
+            task_summary,
+            outcome_status,
+            checkpoint_count: checkpoints.len(),
+            latest_checkpoint,
+            rework: None,
+            handoff_task: None,
+            parallel_handoff_tasks: Vec::new(),
+            blocked_tasks: Vec::new(),
+            next_command,
+            parallel_next_commands: Vec::new(),
+            final_delivery_package: None,
+            reason: "All workflow tasks are complete; request step deferred final delivery so SQLite can commit before package files are published.".to_string(),
+            updated_at: Utc::now(),
+        });
+    }
+
     if task_summary.completed == task_summary.total && task_summary.total > 0 {
         let completed_at = Utc::now();
         let mut completed_run = run.clone();
         let previous_status = completed_run.status.clone();
         completed_run.status = "completed".to_string();
+        clear_request_supervisor_lease(&mut completed_run);
         completed_run.updated_at = completed_at;
         let mut completed_workflow = workflow.clone();
         let previous_workflow_status = completed_workflow.status.clone();
@@ -1560,14 +2155,19 @@ fn drive_request_with_context_budget(
             origin,
         )?;
         let final_delivery_transaction = store.with_transaction(|| {
-            load_current_request_snapshot_for_completion(
+            let (current_run, _) = load_current_request_snapshot_for_completion(
                 store,
                 &run,
                 &workflow,
                 "complete request with final delivery package",
             )?;
             prepared_final_delivery_package.revalidate_snapshot(store)?;
-            save_run_record(store, &completed_run)?;
+            ensure_request_supervisor_fence(
+                &current_run,
+                supervisor_fence,
+                "complete request with final delivery package",
+            )?;
+            update_run_record(store, &completed_run)?;
             store.save_workflow(&completed_workflow)?;
             store.record_event(
                 &completed_workflow.id,
@@ -1582,7 +2182,25 @@ fn drive_request_with_context_budget(
                     "completed_at": completed_at,
                 }),
             )?;
-            prepared_final_delivery_package.commit(store)
+            let final_delivery_package = prepared_final_delivery_package.commit(store)?;
+            #[cfg(test)]
+            {
+                let delay_ms = FINAL_DELIVERY_COMMIT_DELAY
+                    .lock()
+                    .expect("final delivery commit delay lock poisoned")
+                    .take()
+                    .filter(|(run_id, _)| run_id == &current_run.run_id)
+                    .map(|(_, delay_ms)| delay_ms);
+                if let Some(delay_ms) = delay_ms {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                }
+            }
+            ensure_request_supervisor_fence(
+                &current_run,
+                supervisor_fence,
+                "commit completed request with final delivery package",
+            )?;
+            Ok(final_delivery_package)
         });
         let final_delivery_package = prepared_final_delivery_package
             .finish_transaction(store, final_delivery_transaction)?;
@@ -1628,6 +2246,7 @@ fn drive_request_with_context_budget(
             None,
             origin,
             Some((&run, &workflow, &checkpoints)),
+            supervisor_fence,
         )?;
         let handoff_budget = context_budget_override
             .unwrap_or_else(|| handoff_context_budget_for_task(&workflow, &task.task_id));
@@ -1724,7 +2343,15 @@ fn drive_request_with_context_budget(
             ]);
             command
         });
-    let blocked_run = mark_run_blocked(store, &run, &workflow, &checkpoints, origin, reason)?;
+    let blocked_run = mark_run_blocked(
+        store,
+        &run,
+        &workflow,
+        &checkpoints,
+        supervisor_fence,
+        origin,
+        reason,
+    )?;
 
     Ok(RequestDriveReport {
         schema_version: "forge.request_drive.v1".to_string(),
@@ -1758,7 +2385,48 @@ pub fn step_request(
     ttl_seconds: u64,
     origin: &str,
 ) -> Result<RequestStepReport> {
-    let drive_before = drive_request(store, run_id, executor, ttl_seconds, origin)?;
+    step_request_with_options(store, run_id, executor, ttl_seconds, origin, None, false)
+}
+
+pub(crate) fn step_request_with_supervisor_fence(
+    store: &ForgeStore,
+    run_id: &str,
+    executor: &str,
+    ttl_seconds: u64,
+    origin: &str,
+    fence: &RequestSupervisorFence,
+) -> Result<RequestStepReport> {
+    step_request_with_options(
+        store,
+        run_id,
+        executor,
+        ttl_seconds,
+        origin,
+        Some(fence),
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn step_request_with_options(
+    store: &ForgeStore,
+    run_id: &str,
+    executor: &str,
+    ttl_seconds: u64,
+    origin: &str,
+    supervisor_fence: Option<&RequestSupervisorFence>,
+    finalize_delivery: bool,
+) -> Result<RequestStepReport> {
+    let drive_before = drive_request_with_options(
+        store,
+        run_id,
+        executor,
+        ttl_seconds,
+        origin,
+        None,
+        supervisor_fence,
+        finalize_delivery,
+    )?;
     let run = load_run_record(store, run_id)?;
     let workflow = store.load_workflow(&run.workflow_id)?;
     let activity = drive_before.activity.clone();
@@ -1798,114 +2466,26 @@ pub fn step_request(
             )
         })?;
 
-    if !is_auto_steppable_task(task) {
-        return Ok(RequestStepReport {
-            schema_version: "forge.request_step.v1".to_string(),
-            status: "handoff_required".to_string(),
-            action: "start_handoff".to_string(),
-            run_id: run.run_id,
-            workflow_id: workflow.id,
-            executor: executor.to_string(),
-            origin: origin.to_string(),
-            activity,
-            stepped_task: Some(stepped_task),
-            output_artifact: None,
-            response_artifact_path: None,
-            validation: None,
-            drive_before,
-            drive_after: None,
-            reason: "ready task requires an external executor or explicit validation command; Forge will not fake execution".to_string(),
-            updated_at,
-        });
-    }
-
-    let generated_at = Utc::now();
-    let timestamp = generated_at.format("%Y%m%dT%H%M%SZ");
-    let output_payload =
-        build_auto_step_output_payload(&workflow, task, executor, origin, generated_at);
-    let output_relative_path = format!(
-        "artifacts/{}/auto-step-output-{}-{}.json",
-        workflow.id, task.id, timestamp
-    );
-    let (output_path, _) =
-        write_json_artifact(&store.base_dir(), &output_relative_path, &output_payload)?;
-    let output_artifact = crate::workflow::attach_workflow_artifact(
-        store,
-        &workflow.id,
-        &output_path,
-        "auto_step_output",
-        origin,
-    )?;
-
-    let mut auto_step_evidence_command = forge_command_prefix(store);
-    auto_step_evidence_command.extend([
-        "request".to_string(),
-        "step".to_string(),
-        "--run".to_string(),
-        run_id.to_string(),
-        "--executor".to_string(),
-        executor.to_string(),
-        "--ttl-seconds".to_string(),
-        ttl_seconds.max(1).to_string(),
-    ]);
-    let auto_step_evidence_command = render_forge_command(&auto_step_evidence_command);
-    let response_payload = serde_json::json!({
-        "schema_version": "forge.executor_response.v1",
-        "task_id": task.id,
-        "status": "completed",
-        "artifacts": [output_artifact.artifact.path.clone()],
-        "trace_ref": format!("{run_id}/{}", task.id),
-        "cost": {
-            "estimated_usd": 0.0,
-            "tokens_in": 0,
-            "tokens_out": 0
-        },
-        "validation_evidence": [
-            {
-                "command": auto_step_evidence_command,
-                "exit_code": 0,
-                "summary": format!("Forge auto-stepped deterministic task {} and attached replayable output artifact {}.", task.id, output_artifact.artifact.path)
-            }
-        ]
-    });
-    let response_relative_path = format!(
-        "artifacts/{}/auto-step-response-{}-{}.json",
-        workflow.id, task.id, timestamp
-    );
-    let (response_path, _) = write_json_artifact(
-        &store.base_dir(),
-        &response_relative_path,
-        &response_payload,
-    )?;
-    let validation =
-        validate_executor_response_file(store, &workflow.id, &task.id, response_path.as_path())?;
-    let drive_after = drive_request(store, run_id, executor, ttl_seconds, origin)?;
-
     Ok(RequestStepReport {
         schema_version: "forge.request_step.v1".to_string(),
-        status: if validation.accepted {
-            "stepped".to_string()
-        } else {
-            "validation_failed".to_string()
-        },
-        action: if validation.accepted {
-            "auto_promoted_task".to_string()
-        } else {
-            "inspect_validation".to_string()
-        },
+        status: "handoff_required".to_string(),
+        action: "start_handoff".to_string(),
         run_id: run.run_id,
         workflow_id: workflow.id,
         executor: executor.to_string(),
         origin: origin.to_string(),
-        activity: drive_after.activity.clone(),
+        activity,
         stepped_task: Some(stepped_task),
-        output_artifact: Some(output_artifact),
-        response_artifact_path: Some(response_relative_path),
-        validation: Some(validation),
+        output_artifact: None,
+        response_artifact_path: None,
+        validation: None,
         drive_before,
-        drive_after: Some(drive_after),
-        reason: "Forge executed a deterministic ready task through the normal executor-response validation path.".to_string(),
-        updated_at: Utc::now(),
+        drive_after: None,
+        reason: format!(
+            "ready task {} uses executor {:?}; request step requires a real executor execution receipt through request complete-task and will not fabricate command, wait, notification, or model work",
+            task.id, task.executor
+        ),
+        updated_at,
     })
 }
 
@@ -1916,6 +2496,31 @@ pub fn complete_ready_task(
 ) -> Result<RequestTaskCompletionReport> {
     if input.summary.trim().is_empty() {
         anyhow::bail!("request task completion summary is required");
+    }
+    let preflight_run = load_run_record_for_action(store, run_id, "request task completion")?;
+    let preflight_workflow = store.load_workflow(&preflight_run.workflow_id)?;
+    let preflight_task = preflight_workflow
+        .tasks
+        .iter()
+        .find(|task| task.id == input.task_id)
+        .with_context(|| {
+            format!(
+                "request task {} is missing from workflow {}",
+                input.task_id, preflight_workflow.id
+            )
+        })?;
+    if matches!(
+        preflight_task.executor,
+        ExecutorKind::Command | ExecutorKind::Wait | ExecutorKind::Notification
+    ) && input
+        .evidence_command
+        .is_none_or(|command| command.trim().is_empty())
+    {
+        anyhow::bail!(
+            "request task {} uses executor {:?}; an explicit non-empty evidence command receipt is required before promotion",
+            preflight_task.id,
+            preflight_task.executor
+        );
     }
 
     let drive_before = drive_request_with_context_budget(
@@ -1997,7 +2602,6 @@ pub fn complete_ready_task(
                 input.task_id, workflow.id
             )
         })?;
-
     let mut attached_artifacts = Vec::new();
     for artifact_path in input.artifact_paths {
         attached_artifacts.push(crate::workflow::attach_workflow_artifact(
@@ -2355,6 +2959,18 @@ fn prepare_final_delivery_package(
     origin: &str,
 ) -> Result<PreparedFinalDeliveryPackage> {
     ensure_workflow_policy(store, &workflow.id, "workflow artifact attach")?;
+    #[cfg(test)]
+    {
+        let delay_ms = FINAL_DELIVERY_PREPARATION_DELAY
+            .lock()
+            .expect("final delivery preparation delay lock poisoned")
+            .take()
+            .filter(|(run_id, _)| run_id == &run.run_id)
+            .map(|(_, delay_ms)| delay_ms);
+        if let Some(delay_ms) = delay_ms {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+    }
     let generated_at = Utc::now();
     let timestamp = generated_at.format("%Y%m%dT%H%M%SZ");
     let outcome_status = request_outcome_status(store, workflow)?;
@@ -2913,108 +3529,6 @@ fn write_text_artifact(base_dir: &Path, relative_path: &str, content: &str) -> R
     Ok(full_path)
 }
 
-fn is_auto_steppable_task(task: &AtomicTask) -> bool {
-    matches!(
-        task.executor,
-        ExecutorKind::Command | ExecutorKind::Wait | ExecutorKind::Notification
-    ) && task
-        .validation_rules
-        .iter()
-        .all(|rule| rule.command.as_deref().unwrap_or("").trim().is_empty())
-}
-
-fn build_auto_step_output_payload(
-    workflow: &Workflow,
-    task: &AtomicTask,
-    executor: &str,
-    origin: &str,
-    generated_at: DateTime<Utc>,
-) -> serde_json::Value {
-    let known_task_ids = workflow
-        .tasks
-        .iter()
-        .map(|task| task.id.as_str())
-        .collect::<Vec<_>>();
-    let missing_dependencies = task
-        .dependencies
-        .iter()
-        .filter(|dependency| !known_task_ids.iter().any(|id| id == dependency))
-        .cloned()
-        .collect::<Vec<_>>();
-    let completed_dependencies = task
-        .dependencies
-        .iter()
-        .filter(|dependency| {
-            workflow.tasks.iter().any(|candidate| {
-                &candidate.id == *dependency && candidate.status == TaskStatus::Completed
-            })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let graph_nodes = workflow
-        .tasks
-        .iter()
-        .map(|node| {
-            serde_json::json!({
-                "id": node.id,
-                "title": node.title,
-                "dependencies": node.dependencies,
-                "executor": node.executor,
-                "status": node.status,
-                "expected_output": node.expected_output
-            })
-        })
-        .collect::<Vec<_>>();
-    let graph_edges = workflow
-        .tasks
-        .iter()
-        .flat_map(|node| {
-            node.dependencies.iter().map(move |dependency| {
-                serde_json::json!({
-                    "from": dependency,
-                    "to": node.id
-                })
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::json!({
-        "schema_version": "forge.auto_step_output.v1",
-        "workflow_id": workflow.id,
-        "workflow_revision": workflow.revisions.last().map(|revision| revision.revision).unwrap_or(0),
-        "task_id": task.id,
-        "title": task.title,
-        "goal": task.goal,
-        "expected_output": task.expected_output,
-        "executor": executor,
-        "origin": origin,
-        "generated_at": generated_at,
-        "auto_step_policy": {
-            "only_deterministic_tasks": true,
-            "external_commands_allowed": false,
-            "promotion_path": "executor_response_validation"
-        },
-        "dependency_evidence": {
-            "dependencies": task.dependencies,
-            "completed_dependencies": completed_dependencies,
-            "missing_dependencies": missing_dependencies
-        },
-        "validation_rules": task.validation_rules,
-        "artifact_refs": workflow.artifacts.iter().map(|artifact| {
-            serde_json::json!({
-                "kind": artifact.kind,
-                "path": artifact.path,
-                "sha256": artifact.sha256
-            })
-        }).collect::<Vec<_>>(),
-        "atomic_task_graph": {
-            "node_count": graph_nodes.len(),
-            "edge_count": graph_edges.len(),
-            "nodes": graph_nodes,
-            "edges": graph_edges
-        }
-    })
-}
-
 struct ExecutionTracePayloadInput<'a> {
     store: &'a ForgeStore,
     workflow: &'a Workflow,
@@ -3501,6 +4015,7 @@ pub fn switch_request_executor(
             let mut run = load_run_record_for_action(store, run_id, "request switch executor")?;
             let mut workflow = store.load_workflow(&run.workflow_id)?;
             ensure_request_mutation_is_active(&run, &workflow, "switch executor for")?;
+            ensure_request_supervisor_fence(&run, None, "switch executor for")?;
             let previous_status = run.status.clone();
             let previous_executor = run.active_executor.clone();
             let previous_pid = run.executor_pid;
@@ -3533,6 +4048,7 @@ pub fn switch_request_executor(
             };
 
             run.status = "running".to_string();
+            clear_request_supervisor_lease(&mut run);
             run.active_executor = Some(input.executor.clone());
             run.executor_pid = input.pid;
             run.progress_summary = Some(input.summary.clone());
@@ -3543,7 +4059,7 @@ pub fn switch_request_executor(
             run.updated_at = switched_at;
             run.executor_switches.push(executor_switch.clone());
             workflow.status = "running".to_string();
-            save_run_record(store, &run)?;
+            update_run_record(store, &run)?;
             store.save_workflow(&workflow)?;
             store.record_event(
                 &run.workflow_id,
@@ -4549,6 +5065,7 @@ pub fn cancel_request(
     store.with_transaction(|| {
         let mut run = load_run_record_for_action(store, run_id, "request cancel")?;
         let workflow = store.load_workflow(&run.workflow_id)?;
+        ensure_request_supervisor_fence(&run, None, "cancel")?;
         if terminal_request_status(&workflow.status).is_some_and(|status| status != "cancelled") {
             anyhow::bail!(
                 "cannot cancel request {} because workflow {} is terminal in status {}",
@@ -4576,9 +5093,10 @@ pub fn cancel_request(
         }
         let previous_status = run.status.clone();
         run.status = "cancelled".to_string();
+        clear_request_supervisor_lease(&mut run);
         let cancelled_at = Utc::now();
         run.updated_at = cancelled_at;
-        save_run_record(store, &run)?;
+        update_run_record(store, &run)?;
         store.record_event(
             &run.workflow_id,
             "async_request_cancelled",
@@ -4609,10 +5127,12 @@ pub fn resume_async_request(
         let mut run = load_run_record_for_action(store, run_id, "request resume")?;
         let workflow = store.load_workflow(&run.workflow_id)?;
         ensure_request_mutation_is_active(&run, &workflow, "resume")?;
+        ensure_request_supervisor_fence(&run, None, "resume")?;
         let resumed_at = Utc::now();
         run.status = "resumed".to_string();
+        clear_request_supervisor_lease(&mut run);
         run.updated_at = resumed_at;
-        save_run_record(store, &run)?;
+        update_run_record(store, &run)?;
         store.record_event(
             &run.workflow_id,
             "async_request_resumed",
@@ -4645,7 +5165,9 @@ pub fn recover_stale_request(
             let mut run = load_run_record_for_action(store, run_id, "request recover stale")?;
             let mut workflow = store.load_workflow(&run.workflow_id)?;
             ensure_request_mutation_is_active(&run, &workflow, "recover stale")?;
-            let before_activity = build_run_activity_with_store(store, &run);
+            let updated_at = Utc::now();
+            ensure_request_supervisor_lease_is_recoverable(&run, updated_at)?;
+            let before_activity = build_run_activity_at_with_store(store, &run, updated_at);
             if run.status != "running" || before_activity.heartbeat_status != "stale" {
                 anyhow::bail!(
                     "run {run_id} is not a stale running request; heartbeat_status={} status={}",
@@ -4655,11 +5177,20 @@ pub fn recover_stale_request(
             }
             let previous_status = run.status.clone();
             let previous_workflow_status = workflow.status.clone();
-            let updated_at = Utc::now();
             run.status = "needs_attention".to_string();
+            run.active_executor = None;
+            run.executor_pid = None;
+            run.progress_summary = Some(
+                "stale executor heartbeat requires operator reconciliation before resume"
+                    .to_string(),
+            );
+            run.last_heartbeat_at = None;
+            run.heartbeat_expires_at = None;
+            run.heartbeat_ttl_seconds = None;
+            clear_request_supervisor_lease(&mut run);
             run.updated_at = updated_at;
             workflow.status = "needs_attention".to_string();
-            save_run_record(store, &run)?;
+            update_run_record(store, &run)?;
             store.save_workflow(&workflow)?;
             store.record_event(
                 &run.workflow_id,
@@ -4887,4 +5418,244 @@ fn summarize_validation_commands(
         }
     }
     summary
+}
+
+#[cfg(test)]
+mod status_fence_tests {
+    use super::*;
+
+    #[test]
+    fn atomic_run_and_workflow_status_update_rejects_live_lease_without_mutation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        let workflow =
+            crate::graph::create_workflow(crate::intent::parse_intent("Fence terminal status"));
+        store.save_workflow(&workflow).unwrap();
+        let mut fenced_run = create_run_record(&workflow, "test", "accepted");
+        fenced_run.supervisor_instance_id = Some("live-supervisor".to_string());
+        fenced_run.supervisor_lease_expires_at = Some(Utc::now() + Duration::minutes(5));
+        fenced_run.supervisor_fencing_token = 17;
+        save_run_record(&store, &fenced_run).unwrap();
+        let run_before = serde_json::to_value(&fenced_run).unwrap();
+        let workflow_before = serde_json::to_value(&workflow).unwrap();
+
+        let error = update_run_and_workflow_status(&store, &fenced_run.run_id, "failed", "test")
+            .unwrap_err();
+        assert!(error.to_string().contains("live supervisor lease"));
+        assert_eq!(
+            serde_json::to_value(load_run_record(&store, &fenced_run.run_id).unwrap()).unwrap(),
+            run_before
+        );
+        assert_eq!(
+            serde_json::to_value(store.load_workflow(&workflow.id).unwrap()).unwrap(),
+            workflow_before
+        );
+        assert!(store.load_workflow_events(&workflow.id).unwrap().is_empty());
+
+        let normal_run = create_run_record(&workflow, "test", "accepted");
+        save_run_record(&store, &normal_run).unwrap();
+        let updated =
+            update_run_and_workflow_status(&store, &normal_run.run_id, "failed", "test").unwrap();
+        assert_eq!(updated.status, "failed");
+        assert_eq!(store.load_workflow(&workflow.id).unwrap().status, "failed");
+    }
+
+    #[test]
+    fn terminal_delivery_revalidates_a_supervisor_lease_that_expires_during_preparation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
+            "Complete a bounded supervised delivery",
+        ));
+        workflow.tasks = vec![crate::graph::task(
+            "deliver",
+            "Deliver the bounded result",
+            &[],
+            &[],
+            vec![],
+            "Bounded result",
+            (crate::graph::ExecutorKind::Command, 0.0),
+        )];
+        workflow.tasks[0].status = TaskStatus::Completed;
+        store.save_workflow(&workflow).unwrap();
+
+        let mut run = create_run_record(&workflow, "test", "accepted");
+        run.supervisor_instance_id = Some("expiring-supervisor".to_string());
+        run.supervisor_lease_expires_at = Some(Utc::now() + Duration::seconds(1));
+        run.supervisor_fencing_token = 2;
+        save_run_record(&store, &run).unwrap();
+        *FINAL_DELIVERY_PREPARATION_DELAY.lock().unwrap() = Some((run.run_id.clone(), 1_200));
+        let fence = RequestSupervisorFence {
+            instance_id: "expiring-supervisor".to_string(),
+            fencing_token: 2,
+        };
+
+        let error = drive_request_with_options(
+            &store,
+            &run.run_id,
+            "forge-request-supervisor",
+            1,
+            "test",
+            None,
+            Some(&fence),
+            true,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("supervisor lease"));
+        assert!(error.to_string().contains("expired"));
+        let current_run = load_run_record(&store, &run.run_id).unwrap();
+        assert_eq!(current_run.status, "accepted");
+        assert_eq!(
+            current_run.supervisor_instance_id.as_deref(),
+            Some("expiring-supervisor")
+        );
+        assert_eq!(current_run.supervisor_fencing_token, 2);
+        assert_ne!(
+            store.load_workflow(&workflow.id).unwrap().status,
+            "completed"
+        );
+        let artifact_dir = temporary.path().join("artifacts").join(&workflow.id);
+        assert!(
+            !artifact_dir.exists() || fs::read_dir(&artifact_dir).unwrap().next().is_none(),
+            "expired terminal fencing must compensate promoted final delivery files"
+        );
+        let staging_root = temporary
+            .path()
+            .join("tmp")
+            .join(&workflow.id)
+            .join(".final-delivery-staging");
+        assert!(
+            !staging_root.exists() || fs::read_dir(&staging_root).unwrap().next().is_none(),
+            "expired terminal fencing must clean staged final delivery files"
+        );
+    }
+
+    #[test]
+    fn internal_attention_and_blocked_transitions_reject_an_unfenced_live_lease() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        let workflow = crate::graph::create_workflow(crate::intent::parse_intent(
+            "Preserve a live supervisor lease",
+        ));
+        store.save_workflow(&workflow).unwrap();
+        let mut run = create_run_record(&workflow, "test", "accepted");
+        run.supervisor_instance_id = Some("live-supervisor".to_string());
+        run.supervisor_lease_expires_at = Some(Utc::now() + Duration::minutes(5));
+        run.supervisor_fencing_token = 19;
+        save_run_record(&store, &run).unwrap();
+        let run_before = serde_json::to_value(&run).unwrap();
+        let workflow_before = serde_json::to_value(&workflow).unwrap();
+
+        let attention_error = mark_run_needs_attention(
+            &store,
+            &run,
+            &workflow,
+            None,
+            "test",
+            "unfenced_attention",
+            &serde_json::json!({"message": "must remain fenced"}),
+        )
+        .unwrap_err();
+        assert!(attention_error
+            .to_string()
+            .contains("live supervisor lease"));
+
+        let blocked_error = mark_run_blocked(
+            &store,
+            &run,
+            &workflow,
+            &[],
+            None,
+            "test",
+            "must remain fenced",
+        )
+        .unwrap_err();
+        assert!(blocked_error.to_string().contains("live supervisor lease"));
+        assert_eq!(
+            serde_json::to_value(load_run_record(&store, &run.run_id).unwrap()).unwrap(),
+            run_before
+        );
+        assert_eq!(
+            serde_json::to_value(store.load_workflow(&workflow.id).unwrap()).unwrap(),
+            workflow_before
+        );
+        assert!(store.load_workflow_events(&workflow.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn terminal_delivery_revalidates_after_publication_before_transaction_commit() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
+            "Complete a fenced delivery atomically",
+        ));
+        workflow.tasks = vec![crate::graph::task(
+            "deliver",
+            "Deliver the fenced result",
+            &[],
+            &[],
+            vec![],
+            "Fenced result",
+            (crate::graph::ExecutorKind::Command, 0.0),
+        )];
+        workflow.tasks[0].status = TaskStatus::Completed;
+        store.save_workflow(&workflow).unwrap();
+
+        let mut run = create_run_record(&workflow, "test", "accepted");
+        run.supervisor_instance_id = Some("commit-supervisor".to_string());
+        run.supervisor_lease_expires_at = Some(Utc::now() + Duration::seconds(1));
+        run.supervisor_fencing_token = 3;
+        save_run_record(&store, &run).unwrap();
+        *FINAL_DELIVERY_COMMIT_DELAY.lock().unwrap() = Some((run.run_id.clone(), 1_200));
+        let fence = RequestSupervisorFence {
+            instance_id: "commit-supervisor".to_string(),
+            fencing_token: 3,
+        };
+
+        let error = drive_request_with_options(
+            &store,
+            &run.run_id,
+            "forge-request-supervisor",
+            1,
+            "test",
+            None,
+            Some(&fence),
+            true,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("supervisor lease"));
+        assert!(error.to_string().contains("expired"));
+        assert_eq!(
+            serde_json::to_value(load_run_record(&store, &run.run_id).unwrap()).unwrap(),
+            serde_json::to_value(&run).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(store.load_workflow(&workflow.id).unwrap()).unwrap(),
+            serde_json::to_value(&workflow).unwrap()
+        );
+        assert!(store
+            .load_workflow_events(&workflow.id)
+            .unwrap()
+            .into_iter()
+            .all(|event| {
+                event.kind != "async_request_completed"
+                    && event.kind != "final_delivery_package_created"
+            }));
+        let artifact_dir = temporary.path().join("artifacts").join(&workflow.id);
+        assert!(
+            !artifact_dir.exists() || fs::read_dir(&artifact_dir).unwrap().next().is_none(),
+            "post-publication fence failure must remove final delivery files"
+        );
+        let staging_root = temporary
+            .path()
+            .join("tmp")
+            .join(&workflow.id)
+            .join(".final-delivery-staging");
+        assert!(
+            !staging_root.exists() || fs::read_dir(&staging_root).unwrap().next().is_none(),
+            "post-publication fence failure must remove staged final delivery files"
+        );
+    }
 }

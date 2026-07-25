@@ -4,6 +4,19 @@
 
 ## 0.5.3 - 2026-07-25
 
+### Added
+
+- Added `forge milestone production-evidence-template` and
+  `production-evidence-assemble` so operators can supply explicit observed
+  claims plus 13 existing source artifacts while Forge derives canonical
+  claims, source, receipt and manifest SHA-256 values without running probes.
+- Added bounded-load and upgrade/rollback drills that operate on disposable
+  SQLite copies and emit secret-free measured source artifacts for production
+  promotion.
+- Added a provider-neutral single-host adoption bundle for immutable
+  `file://` backup targets and Telegram health alerts. Cloud-specific uploaders
+  and provisioning are not part of the Forge Core release gate or archive.
+
 ### Fixed
 
 - Made intent parsing require the complete sanitized human workflow goal and
@@ -17,6 +30,24 @@
 
 ### Safety
 
+- Release publication now requires an annotated SSH-signed tag from the
+  configured Ed25519 key and principal, checks the tagger name and email, and
+  proves that its commit is reachable from `origin/main`; unsigned legacy tags
+  no longer pass through a fallback.
+- Unix and PowerShell installers now verify
+  `SHA256SUMS.sigstore.json` against the exact GitHub OIDC issuer, release
+  workflow identity, and requested tag before trusting a checksum or
+  downloading an archive. Plain HTTP is restricted to explicit test mode, with
+  negative fixtures for missing or altered bundles and claim drift.
+- Added source-bound production evidence receipts (`v2`) with read-only
+  revalidation of source path, freshness, digest, UTF-8 and secret scanning.
+  Unbound `v1` receipts remain accepted only for the final legacy release,
+  `0.5.2`; `0.5.3` and later fail closed unless all 13 receipts are `v2`.
+- Production evidence template and assembly outputs are confined relative
+  paths, atomically published without overwrite and rolled back if a
+  post-publication filesystem step fails.
+- Removed the cloud-specific S3 uploader and AWS bootstrap from the v0.5.3
+  release package so an optional provider cannot block Forge Core publication.
 - Goal-oriented tasks can no longer be promoted when a head or tail portion of
   the human goal is absent from the routed packet.
 

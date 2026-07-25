@@ -39,6 +39,11 @@ jobs:
       - name: Pin immutable release identity
         id: identity
         shell: bash
+        env:
+          TAG_SIGNER_PRINCIPAL: ${{ vars.FORGE_RELEASE_TAG_SIGNER_PRINCIPAL }}
+          TAG_SIGNER_SSH_PUBLIC_KEY: ${{ vars.FORGE_RELEASE_TAG_SIGNER_SSH_PUBLIC_KEY }}
+          RELEASE_TAGGER_NAME: ${{ vars.FORGE_RELEASE_TAGGER_NAME }}
+          RELEASE_TAGGER_EMAIL: ${{ vars.FORGE_RELEASE_TAGGER_EMAIL }}
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || {
@@ -51,6 +56,10 @@ jobs:
             exit 1
           }
 
+          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag || {
+            echo "Release ref must be an annotated, signed tag: $RELEASE_TAG" >&2
+            exit 1
+          }
           release_sha="$(git rev-parse "${RELEASE_TAG}^{commit}")"
           test "$(git rev-parse HEAD)" = "$release_sha"
           test "$GITHUB_SHA" = "$release_sha" || {
@@ -60,7 +69,114 @@ jobs:
 
           crate_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "forge-core") | .version')"
           test "$RELEASE_TAG" = "v${crate_version}"
-          git verify-tag "$RELEASE_TAG" 2>/dev/null || git rev-parse --verify "refs/tags/$RELEASE_TAG"
+
+          test -n "$TAG_SIGNER_PRINCIPAL" || {
+            echo "Repository variable FORGE_RELEASE_TAG_SIGNER_PRINCIPAL is required." >&2
+            exit 1
+          }
+          test -n "$TAG_SIGNER_SSH_PUBLIC_KEY" || {
+            echo "Repository variable FORGE_RELEASE_TAG_SIGNER_SSH_PUBLIC_KEY is required." >&2
+            exit 1
+          }
+          test -n "$RELEASE_TAGGER_NAME" || {
+            echo "Repository variable FORGE_RELEASE_TAGGER_NAME is required." >&2
+            exit 1
+          }
+          test -n "$RELEASE_TAGGER_EMAIL" || {
+            echo "Repository variable FORGE_RELEASE_TAGGER_EMAIL is required." >&2
+            exit 1
+          }
+
+          [[ "$TAG_SIGNER_PRINCIPAL" =~ ^[A-Za-z0-9_.+@-]+$ ]] || {
+            echo "Pinned SSH signer principal is malformed." >&2
+            exit 1
+          }
+          [[ "$RELEASE_TAGGER_NAME" != *$'\n'* && "$RELEASE_TAGGER_NAME" != *$'\r'* ]] || {
+            echo "Pinned release tagger name must be one exact line." >&2
+            exit 1
+          }
+          [[ "$RELEASE_TAGGER_EMAIL" =~ ^[A-Za-z0-9_.+@-]+$ ]] || {
+            echo "Pinned release tagger email is malformed." >&2
+            exit 1
+          }
+          [[ "$TAG_SIGNER_SSH_PUBLIC_KEY" != *$'\n'* && "$TAG_SIGNER_SSH_PUBLIC_KEY" != *$'\r'* ]] || {
+            echo "Pinned SSH public key must be one exact line." >&2
+            exit 1
+          }
+          read -r signer_key_type signer_key_blob signer_key_extra \
+            <<<"$TAG_SIGNER_SSH_PUBLIC_KEY"
+          test "$signer_key_type" = ssh-ed25519 &&
+            [[ "$signer_key_blob" =~ ^[A-Za-z0-9+/]+={0,3}$ ]] || {
+              echo "Pinned SSH public key must be an ssh-ed25519 key." >&2
+              exit 1
+            }
+          test -z "$signer_key_extra" || {
+            echo "Pinned SSH public key must omit comments and extra fields." >&2
+            exit 1
+          }
+          pinned_signer_key="$signer_key_type $signer_key_blob"
+
+          tagger_name="$(
+            git for-each-ref \
+              --format='%(taggername)' \
+              "refs/tags/$RELEASE_TAG"
+          )"
+          tagger_email="$(
+            git for-each-ref \
+              --format='%(taggeremail)' \
+              "refs/tags/$RELEASE_TAG"
+          )"
+          tagger_email="${tagger_email#<}"
+          tagger_email="${tagger_email%>}"
+          test "$tagger_name" = "$RELEASE_TAGGER_NAME" || {
+            echo "Tagger name '$tagger_name' does not match the pinned name." >&2
+            exit 1
+          }
+          test "$tagger_email" = "$RELEASE_TAGGER_EMAIL" || {
+            echo "Tagger email '$tagger_email' does not match the pinned email." >&2
+            exit 1
+          }
+
+          tag_trust_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$tag_trust_dir"' EXIT
+          chmod 0700 "$tag_trust_dir"
+          signer_key_file="$tag_trust_dir/release-tag-signer.pub"
+          allowed_signers_file="$tag_trust_dir/allowed_signers"
+          printf '%s\n' "$pinned_signer_key" >"$signer_key_file"
+          ssh-keygen -l -f "$signer_key_file" >/dev/null || {
+            echo "Pinned SSH public key could not be parsed." >&2
+            exit 1
+          }
+          printf '%s %s\n' \
+            "$TAG_SIGNER_PRINCIPAL" \
+            "$pinned_signer_key" \
+            >"$allowed_signers_file"
+          chmod 0600 "$signer_key_file" "$allowed_signers_file"
+
+          verification_status="$RUNNER_TEMP/release-tag-verification.status"
+          git \
+            -c gpg.format=ssh \
+            -c gpg.ssh.allowedSignersFile="$allowed_signers_file" \
+            verify-tag "$RELEASE_TAG" \
+            >"$verification_status" 2>&1 || {
+              cat "$verification_status" >&2
+              echo "Release tag SSH signature verification failed." >&2
+              exit 1
+            }
+          grep -F "Good \"git\" signature for $TAG_SIGNER_PRINCIPAL " \
+            "$verification_status" >/dev/null || {
+              cat "$verification_status" >&2
+              echo "Valid tag signature did not resolve to the pinned principal." >&2
+              exit 1
+            }
+
+          git fetch --no-tags --force origin \
+            '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor "$release_sha" refs/remotes/origin/main || {
+            echo "Release commit is not an ancestor of origin/main." >&2
+            exit 1
+          }
+
           release_epoch="$(git show -s --format=%ct "$release_sha")"
           printf 'release_sha=%s\n' "$release_sha" >>"$GITHUB_OUTPUT"
           printf 'release_epoch=%s\n' "$release_epoch" >>"$GITHUB_OUTPUT"
@@ -111,6 +227,10 @@ jobs:
           cargo build --release --all-features --locked
           bash packaging/smoke-production.sh target/release/forge
           bash packaging/smoke-offhost-backup.sh target/release/forge
+          bash packaging/provider-adoption/single-host/tests/self-test.sh
+          bash packaging/production-readiness/tests/self-test.sh
+          bash packaging/systemd/tests/runtime-self-test.sh
+          bash installer/tests/self-test.sh
           cargo audit
           cargo deny check advisories licenses bans sources
 
@@ -258,15 +378,37 @@ jobs:
           install -m 0755 "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/stage/forge
           install -m 0644 LICENSE dist/stage/LICENSE
           cp -a packaging/systemd dist/stage/packaging/systemd
+          cp -a packaging/provider-adoption dist/stage/packaging/provider-adoption
+          cp -a packaging/production-readiness dist/stage/packaging/production-readiness
           chmod 0755 \
             dist/stage/packaging/systemd/forge-admin \
             dist/stage/packaging/systemd/forge-backup \
             dist/stage/packaging/systemd/forge-restore-drill \
-            dist/stage/packaging/systemd/install-service.sh
+            dist/stage/packaging/systemd/install-service.sh \
+            dist/stage/packaging/systemd/tests/runtime-self-test.sh \
+            dist/stage/packaging/production-readiness/forge-bounded-load-drill \
+            dist/stage/packaging/production-readiness/forge-upgrade-rollback-drill \
+            dist/stage/packaging/production-readiness/tests/self-test.sh \
+            dist/stage/packaging/provider-adoption/single-host/bin/forge-production-alert \
+            dist/stage/packaging/provider-adoption/single-host/bin/forge-directory-offhost-uploader \
+            dist/stage/packaging/provider-adoption/single-host/tests/alert-self-test.sh \
+            dist/stage/packaging/provider-adoption/single-host/tests/directory-offhost-self-test.sh \
+            dist/stage/packaging/provider-adoption/single-host/tests/self-test.sh \
+            dist/stage/packaging/provider-adoption/single-host/tests/stubs/curl \
+            dist/stage/packaging/provider-adoption/single-host/tests/stubs/df \
+            dist/stage/packaging/provider-adoption/single-host/tests/stubs/forge-admin \
+            dist/stage/packaging/provider-adoption/single-host/tests/stubs/stat \
+            dist/stage/packaging/provider-adoption/single-host/tests/stubs/systemctl
           chmod 0644 \
             dist/stage/packaging/systemd/forge-ops.service \
+            dist/stage/packaging/systemd/forge-runtime.service \
+            dist/stage/packaging/systemd/forge-request-supervisor.service \
             dist/stage/packaging/systemd/forge-backup.service \
-            dist/stage/packaging/systemd/forge-backup.timer
+            dist/stage/packaging/systemd/forge-backup.timer \
+            dist/stage/packaging/production-readiness/README.md \
+            dist/stage/packaging/provider-adoption/single-host/README.md \
+            dist/stage/packaging/provider-adoption/single-host/systemd/forge-production-alert.service \
+            dist/stage/packaging/provider-adoption/single-host/systemd/forge-production-alert.timer
           install -m 0644 docs/production-single-host.md dist/stage/docs/production-single-host.md
           install -m 0644 installer/README.md dist/stage/installer/README.md
           python3 packaging/reproducible_archive.py create \
@@ -276,6 +418,8 @@ jobs:
             forge \
             LICENSE \
             packaging/systemd \
+            packaging/production-readiness \
+            packaging/provider-adoption \
             docs/production-single-host.md \
             installer/README.md
 
@@ -290,6 +434,8 @@ jobs:
             forge \
             LICENSE \
             packaging/systemd \
+            packaging/production-readiness \
+            packaging/provider-adoption \
             docs/production-single-host.md \
             installer/README.md
 
@@ -300,6 +446,8 @@ jobs:
             forge \
             LICENSE \
             packaging/systemd \
+            packaging/production-readiness \
+            packaging/provider-adoption \
             docs/production-single-host.md \
             installer/README.md
           cmp "dist/${{ matrix.asset }}" "dist/${{ matrix.asset }}.reproduced"
@@ -316,7 +464,11 @@ jobs:
               LICENSE \
               docs/production-single-host.md \
               installer/README.md
-            find packaging/systemd -type f -print
+            find \
+              packaging/systemd \
+              packaging/production-readiness \
+              packaging/provider-adoption \
+              -type f -print
           } | LC_ALL=C sort >"$validation_dir/expected"
           (
             cd "$validation_dir/archive"
@@ -329,7 +481,21 @@ jobs:
             packaging/systemd/forge-admin \
             packaging/systemd/forge-backup \
             packaging/systemd/forge-restore-drill \
-            packaging/systemd/install-service.sh
+            packaging/systemd/install-service.sh \
+            packaging/systemd/tests/runtime-self-test.sh \
+            packaging/production-readiness/forge-bounded-load-drill \
+            packaging/production-readiness/forge-upgrade-rollback-drill \
+            packaging/production-readiness/tests/self-test.sh \
+            packaging/provider-adoption/single-host/bin/forge-production-alert \
+            packaging/provider-adoption/single-host/bin/forge-directory-offhost-uploader \
+            packaging/provider-adoption/single-host/tests/alert-self-test.sh \
+            packaging/provider-adoption/single-host/tests/directory-offhost-self-test.sh \
+            packaging/provider-adoption/single-host/tests/self-test.sh \
+            packaging/provider-adoption/single-host/tests/stubs/curl \
+            packaging/provider-adoption/single-host/tests/stubs/df \
+            packaging/provider-adoption/single-host/tests/stubs/forge-admin \
+            packaging/provider-adoption/single-host/tests/stubs/stat \
+            packaging/provider-adoption/single-host/tests/stubs/systemctl
           do
             test "$(stat -c '%a' "$validation_dir/archive/$executable")" = 755
           done
@@ -339,8 +505,14 @@ jobs:
             docs/production-single-host.md \
             installer/README.md \
             packaging/systemd/forge-ops.service \
+            packaging/systemd/forge-runtime.service \
+            packaging/systemd/forge-request-supervisor.service \
             packaging/systemd/forge-backup.service \
-            packaging/systemd/forge-backup.timer
+            packaging/systemd/forge-backup.timer \
+            packaging/production-readiness/README.md \
+            packaging/provider-adoption/single-host/README.md \
+            packaging/provider-adoption/single-host/systemd/forge-production-alert.service \
+            packaging/provider-adoption/single-host/systemd/forge-production-alert.timer
           do
             test "$(stat -c '%a' "$validation_dir/archive/$non_executable")" = 644
           done
@@ -351,6 +523,9 @@ jobs:
           dpkg --compare-versions "$kernel_version" ge 4.18
           systemd_version="$(systemd --version | awk 'NR == 1 { print $2 }')"
           dpkg --compare-versions "$systemd_version" ge 249
+          bash "$validation_dir/archive/packaging/production-readiness/tests/self-test.sh"
+          bash "$validation_dir/archive/packaging/provider-adoption/single-host/tests/self-test.sh"
+          bash "$validation_dir/archive/packaging/systemd/tests/runtime-self-test.sh"
           required_glibc="$(
             readelf --version-info "$validation_dir/archive/forge" |
               grep -Eo 'GLIBC_[0-9]+(\.[0-9]+)+' |
@@ -384,6 +559,16 @@ jobs:
           digest="$(sha256sum "dist/${{ matrix.asset }}" | awk '{ print $1 }')"
           printf '%s  %s\n' "$digest" "${{ matrix.asset }}" \
             >"$smoke_dir/release/SHA256SUMS"
+          checksums_digest="$(
+            sha256sum "$smoke_dir/release/SHA256SUMS" | awk '{ print $1 }'
+          )"
+          {
+            printf 'issuer=https://token.actions.githubusercontent.com\n'
+            printf 'identity=https://github.com/cardozoarthur/forge-core/.github/workflows/release.yml@refs/tags/%s\n' "$RELEASE_TAG"
+            printf 'subject_sha256=%s\n' "$checksums_digest"
+          } >"$smoke_dir/release/SHA256SUMS.sigstore.json"
+          mkdir "$smoke_dir/stubs"
+          install -m 0755 installer/tests/stubs/cosign "$smoke_dir/stubs/cosign"
           port="$(
             python3 - <<'PY'
           import socket
@@ -408,7 +593,10 @@ jobs:
           done
           curl -fsS "$base_url/SHA256SUMS" >/dev/null
 
-          FORGE_RELEASE_BASE_URL="$base_url" \
+          PATH="$smoke_dir/stubs:$PATH" \
+            FORGE_VERSION="$RELEASE_TAG" \
+            FORGE_INSTALLER_TEST_MODE=1 \
+            FORGE_RELEASE_BASE_URL="$base_url" \
             FORGE_BIN_DIR="$smoke_dir/bin" \
             bash installer/install.sh
           test "$("$smoke_dir/bin/forge" --version)" = "forge ${RELEASE_TAG#v}"
@@ -480,6 +668,16 @@ jobs:
           digest="$(shasum -a 256 "dist/${{ matrix.asset }}" | awk '{ print $1 }')"
           printf '%s  %s\n' "$digest" "${{ matrix.asset }}" \
             >"$smoke_dir/release/SHA256SUMS"
+          checksums_digest="$(
+            shasum -a 256 "$smoke_dir/release/SHA256SUMS" | awk '{ print $1 }'
+          )"
+          {
+            printf 'issuer=https://token.actions.githubusercontent.com\n'
+            printf 'identity=https://github.com/cardozoarthur/forge-core/.github/workflows/release.yml@refs/tags/%s\n' "$RELEASE_TAG"
+            printf 'subject_sha256=%s\n' "$checksums_digest"
+          } >"$smoke_dir/release/SHA256SUMS.sigstore.json"
+          mkdir "$smoke_dir/stubs"
+          install -m 0755 installer/tests/stubs/cosign "$smoke_dir/stubs/cosign"
           port="$(
             python3 - <<'PY'
           import socket
@@ -504,7 +702,10 @@ jobs:
           done
           curl -fsS "$base_url/SHA256SUMS" >/dev/null
 
-          FORGE_RELEASE_BASE_URL="$base_url" \
+          PATH="$smoke_dir/stubs:$PATH" \
+            FORGE_VERSION="$RELEASE_TAG" \
+            FORGE_INSTALLER_TEST_MODE=1 \
+            FORGE_RELEASE_BASE_URL="$base_url" \
             FORGE_BIN_DIR="$smoke_dir/bin" \
             bash installer/install.sh
           test "$("$smoke_dir/bin/forge" --version)" = "forge ${RELEASE_TAG#v}"
@@ -585,6 +786,19 @@ jobs:
             -Path (Join-Path $releaseDir "SHA256SUMS") `
             -Value "$digest  ${{ matrix.asset }}" `
             -Encoding ascii
+          $checksumsPath = Join-Path $releaseDir "SHA256SUMS"
+          $checksumsDigest = (Get-FileHash -Algorithm SHA256 $checksumsPath).Hash.ToLowerInvariant()
+          @{
+            issuer = "https://token.actions.githubusercontent.com"
+            identity = "https://github.com/cardozoarthur/forge-core/.github/workflows/release.yml@refs/tags/$env:RELEASE_TAG"
+            subject_sha256 = $checksumsDigest
+          } | ConvertTo-Json | Set-Content `
+            -Path (Join-Path $releaseDir "SHA256SUMS.sigstore.json") `
+            -Encoding ascii
+          $stubDir = Join-Path $smokeDir "stubs"
+          New-Item -ItemType Directory -Force -Path $stubDir | Out-Null
+          Copy-Item installer/tests/stubs/cosign.cmd $stubDir
+          Copy-Item installer/tests/stubs/cosign-stub.ps1 $stubDir
 
           $portProbe = [Net.Sockets.TcpListener]::new(
             [Net.IPAddress]::Loopback,
@@ -610,6 +824,9 @@ jobs:
 
           $previousBaseUrl = $env:FORGE_RELEASE_BASE_URL
           $previousBinDir = $env:FORGE_BIN_DIR
+          $previousVersion = $env:FORGE_VERSION
+          $previousTestMode = $env:FORGE_INSTALLER_TEST_MODE
+          $previousPath = $env:PATH
           try {
             $baseUrl = "http://127.0.0.1:$port"
             $ready = $false
@@ -630,6 +847,9 @@ jobs:
 
             $env:FORGE_RELEASE_BASE_URL = $baseUrl
             $env:FORGE_BIN_DIR = $binDir
+            $env:FORGE_VERSION = $env:RELEASE_TAG
+            $env:FORGE_INSTALLER_TEST_MODE = "1"
+            $env:PATH = "$stubDir;$previousPath"
             & ./installer/install.ps1
             $actualVersion = & (Join-Path $binDir "forge.exe") --version
             if ($actualVersion -ne "forge $($env:RELEASE_TAG.TrimStart('v'))") {
@@ -638,9 +858,17 @@ jobs:
           } finally {
             $env:FORGE_RELEASE_BASE_URL = $previousBaseUrl
             $env:FORGE_BIN_DIR = $previousBinDir
+            $env:FORGE_VERSION = $previousVersion
+            $env:FORGE_INSTALLER_TEST_MODE = $previousTestMode
+            $env:PATH = $previousPath
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
             Remove-Item -Path $smokeDir -Recurse -Force -ErrorAction SilentlyContinue
           }
+
+      - name: Reject untrusted PowerShell installer fixtures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./installer/tests/self-test.ps1
 
       - name: Upload release archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -656,6 +884,7 @@ jobs:
       - verify
       - build
     runs-on: ubuntu-24.04
+    environment: release
     timeout-minutes: 20
     env:
       RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}

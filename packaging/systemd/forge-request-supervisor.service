@@ -1,0 +1,56 @@
+[Unit]
+Description=Forge Core asynchronous request supervisor
+Documentation=https://github.com/cardozoarthur/forge-core/blob/main/docs/production-single-host.md
+After=network-online.target forge-ops.service forge-runtime.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+ConditionPathExists=/var/lib/forge/forge.sqlite
+
+[Service]
+Type=simple
+User=forge
+Group=forge
+UMask=0077
+StateDirectory=forge
+StateDirectoryMode=0700
+ConfigurationDirectory=forge
+ConfigurationDirectoryMode=0750
+WorkingDirectory=/var/lib/forge/workspace
+ExecStartPre=/usr/bin/mkdir -p /var/lib/forge/workspace
+ExecStart=/usr/local/bin/forge --store /var/lib/forge/forge.sqlite request supervise --executor forge-request-supervisor --origin forge-request-supervisor --ttl-seconds 300 --max-steps-per-run 1 --continuous --max-cycles 0 --interval-seconds 30 --output json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+EnvironmentFile=-/etc/forge/forge.env
+LoadCredential=forge-secret-key:/etc/forge/secret.key
+Environment=FORGE_PRODUCTION_MODE=1
+Environment=FORGE_SECRET_VAULT_KEY_FILE=/run/credentials/forge-request-supervisor.service/forge-secret-key
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/forge
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -5,15 +5,17 @@ use crate::graph::{
 };
 use crate::identity::ensure_workflow_policy;
 use crate::intent::parse_intent;
-use crate::lease::{acquire_task_lease, release_task_lease};
+use crate::lease::{acquire_task_lease, release_task_lease, TaskLease};
 use crate::registry::{attach_reuse_candidates_as_child_subflows, find_reuse_candidates};
 use crate::storage::ForgeStore;
 use crate::worker::{Job, WorkerPool, WorkerPoolReport};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::Serialize;
-use std::fs;
-use std::path::Path;
+use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -26,6 +28,9 @@ const SCHEDULE_WORKER_STATUS_SCHEMA_VERSION: &str = "forge.schedule.worker_statu
 const DAILY_GOAL_EXECUTION_SCHEMA_VERSION: &str = "forge.daily_goal_research.execution.v1";
 const DAILY_GOAL_MAX_ARTIFACT_WORKERS: usize = 4;
 const MISSED_RUN_GRACE_MINUTES: i64 = 5;
+const ARTIFACT_DIRECTORY_NAME: &str = "artifacts";
+const ENCODED_ARTIFACT_COMPONENT_PREFIX: &str = "sha256-";
+const SCHEDULE_RUN_ARTIFACT_PREFIX: &str = "schedule-run-";
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ScheduleSummary {
@@ -419,18 +424,21 @@ pub fn create_daily_goal_research_workflow(
     let attached_subflows =
         attach_reuse_candidates_as_child_subflows(&mut workflow, &reuse_candidates);
     let workflow_id = workflow.id.clone();
-    store.save_workflow(&workflow)?;
-    store.record_event(
-        &workflow.id,
-        "daily_goal_research_workflow_created",
-        &serde_json::json!({
-            "origin": origin,
-            "goals": goals,
-            "timezone": timezone,
-            "cron": cron,
-            "attached_subflows": attached_subflows
-        }),
-    )?;
+    store.with_transaction(|| {
+        store.save_workflow(&workflow)?;
+        store.record_event(
+            &workflow.id,
+            "daily_goal_research_workflow_created",
+            &serde_json::json!({
+                "origin": origin,
+                "goals": goals,
+                "timezone": timezone,
+                "cron": cron,
+                "attached_subflows": attached_subflows
+            }),
+        )?;
+        Ok(())
+    })?;
 
     Ok(DailyGoalResearchWorkflowReport {
         status: "daily_goal_research_workflow_created".to_string(),
@@ -450,8 +458,6 @@ pub fn update_workflow_schedule(
     task_id: &str,
     options: ScheduleUpdateOptions<'_>,
 ) -> Result<ScheduleUpdateReport> {
-    ensure_workflow_policy(store, workflow_id, "schedule update")?;
-    let mut workflow = store.load_workflow(workflow_id)?;
     let parsed_next_run_at = options
         .next_run_at
         .map(|value| {
@@ -460,46 +466,52 @@ pub fn update_workflow_schedule(
                 .with_context(|| format!("invalid next_run_at RFC3339 timestamp: {value}"))
         })
         .transpose()?;
-    let schedule = {
-        let task = workflow
-            .tasks
-            .iter_mut()
-            .find(|task| task.id == task_id)
-            .with_context(|| {
-                format!("scheduled task not found in workflow {workflow_id}: {task_id}")
-            })?;
-        let schedule = task
-            .schedule
-            .as_mut()
-            .with_context(|| format!("task {task_id} is not a scheduled node"))?;
-        if let Some(cron) = options.cron {
-            schedule.cron = cron.to_string();
-        }
-        if let Some(timezone) = options.timezone {
-            schedule.timezone = timezone.to_string();
-        }
-        if let Some(missed_run_policy) = options.missed_run_policy {
-            schedule.missed_run_policy = missed_run_policy.to_string();
-        }
-        schedule.next_run_at = parsed_next_run_at.or_else(|| Some(Utc::now() + Duration::days(1)));
-        schedule.clone()
-    };
-    let revision = push_schedule_revision(
-        &mut workflow,
-        options.origin,
-        &format!("updated schedule for task {task_id}"),
-    );
-    store.save_workflow(&workflow)?;
-    store.record_event(
-        workflow_id,
-        "schedule_updated",
-        &serde_json::json!({
-            "origin": options.origin,
-            "task_id": task_id,
-            "revision": revision,
-            "schedule": schedule
-        }),
-    )?;
+    let (schedule, revision) = store.with_transaction(|| {
+        ensure_workflow_policy(store, workflow_id, "schedule update")?;
+        let mut workflow = store.load_workflow(workflow_id)?;
+        let schedule = {
+            let task = workflow
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+                .with_context(|| {
+                    format!("scheduled task not found in workflow {workflow_id}: {task_id}")
+                })?;
+            let schedule = task
+                .schedule
+                .as_mut()
+                .with_context(|| format!("task {task_id} is not a scheduled node"))?;
+            if let Some(cron) = options.cron {
+                schedule.cron = cron.to_string();
+            }
+            if let Some(timezone) = options.timezone {
+                schedule.timezone = timezone.to_string();
+            }
+            if let Some(missed_run_policy) = options.missed_run_policy {
+                schedule.missed_run_policy = missed_run_policy.to_string();
+            }
+            schedule.next_run_at =
+                parsed_next_run_at.or_else(|| Some(Utc::now() + Duration::days(1)));
+            schedule.clone()
+        };
+        let revision = push_schedule_revision(
+            &mut workflow,
+            options.origin,
+            &format!("updated schedule for task {task_id}"),
+        );
+        store.save_workflow(&workflow)?;
+        store.record_event(
+            workflow_id,
+            "schedule_updated",
+            &serde_json::json!({
+                "origin": options.origin,
+                "task_id": task_id,
+                "revision": revision,
+                "schedule": schedule
+            }),
+        )?;
+        Ok((schedule, revision))
+    })?;
 
     Ok(ScheduleUpdateReport {
         status: "schedule_updated".to_string(),
@@ -515,13 +527,14 @@ pub fn run_daily_goal_research_smoke(
     store: &ForgeStore,
     workflow: &mut Workflow,
 ) -> Result<Option<DailyGoalResearchSmokeReport>> {
-    run_daily_goal_research_smoke_with_schedule_mode(store, workflow, false)
+    run_daily_goal_research_smoke_with_schedule_mode(store, workflow, false, None)
 }
 
 fn run_daily_goal_research_smoke_with_schedule_mode(
     store: &ForgeStore,
     workflow: &mut Workflow,
     due_only: bool,
+    artifact_journal: Option<&ArtifactWriteJournal>,
 ) -> Result<Option<DailyGoalResearchSmokeReport>> {
     let goals = configured_goal_items(workflow);
     if goals.is_empty() {
@@ -545,6 +558,8 @@ fn run_daily_goal_research_smoke_with_schedule_mode(
         &workflow.id,
         &goal_lineage,
         &execution,
+        due_only,
+        artifact_journal,
     )?;
     let mut reports = generated
         .into_iter()
@@ -800,45 +815,48 @@ pub fn update_loop_state(
     new_state: &str,
     origin: &str,
 ) -> Result<LoopStateUpdateReport> {
-    ensure_workflow_policy(store, workflow_id, "loop state update")?;
     let valid_states = ["active", "paused", "stopped"];
     if !valid_states.contains(&new_state) {
         anyhow::bail!("invalid loop state: {new_state}. Valid states: active, paused, stopped");
     }
 
-    let mut workflow = store.load_workflow(workflow_id)?;
-    let previous_state = {
-        let task = workflow
-            .tasks
-            .iter_mut()
-            .find(|task| task.id == task_id)
-            .with_context(|| format!("task not found in workflow {workflow_id}: {task_id}"))?;
-        let loop_control = task
-            .loop_control
-            .as_mut()
-            .with_context(|| format!("task {task_id} is not a loop node"))?;
-        let previous = loop_control.state.clone();
-        loop_control.state = new_state.to_string();
-        previous
-    };
+    let (previous_state, revision) = store.with_transaction(|| {
+        ensure_workflow_policy(store, workflow_id, "loop state update")?;
+        let mut workflow = store.load_workflow(workflow_id)?;
+        let previous_state = {
+            let task = workflow
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+                .with_context(|| format!("task not found in workflow {workflow_id}: {task_id}"))?;
+            let loop_control = task
+                .loop_control
+                .as_mut()
+                .with_context(|| format!("task {task_id} is not a loop node"))?;
+            let previous = loop_control.state.clone();
+            loop_control.state = new_state.to_string();
+            previous
+        };
 
-    let revision = push_loop_revision(
-        &mut workflow,
-        origin,
-        &format!("loop state changed from {previous_state} to {new_state} for task {task_id}"),
-    );
-    store.save_workflow(&workflow)?;
-    store.record_event(
-        workflow_id,
-        "loop_state_updated",
-        &serde_json::json!({
-            "origin": origin,
-            "task_id": task_id,
-            "previous_state": previous_state,
-            "new_state": new_state,
-            "revision": revision
-        }),
-    )?;
+        let revision = push_loop_revision(
+            &mut workflow,
+            origin,
+            &format!("loop state changed from {previous_state} to {new_state} for task {task_id}"),
+        );
+        store.save_workflow(&workflow)?;
+        store.record_event(
+            workflow_id,
+            "loop_state_updated",
+            &serde_json::json!({
+                "origin": origin,
+                "task_id": task_id,
+                "previous_state": previous_state,
+                "new_state": new_state,
+                "revision": revision
+            }),
+        )?;
+        Ok((previous_state, revision))
+    })?;
 
     Ok(LoopStateUpdateReport {
         status: "loop_state_updated".to_string(),
@@ -855,8 +873,21 @@ pub fn run_due_workflow(
     store: &ForgeStore,
     workflow_id: &str,
 ) -> Result<Option<ScheduleRunDueReport>> {
+    let artifact_journal = ArtifactWriteJournal::default();
+    let result = store.with_transaction(|| {
+        run_due_workflow_in_transaction(store, workflow_id, Some(&artifact_journal))
+    });
+    rollback_artifacts_on_error(result, &artifact_journal)
+}
+
+fn run_due_workflow_in_transaction(
+    store: &ForgeStore,
+    workflow_id: &str,
+    artifact_journal: Option<&ArtifactWriteJournal>,
+) -> Result<Option<ScheduleRunDueReport>> {
     ensure_workflow_policy(store, workflow_id, "run due workflow")?;
     let mut workflow = store.load_workflow(workflow_id)?;
+    reconcile_uncommitted_schedule_artifacts(store.base_dir().as_path(), &workflow)?;
     let now = Utc::now();
     let has_due = workflow.tasks.iter().any(|task| {
         task.schedule
@@ -963,8 +994,12 @@ pub fn run_due_workflow(
 
     let workflow_id = workflow.id.clone();
     let history_markers = schedule_run_history_markers(&workflow);
-    let daily_goal_research =
-        run_daily_goal_research_smoke_with_schedule_mode(store, &mut workflow, true)?;
+    let daily_goal_research = run_daily_goal_research_smoke_with_schedule_mode(
+        store,
+        &mut workflow,
+        true,
+        artifact_journal,
+    )?;
     if daily_goal_research.is_none() {
         record_schedule_run_history(&mut workflow, true);
     }
@@ -996,6 +1031,97 @@ pub fn run_due_workflow(
         scale_to_zero: scale_to_zero_decision(&schedule_summary, false, "due_work_executed"),
         schedule_summary,
     }))
+}
+
+fn run_due_workflow_and_release_lease(
+    store: &ForgeStore,
+    workflow_id: &str,
+    schedule_task_id: &str,
+    lease_id: Option<&str>,
+    executor: &str,
+) -> Result<(Option<ScheduleRunDueReport>, bool)> {
+    let Some(lease_id) = lease_id else {
+        return run_due_workflow(store, workflow_id).map(|report| (report, false));
+    };
+
+    let artifact_journal = ArtifactWriteJournal::default();
+    let result = store.with_transaction(|| {
+        validate_schedule_lease(
+            store,
+            workflow_id,
+            schedule_task_id,
+            lease_id,
+            executor,
+            Utc::now(),
+        )?;
+        let report = run_due_workflow_in_transaction(store, workflow_id, Some(&artifact_journal))?;
+        validate_schedule_lease(
+            store,
+            workflow_id,
+            schedule_task_id,
+            lease_id,
+            executor,
+            Utc::now(),
+        )?;
+        let release = release_task_lease(store, workflow_id, schedule_task_id, lease_id, executor)?;
+        if !release.released {
+            anyhow::bail!(
+                "schedule lease fencing rejected commit: lease {lease_id} is no longer current"
+            );
+        }
+        Ok((report, true))
+    });
+    match rollback_artifacts_on_error(result, &artifact_journal) {
+        Ok(report) => Ok(report),
+        Err(error) => {
+            let release_result = store.with_transaction(|| {
+                release_task_lease(store, workflow_id, schedule_task_id, lease_id, executor)
+            });
+            match release_result {
+                Ok(_) => Err(error),
+                Err(release_error) => Err(error.context(format!(
+                    "failed to release schedule lease {lease_id} after the due workflow transaction rolled back: {release_error:#}"
+                ))),
+            }
+        }
+    }
+}
+
+fn validate_schedule_lease(
+    store: &ForgeStore,
+    workflow_id: &str,
+    schedule_task_id: &str,
+    lease_id: &str,
+    executor: &str,
+    observed_at: DateTime<Utc>,
+) -> Result<TaskLease> {
+    let current_value = store
+        .load_task_lease(workflow_id, schedule_task_id)?
+        .with_context(|| {
+            format!(
+                "schedule lease fencing rejected: no current lease for {workflow_id}/{schedule_task_id}"
+            )
+        })?;
+    let current: TaskLease = serde_json::from_value(current_value)
+        .context("schedule lease fencing rejected: current lease is invalid")?;
+    if current.workflow_id != workflow_id
+        || current.task_id != schedule_task_id
+        || current.lease_id != lease_id
+        || current.executor != executor
+    {
+        anyhow::bail!(
+            "schedule lease fencing rejected: expected lease {lease_id} owned by {executor}, current lease is {} owned by {}",
+            current.lease_id,
+            current.executor
+        );
+    }
+    if current.expires_at <= observed_at {
+        anyhow::bail!(
+            "schedule lease fencing rejected: lease {lease_id} owned by {executor} expired at {}",
+            current.expires_at.to_rfc3339()
+        );
+    }
+    Ok(current)
 }
 
 pub fn scan_due_workflows(
@@ -1047,13 +1173,13 @@ pub fn scan_due_workflows(
                 .lease
                 .as_ref()
                 .map(|lease| lease.lease_id.clone());
-            let run_due = run_due_workflow(store, &workflow.id)?;
-            let lease_released = if let Some(lease_id) = lease_id.as_deref() {
-                release_task_lease(store, &workflow.id, &schedule_task_id, lease_id, executor)?
-                    .released
-            } else {
-                false
-            };
+            let (run_due, lease_released) = run_due_workflow_and_release_lease(
+                store,
+                &workflow.id,
+                &schedule_task_id,
+                lease_id.as_deref(),
+                executor,
+            )?;
             if run_due.as_ref().is_some_and(|report| report.due_executed) {
                 summary.executed_workflows += 1;
             }
@@ -1318,13 +1444,13 @@ fn scan_due_workflow_dispatch(
         .as_ref()
         .map(|lease| lease.lease_id.clone());
 
-    let run_due = run_due_workflow(store, workflow_id)?;
-
-    let lease_released = if let Some(ref lease_id) = lease_id {
-        release_task_lease(store, workflow_id, &schedule_task_id, lease_id, executor)?.released
-    } else {
-        false
-    };
+    let (run_due, lease_released) = run_due_workflow_and_release_lease(
+        store,
+        workflow_id,
+        &schedule_task_id,
+        lease_id.as_deref(),
+        executor,
+    )?;
 
     let due_executed = run_due.as_ref().is_some_and(|r| r.due_executed);
     let scale_to_zero = run_due.as_ref().is_some_and(|r| r.scale_to_zero.applied);
@@ -1904,6 +2030,425 @@ fn build_daily_goal_artifact_lineage(
     }
 }
 
+fn portable_artifact_component(value: &str) -> String {
+    let portable = !value.is_empty()
+        && value.len() <= 96
+        && value != "."
+        && value != ".."
+        && !value.starts_with(ENCODED_ARTIFACT_COMPONENT_PREFIX)
+        && !value.starts_with(' ')
+        && !value.ends_with([' ', '.'])
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b' '));
+    if portable {
+        value.to_string()
+    } else {
+        format!(
+            "{ENCODED_ARTIFACT_COMPONENT_PREFIX}{}",
+            hex_sha256(value.as_bytes())
+        )
+    }
+}
+
+fn workflow_artifact_relative_dir(workflow_id: &str) -> PathBuf {
+    Path::new(ARTIFACT_DIRECTORY_NAME).join(portable_artifact_component(workflow_id))
+}
+
+fn artifact_relative_path_string(path: &Path) -> Result<String> {
+    path.to_str()
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("artifact path must be valid UTF-8: {}", path.display()))
+}
+
+fn contained_artifact_components(relative_path: &Path, label: &str) -> Result<Vec<OsString>> {
+    if relative_path.as_os_str().is_empty() || relative_path.is_absolute() {
+        anyhow::bail!("{label} must be a contained relative artifact path");
+    }
+    let mut components = Vec::new();
+    for component in relative_path.components() {
+        match component {
+            Component::Normal(value) => components.push(value.to_os_string()),
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                anyhow::bail!("{label} escapes the artifact root")
+            }
+        }
+    }
+    if components.len() < 2
+        || components
+            .first()
+            .is_none_or(|component| component != ARTIFACT_DIRECTORY_NAME)
+    {
+        anyhow::bail!("{label} must be rooted below `{ARTIFACT_DIRECTORY_NAME}`");
+    }
+    Ok(components)
+}
+
+fn canonical_schedule_base_dir(base_dir: &Path) -> Result<PathBuf> {
+    let canonical = fs::canonicalize(base_dir).with_context(|| {
+        format!(
+            "failed to resolve schedule artifact base directory {}",
+            base_dir.display()
+        )
+    })?;
+    let metadata = fs::metadata(&canonical).with_context(|| {
+        format!(
+            "failed to inspect schedule artifact base directory {}",
+            canonical.display()
+        )
+    })?;
+    if !metadata.is_dir() {
+        anyhow::bail!(
+            "schedule artifact base path is not a directory: {}",
+            canonical.display()
+        );
+    }
+    Ok(canonical)
+}
+
+fn resolve_real_artifact_directory(
+    path: &Path,
+    create: bool,
+    label: &str,
+) -> Result<Option<PathBuf>> {
+    loop {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    anyhow::bail!(
+                        "{label} must be a real directory, not a symlink: {}",
+                        path.display()
+                    );
+                }
+                return fs::canonicalize(path).map(Some).with_context(|| {
+                    format!("failed to resolve {label} directory {}", path.display())
+                });
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound && !create => return Ok(None),
+            Err(error) if error.kind() == ErrorKind::NotFound => match fs::create_dir(path) {
+                Ok(()) => continue,
+                Err(create_error) if create_error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(create_error) => {
+                    return Err(create_error)
+                        .with_context(|| format!("failed to create {label} {}", path.display()));
+                }
+            },
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {label} {}", path.display()));
+            }
+        }
+    }
+}
+
+fn resolve_artifact_directory(
+    base_dir: &Path,
+    relative_dir: &Path,
+    create: bool,
+) -> Result<Option<(PathBuf, PathBuf)>> {
+    let components = contained_artifact_components(relative_dir, "schedule artifact directory")?;
+    let canonical_base = canonical_schedule_base_dir(base_dir)?;
+    let mut current = canonical_base.clone();
+    let mut artifact_root = None;
+
+    for (index, component) in components.iter().enumerate() {
+        let candidate = current.join(component);
+        let Some(canonical_candidate) =
+            resolve_real_artifact_directory(&candidate, create, "schedule artifact")?
+        else {
+            return Ok(None);
+        };
+        if index == 0 {
+            if canonical_candidate.parent() != Some(canonical_base.as_path()) {
+                anyhow::bail!(
+                    "schedule artifact root escapes its base directory: {}",
+                    canonical_candidate.display()
+                );
+            }
+            artifact_root = Some(canonical_candidate.clone());
+        } else if artifact_root
+            .as_ref()
+            .is_none_or(|root| !canonical_candidate.starts_with(root))
+        {
+            anyhow::bail!(
+                "schedule artifact directory escapes its canonical root: {}",
+                canonical_candidate.display()
+            );
+        }
+        current = canonical_candidate;
+    }
+
+    let artifact_root = artifact_root.context("schedule artifact root was not resolved")?;
+    Ok(Some((current, artifact_root)))
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedArtifactFile {
+    path: PathBuf,
+    parent: PathBuf,
+    artifact_root: PathBuf,
+}
+
+fn resolve_artifact_file(
+    base_dir: &Path,
+    relative_path: &Path,
+    create_parent: bool,
+) -> Result<ResolvedArtifactFile> {
+    let components = contained_artifact_components(relative_path, "schedule artifact file")?;
+    if components.len() < 3 {
+        anyhow::bail!("schedule artifact file requires a workflow directory and file name");
+    }
+    let file_name = components
+        .last()
+        .context("schedule artifact file requires a file name")?;
+    let mut relative_parent = PathBuf::new();
+    for component in &components[..components.len() - 1] {
+        relative_parent.push(component);
+    }
+    let (parent, artifact_root) =
+        resolve_artifact_directory(base_dir, &relative_parent, create_parent)?
+            .context("schedule artifact parent directory does not exist")?;
+    let path = parent.join(file_name);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                anyhow::bail!(
+                    "schedule artifact target must be a regular non-symlink file: {}",
+                    path.display()
+                );
+            }
+            let canonical = fs::canonicalize(&path).with_context(|| {
+                format!("failed to resolve schedule artifact {}", path.display())
+            })?;
+            if !canonical.starts_with(&artifact_root) {
+                anyhow::bail!(
+                    "schedule artifact target escapes its canonical root: {}",
+                    path.display()
+                );
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to inspect schedule artifact {}", path.display())
+            });
+        }
+    }
+    Ok(ResolvedArtifactFile {
+        path,
+        parent,
+        artifact_root,
+    })
+}
+
+fn artifact_file_matches(resolved: &ResolvedArtifactFile, expected_bytes: &[u8]) -> Result<bool> {
+    let metadata = fs::symlink_metadata(&resolved.path).with_context(|| {
+        format!(
+            "failed to inspect existing schedule artifact {}",
+            resolved.path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!(
+            "existing schedule artifact must be a regular non-symlink file: {}",
+            resolved.path.display()
+        );
+    }
+    let canonical = fs::canonicalize(&resolved.path).with_context(|| {
+        format!(
+            "failed to resolve existing schedule artifact {}",
+            resolved.path.display()
+        )
+    })?;
+    if !canonical.starts_with(&resolved.artifact_root) {
+        anyhow::bail!(
+            "existing schedule artifact escapes its canonical root: {}",
+            resolved.path.display()
+        );
+    }
+    if metadata.len() != u64::try_from(expected_bytes.len()).unwrap_or(u64::MAX) {
+        return Ok(false);
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(&resolved.path).with_context(|| {
+        format!(
+            "failed to open existing schedule artifact without following symlinks: {}",
+            resolved.path.display()
+        )
+    })?;
+    if !file.metadata()?.is_file() {
+        anyhow::bail!(
+            "existing schedule artifact is not a regular file: {}",
+            resolved.path.display()
+        );
+    }
+    let mut actual = Vec::with_capacity(expected_bytes.len());
+    (&mut file)
+        .take(
+            u64::try_from(expected_bytes.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        )
+        .read_to_end(&mut actual)?;
+    Ok(actual == expected_bytes)
+}
+
+fn remove_contained_artifact_file(artifact_root: &Path, path: &Path) -> Result<bool> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("artifact path has no parent: {}", path.display()))?;
+    let canonical_parent = fs::canonicalize(parent)
+        .with_context(|| format!("failed to resolve artifact parent {}", parent.display()))?;
+    if !canonical_parent.starts_with(artifact_root) {
+        anyhow::bail!(
+            "refusing to remove schedule artifact outside its canonical root: {}",
+            path.display()
+        );
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                anyhow::bail!(
+                    "refusing to remove non-regular schedule artifact: {}",
+                    path.display()
+                );
+            }
+            fs::remove_file(path).with_context(|| {
+                format!("failed to remove schedule artifact {}", path.display())
+            })?;
+            sync_directory(&canonical_parent)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to inspect schedule artifact {}", path.display())),
+    }
+}
+
+fn reconcile_uncommitted_schedule_artifacts(base_dir: &Path, workflow: &Workflow) -> Result<()> {
+    let relative_artifact_dir = workflow_artifact_relative_dir(&workflow.id);
+    let Some((artifact_dir, artifact_root)) =
+        resolve_artifact_directory(base_dir, &relative_artifact_dir, false)?
+    else {
+        return Ok(());
+    };
+
+    let referenced = workflow
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.path.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut removed = false;
+    for entry in fs::read_dir(&artifact_dir).with_context(|| {
+        format!(
+            "failed to reconcile schedule artifacts in {}",
+            artifact_dir.display()
+        )
+    })? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        let is_committed_name = file_name.starts_with(SCHEDULE_RUN_ARTIFACT_PREFIX);
+        let is_staged_name = file_name.starts_with(&format!(".{SCHEDULE_RUN_ARTIFACT_PREFIX}"))
+            && file_name.contains(".tmp-");
+        if !is_committed_name && !is_staged_name {
+            continue;
+        }
+        if entry.file_type()?.is_symlink() {
+            anyhow::bail!(
+                "schedule artifact reconciliation refuses symlink {}",
+                entry.path().display()
+            );
+        }
+        let relative_path =
+            artifact_relative_path_string(&relative_artifact_dir.join(entry.file_name()))?;
+        if !referenced.contains(relative_path.as_str()) {
+            removed |= remove_contained_artifact_file(&artifact_root, &entry.path())?;
+        }
+    }
+    if removed {
+        sync_directory(&artifact_dir)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default)]
+struct ArtifactWriteJournal {
+    created_files: Arc<std::sync::Mutex<Vec<JournaledArtifactFile>>>,
+}
+
+#[derive(Debug, Clone)]
+struct JournaledArtifactFile {
+    path: PathBuf,
+    artifact_root: PathBuf,
+}
+
+impl ArtifactWriteJournal {
+    fn record_created(&self, resolved: &ResolvedArtifactFile) -> Result<()> {
+        self.created_files
+            .lock()
+            .map_err(|_| anyhow::anyhow!("artifact write journal lock poisoned"))?
+            .push(JournaledArtifactFile {
+                path: resolved.path.clone(),
+                artifact_root: resolved.artifact_root.clone(),
+            });
+        Ok(())
+    }
+
+    fn rollback(&self) -> Result<()> {
+        let mut created_files = self
+            .created_files
+            .lock()
+            .map_err(|_| anyhow::anyhow!("artifact write journal lock poisoned"))?;
+        let files = std::mem::take(&mut *created_files);
+        drop(created_files);
+
+        for file in files.into_iter().rev() {
+            remove_contained_artifact_file(&file.artifact_root, &file.path).with_context(|| {
+                format!(
+                    "failed to roll back schedule artifact {}",
+                    file.path.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
+fn rollback_artifacts_on_error<T>(
+    result: Result<T>,
+    artifact_journal: &ArtifactWriteJournal,
+) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => match artifact_journal.rollback() {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(anyhow::anyhow!(
+                "{error:#}; schedule artifact rollback also failed: {rollback_error:#}"
+            )),
+        },
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ArtifactWriteMode {
+    AtomicReplace,
+    NoOverwrite,
+}
+
 #[derive(Debug, Clone)]
 struct GeneratedDailyGoalArtifacts {
     goal: String,
@@ -1948,6 +2493,8 @@ fn generate_daily_goal_artifacts_bounded(
     workflow_id: &str,
     goal_lineage: &[(String, ArtifactLineageRecord)],
     execution: &DailyGoalSmokeExecutionReport,
+    due_only: bool,
+    artifact_journal: Option<&ArtifactWriteJournal>,
 ) -> Result<Vec<GeneratedDailyGoalArtifacts>> {
     let max_workers = execution.max_workers.max(1);
     let pool = WorkerPool::new(max_workers);
@@ -1963,8 +2510,16 @@ fn generate_daily_goal_artifacts_bounded(
             let goal = goal.clone();
             let lineage = lineage.clone();
             let results = Arc::clone(&results);
+            let artifact_journal = artifact_journal.cloned();
             Box::new(move || {
-                match generate_daily_goal_artifacts(&base_dir, &workflow_id, &goal, lineage) {
+                match generate_daily_goal_artifacts(
+                    &base_dir,
+                    &workflow_id,
+                    &goal,
+                    lineage,
+                    due_only,
+                    artifact_journal.as_ref(),
+                ) {
                     Ok(artifacts) => {
                         if let Ok(mut guard) = results.lock() {
                             guard.push(artifacts);
@@ -1984,8 +2539,11 @@ fn generate_daily_goal_artifacts_bounded(
         .into_inner()
         .unwrap_or_default();
 
-    if worker_report.failed_jobs > 0 && generated.is_empty() {
-        anyhow::bail!("all daily Goal artifact workers failed; no artifacts generated");
+    if worker_report.failed_jobs > 0 {
+        anyhow::bail!(
+            "{} daily Goal artifact worker(s) failed; artifact batch was not committed",
+            worker_report.failed_jobs
+        );
     }
 
     generated.sort_by_key(|artifacts| {
@@ -2003,20 +2561,62 @@ fn generate_daily_goal_artifacts(
     workflow_id: &str,
     goal: &str,
     lineage: ArtifactLineageRecord,
+    due_only: bool,
+    artifact_journal: Option<&ArtifactWriteJournal>,
 ) -> Result<GeneratedDailyGoalArtifacts> {
-    let markdown_path = format!("artifacts/{workflow_id}/goal-{goal}-report.md");
+    let artifact_dir = workflow_artifact_relative_dir(workflow_id);
+    let goal_component = portable_artifact_component(goal);
+    let file_prefix = if due_only {
+        format!(
+            "{SCHEDULE_RUN_ARTIFACT_PREFIX}{}--",
+            portable_artifact_component(&lineage.run_id)
+        )
+    } else {
+        String::new()
+    };
+    let write_mode = if due_only {
+        ArtifactWriteMode::NoOverwrite
+    } else {
+        ArtifactWriteMode::AtomicReplace
+    };
+
+    let markdown_relative =
+        artifact_dir.join(format!("{file_prefix}goal-{goal_component}-report.md"));
+    let markdown_path = artifact_relative_path_string(&markdown_relative)?;
     let markdown_bytes = daily_goal_markdown_report_bytes(workflow_id, goal);
-    write_artifact_file(base_dir, &markdown_path, &markdown_bytes)?;
+    write_artifact_file(
+        base_dir,
+        &markdown_path,
+        &markdown_bytes,
+        write_mode,
+        artifact_journal,
+    )?;
 
-    let pdf_path = format!("artifacts/{workflow_id}/goal-{goal}-report.pdf");
+    let pdf_relative = artifact_dir.join(format!("{file_prefix}goal-{goal_component}-report.pdf"));
+    let pdf_path = artifact_relative_path_string(&pdf_relative)?;
     let pdf_bytes = minimal_pdf_bytes(&format!("Daily Goal Research: {goal}"));
-    write_artifact_file(base_dir, &pdf_path, &pdf_bytes)?;
+    write_artifact_file(
+        base_dir,
+        &pdf_path,
+        &pdf_bytes,
+        write_mode,
+        artifact_journal,
+    )?;
 
-    let telegram_delivery_path = format!("artifacts/{workflow_id}/telegram-delivery-{goal}.json");
+    let telegram_delivery_relative = artifact_dir.join(format!(
+        "{file_prefix}telegram-delivery-{goal_component}.json"
+    ));
+    let telegram_delivery_path = artifact_relative_path_string(&telegram_delivery_relative)?;
     let telegram_delivery =
         telegram_delivery_record(goal, &markdown_path, &pdf_path, lineage.clone());
     let telegram_delivery_bytes = serde_json::to_vec_pretty(&telegram_delivery)?;
-    write_artifact_file(base_dir, &telegram_delivery_path, &telegram_delivery_bytes)?;
+    write_artifact_file(
+        base_dir,
+        &telegram_delivery_path,
+        &telegram_delivery_bytes,
+        write_mode,
+        artifact_journal,
+    )?;
 
     Ok(GeneratedDailyGoalArtifacts {
         goal: goal.to_string(),
@@ -2031,13 +2631,107 @@ fn generate_daily_goal_artifacts(
     })
 }
 
-fn write_artifact_file(base_dir: &Path, relative_path: &str, bytes: &[u8]) -> Result<()> {
-    let full_path = base_dir.join(relative_path);
-    if let Some(parent) = full_path.parent() {
-        fs::create_dir_all(parent)?;
+fn write_artifact_file(
+    base_dir: &Path,
+    relative_path: &str,
+    bytes: &[u8],
+    mode: ArtifactWriteMode,
+    artifact_journal: Option<&ArtifactWriteJournal>,
+) -> Result<()> {
+    let resolved = resolve_artifact_file(base_dir, Path::new(relative_path), true)?;
+    let file_name = resolved
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("artifact path has no UTF-8 file name")?;
+    let temporary_path = resolved.parent.join(format!(
+        ".{file_name}.tmp-{}",
+        Uuid::new_v4().to_string().replace('-', "")
+    ));
+
+    let write_result = (|| -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        }
+        let mut temporary = options.open(&temporary_path).with_context(|| {
+            format!(
+                "failed to create staged schedule artifact {}",
+                temporary_path.display()
+            )
+        })?;
+        temporary.write_all(bytes)?;
+        temporary.sync_all()?;
+        drop(temporary);
+
+        match mode {
+            ArtifactWriteMode::AtomicReplace => {
+                fs::rename(&temporary_path, &resolved.path).with_context(|| {
+                    format!(
+                        "failed to atomically publish schedule artifact {}",
+                        resolved.path.display()
+                    )
+                })?;
+            }
+            ArtifactWriteMode::NoOverwrite => {
+                match fs::hard_link(&temporary_path, &resolved.path) {
+                    Ok(()) => {
+                        if let Some(journal) = artifact_journal {
+                            if let Err(error) = journal.record_created(&resolved) {
+                                let _ = remove_contained_artifact_file(
+                                    &resolved.artifact_root,
+                                    &resolved.path,
+                                );
+                                return Err(error);
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                        if !artifact_file_matches(&resolved, bytes)? {
+                            anyhow::bail!(
+                                "schedule artifact no-overwrite conflict at {}",
+                                resolved.path.display()
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "failed to publish no-overwrite schedule artifact {}",
+                                resolved.path.display()
+                            )
+                        });
+                    }
+                }
+            }
+        }
+        sync_directory(&resolved.parent)
+    })();
+
+    match fs::remove_file(&temporary_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(cleanup_error) if write_result.is_ok() => {
+            return Err(cleanup_error).with_context(|| {
+                format!(
+                    "failed to remove staged schedule artifact {}",
+                    temporary_path.display()
+                )
+            });
+        }
+        Err(_) => {}
     }
-    fs::write(&full_path, bytes)?;
-    Ok(())
+    write_result
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)
+        .with_context(|| format!("failed to open artifact directory {}", path.display()))?
+        .sync_all()
+        .with_context(|| format!("failed to sync artifact directory {}", path.display()))
 }
 
 fn daily_goal_markdown_report_bytes(workflow_id: &str, goal: &str) -> Vec<u8> {
@@ -2154,4 +2848,207 @@ fn minimal_pdf_bytes(title: &str) -> Vec<u8> {
          trailer << /Root 1 0 R >>\n%%EOF\n"
     )
     .into_bytes()
+}
+
+#[cfg(test)]
+mod schedule_concurrency_tests {
+    use super::*;
+    use rusqlite::{params, Connection};
+    use tempfile::tempdir;
+
+    fn create_due_schedule(store: &ForgeStore) -> (String, String) {
+        let created = create_daily_goal_research_workflow(
+            store,
+            vec!["lease fencing".to_string()],
+            "UTC",
+            "0 9 * * *",
+            "schedule-test",
+        )
+        .unwrap();
+        let mut workflow = store.load_workflow(&created.workflow_id).unwrap();
+        let task_id = workflow
+            .tasks
+            .iter_mut()
+            .find_map(|task| {
+                task.schedule.as_mut().map(|schedule| {
+                    schedule.next_run_at = Some(Utc::now() - Duration::seconds(1));
+                    task.id.clone()
+                })
+            })
+            .unwrap();
+        store.save_workflow(&workflow).unwrap();
+        (created.workflow_id, task_id)
+    }
+
+    #[test]
+    fn stale_schedule_lease_is_fenced_after_reacquisition() {
+        let temp = tempdir().unwrap();
+        let store_path = temp.path().join("forge.sqlite");
+        let store = ForgeStore::open(&store_path).unwrap();
+        let (workflow_id, task_id) = create_due_schedule(&store);
+
+        let first = acquire_task_lease(&store, &workflow_id, &task_id, "worker-old", 60)
+            .unwrap()
+            .lease
+            .unwrap();
+        let mut expired = first.clone();
+        expired.expires_at = Utc::now() - Duration::seconds(1);
+        let connection = Connection::open(&store_path).unwrap();
+        connection
+            .execute(
+                "UPDATE task_leases
+                 SET expires_at = ?1, data_json = ?2
+                 WHERE workflow_id = ?3 AND task_id = ?4",
+                params![
+                    expired.expires_at.to_rfc3339(),
+                    serde_json::to_string(&expired).unwrap(),
+                    workflow_id,
+                    task_id
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let replacement = acquire_task_lease(&store, &workflow_id, &task_id, "worker-new", 60)
+            .unwrap()
+            .lease
+            .unwrap();
+        let error = run_due_workflow_and_release_lease(
+            &store,
+            &workflow_id,
+            &task_id,
+            Some(&first.lease_id),
+            "worker-old",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("schedule lease fencing rejected"),
+            "{error:#}"
+        );
+
+        let current: TaskLease = serde_json::from_value(
+            store
+                .load_task_lease(&workflow_id, &task_id)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(current.lease_id, replacement.lease_id);
+        assert_eq!(current.executor, "worker-new");
+        let still_due = store
+            .load_workflow(&workflow_id)
+            .unwrap()
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .and_then(|task| task.schedule.as_ref())
+            .and_then(|schedule| schedule.next_run_at)
+            .is_some_and(|next_run_at| next_run_at <= Utc::now());
+        assert!(still_due, "stale worker must not advance the schedule");
+
+        let (report, released) = run_due_workflow_and_release_lease(
+            &store,
+            &workflow_id,
+            &task_id,
+            Some(&replacement.lease_id),
+            "worker-new",
+        )
+        .unwrap();
+        assert!(report.unwrap().due_executed);
+        assert!(released);
+        assert!(store
+            .load_task_lease(&workflow_id, &task_id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn no_overwrite_artifact_conflict_preserves_committed_bytes() {
+        let temp = tempdir().unwrap();
+        let journal = ArtifactWriteJournal::default();
+        let path = "artifacts/workflow/runs/run-1/report.md";
+        write_artifact_file(
+            temp.path(),
+            path,
+            b"committed",
+            ArtifactWriteMode::NoOverwrite,
+            Some(&journal),
+        )
+        .unwrap();
+
+        let error = write_artifact_file(
+            temp.path(),
+            path,
+            b"stale-worker",
+            ArtifactWriteMode::NoOverwrite,
+            Some(&journal),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no-overwrite conflict"));
+        assert_eq!(fs::read(temp.path().join(path)).unwrap(), b"committed");
+    }
+
+    #[test]
+    fn artifact_writer_rejects_traversal_absolute_and_separator_paths_in_both_modes() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().join("base");
+        fs::create_dir(&base).unwrap();
+        let sentinel = temp.path().join("sentinel");
+        fs::write(&sentinel, b"external sentinel").unwrap();
+        let absolute = sentinel.to_string_lossy().to_string();
+        let paths = [
+            "../sentinel",
+            "artifacts/workflow/../../../sentinel",
+            r"artifacts\workflow\..\sentinel",
+            absolute.as_str(),
+        ];
+
+        for mode in [
+            ArtifactWriteMode::AtomicReplace,
+            ArtifactWriteMode::NoOverwrite,
+        ] {
+            for path in paths {
+                let error = write_artifact_file(&base, path, b"attacker", mode, None).unwrap_err();
+                assert!(error.to_string().contains("artifact"), "{path}: {error:#}");
+                assert_eq!(fs::read(&sentinel).unwrap(), b"external sentinel");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_writer_rejects_symlink_ancestors_and_symlink_targets_in_both_modes() {
+        use std::os::unix::fs::symlink;
+
+        for target_is_ancestor in [true, false] {
+            for mode in [
+                ArtifactWriteMode::AtomicReplace,
+                ArtifactWriteMode::NoOverwrite,
+            ] {
+                let temp = tempdir().unwrap();
+                let external = temp.path().join("external");
+                let artifact_root = temp.path().join("artifacts");
+                fs::create_dir(&external).unwrap();
+                fs::create_dir(&artifact_root).unwrap();
+                let sentinel = external.join("sentinel");
+                fs::write(&sentinel, b"external sentinel").unwrap();
+
+                let relative = "artifacts/workflow/report.md";
+                if target_is_ancestor {
+                    symlink(&external, artifact_root.join("workflow")).unwrap();
+                } else {
+                    fs::create_dir(artifact_root.join("workflow")).unwrap();
+                    symlink(&sentinel, temp.path().join(relative)).unwrap();
+                }
+
+                let error =
+                    write_artifact_file(temp.path(), relative, b"external sentinel", mode, None)
+                        .unwrap_err();
+                assert!(error.to_string().contains("symlink"), "{error:#}");
+                assert_eq!(fs::read(&sentinel).unwrap(), b"external sentinel");
+            }
+        }
+    }
 }

@@ -159,15 +159,16 @@ use forge_core::memory::{
     MemoryRetentionOptions, MemorySearchOptions,
 };
 use forge_core::milestone::{
-    attach_milestone_evidence, build_milestone_evidence_plan, build_milestone_export_demo,
-    build_milestone_manifest_with_store, build_milestone_research, build_milestone_status,
-    build_production_mission_lifecycle_evidence, build_production_readiness_plan,
-    build_replacement_cli_demo_with_options, collect_milestone_evidence,
-    collect_ready_milestone_evidence, evaluate_production_readiness,
-    prepare_milestone_evidence_inputs, MilestoneAttachEvidenceOptions, MilestoneCliDemoOptions,
-    MilestoneCollectEvidenceOptions, MilestoneCollectReadyEvidenceOptions,
-    MilestoneEvidencePlanOptions, MilestonePrepareEvidenceInputsOptions,
-    ProductionReadinessOptions,
+    assemble_production_evidence, attach_milestone_evidence, build_milestone_evidence_plan,
+    build_milestone_export_demo, build_milestone_manifest_with_store, build_milestone_research,
+    build_milestone_status, build_production_mission_lifecycle_evidence,
+    build_production_readiness_plan, build_replacement_cli_demo_with_options,
+    collect_milestone_evidence, collect_ready_milestone_evidence, evaluate_production_readiness,
+    prepare_milestone_evidence_inputs, write_production_evidence_template,
+    MilestoneAttachEvidenceOptions, MilestoneCliDemoOptions, MilestoneCollectEvidenceOptions,
+    MilestoneCollectReadyEvidenceOptions, MilestoneEvidencePlanOptions,
+    MilestonePrepareEvidenceInputsOptions, ProductionEvidenceAssemblyOptions,
+    ProductionEvidenceTemplateOptions, ProductionReadinessOptions,
 };
 use forge_core::mission::{
     builtin_squad_catalog, clone_squad, drive_mission, install_builtin_squads, install_squad,
@@ -208,9 +209,12 @@ use forge_core::registry::{
 use forge_core::request::{
     cancel_request, complete_ready_task, create_final_delivery_package, drive_request,
     ensure_final_audit, heartbeat_request, list_requests, load_request_status,
-    recover_stale_request, resume_async_request, start_async_request,
-    start_async_request_with_project, step_request, switch_request_executor,
+    recover_stale_request, resume_async_request, start_async_request_with_idempotency,
+    start_async_request_with_project_and_idempotency, step_request, switch_request_executor,
     RequestExecutorSwitchInput, RequestTaskCompletionInput,
+};
+use forge_core::request_supervisor::{
+    supervise_request_once, supervise_requests_once, RequestSupervisorOptions,
 };
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
@@ -3575,6 +3579,8 @@ enum RequestCommands {
         worktree: Option<String>,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
+        #[arg(long = "idempotency-key")]
+        idempotency_key: Option<String>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
         #[arg(short = 'd', long = "detached")]
@@ -3733,6 +3739,24 @@ enum RequestCommands {
         ttl_seconds: u64,
         #[arg(long, default_value = "background_driver")]
         origin: String,
+    },
+    Supervise {
+        #[arg(long, default_value = "forge-request-supervisor")]
+        executor: String,
+        #[arg(long, default_value = "forge-request-supervisor")]
+        origin: String,
+        #[arg(long = "ttl-seconds", default_value_t = 300)]
+        ttl_seconds: u64,
+        #[arg(long = "max-steps-per-run", default_value_t = 1)]
+        max_steps_per_run: usize,
+        #[arg(long)]
+        continuous: bool,
+        #[arg(long = "max-cycles", default_value_t = 1)]
+        max_cycles: usize,
+        #[arg(long = "interval-seconds", default_value_t = 30)]
+        interval_seconds: u64,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
     },
 }
 
@@ -4338,6 +4362,36 @@ enum MilestoneCommands {
     ProductionPlan {
         #[arg(long, default_value = "0.5")]
         version: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    #[command(name = "production-evidence-template")]
+    ProductionEvidenceTemplate {
+        #[arg(long, default_value = "0.5")]
+        version: String,
+        #[arg(long = "release-version")]
+        release_version: String,
+        #[arg(long = "evidence-root")]
+        evidence_root: PathBuf,
+        #[arg(long)]
+        template: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    #[command(name = "production-evidence-assemble")]
+    ProductionEvidenceAssemble {
+        #[arg(long, default_value = "0.5")]
+        version: String,
+        #[arg(long = "release-version")]
+        release_version: String,
+        #[arg(long = "evidence-root")]
+        evidence_root: PathBuf,
+        #[arg(long)]
+        draft: PathBuf,
+        #[arg(long = "receipt-dir", default_value = "receipts")]
+        receipt_directory: PathBuf,
+        #[arg(long, default_value = "production-readiness.json")]
+        manifest: PathBuf,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -9703,6 +9757,7 @@ fn run() -> Result<i32> {
                 goal,
                 worktree,
                 origin,
+                idempotency_key,
                 output,
                 detached,
             } => {
@@ -9713,9 +9768,20 @@ fn run() -> Result<i32> {
                     .map(|selector| resolve_worktree_selector_root(&store, selector))
                     .transpose()?;
                 let mut report = if let Some(project_root) = selected_project_root.as_deref() {
-                    start_async_request_with_project(&store, &goal, &origin, project_root)?
+                    start_async_request_with_project_and_idempotency(
+                        &store,
+                        &goal,
+                        &origin,
+                        project_root,
+                        idempotency_key.as_deref(),
+                    )?
                 } else {
-                    start_async_request(&store, &goal, &origin)?
+                    start_async_request_with_idempotency(
+                        &store,
+                        &goal,
+                        &origin,
+                        idempotency_key.as_deref(),
+                    )?
                 };
                 if let Some(selector) = worktree {
                     if PathBuf::from(&selector).exists() {
@@ -9736,9 +9802,9 @@ fn run() -> Result<i32> {
                     report.worktree = bound_worktree_context(&store, &report.workflow_id, None)?;
                 }
                 print_response(output, &report)?;
-                if detached {
+                if detached && !report.idempotent_replay {
                     let current_exe = std::env::current_exe()?;
-                    std::process::Command::new(current_exe)
+                    let child = std::process::Command::new(current_exe)
                         .arg("--store")
                         .arg(&store_path)
                         .arg("request")
@@ -9748,6 +9814,16 @@ fn run() -> Result<i32> {
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
                         .spawn()?;
+                    store.record_event(
+                        &report.workflow_id,
+                        "async_request_detached_driver_spawned",
+                        &serde_json::json!({
+                            "schema_version": "forge.request_detached_driver.v1",
+                            "run_id": report.run_id,
+                            "pid": child.id(),
+                            "origin": origin,
+                        }),
+                    )?;
                 }
                 Ok(0)
             }
@@ -9937,6 +10013,46 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
+            RequestCommands::Supervise {
+                executor,
+                origin,
+                ttl_seconds,
+                max_steps_per_run,
+                continuous,
+                max_cycles,
+                interval_seconds,
+                output,
+            } => {
+                if continuous && interval_seconds == 0 {
+                    anyhow::bail!(
+                        "continuous request supervision requires interval-seconds at least 1"
+                    );
+                }
+                if !continuous && max_cycles != 1 {
+                    anyhow::bail!("max-cycles only applies continuous request supervision");
+                }
+
+                let store = ForgeStore::open(cli.store)?;
+                let options =
+                    RequestSupervisorOptions::new(executor, origin, ttl_seconds, max_steps_per_run);
+                let mut cycle = 0usize;
+                loop {
+                    cycle = cycle
+                        .checked_add(1)
+                        .context("request supervisor cycle overflow")?;
+                    let report = supervise_requests_once(&store, &options)?;
+                    let failed = report.status == "request_supervisor_completed_with_failures";
+                    print_response(output, &report)?;
+                    if failed {
+                        return Ok(1);
+                    }
+                    if !continuous || (max_cycles > 0 && cycle >= max_cycles) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(interval_seconds));
+                }
+                Ok(0)
+            }
             RequestCommands::DriveLoop {
                 run_id,
                 executor,
@@ -9961,6 +10077,21 @@ fn run() -> Result<i32> {
                                 | "validation_failed"
                         )
                     };
+                    let needs_attention = |status: &str| {
+                        matches!(
+                            status,
+                            "completion_audit_required"
+                                | "rework_required"
+                                | "handoff_required"
+                                | "validation_failed"
+                        )
+                    };
+                    let attention_boundary = needs_attention(&report.status)
+                        || needs_attention(&report.drive_before.status)
+                        || report
+                            .drive_after
+                            .as_ref()
+                            .is_some_and(|drive| needs_attention(&drive.status));
                     if stops_loop(&report.status)
                         || stops_loop(&report.drive_before.status)
                         || report
@@ -9968,6 +10099,23 @@ fn run() -> Result<i32> {
                             .as_ref()
                             .is_some_and(|drive| stops_loop(&drive.status))
                     {
+                        if attention_boundary {
+                            let supervisor = supervise_request_once(
+                                &store,
+                                &run_id,
+                                &RequestSupervisorOptions::new(
+                                    executor.clone(),
+                                    origin.clone(),
+                                    ttl_seconds,
+                                    1,
+                                ),
+                            )?;
+                            if supervisor.error.is_some() {
+                                anyhow::bail!(
+                                    "request drive loop could not persist manual-attention boundary"
+                                );
+                            }
+                        }
                         break;
                     }
                 }
@@ -10867,6 +11015,43 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
+            MilestoneCommands::ProductionEvidenceTemplate {
+                version,
+                release_version,
+                evidence_root,
+                template,
+                output,
+            } => {
+                let report =
+                    write_production_evidence_template(ProductionEvidenceTemplateOptions {
+                        version: &version,
+                        release_version: &release_version,
+                        evidence_root: &evidence_root,
+                        template_path: &template,
+                    })?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MilestoneCommands::ProductionEvidenceAssemble {
+                version,
+                release_version,
+                evidence_root,
+                draft,
+                receipt_directory,
+                manifest,
+                output,
+            } => {
+                let report = assemble_production_evidence(ProductionEvidenceAssemblyOptions {
+                    version: &version,
+                    release_version: &release_version,
+                    evidence_root: &evidence_root,
+                    draft_path: &draft,
+                    receipt_directory: &receipt_directory,
+                    manifest_path: &manifest,
+                })?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
             MilestoneCommands::ProductionMissionEvidence {
                 mission,
                 receipt,
@@ -11702,9 +11887,18 @@ fn write_contained_production_evidence_artifact(
         .file_name()
         .context("production mission evidence artifact requires a file name")?;
     let target = canonical_parent.join(file_name);
-    if let Ok(metadata) = std::fs::symlink_metadata(&target) {
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            bail!("production mission evidence artifact must be a regular non-symlink file");
+    match std::fs::symlink_metadata(&target) {
+        Ok(_) => {
+            bail!("production mission evidence artifact already exists and will not be overwritten")
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect production mission evidence artifact {}",
+                    target.display()
+                )
+            });
         }
     }
     let temporary = canonical_parent.join(format!(
@@ -11712,6 +11906,7 @@ fn write_contained_production_evidence_artifact(
         file_name.to_string_lossy(),
         uuid::Uuid::new_v4().simple()
     ));
+    let mut published = false;
     let persist_result = (|| -> Result<()> {
         use std::io::Write as _;
 
@@ -11738,10 +11933,17 @@ fn write_contained_production_evidence_artifact(
             )
         })?;
         drop(file);
-        std::fs::rename(&temporary, &target).with_context(|| {
+        std::fs::hard_link(&temporary, &target).with_context(|| {
             format!(
-                "failed to atomically publish production mission evidence artifact {}",
+                "failed to publish no-overwrite production mission evidence artifact {}",
                 target.display()
+            )
+        })?;
+        published = true;
+        std::fs::remove_file(&temporary).with_context(|| {
+            format!(
+                "failed to remove production mission evidence staging link {}",
+                temporary.display()
             )
         })?;
         std::fs::File::open(&canonical_parent)
@@ -11754,10 +11956,28 @@ fn write_contained_production_evidence_artifact(
             })?;
         Ok(())
     })();
-    if persist_result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+    if let Err(error) = persist_result {
+        let mut cleanup_failures = Vec::new();
+        if published {
+            if let Err(cleanup_error) = std::fs::remove_file(&target) {
+                cleanup_failures.push(format!("{}: {cleanup_error}", target.display()));
+            }
+        }
+        match std::fs::remove_file(&temporary) {
+            Ok(()) => {}
+            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(cleanup_error) => {
+                cleanup_failures.push(format!("{}: {cleanup_error}", temporary.display()));
+            }
+        }
+        if cleanup_failures.is_empty() {
+            return Err(error);
+        }
+        bail!(
+            "{error:#}; additionally failed rollback production mission evidence: {}",
+            cleanup_failures.join(", ")
+        );
     }
-    persist_result?;
     Ok(target)
 }
 

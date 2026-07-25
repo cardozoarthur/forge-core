@@ -62,7 +62,9 @@ set -euo pipefail
 [[ -z "${CREDENTIALS_DIRECTORY:-}" &&
   -z "${FORGE_BACKUP_OFFHOST_COMMAND_FILE:-}" &&
   -z "${FORGE_BACKUP_OFFHOST_DESTINATION_FILE:-}" &&
-  -z "${FORGE_BACKUP_OFFHOST_GENERATION_FILE:-}" ]] || exit 66
+  -z "${FORGE_BACKUP_OFFHOST_GENERATION_FILE:-}" &&
+  -z "${FORGE_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE:-}" &&
+  -z "${FORGE_DIRECTORY_MOUNT_IDENTITY_FILE:-}" ]] || exit 66
 
 exec "$(dirname -- "$0")/forge-real" "$@"
 FIXTURE_FORGE
@@ -203,10 +205,60 @@ case "$operation" in
 esac
 FIXTURE_UPLOADER
 
+cat >"$smoke_root/bin/findmnt" <<'FIXTURE_FINDMNT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+field=""
+target_path=""
+while (($# > 0)); do
+  case "$1" in
+    --output)
+      (($# >= 2)) || exit 64
+      field="$2"
+      shift 2
+      ;;
+    --target)
+      (($# >= 2)) || exit 64
+      target_path="$2"
+      shift 2
+      ;;
+    --noheadings | --raw | --first-only)
+      shift
+      ;;
+    *)
+      exit 64
+      ;;
+  esac
+done
+
+[[ -n "$target_path" &&
+  ( "$target_path" = "${FIXTURE_DIRECTORY_MOUNT_TARGET:?}" ||
+    "$target_path" = "$FIXTURE_DIRECTORY_MOUNT_TARGET"/* ) ]] ||
+  exit 1
+
+if [[ "${FIXTURE_DIRECTORY_MOUNT_STATE:-up}" = up ]]; then
+  case "$field" in
+    TARGET) printf '%s\n' "$FIXTURE_DIRECTORY_MOUNT_TARGET" ;;
+    SOURCE) printf '%s\n' "${FIXTURE_DIRECTORY_MOUNT_SOURCE:?}" ;;
+    FSTYPE) printf '%s\n' "${FIXTURE_DIRECTORY_MOUNT_FSTYPE:?}" ;;
+    *) exit 64 ;;
+  esac
+else
+  case "$field" in
+    TARGET) printf '/\n' ;;
+    SOURCE) printf '/dev/fixture-root\n' ;;
+    FSTYPE) printf 'ext4\n' ;;
+    *) exit 64 ;;
+  esac
+fi
+FIXTURE_FINDMNT
+
 chmod 0755 \
   "$smoke_root/bin/forge" \
   "$smoke_root/bin/forge-real" \
-  "$smoke_root/bin/offhost-uploader"
+  "$smoke_root/bin/offhost-uploader" \
+  "$smoke_root/bin/findmnt"
 
 readonly upload_log="$smoke_root/upload.log"
 readonly fail_verify_file="$smoke_root/fail-verify"
@@ -219,6 +271,8 @@ run_forge_without_vault() {
     -u FORGE_BACKUP_OFFHOST_COMMAND_FILE \
     -u FORGE_BACKUP_OFFHOST_DESTINATION_FILE \
     -u FORGE_BACKUP_OFFHOST_GENERATION_FILE \
+    -u FORGE_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE \
+    -u FORGE_DIRECTORY_MOUNT_IDENTITY_FILE \
     -u FORGE_SECRET_VAULT_KEY \
     -u FORGE_SECRET_VAULT_KEY_FILE \
     -u FORGE_SECRET_VAULT_PREVIOUS_KEYS \
@@ -249,6 +303,10 @@ run_backup() {
     FIXTURE_UPLOAD_LOG="$upload_log" \
     FIXTURE_FAIL_VERIFY_FILE="$fail_verify_file" \
     FIXTURE_HANG_DOWNLOAD_FILE="$hang_download_file" \
+    FIXTURE_DIRECTORY_MOUNT_TARGET="$smoke_root/remote-mount" \
+    FIXTURE_DIRECTORY_MOUNT_SOURCE="fixture-remote:/forge" \
+    FIXTURE_DIRECTORY_MOUNT_FSTYPE="fuse.fixture" \
+    PATH="$smoke_root/bin:$PATH" \
     "$backup_script"
 }
 
@@ -280,6 +338,33 @@ printf '%s\n' "$smoke_root/bin/offhost-uploader" \
   >"$smoke_root/config/offhost-command"
 printf 'fixture://primary\n' >"$smoke_root/config/offhost-destination"
 printf 'primary-generation-1\n' >"$smoke_root/config/offhost-generation"
+
+install -d -m 0700 \
+  "$smoke_root/remote-mount" \
+  "$smoke_root/remote-mount/provider"
+mount_fsid="$(stat -f -c '%i' -- "$smoke_root/remote-mount/provider")"
+printf '%s\n' \
+  "forge-directory-mount-v1" \
+  "target=$smoke_root/remote-mount" \
+  "source=fixture-remote:/forge" \
+  "fstype=fuse.fixture" \
+  "fsid=$mount_fsid" \
+  >"$smoke_root/config/offhost-mount-identity"
+printf 'file://%s\n' "$smoke_root/remote-mount/provider" \
+  >"$smoke_root/config/offhost-destination"
+export FIXTURE_DIRECTORY_MOUNT_STATE="down"
+if run_backup 20260724T010500Z >"$smoke_root/mount-loss.log" 2>&1; then
+  fail "file destination accepted the host directory after simulated mount loss"
+fi
+unset FIXTURE_DIRECTORY_MOUNT_STATE
+grep -q "mount identity changed or is unavailable" \
+  "$smoke_root/mount-loss.log" ||
+  fail "backup mount-loss rejection was not explicit"
+[[ ! -e "$smoke_root/backups/forge-20260724T010500Z.sqlite" ]] ||
+  fail "mount-loss rejection created a local backup"
+[[ ! -s "$upload_log" ]] ||
+  fail "mount-loss rejection invoked the uploader"
+printf 'fixture://primary\n' >"$smoke_root/config/offhost-destination"
 
 ln -s "$smoke_root/bin/offhost-uploader" "$smoke_root/bin/symlink-uploader"
 printf '%s\n' "$smoke_root/bin/symlink-uploader" \

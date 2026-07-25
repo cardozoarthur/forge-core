@@ -1,10 +1,266 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export LC_ALL=C
+
 fail() {
   echo "forge systemd installer: $*" >&2
   exit 1
 }
+
+staged_backup_dropin=""
+staged_backup_mount_identity=""
+
+audit_no_symlink_components() {
+  local candidate="$1"
+  local component="$candidate"
+
+  while true; do
+    [[ ! -L "$component" ]] ||
+      fail "directory destination path component must not be a symbolic link: $component"
+    [[ "$component" = "/" ]] && break
+    component="${component%/*}"
+    [[ -n "$component" ]] || component="/"
+  done
+}
+
+audit_directory_offhost_permissions() {
+  local candidate="$1"
+  local account="$2"
+  local account_uid=""
+  local component=""
+  local component_uid=""
+  local component_mode=""
+
+  account_uid="$(id -u "$account")" ||
+    fail "cannot resolve directory destination owner account: $account"
+  [[ "$(stat -c '%u' -- "$candidate")" -eq "$account_uid" ]] ||
+    fail "directory destination must be owned by $account: $candidate"
+  [[ "$(stat -c '%a' -- "$candidate")" = 700 ]] ||
+    fail "directory destination mode must be exactly 0700: $candidate"
+
+  component="${candidate%/*}"
+  [[ -n "$component" ]] || component="/"
+  while true; do
+    [[ ! -L "$component" ]] ||
+      fail "directory destination ancestor must not be a symbolic link: $component"
+    component_uid="$(stat -c '%u' -- "$component")"
+    [[ "$component_uid" -eq 0 || "$component_uid" -eq "$account_uid" ]] ||
+      fail "directory destination ancestor must be owned by root or $account: $component"
+    component_mode="$(stat -c '%a' -- "$component")"
+    (( (8#$component_mode & 0022) == 0 )) ||
+      fail "directory destination ancestor must not be writable by group or other: $component"
+    [[ "$component" = "/" ]] && break
+    component="${component%/*}"
+    [[ -n "$component" ]] || component="/"
+  done
+}
+
+resolve_directory_offhost_path() {
+  local destination="$1"
+  local account="${2:-}"
+  local destination_path=""
+  local canonical_path=""
+
+  case "$destination" in
+    file://*) ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  [[ "$destination" == file:///* ]] ||
+    fail "directory destination must use file:///absolute/path"
+  destination_path="${destination#file://}"
+  [[ "$destination_path" =~ ^/[A-Za-z0-9._/@:+,-]+$ &&
+    "$destination_path" != *"//"* &&
+    "$destination_path" != *"/./"* &&
+    "$destination_path" != *"/../"* &&
+    "$destination_path" != */"." &&
+    "$destination_path" != */".." &&
+    "$destination_path" != */ ]] ||
+    fail "directory destination must be an unencoded canonical file URI path"
+  [[ -d "$destination_path" && ! -L "$destination_path" ]] ||
+    fail "directory destination must be an existing non-symlink directory: $destination_path"
+  canonical_path="$(realpath -e -- "$destination_path")" ||
+    fail "cannot resolve directory destination: $destination_path"
+  [[ "$canonical_path" = "$destination_path" ]] ||
+    fail "directory destination must be canonical and contain no symlink or traversal: $destination_path"
+  audit_no_symlink_components "$destination_path"
+  if [[ -n "$account" ]]; then
+    audit_directory_offhost_permissions "$destination_path" "$account"
+  fi
+  case "$destination_path" in
+    /var/lib/forge | /var/lib/forge/* | /var/backups/forge | /var/backups/forge/*)
+      fail "directory destination must be outside Forge state and local backup directories"
+      ;;
+  esac
+
+  printf '%s\n' "$destination_path"
+}
+
+probe_directory_write_contract() {
+  local account="$1"
+  local destination_path="$2"
+  local account_uid=""
+  local probe_program=""
+
+  account_uid="$(id -u "$account")" ||
+    fail "cannot resolve service account for directory destination probe: $account"
+  # shellcheck disable=SC2016 # This is a literal program executed by bash -c.
+  probe_program='
+set -euo pipefail
+directory="$1"
+probe_file=""
+probe_link=""
+cleanup() {
+  if [[ -n "$probe_link" ]]; then
+    rm -f -- "$probe_link"
+  fi
+  if [[ -n "$probe_file" ]]; then
+    rm -f -- "$probe_file"
+  fi
+}
+trap cleanup EXIT
+probe_file="$(mktemp "$directory/.forge-install-write-probe.XXXXXX")"
+probe_link="$probe_file.link"
+printf "forge-directory-write-probe\n" >"$probe_file"
+sync -f -- "$probe_file"
+ln -- "$probe_file" "$probe_link"
+[[ "$probe_file" -ef "$probe_link" ]]
+sync -f -- "$probe_link"
+rm -f -- "$probe_link" "$probe_file"
+probe_link=""
+probe_file=""
+sync -f -- "$directory"
+trap - EXIT
+'
+
+  if [[ "$account_uid" -eq "$EUID" ]]; then
+    bash -c "$probe_program" forge-directory-write-probe "$destination_path" ||
+      fail "directory destination does not satisfy the write, hard-link, and durable-sync contract for user $account: $destination_path"
+  else
+    runuser --user "$account" -- \
+      bash -c "$probe_program" forge-directory-write-probe "$destination_path" ||
+      fail "directory destination does not satisfy the write, hard-link, and durable-sync contract for user $account: $destination_path"
+  fi
+}
+
+read_mount_field() {
+  local destination_path="$1"
+  local field="$2"
+  local -a field_lines=()
+
+  mapfile -t field_lines < <(
+    findmnt \
+      --noheadings \
+      --raw \
+      --first-only \
+      --output "$field" \
+      --target "$destination_path"
+  )
+  [[ ${#field_lines[@]} -eq 1 && -n "${field_lines[0]}" ]] ||
+    fail "cannot resolve mount $field for directory destination: $destination_path"
+  [[ "${field_lines[0]}" != *$'\r'* ]] ||
+    fail "mount $field contains a carriage return: $destination_path"
+
+  printf '%s' "${field_lines[0]}"
+}
+
+capture_directory_mount_identity() {
+  local destination_path="$1"
+  local mount_target=""
+  local mount_source=""
+  local mount_fstype=""
+  local mount_fsid=""
+  local confirmed_target=""
+  local confirmed_source=""
+  local confirmed_fstype=""
+  local confirmed_fsid=""
+
+  command -v findmnt >/dev/null 2>&1 ||
+    fail "required command not found for file destination: findmnt"
+  mount_target="$(read_mount_field "$destination_path" TARGET)"
+  mount_source="$(read_mount_field "$destination_path" SOURCE)"
+  mount_fstype="$(read_mount_field "$destination_path" FSTYPE)"
+  mount_fsid="$(stat -f -c '%i' -- "$destination_path")" ||
+    fail "cannot resolve filesystem identity for directory destination: $destination_path"
+
+  [[ "$mount_target" = /* && "$mount_target" != "/" ]] ||
+    fail "directory destination must be backed by a dedicated mount, not the host root filesystem: $destination_path"
+  [[ "$mount_target" =~ ^/[A-Za-z0-9._/@:+,-]+$ &&
+    "$mount_target" != *"//"* &&
+    "$mount_target" != *"/./"* &&
+    "$mount_target" != *"/../"* &&
+    "$mount_target" != */"." &&
+    "$mount_target" != */".." &&
+    "$mount_target" != */ ]] ||
+    fail "directory destination mount target must be a canonical absolute path"
+  case "$destination_path" in
+    "$mount_target"/*) ;;
+    *)
+      fail "directory destination must be a subdirectory of its resolved mount target: $mount_target"
+      ;;
+  esac
+  [[ "$mount_source" != *$'\n'* &&
+    "$mount_source" != *$'\r'* &&
+    -n "$mount_source" ]] ||
+    fail "directory destination mount source is invalid"
+  [[ "$mount_fstype" =~ ^[A-Za-z0-9._+-]+$ ]] ||
+    fail "directory destination mount filesystem type is invalid"
+  [[ "$mount_fsid" =~ ^[0-9A-Fa-f]+$ ]] ||
+    fail "directory destination filesystem identity is invalid"
+
+  confirmed_target="$(read_mount_field "$destination_path" TARGET)"
+  confirmed_source="$(read_mount_field "$destination_path" SOURCE)"
+  confirmed_fstype="$(read_mount_field "$destination_path" FSTYPE)"
+  confirmed_fsid="$(stat -f -c '%i' -- "$destination_path")" ||
+    fail "cannot confirm filesystem identity for directory destination: $destination_path"
+  [[ "$mount_target" = "$confirmed_target" &&
+    "$mount_source" = "$confirmed_source" &&
+    "$mount_fstype" = "$confirmed_fstype" &&
+    "$mount_fsid" = "$confirmed_fsid" ]] ||
+    fail "directory destination mount changed while its identity was captured"
+
+  printf '%s\n' \
+    "forge-directory-mount-v1" \
+    "target=$mount_target" \
+    "source=$mount_source" \
+    "fstype=$mount_fstype" \
+    "fsid=$mount_fsid"
+}
+
+render_backup_directory_dropin() {
+  local destination_path="$1"
+
+  printf \
+    '[Unit]\nRequiresMountsFor=%s\n\n[Service]\nReadWritePaths=%s\n' \
+    "$destination_path" \
+    "$destination_path"
+}
+
+reconcile_backup_directory_dropin() {
+  local destination_file="$1"
+  local destination_path="$2"
+
+  if [[ -z "$destination_path" ]]; then
+    rm -f -- "$destination_file"
+    return 0
+  fi
+
+  staged_backup_dropin="$(mktemp "$destination_file.XXXXXX")"
+  render_backup_directory_dropin "$destination_path" >"$staged_backup_dropin"
+  chmod 0644 "$staged_backup_dropin"
+  if [[ "$EUID" -eq 0 ]]; then
+    chown root:root "$staged_backup_dropin"
+  fi
+  mv "$staged_backup_dropin" "$destination_file"
+  staged_backup_dropin=""
+}
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
 
 [[ "$EUID" -eq 0 ]] || fail "run as root"
 [[ $# -eq 4 ]] ||
@@ -35,7 +291,7 @@ esac
 [[ "$offhost_generation" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] ||
   fail "off-host generation must match [A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
 
-for required_command in chmod chown cp curl date env find getent grep groupadd id install mktemp mv nologin openssl realpath rm sha256sum sleep stat systemctl tr useradd wc; do
+for required_command in bash chmod chown cp curl date env find getent grep groupadd id install ln mktemp mv nologin openssl realpath rm runuser sha256sum sleep stat sync systemctl tr useradd wc; do
   command -v "$required_command" >/dev/null 2>&1 ||
     fail "required command not found: $required_command"
 done
@@ -83,23 +339,40 @@ if ! id -u forge >/dev/null 2>&1; then
     forge
 fi
 
+directory_offhost_path="$(
+  resolve_directory_offhost_path "$offhost_destination" forge
+)"
+directory_mount_identity=""
+
+if [[ -n "$directory_offhost_path" ]]; then
+  probe_directory_write_contract forge "$directory_offhost_path"
+  directory_mount_identity="$(
+    capture_directory_mount_identity "$directory_offhost_path"
+  )"
+fi
+
 install -d -m 0700 -o forge -g forge /var/lib/forge
 install -d -m 0700 -o forge -g forge /var/lib/forge/workspace
 install -d -m 0700 -o forge -g forge /var/backups/forge
 install -d -m 0750 -o root -g forge /etc/forge
 install -d -m 0755 -o root -g root /usr/local/libexec
 
+directory_offhost_dropin="/etc/systemd/system/forge-backup.service.d/20-directory-offhost.conf"
 managed_paths=(
   /etc/forge/secret.key
   /etc/forge/ops-token
   /etc/forge/backup-offhost-command
   /etc/forge/backup-offhost-destination
   /etc/forge/backup-offhost-generation
+  /etc/forge/backup-offhost-mount-identity
   /usr/local/libexec/forge-backup
   /usr/local/sbin/forge-admin
   /usr/local/sbin/forge-restore-drill
   /etc/systemd/system/forge-ops.service
+  /etc/systemd/system/forge-runtime.service
+  /etc/systemd/system/forge-request-supervisor.service
   /etc/systemd/system/forge-backup.service
+  "$directory_offhost_dropin"
   /etc/systemd/system/forge-backup.timer
   /usr/local/bin/forge
 )
@@ -110,6 +383,7 @@ transaction_committed=false
 staged_secret=""
 staged_token=""
 staged_backup_config=""
+staged_backup_dropin=""
 staged_binary=""
 ops_probe_config=""
 
@@ -123,13 +397,23 @@ read_unit_enable_state() {
 }
 
 forge_ops_enable_state="$(read_unit_enable_state forge-ops.service)"
+forge_runtime_enable_state="$(read_unit_enable_state forge-runtime.service)"
+forge_request_supervisor_enable_state="$(read_unit_enable_state forge-request-supervisor.service)"
 forge_backup_enable_state="$(read_unit_enable_state forge-backup.service)"
 forge_timer_enable_state="$(read_unit_enable_state forge-backup.timer)"
 forge_ops_was_active=false
+forge_runtime_was_active=false
+forge_request_supervisor_was_active=false
 forge_backup_was_active=false
 forge_timer_was_active=false
 if systemctl is-active --quiet forge-ops.service; then
   forge_ops_was_active=true
+fi
+if systemctl is-active --quiet forge-runtime.service; then
+  forge_runtime_was_active=true
+fi
+if systemctl is-active --quiet forge-request-supervisor.service; then
+  forge_request_supervisor_was_active=true
 fi
 if systemctl is-active --quiet forge-backup.service; then
   forge_backup_was_active=true
@@ -145,6 +429,8 @@ cleanup_transaction_artifacts() {
     "$staged_secret" \
     "$staged_token" \
     "$staged_backup_config" \
+    "$staged_backup_dropin" \
+    "$staged_backup_mount_identity" \
     "$staged_binary" \
     "$ops_probe_config"; do
     if [[ -n "$staged_path" ]]; then
@@ -193,7 +479,7 @@ rollback_installation() {
   local path=""
   local rollback_failed=false
 
-  systemctl disable --now forge-backup.timer forge-ops.service \
+  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service \
     >/dev/null 2>&1 || true
   systemctl stop forge-backup.service \
     >/dev/null 2>&1 || true
@@ -217,6 +503,12 @@ rollback_installation() {
     forge-ops.service "$forge_ops_enable_state" \
     >/dev/null 2>&1 || rollback_failed=true
   restore_unit_enable_state \
+    forge-runtime.service "$forge_runtime_enable_state" \
+    >/dev/null 2>&1 || rollback_failed=true
+  restore_unit_enable_state \
+    forge-request-supervisor.service "$forge_request_supervisor_enable_state" \
+    >/dev/null 2>&1 || rollback_failed=true
+  restore_unit_enable_state \
     forge-backup.service "$forge_backup_enable_state" \
     >/dev/null 2>&1 || rollback_failed=true
   restore_unit_enable_state \
@@ -225,6 +517,14 @@ rollback_installation() {
 
   if [[ "$forge_ops_was_active" = true ]] &&
     ! systemctl start forge-ops.service >/dev/null 2>&1; then
+    rollback_failed=true
+  fi
+  if [[ "$forge_runtime_was_active" = true ]] &&
+    ! systemctl start forge-runtime.service >/dev/null 2>&1; then
+    rollback_failed=true
+  fi
+  if [[ "$forge_request_supervisor_was_active" = true ]] &&
+    ! systemctl start forge-request-supervisor.service >/dev/null 2>&1; then
     rollback_failed=true
   fi
   if [[ "$forge_backup_was_active" = true ]] &&
@@ -345,6 +645,50 @@ wait_for_ops_ready() {
   return 1
 }
 
+wait_for_runtime_ready() {
+  local deadline="$((SECONDS + 30))"
+  local stable_checks=0
+
+  while ((SECONDS < deadline)); do
+    if systemctl is-failed --quiet forge-runtime.service; then
+      return 1
+    fi
+    if systemctl is-active --quiet forge-runtime.service; then
+      stable_checks="$((stable_checks + 1))"
+      if ((stable_checks >= 3)); then
+        return 0
+      fi
+    else
+      stable_checks=0
+    fi
+    sleep 1
+  done
+
+  return 1
+}
+
+wait_for_request_supervisor_ready() {
+  local deadline="$((SECONDS + 30))"
+  local stable_checks=0
+
+  while ((SECONDS < deadline)); do
+    if systemctl is-failed --quiet forge-request-supervisor.service; then
+      return 1
+    fi
+    if systemctl is-active --quiet forge-request-supervisor.service; then
+      stable_checks="$((stable_checks + 1))"
+      if ((stable_checks >= 3)); then
+        return 0
+      fi
+    else
+      stable_checks=0
+    fi
+    sleep 1
+  done
+
+  return 1
+}
+
 install_backup_config() {
   local destination="$1"
   local value="$2"
@@ -357,24 +701,61 @@ install_backup_config() {
   staged_backup_config=""
 }
 
+install_backup_mount_identity() {
+  local destination="$1"
+  local value="$2"
+
+  staged_backup_mount_identity="$(
+    mktemp /etc/forge/.backup-mount-identity.XXXXXX
+  )"
+  printf '%s\n' "$value" >"$staged_backup_mount_identity"
+  chmod 0644 "$staged_backup_mount_identity"
+  chown root:root "$staged_backup_mount_identity"
+  mv "$staged_backup_mount_identity" "$destination"
+  staged_backup_mount_identity=""
+}
+
 if [[ "$forge_timer_was_active" = true ]]; then
   systemctl stop forge-backup.timer
 fi
 if [[ "$forge_ops_was_active" = true ]]; then
   systemctl stop forge-ops.service
 fi
+if [[ "$forge_runtime_was_active" = true ]]; then
+  systemctl stop forge-runtime.service
+fi
+if systemctl is-active --quiet forge-request-supervisor.service; then
+  systemctl stop forge-request-supervisor.service
+fi
 if [[ "$forge_backup_was_active" = true ]]; then
   systemctl stop forge-backup.service
 fi
 
+if [[ -n "$directory_offhost_path" ]]; then
+  install -d -m 0755 -o root -g root \
+    /etc/systemd/system/forge-backup.service.d
+fi
+reconcile_backup_directory_dropin \
+  "$directory_offhost_dropin" \
+  "$directory_offhost_path"
+
 install_backup_config /etc/forge/backup-offhost-command "$offhost_command"
 install_backup_config /etc/forge/backup-offhost-destination "$offhost_destination"
 install_backup_config /etc/forge/backup-offhost-generation "$offhost_generation"
+if [[ -n "$directory_mount_identity" ]]; then
+  install_backup_mount_identity \
+    /etc/forge/backup-offhost-mount-identity \
+    "$directory_mount_identity"
+else
+  rm -f -- /etc/forge/backup-offhost-mount-identity
+fi
 
 install -m 0755 -o root -g root "$script_dir/forge-backup" /usr/local/libexec/forge-backup
 install -m 0755 -o root -g root "$script_dir/forge-admin" /usr/local/sbin/forge-admin
 install -m 0755 -o root -g root "$script_dir/forge-restore-drill" /usr/local/sbin/forge-restore-drill
 install -m 0644 -o root -g root "$script_dir/forge-ops.service" /etc/systemd/system/forge-ops.service
+install -m 0644 -o root -g root "$script_dir/forge-runtime.service" /etc/systemd/system/forge-runtime.service
+install -m 0644 -o root -g root "$script_dir/forge-request-supervisor.service" /etc/systemd/system/forge-request-supervisor.service
 install -m 0644 -o root -g root "$script_dir/forge-backup.service" /etc/systemd/system/forge-backup.service
 install -m 0644 -o root -g root "$script_dir/forge-backup.timer" /etc/systemd/system/forge-backup.timer
 
@@ -384,7 +765,7 @@ mv "$staged_binary" /usr/local/bin/forge
 staged_binary=""
 
 systemctl daemon-reload
-systemctl disable --now forge-backup.timer forge-ops.service
+systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
 
 ops_probe_config="$(mktemp /etc/forge/.ops-probe.XXXXXX)"
 ops_token_for_curl="${ops_token_value//\\/\\\\}"
@@ -406,29 +787,47 @@ fi
 systemctl stop forge-ops.service
 
 [[ "$store_ready" = true ]] ||
-  fail "Forge store or authenticated Ops snapshot did not become ready; Ops and backup timer remain disabled"
+  fail "Forge store or authenticated Ops snapshot did not become ready; Ops, runtime, request supervisor and backup timer remain disabled"
 
 if ! systemctl start forge-backup.service; then
   systemctl stop forge-ops.service
-  fail "initial off-host recovery challenge failed; Ops and backup timer remain disabled"
+  fail "initial off-host recovery challenge failed; Ops, runtime, request supervisor and backup timer remain disabled"
 fi
 
-systemctl enable forge-ops.service forge-backup.timer
+systemctl enable forge-ops.service forge-runtime.service forge-request-supervisor.service forge-backup.timer
 if ! systemctl start forge-ops.service; then
-  systemctl disable --now forge-backup.timer forge-ops.service
+  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
   fail "Forge Ops failed after backup promotion; services were disabled again"
 fi
 if ! wait_for_ops_ready; then
-  systemctl disable --now forge-backup.timer forge-ops.service
+  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
   fail "authenticated Forge Ops snapshot failed after backup promotion; services were disabled again"
 fi
+if ! systemctl start forge-runtime.service; then
+  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
+  fail "Forge runtime failed after backup promotion; services were disabled again"
+fi
+if ! wait_for_runtime_ready; then
+  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
+  fail "Forge runtime did not remain active after startup; services were disabled again"
+fi
+if ! systemctl start forge-request-supervisor.service; then
+  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
+  fail "Forge request supervisor failed after backup promotion; services were disabled again"
+fi
+if ! wait_for_request_supervisor_ready; then
+  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
+  fail "Forge request supervisor did not remain active after startup; services were disabled again"
+fi
 if ! systemctl start forge-backup.timer; then
-  systemctl disable --now forge-backup.timer forge-ops.service
-  fail "backup timer failed after promotion; Ops and timer were disabled again"
+  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
+  fail "backup timer failed after promotion; Ops, runtime, request supervisor and timer were disabled again"
 fi
 cleanup_ops_probe_config
 ops_probe_config=""
 systemctl --no-pager --full status forge-ops.service
+systemctl --no-pager --full status forge-runtime.service
+systemctl --no-pager --full status forge-request-supervisor.service
 systemctl --no-pager --full status forge-backup.timer
 transaction_committed=true
 cleanup_transaction_artifacts

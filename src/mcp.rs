@@ -166,8 +166,8 @@ use crate::registry::{
 use crate::request::{
     cancel_request, complete_ready_task, create_final_delivery_package, drive_request,
     ensure_final_audit, heartbeat_request, list_requests, load_request_status,
-    recover_stale_request, resume_async_request, start_async_request, step_request,
-    switch_request_executor, RequestExecutorSwitchInput, RequestTaskCompletionInput,
+    recover_stale_request, resume_async_request, start_async_request_with_idempotency,
+    step_request, switch_request_executor, RequestExecutorSwitchInput, RequestTaskCompletionInput,
 };
 use crate::schedule::{
     aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
@@ -1777,6 +1777,8 @@ struct WorkerStatusInput {
 struct RunStartInput {
     goal: String,
     origin: Option<String>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6133,10 +6135,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.run.start",
                 "Start Async Forge Run",
                 "Start an async workflow request, return a run_id quickly and preserve Forge as source of truth.",
-                object_schema(&[
-                    ("goal", "string", "human objective"),
-                    ("origin", "string", "codex|opencode|skill|mcp"),
-                ], &["goal"]),
+            object_schema(&[
+                ("goal", "string", "human objective"),
+                ("origin", "string", "codex|opencode|skill|mcp"),
+                (
+                    "idempotency_key",
+                    "string",
+                    "optional retry key scoped to origin",
+                ),
+            ], &["goal"]),
                 "forge.request_start.v1",
                 &["forge", "request", "start", "--goal", "<goal>", "--output", "json"],
                 ToolFlags::new(true, true),
@@ -10045,7 +10052,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.run.start" => {
             let input: RunStartInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
-            serde_json::to_value(start_async_request(store, &input.goal, &origin)?)?
+            serde_json::to_value(start_async_request_with_idempotency(
+                store,
+                &input.goal,
+                &origin,
+                input.idempotency_key.as_deref(),
+            )?)?
         }
         "forge.run.resume" => {
             let input: RunIdInput = parse_input(input)?;

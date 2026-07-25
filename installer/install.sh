@@ -6,13 +6,15 @@ VERSION="${FORGE_VERSION:-latest}"
 PREFIX="${FORGE_PREFIX:-$HOME/.local}"
 BIN_DIR="${FORGE_BIN_DIR:-$PREFIX/bin}"
 RELEASE_BASE_URL="${FORGE_RELEASE_BASE_URL:-}"
+TEST_MODE="${FORGE_INSTALLER_TEST_MODE:-0}"
+SIGSTORE_ISSUER="https://token.actions.githubusercontent.com"
 TMP_DIR="$(mktemp -d)"
 STAGED_BINARY=""
 
 cleanup() {
-  rm -rf "$TMP_DIR"
+  rm -rf -- "$TMP_DIR"
   if [[ -n "$STAGED_BINARY" && -e "$STAGED_BINARY" ]]; then
-    rm -f "$STAGED_BINARY"
+    rm -f -- "$STAGED_BINARY"
   fi
 }
 trap cleanup EXIT
@@ -22,10 +24,58 @@ fail() {
   exit 1
 }
 
-for required_command in awk curl install mktemp tar tr; do
+for required_command in awk cosign curl install mktemp tar tr; do
   command -v "$required_command" >/dev/null 2>&1 ||
     fail "required command not found: $required_command"
 done
+
+[[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
+  fail "FORGE_REPO must be an exact GitHub owner/repository pair"
+
+release_version_is_valid() {
+  [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
+}
+
+if [[ -n "$RELEASE_BASE_URL" ]]; then
+  [[ "$VERSION" != "latest" ]] ||
+    fail "FORGE_VERSION must be explicit when FORGE_RELEASE_BASE_URL is set"
+  resolved_version="$VERSION"
+  release_version_is_valid "$resolved_version" ||
+    fail "FORGE_VERSION must be a supported v-prefixed semantic version"
+  base_url="${RELEASE_BASE_URL%/}"
+else
+  if [[ "$VERSION" == "latest" ]]; then
+    latest_url="$(
+      curl -fsSL --proto '=https' --tlsv1.2 \
+        -o /dev/null -w '%{url_effective}' \
+        "https://github.com/${REPO}/releases/latest"
+    )" || fail "could not resolve the latest immutable release tag"
+    resolved_version="${latest_url##*/}"
+  else
+    resolved_version="$VERSION"
+  fi
+  release_version_is_valid "$resolved_version" ||
+    fail "resolved release version is not a supported v-prefixed semantic version"
+  base_url="https://github.com/${REPO}/releases/download/${resolved_version}"
+fi
+
+case "$base_url" in
+  https://*)
+    download() {
+      curl -fsSL --proto '=https' --tlsv1.2 "$1" -o "$2"
+    }
+    ;;
+  http://*)
+    [[ "$TEST_MODE" == "1" ]] ||
+      fail "plain HTTP release URLs are allowed only with FORGE_INSTALLER_TEST_MODE=1"
+    download() {
+      curl -fsSL --proto '=http,https' "$1" -o "$2"
+    }
+    ;;
+  *)
+    fail "release URL must use HTTPS"
+    ;;
+esac
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m)"
@@ -43,36 +93,31 @@ case "$arch" in
 esac
 
 asset="forge-${platform}-${target_arch}.tar.gz"
-
-if [[ -n "$RELEASE_BASE_URL" ]]; then
-  base_url="${RELEASE_BASE_URL%/}"
-  download() {
-    curl -fsSL "$1" -o "$2"
-  }
-elif [[ "$VERSION" == "latest" ]]; then
-  base_url="https://github.com/${REPO}/releases/latest/download"
-  download() {
-    curl -fsSL --proto '=https' --tlsv1.2 "$1" -o "$2"
-  }
-else
-  base_url="https://github.com/${REPO}/releases/download/${VERSION}"
-  download() {
-    curl -fsSL --proto '=https' --tlsv1.2 "$1" -o "$2"
-  }
-fi
-
-archive="$TMP_DIR/$asset"
 checksums="$TMP_DIR/SHA256SUMS"
-download "$base_url/$asset" "$archive"
+sigstore_bundle="$TMP_DIR/SHA256SUMS.sigstore.json"
+
 download "$base_url/SHA256SUMS" "$checksums"
+download "$base_url/SHA256SUMS.sigstore.json" "$sigstore_bundle"
+
+sigstore_identity="https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/${resolved_version}"
+if ! cosign verify-blob \
+  --bundle "$sigstore_bundle" \
+  --certificate-identity "$sigstore_identity" \
+  --certificate-oidc-issuer "$SIGSTORE_ISSUER" \
+  "$checksums" >/dev/null; then
+  fail "Sigstore verification failed for SHA256SUMS; no archive was trusted"
+fi
 
 expected_sha256="$(
   awk -v expected_asset="$asset" '$2 == expected_asset { print $1 }' "$checksums"
 )"
 if [[ ${#expected_sha256} -ne 64 || "$expected_sha256" == *[!0-9A-Fa-f]* ]]; then
-  fail "SHA256SUMS does not contain one valid digest for $asset"
+  fail "verified SHA256SUMS does not contain one valid digest for $asset"
 fi
 expected_sha256="$(printf '%s' "$expected_sha256" | tr '[:upper:]' '[:lower:]')"
+
+archive="$TMP_DIR/$asset"
+download "$base_url/$asset" "$archive"
 
 if command -v sha256sum >/dev/null 2>&1; then
   actual_sha256="$(sha256sum "$archive" | awk '{ print $1 }')"
@@ -99,11 +144,12 @@ done < <(tar -tzf "$archive")
 
 tar -xzf "$archive" -C "$extract_dir" "$binary_member"
 binary="$extract_dir/forge"
-[[ -f "$binary" ]] || fail "forge binary was not extracted from verified archive"
+[[ -f "$binary" ]] ||
+  fail "forge binary was not extracted from the verified archive"
 
 mkdir -p "$BIN_DIR"
 STAGED_BINARY="$(mktemp "$BIN_DIR/.forge.install.XXXXXX")"
 install -m 0755 "$binary" "$STAGED_BINARY"
-mv -f "$STAGED_BINARY" "$BIN_DIR/forge"
+mv -f -- "$STAGED_BINARY" "$BIN_DIR/forge"
 STAGED_BINARY=""
 echo "Installed forge to $BIN_DIR/forge"
