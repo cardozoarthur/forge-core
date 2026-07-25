@@ -28,6 +28,22 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Install Linux sandbox runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          bwrap --version
+          if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl --write kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap \
+            --ro-bind / / \
+            --proc /proc \
+            --dev /dev \
+            --unshare-all \
+            --die-with-parent \
+            /bin/true
+
       - name: Check formatting
         run: cargo fmt --check
 
