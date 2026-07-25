@@ -13821,6 +13821,326 @@ fn context_package_exposes_replay_manifest_for_resumable_executor_context() {
 }
 
 #[test]
+fn parse_intent_context_requires_the_human_goal_without_widening_other_deterministic_tasks() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let goal_marker = "TAIL_CONSTRAINT_SENTINEL";
+    let goal = format!(
+        "{} {goal_marker}: never mutate external state without explicit authorization",
+        "bounded human-goal detail ".repeat(40)
+    );
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            &goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let parse_intent = find_task(json["tasks"].as_array().unwrap(), "Parse intent");
+
+    let blocked_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            parse_intent["id"].as_str().unwrap(),
+            "--budget",
+            "768",
+            "--strict",
+            "--view",
+            "compact",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let blocked: Value = serde_json::from_slice(&blocked_output).unwrap();
+    assert_eq!(blocked["context_ready"], false);
+    assert_eq!(blocked["handoff_ready"], false);
+    assert_eq!(blocked["guardrail"]["status"], "blocked");
+    assert!(!blocked["content"].as_str().unwrap().contains(goal_marker));
+    assert!(blocked["missing_required_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("workflow_goal".to_string())));
+    let recommended_budget_bytes = blocked["guardrail"]["recommended_budget_bytes"]
+        .as_u64()
+        .unwrap();
+    assert!(recommended_budget_bytes > 768);
+    let insufficient_budget = (recommended_budget_bytes - 1).to_string();
+    let insufficient_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            parse_intent["id"].as_str().unwrap(),
+            "--budget",
+            &insufficient_budget,
+            "--strict",
+            "--view",
+            "compact",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let insufficient: Value = serde_json::from_slice(&insufficient_output).unwrap();
+    assert_eq!(insufficient["handoff_ready"], false);
+    assert_eq!(
+        insufficient["guardrail"]["recommended_budget_bytes"],
+        recommended_budget_bytes
+    );
+    let recommended_budget = recommended_budget_bytes.to_string();
+
+    let compact_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            parse_intent["id"].as_str().unwrap(),
+            "--budget",
+            &recommended_budget,
+            "--strict",
+            "--view",
+            "compact",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let compact: Value = serde_json::from_slice(&compact_output).unwrap();
+    assert_eq!(compact["context_ready"], true);
+    assert_eq!(compact["handoff_ready"], true);
+    assert_eq!(compact["guardrail"]["status"], "ready");
+    assert!(compact["included_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("workflow_goal".to_string())));
+    assert!(compact["included_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("constraints".to_string())));
+    assert!(compact["content"].as_str().unwrap().contains(&goal));
+    assert!(compact["content"].as_str().unwrap().contains(goal_marker));
+
+    let parse_full_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            parse_intent["id"].as_str().unwrap(),
+            "--budget",
+            &recommended_budget,
+            "--view",
+            "full",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parse_full: Value = serde_json::from_slice(&parse_full_output).unwrap();
+    assert_eq!(parse_full["content"], compact["content"]);
+    assert_eq!(parse_full["context_sha256"], compact["context_sha256"]);
+    let parse_required_sections = parse_full["executor_profile"]["required_sections"]
+        .as_array()
+        .unwrap();
+    assert!(
+        parse_full["executor_profile"]["max_context_bytes"]
+            .as_u64()
+            .unwrap()
+            >= recommended_budget_bytes
+    );
+    assert!(parse_required_sections.contains(&Value::String("workflow_goal".to_string())));
+    assert!(parse_required_sections.contains(&Value::String("constraints".to_string())));
+    for section in ["workflow_goal", "constraints"] {
+        let shard = parse_full["shards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|shard| shard["section"] == section)
+            .unwrap();
+        assert_eq!(shard["included"], true);
+        assert_eq!(shard["compressed"], false);
+        assert_eq!(shard["bytes"], shard["original_bytes"]);
+    }
+
+    let requirements = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
+    let full_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            requirements["id"].as_str().unwrap(),
+            "--budget",
+            "768",
+            "--view",
+            "full",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let full: Value = serde_json::from_slice(&full_output).unwrap();
+    assert_eq!(full["executor_profile"]["max_context_bytes"], 768);
+    assert!(!full["executor_profile"]["required_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("workflow_goal".to_string())));
+    assert!(!full["executor_profile"]["required_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("constraints".to_string())));
+}
+
+#[test]
+fn lossless_goal_context_composes_with_artifact_and_rework_profiles() {
+    use chrono::Utc;
+    use forge_core::checkpoint::TaskCheckpoint;
+    use forge_core::context::{build_context_package, build_context_package_with_checkpoint};
+    use forge_core::graph::ArtifactRecord;
+    use forge_core::{graph, intent};
+
+    let goal_marker = "REWORK_ARTIFACT_TAIL_çã🚀";
+    let goal = format!(
+        "{}\n{goal_marker}: preservar esta restrição até o handoff",
+        "objetivo humano extenso com decisão relevante ".repeat(120)
+    );
+    let mut workflow = graph::create_workflow(intent::parse_intent(&goal));
+    workflow.artifacts.push(ArtifactRecord {
+        id: "artifact-goal-overlay".to_string(),
+        kind: "artifact_manifest".to_string(),
+        path: "artifacts/goal-overlay/manifest.json".to_string(),
+        sha256: hex_sha256(b"goal-overlay-artifact"),
+        tags: Vec::new(),
+        created_at: Utc::now(),
+        lineage: None,
+    });
+    let parse_intent = workflow
+        .tasks
+        .iter_mut()
+        .find(|task| task.title == "Parse intent")
+        .unwrap();
+    parse_intent.expected_output = "IntentSpec artifact manifest".to_string();
+    let task_id = parse_intent.id.clone();
+
+    let artifact_blocked = build_context_package(&workflow, &task_id, 768).unwrap();
+    assert_eq!(
+        artifact_blocked.executor_profile.id,
+        "no_ai_artifact_manifest"
+    );
+    assert!(!artifact_blocked.handoff_ready);
+    assert_eq!(
+        artifact_blocked.routing_repair.action,
+        "increase_context_budget"
+    );
+    let artifact_budget = artifact_blocked.routing_repair.recommended_budget_bytes;
+    assert!(artifact_budget > 4096);
+    assert!(artifact_blocked.executor_profile.max_context_bytes.unwrap() >= artifact_budget);
+
+    let artifact_ready = build_context_package(&workflow, &task_id, artifact_budget).unwrap();
+    assert!(artifact_ready.context_ready);
+    assert!(artifact_ready.handoff_ready);
+    for section in ["artifacts", "workflow_goal", "constraints"] {
+        assert!(artifact_ready
+            .required_sections
+            .contains(&section.to_string()));
+    }
+    assert!(artifact_ready.content.contains(&goal));
+    assert!(artifact_ready.content.contains(goal_marker));
+    for section in ["workflow_goal", "constraints"] {
+        let shard = artifact_ready
+            .shards
+            .iter()
+            .find(|shard| shard.section == section)
+            .unwrap();
+        assert!(shard.included);
+        assert!(!shard.compressed);
+        assert_eq!(shard.bytes, shard.original_bytes);
+    }
+
+    let checkpoint = TaskCheckpoint {
+        checkpoint_id: "ckpt_goal_overlay_rework".to_string(),
+        workflow_id: workflow.id.clone(),
+        task_id: task_id.clone(),
+        executor: "forge_cli".to_string(),
+        state: "failed".to_string(),
+        summary: "retry only with the complete human objective".to_string(),
+        context_sha256: hex_sha256(b"prior-goal-overlay-context"),
+        context_routing_cache_key: None,
+        workflow_revision: 0,
+        created_at: Utc::now(),
+    };
+    let rework_blocked =
+        build_context_package_with_checkpoint(&workflow, &task_id, 768, Some(checkpoint.clone()))
+            .unwrap();
+    assert_eq!(rework_blocked.executor_profile.id, "no_ai_rework");
+    assert!(!rework_blocked.handoff_ready);
+    let rework_budget = rework_blocked.routing_repair.recommended_budget_bytes;
+    assert!(rework_budget > 4096);
+
+    let rework_ready =
+        build_context_package_with_checkpoint(&workflow, &task_id, rework_budget, Some(checkpoint))
+            .unwrap();
+    assert!(rework_ready.context_ready);
+    assert!(rework_ready.handoff_ready);
+    for section in ["checkpoint", "artifacts", "workflow_goal", "constraints"] {
+        assert!(rework_ready
+            .required_sections
+            .contains(&section.to_string()));
+    }
+    assert!(rework_ready.content.contains(&goal));
+    assert!(rework_ready.content.contains(goal_marker));
+    let workflow_goal = rework_ready
+        .shards
+        .iter()
+        .find(|shard| shard.section == "workflow_goal")
+        .unwrap();
+    assert!(workflow_goal.included);
+    assert!(!workflow_goal.compressed);
+    assert_eq!(workflow_goal.bytes, workflow_goal.original_bytes);
+}
+
+#[test]
 fn strict_context_blocks_executor_when_required_sections_are_missing() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -32054,7 +32374,10 @@ fn list_aggregates_context_quality_and_recommends_quality_actions_by_lifecycle()
         row["quality_action"]["schema_version"],
         "forge.registry_quality_action.v1"
     );
-    assert_eq!(row["quality_action"]["action"], "wait_for_dependencies");
+    assert_eq!(
+        row["quality_action"]["action"],
+        "repair_context_and_wait_for_dependencies"
+    );
     assert_eq!(row["quality_action"]["priority"], "blocking");
     assert!(row["quality_action"]["affected_tasks"].as_u64().unwrap() > 0);
 }
@@ -32126,7 +32449,7 @@ fn list_filters_workflow_registry_by_quality_action_and_lifecycle() {
             "--lifecycle",
             "running",
             "--quality-action",
-            "wait_for_dependencies",
+            "repair_context_and_wait_for_dependencies",
             "--output",
             "json",
         ])
@@ -32140,7 +32463,7 @@ fn list_filters_workflow_registry_by_quality_action_and_lifecycle() {
     assert_eq!(listed_json["filter"]["lifecycle"], "running");
     assert_eq!(
         listed_json["filter"]["quality_action"],
-        "wait_for_dependencies"
+        "repair_context_and_wait_for_dependencies"
     );
     assert_eq!(listed_json["summary"]["total"], 1);
     assert_eq!(listed_json["summary"]["running"], 1);
@@ -32158,7 +32481,7 @@ fn list_filters_workflow_registry_by_quality_action_and_lifecycle() {
     assert_eq!(workflows[0]["workflow_id"], running_workflow_id);
     assert_eq!(
         workflows[0]["quality_action"]["action"],
-        "wait_for_dependencies"
+        "repair_context_and_wait_for_dependencies"
     );
 }
 
@@ -40347,7 +40670,7 @@ fn request_heartbeat_marks_async_run_active_and_surfaces_it_in_status_list_and_i
 }
 
 #[test]
-fn request_step_auto_promotes_ready_deterministic_task_and_advances_drive() {
+fn request_step_requires_real_receipts_for_ready_deterministic_tasks() {
     let temp = tempdir().unwrap();
     let store_dir = temp.path().join("store with spaces");
     fs::create_dir_all(&store_dir).unwrap();
@@ -40398,40 +40721,18 @@ fn request_step_auto_promotes_ready_deterministic_task_and_advances_drive() {
         .clone();
     let stepped_json: Value = serde_json::from_slice(&stepped).unwrap();
     assert_eq!(stepped_json["schema_version"], "forge.request_step.v1");
-    assert_eq!(stepped_json["status"], "stepped");
-    assert_eq!(stepped_json["action"], "auto_promoted_task");
+    assert_eq!(stepped_json["status"], "handoff_required");
+    assert_eq!(stepped_json["action"], "start_handoff");
     assert_eq!(stepped_json["stepped_task"]["task_id"], "task-001");
-    assert_eq!(
-        stepped_json["output_artifact"]["status"],
-        "artifact_attached"
-    );
-    assert_eq!(
-        stepped_json["output_artifact"]["artifact"]["kind"],
-        "auto_step_output"
-    );
-    assert_eq!(stepped_json["validation"]["accepted"], true);
-    assert_eq!(
-        stepped_json["validation"]["validation_summary"]["passing"],
-        1
-    );
-    assert_eq!(stepped_json["drive_after"]["status"], "ready_for_handoff");
-    assert_eq!(
-        stepped_json["drive_after"]["handoff_task"]["task_id"],
-        "task-002"
-    );
-    assert_forge_store_prefix(&stepped_json["drive_before"]["next_command"], &store);
-    assert_forge_store_prefix(&stepped_json["drive_after"]["next_command"], &store);
-
-    let response_path = store
-        .parent()
-        .unwrap()
-        .join(stepped_json["response_artifact_path"].as_str().unwrap());
-    let response_json: Value = serde_json::from_slice(&fs::read(response_path).unwrap()).unwrap();
-    let expected_command_prefix = format!("forge --store '{}' ", store.display());
-    assert!(response_json["validation_evidence"][0]["command"]
+    assert_eq!(stepped_json["output_artifact"], Value::Null);
+    assert_eq!(stepped_json["response_artifact_path"], Value::Null);
+    assert_eq!(stepped_json["validation"], Value::Null);
+    assert_eq!(stepped_json["drive_after"], Value::Null);
+    assert!(stepped_json["reason"]
         .as_str()
         .unwrap()
-        .starts_with(&expected_command_prefix));
+        .contains("real executor execution receipt"));
+    assert_forge_store_prefix(&stepped_json["drive_before"]["next_command"], &store);
 
     let status = forge()
         .args([
@@ -40450,8 +40751,8 @@ fn request_step_auto_promotes_ready_deterministic_task_and_advances_drive() {
         .stdout
         .clone();
     let status_json: Value = serde_json::from_slice(&status).unwrap();
-    assert_eq!(status_json["task_summary"]["completed"], 1);
-    assert_eq!(status_json["artifact_count"], 1);
+    assert_eq!(status_json["task_summary"]["completed"], 0);
+    assert_eq!(status_json["artifact_count"], 0);
     assert_eq!(
         status_json["outcome_status"]["schema_version"],
         "forge.outcome_status.v1"
@@ -40542,7 +40843,7 @@ fn request_step_auto_promotes_ready_deterministic_task_and_advances_drive() {
     let mcp_step_json: Value = serde_json::from_slice(&mcp_step).unwrap();
     assert_eq!(mcp_step_json["status"], "ok");
     assert_eq!(mcp_step_json["tool_name"], "forge.run.step");
-    assert_eq!(mcp_step_json["result"]["status"], "stepped");
+    assert_eq!(mcp_step_json["result"]["status"], "handoff_required");
     assert_eq!(
         mcp_step_json["result"]["stepped_task"]["task_id"],
         "task-001"
@@ -40580,11 +40881,19 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
             "--store",
             store.to_str().unwrap(),
             "request",
-            "step",
+            "complete-task",
             "--run",
             run_id,
+            "--task",
+            "task-001",
             "--executor",
             "codex",
+            "--summary",
+            "Codex parsed the request and recorded an explicit execution receipt.",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "intent parsing receipt passed",
             "--origin",
             "codex",
             "--output",
@@ -40607,6 +40916,8 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
             "codex",
             "--summary",
             "Codex extracted requirements and recorded a replayable trace.",
+            "--evidence-command",
+            "true",
             "--evidence-summary",
             "requirements trace is present and retryable",
             "--tokens-in",
@@ -40672,7 +40983,7 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
     let evidence_command = response_json["validation_evidence"][0]["command"]
         .as_str()
         .unwrap();
-    assert!(evidence_command.starts_with(&format!("forge --store {} ", store.display())));
+    assert_eq!(evidence_command, "true");
 
     let trace_path = store.parent().unwrap().join(
         completed_json["trace_artifact"]["artifact"]["path"]
@@ -40745,11 +41056,19 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
             "--store",
             store.to_str().unwrap(),
             "request",
-            "step",
+            "complete-task",
             "--run",
             mcp_run_id,
+            "--task",
+            "task-001",
             "--executor",
             "codex",
+            "--summary",
+            "Codex parsed the MCP request with a real execution receipt.",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "MCP setup task receipt passed",
             "--origin",
             "codex",
             "--output",

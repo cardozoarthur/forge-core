@@ -14,9 +14,12 @@ The scripts install the same `forge` runtime on every platform.
 | Windows | x86_64 | `forge-windows-x86_64.zip` |
 
 Every release also contains `SHA256SUMS`,
-`SHA256SUMS.sigstore.json`, and `forge-core.cdx.json`. The installers download
-the archive and checksum manifest separately, require exactly one matching
-SHA-256 digest, and do not replace an installed binary if verification fails.
+`SHA256SUMS.sigstore.json`, and `forge-core.cdx.json`. The installers first
+verify the checksum manifest's Sigstore bundle against the exact repository,
+release workflow, tag, and GitHub Actions OIDC issuer. Only then do they
+download the archive, require exactly one matching SHA-256 digest, and
+atomically replace the installed binary. A missing or altered bundle, identity,
+issuer, tag, checksum, or archive leaves the existing binary unchanged.
 Archive entry order, ownership metadata, modes, and timestamps are normalized
 from the tagged commit epoch. Every build job creates each archive twice and
 requires byte-for-byte equality before upload.
@@ -33,6 +36,11 @@ newer. Ubuntu 22.04 LTS and compatible newer distributions meet that tested
 service baseline.
 
 ## Install
+
+Install
+[Cosign](https://docs.sigstore.dev/cosign/system_config/installation/) first.
+The installers intentionally fail closed when `cosign` is unavailable because
+the checksum manifest is not a trust root by itself.
 
 Linux or macOS:
 
@@ -82,23 +90,28 @@ When `FORGE_BIN_DIR` is set, add that exact directory instead of the default.
 - `FORGE_BIN_DIR`
 - `FORGE_RELEASE_BASE_URL` for an explicitly selected release mirror
 
-Use a v-prefixed `FORGE_VERSION`, for example `v0.5.0`. Do not set
-`FORGE_RELEASE_BASE_URL` to an untrusted or plaintext endpoint in production.
+Use a v-prefixed `FORGE_VERSION`, for example `v0.5.3`. A custom
+`FORGE_RELEASE_BASE_URL` requires an explicit version so the expected Sigstore
+certificate identity contains one exact tag. Release URLs must use HTTPS.
+`FORGE_INSTALLER_TEST_MODE=1` permits HTTP solely for isolated installer
+fixtures and must never be set during a real installation.
 
 ## Verify the release signature
 
-Checksum validation is mandatory in the installers. To additionally verify the
-keyless release signature before installation, install
-[Cosign](https://docs.sigstore.dev/cosign/system_config/installation/) and run:
+The installers perform this verification automatically before reading a digest
+from `SHA256SUMS`. For an explicit `v0.5.3` manual verification, run:
 
 ```bash
 cosign verify-blob \
   --bundle SHA256SUMS.sigstore.json \
-  --certificate-identity-regexp \
-    '^https://github\.com/cardozoarthur/forge-core/\.github/workflows/release\.yml@refs/tags/v.*$' \
+  --certificate-identity \
+    https://github.com/cardozoarthur/forge-core/.github/workflows/release.yml@refs/tags/v0.5.3 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS
 ```
 
 GitHub's `gh attestation verify <asset> --repo cardozoarthur/forge-core` verifies
 the build-provenance attestation for an individual downloaded asset.
+The maintainer-side signed-tag and release configuration is documented in
+the
+[release trust contract](https://github.com/cardozoarthur/forge-core/blob/main/docs/release-security.md).

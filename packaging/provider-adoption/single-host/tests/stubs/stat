@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+format=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -c)
+      format="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+case "$format" in
+  %s)
+    printf '100\n'
+    ;;
+  %Y)
+    now="${TEST_NOW_EPOCH:-200000}"
+    if [[ "${TEST_FAILURE_CATEGORY:-}" == "offhost_marker" ]]; then
+      printf '%s\n' "$((now - 90000))"
+    else
+      printf '%s\n' "$((now - 3600))"
+    fi
+    ;;
+  *)
+    exit 1
+    ;;
+esac

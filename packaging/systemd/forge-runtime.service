@@ -1,0 +1,55 @@
+[Unit]
+Description=Forge Core single-host workflow runtime
+Documentation=https://github.com/cardozoarthur/forge-core/blob/main/docs/production-single-host.md
+After=network-online.target forge-ops.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=forge
+Group=forge
+UMask=0077
+StateDirectory=forge
+StateDirectoryMode=0700
+ConfigurationDirectory=forge
+ConfigurationDirectoryMode=0750
+WorkingDirectory=/var/lib/forge/workspace
+ExecStartPre=/usr/bin/mkdir -p /var/lib/forge/workspace
+ExecStart=/usr/local/bin/forge --store /var/lib/forge/forge.sqlite events runtime-daemon --project-root /var/lib/forge/workspace --execute --dispatch-activations --continuous --cycle-retention 100 --recover-stale-services --lease-owner forge.systemd.runtime-daemon --lease-seconds 300 --heartbeat-seconds 60 --max-runs 1 --backoff-initial-seconds 5 --backoff-max-seconds 300 --scan-schedules --schedule-executor forge-runtime-scheduler --schedule-max-workers 1 --schedule-ttl-seconds 300 --interval-seconds 30 --output json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+EnvironmentFile=-/etc/forge/forge.env
+LoadCredential=forge-secret-key:/etc/forge/secret.key
+Environment=FORGE_PRODUCTION_MODE=1
+Environment=FORGE_SECRET_VAULT_KEY_FILE=/run/credentials/forge-runtime.service/forge-secret-key
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/forge
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

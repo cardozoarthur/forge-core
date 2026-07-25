@@ -38,6 +38,7 @@ pub mod outcome;
 pub mod patch;
 pub mod registry;
 pub mod request;
+pub mod request_supervisor;
 pub mod runtime;
 pub mod schedule;
 pub mod scheduler;

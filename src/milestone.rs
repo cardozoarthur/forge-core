@@ -20,8 +20,8 @@ use crate::ir::{
     SemanticAlias, TokenCollection, TokenType,
 };
 use crate::mission::{
-    load_mission, AgentHandoff, MissionDriveReport, MissionMode, MissionRecord, MissionSubmission,
-    MissionSubmitReport,
+    load_mission, AgentHandoff, MissionDriveReport, MissionMode, MissionRecord, MissionStatus,
+    MissionSubmission, MissionSubmitReport,
 };
 use crate::mission_executor::{
     load_mission_execution_receipt, verify_mission_execution_receipt, MissionExecutionReceipt,
@@ -44,6 +44,7 @@ use crate::request::{heartbeat_request, start_async_request, RunActivity};
 use crate::schedule::{create_daily_goal_research_workflow, run_daily_goal_research_smoke};
 use crate::security::{sanitize_prompt_secrets, SecretSanitizationOptions};
 use crate::storage::{ForgeStore, GlobalEventWrite};
+use crate::validation::validate_workflow;
 use crate::workflow::{
     attach_creative_artifact, attach_workflow_artifact, set_workflow_token_collection,
     update_workflow_node_brain_routing, WorkflowNodeBrainRoutingUpdateInput,
@@ -55,6 +56,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -69,11 +71,20 @@ pub const PRODUCTION_READINESS_REPORT_SCHEMA_VERSION: &str =
     "forge.milestone.production_readiness.v1";
 pub const PRODUCTION_READINESS_PLAN_SCHEMA_VERSION: &str =
     "forge.milestone.production_readiness_plan.v1";
+pub const PRODUCTION_EVIDENCE_DRAFT_SCHEMA_VERSION: &str =
+    "forge.milestone.production_evidence_draft.v1";
+pub const PRODUCTION_EVIDENCE_TEMPLATE_REPORT_SCHEMA_VERSION: &str =
+    "forge.milestone.production_evidence_template.v1";
+pub const PRODUCTION_EVIDENCE_ASSEMBLY_REPORT_SCHEMA_VERSION: &str =
+    "forge.milestone.production_evidence_assembly.v1";
+pub const PRODUCTION_SOURCE_EVIDENCE_SCHEMA_PREFIX: &str =
+    "forge.milestone.production_source_evidence";
 pub const PRODUCTION_MISSION_LIFECYCLE_RECEIPT_SCHEMA_VERSION: &str =
     "forge.milestone.mission_lifecycle.v1";
 pub const PRODUCTION_READINESS_REQUIRED_GATE_COUNT: usize = 11;
 pub const PRODUCTION_READINESS_REQUIRED_RECEIPT_COUNT: usize = 14;
 const PRODUCTION_PROFILE: &str = "single_host_linux_v0.5";
+const LAST_LEGACY_PRODUCTION_RECEIPT_VERSION: &str = "0.5.2";
 const MAX_PRODUCTION_EVIDENCE_AGE_SECONDS: u64 = 86_400;
 const MAX_PRODUCTION_EVIDENCE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RESTORE_RPO_SECONDS: u64 = 86_400;
@@ -88,6 +99,21 @@ const REQUIRED_RELEASE_TARGETS: [&str; 5] = [
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
+];
+const PRODUCTION_EVIDENCE_ASSEMBLY_KINDS: [&str; 13] = [
+    "release_matrix",
+    "release_artifacts",
+    "release_sbom",
+    "release_checksums",
+    "release_sigstore",
+    "release_provenance",
+    "installation",
+    "off_host_recovery",
+    "key_escrow",
+    "alerting",
+    "restore_drill",
+    "upgrade_rollback",
+    "bounded_load",
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -168,7 +194,9 @@ pub struct ProductionInstallationEvidence {
     pub target: String,
     pub installed_version: String,
     pub installed_binary_sha256: String,
-    pub service_active: bool,
+    pub ops_service_active: bool,
+    pub runtime_service_active: bool,
+    pub request_supervisor_service_active: bool,
     pub store_check_passed: bool,
     pub ops_authenticated_probe_passed: bool,
     pub ops_http_status: u16,
@@ -206,7 +234,9 @@ pub struct ProductionKeyEscrowEvidence {
 #[serde(deny_unknown_fields)]
 pub struct ProductionAlertEvidence {
     pub evidence: ProductionEvidenceRef,
-    pub service_failure_alert: bool,
+    pub ops_service_failure_alert: bool,
+    pub runtime_service_failure_alert: bool,
+    pub request_supervisor_service_failure_alert: bool,
     pub store_check_alert: bool,
     pub backup_timer_alert: bool,
     pub off_host_failure_alert: bool,
@@ -342,6 +372,85 @@ pub struct ProductionReadinessManifest {
 }
 
 #[derive(Debug, Clone)]
+pub struct ProductionEvidenceTemplateOptions<'a> {
+    pub version: &'a str,
+    pub release_version: &'a str,
+    pub evidence_root: &'a Path,
+    pub template_path: &'a Path,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProductionEvidenceAssemblyOptions<'a> {
+    pub version: &'a str,
+    pub release_version: &'a str,
+    pub evidence_root: &'a Path,
+    pub draft_path: &'a Path,
+    pub receipt_directory: &'a Path,
+    pub manifest_path: &'a Path,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProductionEvidenceTemplateReport {
+    pub schema_version: String,
+    pub status: String,
+    pub template_path: String,
+    pub release_version: String,
+    pub unresolved_field_count: usize,
+    pub files_written: u64,
+    pub infrastructure_commands_executed: u64,
+    pub infrastructure_mutations_performed: bool,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProductionEvidenceAssemblyReceiptReport {
+    pub kind: String,
+    pub artifact_path: String,
+    pub artifact_sha256: String,
+    pub source_artifact_path: String,
+    pub source_artifact_sha256: String,
+    pub observed_at_epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProductionEvidenceAssemblyReport {
+    pub schema_version: String,
+    pub status: String,
+    pub manifest_path: String,
+    pub manifest_sha256: String,
+    pub release_version: String,
+    pub receipt_count: usize,
+    pub source_artifact_count: usize,
+    pub receipts: Vec<ProductionEvidenceAssemblyReceiptReport>,
+    pub mission_operational_lifecycle_artifact: String,
+    pub files_written: u64,
+    pub infrastructure_commands_executed: u64,
+    pub infrastructure_mutations_performed: bool,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProductionEvidenceDraftSource {
+    artifact_path: String,
+    observed_at_epoch: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProductionSourceEvidence {
+    schema_version: String,
+    kind: String,
+    status: String,
+    subject_version: String,
+    observed_at_epoch: u64,
+    execution_mode: String,
+    producer: String,
+    claims: serde_json::Value,
+    evidence: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
 pub struct ProductionReadinessOptions<'a> {
     pub version: &'a str,
     pub manifest_path: &'a Path,
@@ -414,14 +523,20 @@ pub struct ProductionReadinessPlanReport {
     pub next_action: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProductionEvidenceReceipt {
-    schema_version: String,
-    kind: String,
-    status: String,
-    subject_version: String,
-    claims_sha256: String,
+pub struct ProductionEvidenceReceipt {
+    pub schema_version: String,
+    pub kind: String,
+    pub status: String,
+    pub subject_version: String,
+    pub claims_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_artifact_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_artifact_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_observed_at_epoch: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -942,7 +1057,11 @@ pub fn build_production_readiness_plan(version: &str) -> Result<ProductionReadin
             ),
             requirement(
                 "installed_ops_health",
-                &["installed version and binary digest", "authenticated Ops health"],
+                &[
+                    "installed version and binary digest",
+                    "Ops, runtime and request-supervisor services active",
+                    "authenticated Ops health",
+                ],
             ),
             requirement(
                 "off_host_recovery",
@@ -954,7 +1073,10 @@ pub fn build_production_readiness_plan(version: &str) -> Result<ProductionReadin
             ),
             requirement(
                 "alerting",
-                &["service, store, backup, off-host, disk and backup-age alerts"],
+                &[
+                    "Ops, runtime and request-supervisor service-failure alerts",
+                    "store, backup, off-host, disk and backup-age alerts",
+                ],
             ),
             requirement(
                 "restore_drill",
@@ -984,6 +1106,1107 @@ pub fn build_production_readiness_plan(version: &str) -> Result<ProductionReadin
             "Collect the listed evidence into the secret-free manifest, then run the read-only evaluator; no command or infrastructure mutation is authorized by this plan."
                 .to_string(),
     })
+}
+
+pub fn write_production_evidence_template(
+    options: ProductionEvidenceTemplateOptions<'_>,
+) -> Result<ProductionEvidenceTemplateReport> {
+    validate_production_evidence_release_identity(options.version, options.release_version)?;
+    let evidence_root = canonical_production_evidence_root(options.evidence_root)?;
+    let template_path =
+        contained_production_relative_path(options.template_path, "production evidence template")?;
+    let template = production_evidence_draft_template(options.version, options.release_version);
+    let unresolved_field_count = count_json_nulls(&template);
+    let mut bytes = serde_json::to_vec_pretty(&template)
+        .context("failed serialize production evidence template")?;
+    bytes.push(b'\n');
+    let persisted_path = write_new_contained_production_file(
+        &evidence_root,
+        &template_path,
+        &bytes,
+        "production evidence template",
+    )?;
+
+    Ok(ProductionEvidenceTemplateReport {
+        schema_version: PRODUCTION_EVIDENCE_TEMPLATE_REPORT_SCHEMA_VERSION.to_string(),
+        status: "template_written".to_string(),
+        template_path: relative_production_path_string(&template_path, "template path")?,
+        release_version: options.release_version.to_string(),
+        unresolved_field_count,
+        files_written: 1,
+        infrastructure_commands_executed: 0,
+        infrastructure_mutations_performed: false,
+        next_action: format!(
+            "Fill every null with observed claims and source artifacts, paste the exact production-mission-evidence manifest_section, then assemble {}.",
+            persisted_path.display()
+        ),
+    })
+}
+
+pub fn assemble_production_evidence(
+    options: ProductionEvidenceAssemblyOptions<'_>,
+) -> Result<ProductionEvidenceAssemblyReport> {
+    validate_production_evidence_release_identity(options.version, options.release_version)?;
+    let evidence_root = canonical_production_evidence_root(options.evidence_root)?;
+    let draft_path =
+        contained_production_relative_path(options.draft_path, "production evidence draft")?;
+    let receipt_directory = contained_production_relative_path(
+        options.receipt_directory,
+        "production evidence receipt directory",
+    )?;
+    let manifest_path =
+        contained_production_relative_path(options.manifest_path, "production readiness manifest")?;
+    if draft_path == manifest_path {
+        bail!("production evidence draft and output manifest paths must differ");
+    }
+
+    let draft_path_value = relative_production_path_string(&draft_path, "draft path")?;
+    let draft_file = resolve_production_evidence_path(&evidence_root, &draft_path_value)?;
+    let draft_bytes =
+        read_bounded_production_text_artifact(&draft_file, "production evidence draft")?;
+    let mut draft: serde_json::Value =
+        serde_json::from_slice(&draft_bytes).context("failed parse production evidence draft")?;
+    if let Some(path) = first_json_null_path(&draft) {
+        bail!("production evidence draft contains unresolved null at {path}");
+    }
+    validate_production_draft_top_level_keys(&draft)?;
+
+    let draft_object = draft
+        .as_object_mut()
+        .context("production evidence draft must be a JSON object")?;
+    let schema_version = draft_object
+        .get("schema_version")
+        .and_then(serde_json::Value::as_str)
+        .context("production evidence draft schema_version must be a string")?;
+    if schema_version != PRODUCTION_EVIDENCE_DRAFT_SCHEMA_VERSION {
+        bail!(
+            "unsupported production evidence draft schema `{schema_version}`; expected `{PRODUCTION_EVIDENCE_DRAFT_SCHEMA_VERSION}`"
+        );
+    }
+    let sources_value = draft_object
+        .remove("sources")
+        .context("production evidence draft is missing sources")?;
+    let sources: BTreeMap<String, ProductionEvidenceDraftSource> =
+        serde_json::from_value(sources_value)
+            .context("failed parse production evidence draft sources")?;
+    validate_production_draft_source_kinds(&sources)?;
+    inject_production_draft_evidence_refs(draft_object, &sources)?;
+    draft_object.insert(
+        "schema_version".to_string(),
+        serde_json::Value::String(PRODUCTION_READINESS_MANIFEST_SCHEMA_VERSION.to_string()),
+    );
+
+    let mut manifest: ProductionReadinessManifest = serde_json::from_value(draft)
+        .context("failed parse completed production evidence claims")?;
+    validate_completed_production_draft(&manifest, options.version, options.release_version)?;
+    let now_epoch =
+        u64::try_from(Utc::now().timestamp()).context("system clock is before Unix epoch")?;
+
+    struct PreparedReceipt {
+        report: ProductionEvidenceAssemblyReceiptReport,
+        artifact_path: PathBuf,
+        bytes: Vec<u8>,
+        evidence: ProductionEvidenceRef,
+    }
+
+    let mut prepared = Vec::with_capacity(PRODUCTION_EVIDENCE_ASSEMBLY_KINDS.len());
+    let mut output_paths = BTreeSet::new();
+    let mut canonical_source_paths = BTreeSet::new();
+    let draft_path_string = relative_production_path_string(&draft_path, "draft path")?;
+    let manifest_path_string = relative_production_path_string(&manifest_path, "manifest path")?;
+    output_paths.insert(draft_path_string.clone());
+    if !output_paths.insert(manifest_path_string.clone()) {
+        bail!("production evidence output paths must be unique");
+    }
+
+    for kind in PRODUCTION_EVIDENCE_ASSEMBLY_KINDS {
+        let source = sources
+            .get(kind)
+            .with_context(|| format!("production evidence source `{kind}` is missing"))?;
+        if !evidence_epoch_is_fresh(
+            source.observed_at_epoch,
+            now_epoch,
+            MAX_PRODUCTION_EVIDENCE_AGE_SECONDS,
+        ) {
+            bail!("production evidence source `{kind}` is future-dated, zero or stale");
+        }
+        let source_path =
+            contained_production_relative_path(Path::new(&source.artifact_path), kind)?;
+        let source_path_string =
+            relative_production_path_string(&source_path, "source artifact path")?;
+        let canonical_source =
+            resolve_production_evidence_path(&evidence_root, &source_path_string)
+                .with_context(|| format!("failed resolve source artifact for `{kind}`"))?;
+        if !canonical_source_paths.insert(canonical_source.clone()) {
+            bail!("production evidence source `{kind}` reuses another source artifact");
+        }
+        let source_bytes = read_bounded_production_text_artifact(&canonical_source, kind)?;
+        let claims = production_readiness_claims_value(&manifest, kind)?;
+        validate_production_source_evidence(
+            &source_bytes,
+            kind,
+            options.release_version,
+            source.observed_at_epoch,
+            &claims,
+        )?;
+        let source_artifact_sha256 = hex_sha256(&source_bytes);
+
+        let receipt_path = receipt_directory.join(format!("{kind}.json"));
+        let receipt_path =
+            contained_production_relative_path(&receipt_path, "production evidence receipt")?;
+        let receipt_path_string =
+            relative_production_path_string(&receipt_path, "receipt artifact path")?;
+        if !output_paths.insert(receipt_path_string.clone()) {
+            bail!("production evidence output path `{receipt_path_string}` is duplicated");
+        }
+        if receipt_path_string == source_path_string {
+            bail!("production evidence receipt `{kind}` must not overwrite its source artifact");
+        }
+
+        let claims_sha256 = hex_sha256(
+            &serde_json::to_vec(&claims)
+                .context("failed to serialize canonical production evidence claims")?,
+        );
+        let receipt = ProductionEvidenceReceipt {
+            schema_version: production_source_bound_receipt_schema(kind),
+            kind: kind.to_string(),
+            status: "passed".to_string(),
+            subject_version: options.release_version.to_string(),
+            claims_sha256,
+            source_artifact_path: Some(source_path_string.clone()),
+            source_artifact_sha256: Some(source_artifact_sha256.clone()),
+            source_observed_at_epoch: Some(source.observed_at_epoch),
+        };
+        let bytes = serde_json::to_vec(&receipt)
+            .with_context(|| format!("failed serialize production evidence receipt `{kind}`"))?;
+        let artifact_sha256 = hex_sha256(&bytes);
+        let evidence = ProductionEvidenceRef {
+            artifact_path: receipt_path_string.clone(),
+            artifact_sha256: artifact_sha256.clone(),
+            observed_at_epoch: source.observed_at_epoch,
+        };
+        prepared.push(PreparedReceipt {
+            report: ProductionEvidenceAssemblyReceiptReport {
+                kind: kind.to_string(),
+                artifact_path: receipt_path_string,
+                artifact_sha256,
+                source_artifact_path: source_path_string,
+                source_artifact_sha256,
+                observed_at_epoch: source.observed_at_epoch,
+            },
+            artifact_path: receipt_path,
+            bytes,
+            evidence,
+        });
+    }
+
+    for receipt in &prepared {
+        set_production_evidence_ref(
+            &mut manifest,
+            &receipt.report.kind,
+            receipt.evidence.clone(),
+        )?;
+    }
+
+    let mission_artifact_path = manifest
+        .mission_operational_lifecycle
+        .evidence
+        .artifact_path
+        .clone();
+    if output_paths.contains(&mission_artifact_path) {
+        bail!("mission operational lifecycle artifact path conflicts with assembly output");
+    }
+    bind_existing_mission_lifecycle_artifact(
+        &mut manifest,
+        &evidence_root,
+        now_epoch,
+        options.release_version,
+    )?;
+
+    let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .context("failed serialize production readiness manifest")?;
+    manifest_bytes.push(b'\n');
+    if manifest_bytes.is_empty()
+        || u64::try_from(manifest_bytes.len()).unwrap_or(u64::MAX) > MAX_PRODUCTION_EVIDENCE_BYTES
+    {
+        bail!(
+            "production readiness manifest must contain 1..={MAX_PRODUCTION_EVIDENCE_BYTES} bytes"
+        );
+    }
+    let manifest_sha256 = hex_sha256(&manifest_bytes);
+
+    let receipt_states = prepared
+        .iter()
+        .map(|receipt| {
+            inspect_exact_production_output(
+                &evidence_root,
+                &receipt.artifact_path,
+                &receipt.bytes,
+                "production evidence receipt",
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let manifest_state = inspect_exact_production_output(
+        &evidence_root,
+        &manifest_path,
+        &manifest_bytes,
+        "production readiness manifest",
+    )?;
+    if manifest_state == ExactProductionOutputState::Exact
+        && receipt_states.contains(&ExactProductionOutputState::Missing)
+    {
+        bail!(
+            "committed production evidence manifest exists but its receipt set is incomplete; refusing to repair files behind a published commit marker"
+        );
+    }
+
+    let mut files_written = 0_u64;
+    if manifest_state == ExactProductionOutputState::Missing {
+        for receipt in &prepared {
+            if write_or_reuse_exact_production_output(
+                &evidence_root,
+                &receipt.artifact_path,
+                &receipt.bytes,
+                "production evidence receipt",
+            )? {
+                files_written = files_written.saturating_add(1);
+            }
+        }
+
+        // The manifest is the assembly commit marker. Recheck and durably sync
+        // every receipt immediately before publishing it so an interrupted run
+        // can resume from exact receipt bytes without exposing a partial assembly.
+        for receipt in &prepared {
+            sync_exact_production_output(
+                &evidence_root,
+                &receipt.artifact_path,
+                &receipt.bytes,
+                "production evidence receipt",
+            )?;
+        }
+        if write_or_reuse_exact_production_output(
+            &evidence_root,
+            &manifest_path,
+            &manifest_bytes,
+            "production readiness manifest",
+        )? {
+            files_written = files_written.saturating_add(1);
+        }
+    } else {
+        for receipt in &prepared {
+            sync_exact_production_output(
+                &evidence_root,
+                &receipt.artifact_path,
+                &receipt.bytes,
+                "production evidence receipt",
+            )?;
+        }
+        sync_exact_production_output(
+            &evidence_root,
+            &manifest_path,
+            &manifest_bytes,
+            "production readiness manifest",
+        )?;
+    }
+
+    for receipt in &prepared {
+        if inspect_exact_production_output(
+            &evidence_root,
+            &receipt.artifact_path,
+            &receipt.bytes,
+            "production evidence receipt",
+        )? != ExactProductionOutputState::Exact
+        {
+            bail!("production evidence receipt is missing after manifest commit");
+        }
+    }
+    if inspect_exact_production_output(
+        &evidence_root,
+        &manifest_path,
+        &manifest_bytes,
+        "production readiness manifest",
+    )? != ExactProductionOutputState::Exact
+    {
+        bail!("production readiness manifest commit marker is missing after assembly");
+    }
+
+    Ok(ProductionEvidenceAssemblyReport {
+        schema_version: PRODUCTION_EVIDENCE_ASSEMBLY_REPORT_SCHEMA_VERSION.to_string(),
+        status: "assembled".to_string(),
+        manifest_path: manifest_path_string.clone(),
+        manifest_sha256,
+        release_version: options.release_version.to_string(),
+        receipt_count: prepared.len(),
+        source_artifact_count: sources.len(),
+        receipts: prepared.into_iter().map(|receipt| receipt.report).collect(),
+        mission_operational_lifecycle_artifact: mission_artifact_path,
+        files_written,
+        infrastructure_commands_executed: 0,
+        infrastructure_mutations_performed: false,
+        next_action: format!(
+            "Run `forge milestone production-readiness --version {} --manifest {} --evidence-root <same-root> --output json`; assembly does not promote readiness.",
+            options.version, manifest_path_string
+        ),
+    })
+}
+
+fn production_evidence_draft_template(version: &str, release_version: &str) -> serde_json::Value {
+    let sources = PRODUCTION_EVIDENCE_ASSEMBLY_KINDS
+        .into_iter()
+        .map(|kind| {
+            (
+                kind.to_string(),
+                serde_json::json!({
+                    "artifact_path": null,
+                    "observed_at_epoch": null,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    serde_json::json!({
+        "schema_version": PRODUCTION_EVIDENCE_DRAFT_SCHEMA_VERSION,
+        "milestone": version,
+        "profile": PRODUCTION_PROFILE,
+        "release_version": release_version,
+        "generated_at_epoch": null,
+        "release": {
+            "successful_targets": null,
+            "binary_sha256_by_target": null,
+            "sbom_format": null,
+            "sbom_component_count": null,
+            "checksum_entry_count": null,
+            "checksums_verified": null,
+            "sigstore_verified": null,
+            "provenance_verified": null
+        },
+        "installation": {
+            "target": null,
+            "installed_version": null,
+            "installed_binary_sha256": null,
+            "ops_service_active": null,
+            "runtime_service_active": null,
+            "request_supervisor_service_active": null,
+            "store_check_passed": null,
+            "ops_authenticated_probe_passed": null,
+            "ops_http_status": null,
+            "ops_loopback_only": null
+        },
+        "off_host_backup": {
+            "recovery_challenge_epoch": null,
+            "immutable_upload_passed": null,
+            "remote_digest_verified": null,
+            "download_digest_verified": null,
+            "downloaded_store_check_passed": null,
+            "disposable_restore_passed": null,
+            "restored_store_check_passed": null,
+            "off_host_retention_enabled": null,
+            "forge_key_isolated_from_uploader": null,
+            "uploader_credentials_isolated_from_forge": null
+        },
+        "key_escrow": {
+            "encrypted": null,
+            "separate_access_control": null,
+            "recovery_key_available": null,
+            "restore_with_escrowed_key_tested": null,
+            "excluded_from_database_backup": null
+        },
+        "alerts": {
+            "ops_service_failure_alert": null,
+            "runtime_service_failure_alert": null,
+            "request_supervisor_service_failure_alert": null,
+            "store_check_alert": null,
+            "backup_timer_alert": null,
+            "off_host_failure_alert": null,
+            "disk_space_alert": null,
+            "backup_age_alert": null,
+            "delivery_route_verified": null
+        },
+        "restore_drill": {
+            "drill_epoch": null,
+            "disposable_recovery_host": null,
+            "downloaded_store_check_passed": null,
+            "restored_store_check_passed": null,
+            "canary_workflow_verified": null,
+            "ops_authenticated_probe_passed": null,
+            "rpo_seconds": null,
+            "rto_seconds": null
+        },
+        "upgrade_rollback": {
+            "target_version": null,
+            "simulation_completed": null,
+            "pre_upgrade_backup_verified": null,
+            "upgraded_store_check_passed": null,
+            "upgraded_ops_health_passed": null,
+            "rollback_completed": null,
+            "previous_version_store_check_passed": null,
+            "previous_version_ops_health_passed": null,
+            "target_reinstalled_and_healthy": null
+        },
+        "bounded_load": {
+            "duration_seconds": null,
+            "concurrency": null,
+            "operation_count": null,
+            "error_count": null,
+            "p95_latency_millis": null,
+            "max_rss_bytes": null,
+            "max_rss_limit_bytes": null,
+            "timeout_enforced": null,
+            "resource_limit_enforced": null,
+            "store_check_passed": null,
+            "crash_restart_verified": null
+        },
+        "mission_operational_lifecycle": null,
+        "sources": serde_json::Value::Object(sources)
+    })
+}
+
+fn validate_production_evidence_release_identity(
+    version: &str,
+    release_version: &str,
+) -> Result<()> {
+    if version != SUPPORTED_MILESTONE {
+        bail!("unsupported production milestone `{version}`; expected `{SUPPORTED_MILESTONE}`");
+    }
+    if release_version != env!("CARGO_PKG_VERSION") {
+        bail!(
+            "production evidence release version `{release_version}` must match running Forge version `{}`",
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+    if !release_version_matches_milestone(release_version, version) {
+        bail!(
+            "production evidence release version `{release_version}` does not belong to milestone `{version}`"
+        );
+    }
+    Ok(())
+}
+
+fn canonical_production_evidence_root(evidence_root: &Path) -> Result<PathBuf> {
+    let metadata = fs::symlink_metadata(evidence_root).with_context(|| {
+        format!(
+            "failed inspect production evidence root {}",
+            evidence_root.display()
+        )
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!("production evidence root must be a non-symlink directory");
+    }
+    fs::canonicalize(evidence_root).with_context(|| {
+        format!(
+            "failed resolve production evidence root {}",
+            evidence_root.display()
+        )
+    })
+}
+
+fn contained_production_relative_path(value: &Path, label: &str) -> Result<PathBuf> {
+    if value.as_os_str().is_empty()
+        || value.is_absolute()
+        || !value
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        bail!("{label} must be a contained relative path");
+    }
+    Ok(value.to_path_buf())
+}
+
+fn relative_production_path_string(value: &Path, label: &str) -> Result<String> {
+    value
+        .to_str()
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("{label} must be valid UTF-8"))
+}
+
+fn count_json_nulls(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null => 1,
+        serde_json::Value::Array(values) => values.iter().map(count_json_nulls).sum(),
+        serde_json::Value::Object(values) => values.values().map(count_json_nulls).sum(),
+        _ => 0,
+    }
+}
+
+fn first_json_null_path(value: &serde_json::Value) -> Option<String> {
+    fn visit(value: &serde_json::Value, path: &str) -> Option<String> {
+        match value {
+            serde_json::Value::Null => Some(path.to_string()),
+            serde_json::Value::Array(values) => values
+                .iter()
+                .enumerate()
+                .find_map(|(index, value)| visit(value, &format!("{path}[{index}]"))),
+            serde_json::Value::Object(values) => values
+                .iter()
+                .find_map(|(key, value)| visit(value, &format!("{path}.{key}"))),
+            _ => None,
+        }
+    }
+    visit(value, "$")
+}
+
+fn validate_production_draft_top_level_keys(draft: &serde_json::Value) -> Result<()> {
+    let object = draft
+        .as_object()
+        .context("production evidence draft must be a JSON object")?;
+    let actual = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    let expected = [
+        "schema_version",
+        "milestone",
+        "profile",
+        "release_version",
+        "generated_at_epoch",
+        "release",
+        "installation",
+        "off_host_backup",
+        "key_escrow",
+        "alerts",
+        "restore_drill",
+        "upgrade_rollback",
+        "bounded_load",
+        "mission_operational_lifecycle",
+        "sources",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    if actual != expected {
+        let missing = expected.difference(&actual).copied().collect::<Vec<_>>();
+        let unknown = actual.difference(&expected).copied().collect::<Vec<_>>();
+        bail!(
+            "production evidence draft top-level keys differ: missing={missing:?} unknown={unknown:?}"
+        );
+    }
+    Ok(())
+}
+
+fn validate_production_draft_source_kinds(
+    sources: &BTreeMap<String, ProductionEvidenceDraftSource>,
+) -> Result<()> {
+    let actual = sources.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    let expected = PRODUCTION_EVIDENCE_ASSEMBLY_KINDS
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if actual != expected {
+        let missing = expected.difference(&actual).copied().collect::<Vec<_>>();
+        let unknown = actual.difference(&expected).copied().collect::<Vec<_>>();
+        bail!(
+            "production evidence draft must contain all 13 source kinds exactly: missing={missing:?} unknown={unknown:?}"
+        );
+    }
+    Ok(())
+}
+
+fn draft_evidence_ref(source: &ProductionEvidenceDraftSource) -> Result<serde_json::Value> {
+    serde_json::to_value(ProductionEvidenceRef {
+        artifact_path: source.artifact_path.clone(),
+        artifact_sha256: String::new(),
+        observed_at_epoch: source.observed_at_epoch,
+    })
+    .context("failed serialize production evidence draft source reference")
+}
+
+fn draft_object_section_mut<'a>(
+    draft: &'a mut serde_json::Map<String, serde_json::Value>,
+    section: &str,
+) -> Result<&'a mut serde_json::Map<String, serde_json::Value>> {
+    draft
+        .get_mut(section)
+        .and_then(serde_json::Value::as_object_mut)
+        .with_context(|| format!("production evidence draft section `{section}` must be an object"))
+}
+
+fn inject_production_draft_evidence_refs(
+    draft: &mut serde_json::Map<String, serde_json::Value>,
+    sources: &BTreeMap<String, ProductionEvidenceDraftSource>,
+) -> Result<()> {
+    let source = |kind: &str| {
+        sources
+            .get(kind)
+            .with_context(|| format!("production evidence source `{kind}` is missing"))
+            .and_then(draft_evidence_ref)
+    };
+    let release = draft_object_section_mut(draft, "release")?;
+    release.insert("matrix".to_string(), source("release_matrix")?);
+    release.insert("artifacts".to_string(), source("release_artifacts")?);
+    release.insert("sbom".to_string(), source("release_sbom")?);
+    release.insert("checksums".to_string(), source("release_checksums")?);
+    release.insert("sigstore".to_string(), source("release_sigstore")?);
+    release.insert("provenance".to_string(), source("release_provenance")?);
+    for (section, kind) in [
+        ("installation", "installation"),
+        ("off_host_backup", "off_host_recovery"),
+        ("key_escrow", "key_escrow"),
+        ("alerts", "alerting"),
+        ("restore_drill", "restore_drill"),
+        ("upgrade_rollback", "upgrade_rollback"),
+        ("bounded_load", "bounded_load"),
+    ] {
+        draft_object_section_mut(draft, section)?.insert("evidence".to_string(), source(kind)?);
+    }
+    Ok(())
+}
+
+fn validate_completed_production_draft(
+    manifest: &ProductionReadinessManifest,
+    version: &str,
+    release_version: &str,
+) -> Result<()> {
+    if manifest.schema_version != PRODUCTION_READINESS_MANIFEST_SCHEMA_VERSION {
+        bail!("completed production evidence draft produced unsupported manifest schema");
+    }
+    if manifest.milestone != version {
+        bail!("production evidence draft milestone does not match --version");
+    }
+    if manifest.profile != PRODUCTION_PROFILE {
+        bail!("production evidence draft profile is unsupported");
+    }
+    if manifest.release_version != release_version {
+        bail!("production evidence draft release_version does not match --release-version");
+    }
+    let now_epoch =
+        u64::try_from(Utc::now().timestamp()).context("system clock is before Unix epoch")?;
+    if !evidence_epoch_is_fresh(
+        manifest.generated_at_epoch,
+        now_epoch,
+        MAX_PRODUCTION_EVIDENCE_AGE_SECONDS,
+    ) {
+        bail!("production evidence draft generated_at_epoch is future-dated, zero or stale");
+    }
+    Ok(())
+}
+
+fn read_bounded_production_text_artifact(path: &Path, label: &str) -> Result<Vec<u8>> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("failed inspect {label} {}", path.display()))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_PRODUCTION_EVIDENCE_BYTES
+    {
+        bail!(
+            "{label} must be a non-empty file no larger than {MAX_PRODUCTION_EVIDENCE_BYTES} bytes"
+        );
+    }
+    let bytes =
+        fs::read(path).with_context(|| format!("failed read {label} {}", path.display()))?;
+    let text = std::str::from_utf8(&bytes)
+        .with_context(|| format!("{label} must be inspectable UTF-8 text"))?;
+    if !production_text_is_secret_free(text, "production_evidence_assembly") {
+        bail!("{label} contains detected secret material");
+    }
+    Ok(bytes)
+}
+
+fn production_source_evidence_schema(kind: &str) -> String {
+    format!("{PRODUCTION_SOURCE_EVIDENCE_SCHEMA_PREFIX}.{kind}.v1")
+}
+
+fn validate_production_source_evidence(
+    bytes: &[u8],
+    kind: &str,
+    release_version: &str,
+    observed_at_epoch: u64,
+    expected_claims: &serde_json::Value,
+) -> Result<()> {
+    let source: ProductionSourceEvidence = serde_json::from_slice(bytes).with_context(|| {
+        format!("production evidence source `{kind}` is not a typed attestation")
+    })?;
+    if source.schema_version != production_source_evidence_schema(kind) {
+        bail!("production evidence source `{kind}` has an unsupported schema");
+    }
+    if source.kind != kind {
+        bail!("production evidence source `{kind}` declares another evidence kind");
+    }
+    if source.status != "passed" {
+        bail!("production evidence source `{kind}` does not record a passed outcome");
+    }
+    if source.subject_version != release_version {
+        bail!("production evidence source `{kind}` is bound to another release");
+    }
+    if source.observed_at_epoch != observed_at_epoch {
+        bail!("production evidence source `{kind}` observation differs from the draft");
+    }
+    if source.execution_mode != "production" {
+        bail!("production evidence source `{kind}` was not collected in production mode");
+    }
+    if source.producer.trim().is_empty()
+        || source.producer.len() > 128
+        || source.producer.chars().any(char::is_control)
+    {
+        bail!("production evidence source `{kind}` has an invalid producer identity");
+    }
+    if source
+        .claims
+        .as_object()
+        .is_none_or(|claims| claims.is_empty())
+        || source.claims != *expected_claims
+    {
+        bail!("production evidence source `{kind}` claims do not match the completed draft");
+    }
+    if source
+        .evidence
+        .as_object()
+        .is_none_or(|evidence| evidence.is_empty())
+    {
+        bail!("production evidence source `{kind}` has no structured collector evidence");
+    }
+    Ok(())
+}
+
+fn production_source_bound_receipt_schema(kind: &str) -> String {
+    format!("forge.milestone.production_evidence.{kind}.v2")
+}
+
+fn legacy_production_receipt_schema(kind: &str) -> String {
+    format!("forge.milestone.production_evidence.{kind}.v1")
+}
+
+fn production_receipt_schema_supported(kind: &str, schema: &str, subject_version: &str) -> bool {
+    schema == production_source_bound_receipt_schema(kind)
+        || (subject_version == LAST_LEGACY_PRODUCTION_RECEIPT_VERSION
+            && schema == legacy_production_receipt_schema(kind))
+}
+
+fn set_production_evidence_ref(
+    manifest: &mut ProductionReadinessManifest,
+    kind: &str,
+    evidence: ProductionEvidenceRef,
+) -> Result<()> {
+    match kind {
+        "release_matrix" => manifest.release.matrix = evidence,
+        "release_artifacts" => manifest.release.artifacts = evidence,
+        "release_sbom" => manifest.release.sbom = evidence,
+        "release_checksums" => manifest.release.checksums = evidence,
+        "release_sigstore" => manifest.release.sigstore = evidence,
+        "release_provenance" => manifest.release.provenance = evidence,
+        "installation" => manifest.installation.evidence = evidence,
+        "off_host_recovery" => manifest.off_host_backup.evidence = evidence,
+        "key_escrow" => manifest.key_escrow.evidence = evidence,
+        "alerting" => manifest.alerts.evidence = evidence,
+        "restore_drill" => manifest.restore_drill.evidence = evidence,
+        "upgrade_rollback" => manifest.upgrade_rollback.evidence = evidence,
+        "bounded_load" => manifest.bounded_load.evidence = evidence,
+        _ => bail!("unsupported production evidence assembly kind `{kind}`"),
+    }
+    Ok(())
+}
+
+fn bind_existing_mission_lifecycle_artifact(
+    manifest: &mut ProductionReadinessManifest,
+    evidence_root: &Path,
+    now_epoch: u64,
+    release_version: &str,
+) -> Result<()> {
+    let evidence = manifest.mission_operational_lifecycle.evidence.clone();
+    if !evidence_epoch_is_fresh(
+        evidence.observed_at_epoch,
+        now_epoch,
+        MAX_PRODUCTION_EVIDENCE_AGE_SECONDS,
+    ) {
+        bail!("mission operational lifecycle artifact is future-dated, zero or stale");
+    }
+    let path = resolve_production_evidence_path(evidence_root, &evidence.artifact_path)
+        .context("failed resolve mission operational lifecycle artifact")?;
+    let bytes = read_bounded_production_text_artifact(&path, "mission operational lifecycle")?;
+    let actual_sha256 = hex_sha256(&bytes);
+    if !evidence.artifact_sha256.is_empty() && evidence.artifact_sha256 != actual_sha256 {
+        bail!("mission operational lifecycle artifact digest drifted from draft");
+    }
+    let receipt: ProductionMissionLifecycleReceipt = serde_json::from_slice(&bytes)
+        .context("failed parse mission operational lifecycle receipt")?;
+    let expected_claims =
+        production_readiness_claims_sha256(manifest, "mission_operational_lifecycle")?;
+    if receipt.schema_version != PRODUCTION_MISSION_LIFECYCLE_RECEIPT_SCHEMA_VERSION
+        || receipt.kind != "mission_operational_lifecycle"
+        || receipt.status != "passed"
+        || receipt.subject_version != release_version
+        || receipt.claims_sha256 != expected_claims
+    {
+        bail!("mission operational lifecycle receipt does not match completed draft claims");
+    }
+    manifest
+        .mission_operational_lifecycle
+        .evidence
+        .artifact_sha256 = actual_sha256;
+    Ok(())
+}
+
+fn ensure_new_production_output_path(evidence_root: &Path, relative: &Path) -> Result<()> {
+    let relative = contained_production_relative_path(relative, "production evidence output")?;
+    let target = evidence_root.join(relative);
+    match fs::symlink_metadata(&target) {
+        Ok(_) => bail!(
+            "production evidence output already exists and will not be overwritten: {}",
+            target.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed inspect production evidence output {}",
+                target.display()
+            )
+        }),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExactProductionOutputState {
+    Missing,
+    Exact,
+}
+
+fn inspect_exact_production_output(
+    evidence_root: &Path,
+    relative: &Path,
+    expected_bytes: &[u8],
+    label: &str,
+) -> Result<ExactProductionOutputState> {
+    let relative = contained_production_relative_path(relative, label)?;
+    let unresolved_target = evidence_root.join(&relative);
+    match fs::symlink_metadata(&unresolved_target) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ExactProductionOutputState::Missing);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed inspect existing {label} {}",
+                    unresolved_target.display()
+                )
+            });
+        }
+    }
+    let parent = ensure_contained_production_parent(evidence_root, &relative)?;
+    let file_name = relative
+        .file_name()
+        .with_context(|| format!("{label} requires a file name"))?;
+    let target = parent.join(file_name);
+    let metadata = match fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ExactProductionOutputState::Missing);
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed inspect existing {label} {}", target.display()));
+        }
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        bail!(
+            "{label} already exists but is not a regular non-symlink file and will not be overwritten: {}",
+            target.display()
+        );
+    }
+    if metadata.len() != u64::try_from(expected_bytes.len()).unwrap_or(u64::MAX) {
+        bail!(
+            "{label} already exists with different content and will not be overwritten: {}",
+            target.display()
+        );
+    }
+    let canonical = fs::canonicalize(&target)
+        .with_context(|| format!("failed resolve existing {label} {}", target.display()))?;
+    if !canonical.starts_with(evidence_root) {
+        bail!("{label} escapes the production evidence root");
+    }
+    let actual_bytes = fs::read(&canonical)
+        .with_context(|| format!("failed read existing {label} {}", target.display()))?;
+    if actual_bytes != expected_bytes {
+        bail!(
+            "{label} already exists with different content and will not be overwritten: {}",
+            target.display()
+        );
+    }
+    Ok(ExactProductionOutputState::Exact)
+}
+
+fn write_or_reuse_exact_production_output(
+    evidence_root: &Path,
+    relative: &Path,
+    bytes: &[u8],
+    label: &str,
+) -> Result<bool> {
+    if inspect_exact_production_output(evidence_root, relative, bytes, label)?
+        == ExactProductionOutputState::Exact
+    {
+        return Ok(false);
+    }
+    write_new_contained_production_file(evidence_root, relative, bytes, label)?;
+    Ok(true)
+}
+
+fn sync_exact_production_output(
+    evidence_root: &Path,
+    relative: &Path,
+    expected_bytes: &[u8],
+    label: &str,
+) -> Result<()> {
+    if inspect_exact_production_output(evidence_root, relative, expected_bytes, label)?
+        != ExactProductionOutputState::Exact
+    {
+        bail!("{label} disappeared before durable assembly commit");
+    }
+    let relative = contained_production_relative_path(relative, label)?;
+    let parent = ensure_contained_production_parent(evidence_root, &relative)?;
+    let file_name = relative
+        .file_name()
+        .with_context(|| format!("{label} requires a file name"))?;
+    let target = parent.join(file_name);
+    fs::File::open(&target)
+        .and_then(|file| file.sync_all())
+        .with_context(|| format!("failed sync existing {label} {}", target.display()))?;
+    fs::File::open(&parent)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| {
+            format!(
+                "failed sync existing {label} directory {}",
+                parent.display()
+            )
+        })?;
+    Ok(())
+}
+
+fn ensure_contained_production_parent(evidence_root: &Path, relative: &Path) -> Result<PathBuf> {
+    let mut parent = evidence_root.to_path_buf();
+    if let Some(relative_parent) = relative.parent() {
+        for component in relative_parent.components() {
+            let Component::Normal(segment) = component else {
+                bail!("production evidence output parent must stay contained");
+            };
+            let candidate = parent.join(segment);
+            match fs::symlink_metadata(&candidate) {
+                Ok(metadata) => {
+                    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                        bail!(
+                            "production evidence output parent must be a non-symlink directory: {}",
+                            candidate.display()
+                        );
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    fs::create_dir(&candidate).with_context(|| {
+                        format!(
+                            "failed create production evidence output directory {}",
+                            candidate.display()
+                        )
+                    })?;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed inspect production evidence output directory {}",
+                            candidate.display()
+                        )
+                    });
+                }
+            }
+            parent = fs::canonicalize(&candidate).with_context(|| {
+                format!(
+                    "failed resolve production evidence output directory {}",
+                    candidate.display()
+                )
+            })?;
+            if !parent.starts_with(evidence_root) {
+                bail!("production evidence output parent escapes evidence root");
+            }
+        }
+    }
+    Ok(parent)
+}
+
+fn write_new_contained_production_file(
+    evidence_root: &Path,
+    relative: &Path,
+    bytes: &[u8],
+    label: &str,
+) -> Result<PathBuf> {
+    write_new_contained_production_file_with_post_publish(
+        evidence_root,
+        relative,
+        bytes,
+        label,
+        |_| Ok(()),
+    )
+}
+
+fn write_new_contained_production_file_with_post_publish<F>(
+    evidence_root: &Path,
+    relative: &Path,
+    bytes: &[u8],
+    label: &str,
+    post_publish: F,
+) -> Result<PathBuf>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    let relative = contained_production_relative_path(relative, label)?;
+    ensure_new_production_output_path(evidence_root, &relative)?;
+    let parent = ensure_contained_production_parent(evidence_root, &relative)?;
+    let file_name = relative
+        .file_name()
+        .with_context(|| format!("{label} requires a file name"))?;
+    let target = parent.join(file_name);
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut published = false;
+    let persist_result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| {
+                format!("failed create {label} staging file {}", temporary.display())
+            })?;
+        file.write_all(bytes).with_context(|| {
+            format!("failed write {label} staging file {}", temporary.display())
+        })?;
+        file.sync_all()
+            .with_context(|| format!("failed sync {label} staging file {}", temporary.display()))?;
+        drop(file);
+        fs::hard_link(&temporary, &target)
+            .with_context(|| format!("failed publish no-overwrite {label} {}", target.display()))?;
+        published = true;
+        post_publish(&target)?;
+        fs::remove_file(&temporary).with_context(|| {
+            format!(
+                "failed remove published {label} staging link {}",
+                temporary.display()
+            )
+        })?;
+        fs::File::open(&parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("failed sync {label} directory {}", parent.display()))?;
+        Ok(())
+    })();
+    if let Err(error) = persist_result {
+        let mut cleanup_failures = Vec::new();
+        if published {
+            if let Err(cleanup_error) = fs::remove_file(&target) {
+                cleanup_failures.push(format!("{}: {cleanup_error}", target.display()));
+            }
+        }
+        match fs::remove_file(&temporary) {
+            Ok(()) => {}
+            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(cleanup_error) => {
+                cleanup_failures.push(format!("{}: {cleanup_error}", temporary.display()));
+            }
+        }
+        if published {
+            if let Err(cleanup_error) =
+                fs::File::open(&parent).and_then(|directory| directory.sync_all())
+            {
+                cleanup_failures.push(format!("{}: {cleanup_error}", parent.display()));
+            }
+        }
+        if cleanup_failures.is_empty() {
+            return Err(error);
+        }
+        bail!(
+            "{error:#}; additionally failed rollback published {label}: {}",
+            cleanup_failures.join(", ")
+        );
+    }
+    Ok(target)
 }
 
 fn production_mission_operational_claims_value(
@@ -1054,6 +2277,18 @@ pub fn build_production_mission_lifecycle_evidence(
     let mission = load_mission(store, mission_id)?;
     if mission.mode != MissionMode::Workflow || mission.worktree.is_none() {
         bail!("mission lifecycle evidence requires a real workflow mission bound to a worktree");
+    }
+    if mission.status != MissionStatus::Completed {
+        bail!("mission lifecycle evidence requires a terminal completed mission");
+    }
+    let workflow = store.load_workflow(&mission.workflow_id)?;
+    let validation = validate_workflow(&workflow);
+    if validation.status != "passed"
+        || !validation.promotable
+        || !validation.failed_rules.is_empty()
+        || !validation.rework_tasks.is_empty()
+    {
+        bail!("mission lifecycle evidence requires a promotable workflow with no rework");
     }
     let execution_receipt = load_mission_execution_receipt(store, execution_receipt_id)?;
     verify_mission_execution_receipt(&execution_receipt)?;
@@ -1299,10 +2534,10 @@ pub fn build_production_mission_lifecycle_evidence(
     })
 }
 
-pub fn production_readiness_claims_sha256(
+pub fn production_readiness_claims_value(
     manifest: &ProductionReadinessManifest,
     kind: &str,
-) -> Result<String> {
+) -> Result<serde_json::Value> {
     let claims = match kind {
         "release_matrix" | "release_artifacts" | "release_sbom" | "release_checksums"
         | "release_sigstore" | "release_provenance" => serde_json::json!({
@@ -1319,7 +2554,9 @@ pub fn production_readiness_claims_sha256(
             "target": &manifest.installation.target,
             "installed_version": &manifest.installation.installed_version,
             "installed_binary_sha256": &manifest.installation.installed_binary_sha256,
-            "service_active": manifest.installation.service_active,
+            "ops_service_active": manifest.installation.ops_service_active,
+            "runtime_service_active": manifest.installation.runtime_service_active,
+            "request_supervisor_service_active": manifest.installation.request_supervisor_service_active,
             "store_check_passed": manifest.installation.store_check_passed,
             "ops_authenticated_probe_passed": manifest.installation.ops_authenticated_probe_passed,
             "ops_http_status": manifest.installation.ops_http_status,
@@ -1345,7 +2582,9 @@ pub fn production_readiness_claims_sha256(
             "excluded_from_database_backup": manifest.key_escrow.excluded_from_database_backup,
         }),
         "alerting" => serde_json::json!({
-            "service_failure_alert": manifest.alerts.service_failure_alert,
+            "ops_service_failure_alert": manifest.alerts.ops_service_failure_alert,
+            "runtime_service_failure_alert": manifest.alerts.runtime_service_failure_alert,
+            "request_supervisor_service_failure_alert": manifest.alerts.request_supervisor_service_failure_alert,
             "store_check_alert": manifest.alerts.store_check_alert,
             "backup_timer_alert": manifest.alerts.backup_timer_alert,
             "off_host_failure_alert": manifest.alerts.off_host_failure_alert,
@@ -1392,6 +2631,14 @@ pub fn production_readiness_claims_sha256(
         }
         _ => bail!("unsupported production evidence kind `{kind}`"),
     };
+    Ok(claims)
+}
+
+pub fn production_readiness_claims_sha256(
+    manifest: &ProductionReadinessManifest,
+    kind: &str,
+) -> Result<String> {
+    let claims = production_readiness_claims_value(manifest, kind)?;
     let bytes = serde_json::to_vec(&claims)
         .context("failed to serialize canonical production evidence claims")?;
     Ok(hex_sha256(&bytes))
@@ -1631,10 +2878,28 @@ pub fn evaluate_production_readiness(
             "installed binary digest is malformed or differs from the published artifact",
         ),
         production_check(
-            "service_and_store",
-            manifest.installation.service_active && manifest.installation.store_check_passed,
-            "Forge service is active and the production store check passed",
-            "Forge service is inactive or the production store check failed",
+            "ops_service_active",
+            manifest.installation.ops_service_active,
+            "Forge Ops service is active",
+            "Forge Ops service is inactive",
+        ),
+        production_check(
+            "runtime_service_active",
+            manifest.installation.runtime_service_active,
+            "Forge runtime service is active",
+            "Forge runtime service is inactive",
+        ),
+        production_check(
+            "request_supervisor_service_active",
+            manifest.installation.request_supervisor_service_active,
+            "Forge request-supervisor service is active",
+            "Forge request-supervisor service is inactive",
+        ),
+        production_check(
+            "store_check",
+            manifest.installation.store_check_passed,
+            "production store check passed",
+            "production store check failed",
         ),
         production_check(
             "ops_health",
@@ -1740,7 +3005,9 @@ pub fn evaluate_production_readiness(
     );
     alert_checks.push(production_check(
         "required_alerts",
-        manifest.alerts.service_failure_alert
+        manifest.alerts.ops_service_failure_alert
+            && manifest.alerts.runtime_service_failure_alert
+            && manifest.alerts.request_supervisor_service_failure_alert
             && manifest.alerts.store_check_alert
             && manifest.alerts.backup_timer_alert
             && manifest.alerts.off_host_failure_alert
@@ -2371,6 +3638,9 @@ fn production_evidence_checks(
                     status: receipt.status,
                     subject_version: receipt.subject_version,
                     claims_sha256: receipt.claims_sha256,
+                    source_artifact_path: None,
+                    source_artifact_sha256: None,
+                    source_observed_at_epoch: None,
                 }
             })
         } else {
@@ -2383,15 +3653,15 @@ fn production_evidence_checks(
             "evidence artifact is not a canonical production receipt",
         ));
         if let Ok(receipt) = receipt {
-            let expected_schema = if label == "mission_operational_lifecycle" {
-                PRODUCTION_MISSION_LIFECYCLE_RECEIPT_SCHEMA_VERSION.to_string()
+            let supported_schema = if label == "mission_operational_lifecycle" {
+                receipt.schema_version == PRODUCTION_MISSION_LIFECYCLE_RECEIPT_SCHEMA_VERSION
             } else {
-                format!("forge.milestone.production_evidence.{label}.v1")
+                production_receipt_schema_supported(label, &receipt.schema_version, subject_version)
             };
             checks.extend([
                 production_check(
                     &format!("{label}.receipt_schema"),
-                    receipt.schema_version == expected_schema,
+                    supported_schema,
                     "evidence receipt schema matches the required gate",
                     "evidence receipt schema does not match the required gate",
                 ),
@@ -2419,6 +3689,185 @@ fn production_evidence_checks(
                         && receipt.claims_sha256 == expected_claims_sha256,
                     "evidence receipt is bound to the evaluated claims",
                     "evidence receipt claims digest is malformed or differs from the manifest",
+                ),
+            ]);
+            if label != "mission_operational_lifecycle"
+                && receipt.schema_version == production_source_bound_receipt_schema(label)
+            {
+                checks.extend(production_source_artifact_checks(
+                    label,
+                    evidence,
+                    &receipt,
+                    evidence_root,
+                    now_epoch,
+                    subject_version,
+                    expected_claims_sha256,
+                ));
+            }
+        }
+    }
+    checks
+}
+
+fn production_source_artifact_checks(
+    label: &str,
+    evidence: &ProductionEvidenceRef,
+    receipt: &ProductionEvidenceReceipt,
+    evidence_root: &Path,
+    now_epoch: u64,
+    subject_version: &str,
+    expected_claims_sha256: &str,
+) -> Vec<ProductionReadinessCheck> {
+    let complete = receipt.source_artifact_path.is_some()
+        && receipt.source_artifact_sha256.is_some()
+        && receipt.source_observed_at_epoch.is_some();
+    let mut checks = vec![production_check(
+        &format!("{label}.source.complete"),
+        complete,
+        "source-bound receipt declares path, digest and observation epoch",
+        "source-bound receipt is missing path, digest or observation epoch",
+    )];
+    let (Some(source_path), Some(source_sha256), Some(source_epoch)) = (
+        receipt.source_artifact_path.as_deref(),
+        receipt.source_artifact_sha256.as_deref(),
+        receipt.source_observed_at_epoch,
+    ) else {
+        return checks;
+    };
+    let resolved = resolve_production_evidence_path(evidence_root, source_path);
+    checks.extend([
+        production_check(
+            &format!("{label}.source.distinct"),
+            source_path != evidence.artifact_path,
+            "source artifact is distinct from its canonical receipt",
+            "source artifact aliases its canonical receipt",
+        ),
+        production_check(
+            &format!("{label}.source.sha256_format"),
+            valid_sha256(source_sha256),
+            "source artifact digest is lowercase SHA-256",
+            "source artifact digest is not lowercase SHA-256",
+        ),
+        production_check(
+            &format!("{label}.source.fresh"),
+            source_epoch == evidence.observed_at_epoch
+                && evidence_epoch_is_fresh(
+                    source_epoch,
+                    now_epoch,
+                    MAX_PRODUCTION_EVIDENCE_AGE_SECONDS,
+                ),
+            "source observation matches receipt freshness",
+            "source observation differs from receipt, is future-dated, zero or stale",
+        ),
+        production_check(
+            &format!("{label}.source.path"),
+            resolved.is_ok(),
+            "source artifact is a regular non-symlink file inside evidence root",
+            "source artifact is missing, unsafe, outside evidence root or symlink",
+        ),
+    ]);
+    let Ok(path) = resolved else {
+        return checks;
+    };
+    let metadata = fs::metadata(&path);
+    let readable_size = metadata.as_ref().is_ok_and(|metadata| {
+        metadata.is_file() && metadata.len() > 0 && metadata.len() <= MAX_PRODUCTION_EVIDENCE_BYTES
+    });
+    checks.push(production_check(
+        &format!("{label}.source.size"),
+        readable_size,
+        "source artifact size is within inspection bounds",
+        "source artifact is empty, oversized or unreadable",
+    ));
+    if !readable_size {
+        return checks;
+    }
+    let bytes = fs::read(&path);
+    checks.push(production_check(
+        &format!("{label}.source.readable"),
+        bytes.is_ok(),
+        "source artifact is readable",
+        "source artifact cannot be read",
+    ));
+    let Ok(bytes) = bytes else {
+        return checks;
+    };
+    checks.push(production_check(
+        &format!("{label}.source.digest"),
+        valid_sha256(source_sha256) && hex_sha256(&bytes) == source_sha256,
+        "source artifact bytes match the bound SHA-256",
+        "source artifact bytes drifted from the bound SHA-256",
+    ));
+    let text = std::str::from_utf8(&bytes);
+    checks.push(production_check(
+        &format!("{label}.source.utf8"),
+        text.is_ok(),
+        "source artifact is inspectable UTF-8 text",
+        "source artifact is opaque or non-UTF-8",
+    ));
+    if let Ok(text) = text {
+        checks.push(production_check(
+            &format!("{label}.source.secret_free"),
+            production_text_is_secret_free(text, "production_readiness_source_evidence"),
+            "source artifact contains no detected secret material",
+            "source artifact contains detected secret material",
+        ));
+        let attestation = serde_json::from_str::<ProductionSourceEvidence>(text);
+        checks.push(production_check(
+            &format!("{label}.source.attestation"),
+            attestation.is_ok(),
+            "source artifact is a typed production evidence attestation",
+            "source artifact is not a typed production evidence attestation",
+        ));
+        if let Ok(attestation) = attestation {
+            let producer_valid = !attestation.producer.trim().is_empty()
+                && attestation.producer.len() <= 128
+                && !attestation.producer.chars().any(char::is_control);
+            let claims_sha256 = serde_json::to_vec(&attestation.claims)
+                .ok()
+                .map(|bytes| hex_sha256(&bytes));
+            checks.extend([
+                production_check(
+                    &format!("{label}.source.schema_kind"),
+                    attestation.schema_version == production_source_evidence_schema(label)
+                        && attestation.kind == label,
+                    "source attestation schema and kind match the required gate",
+                    "source attestation schema or kind differs from the required gate",
+                ),
+                production_check(
+                    &format!("{label}.source.subject_outcome"),
+                    attestation.status == "passed"
+                        && attestation.subject_version == subject_version
+                        && attestation.observed_at_epoch == source_epoch,
+                    "source attestation outcome, release and observation match the receipt",
+                    "source attestation outcome, release or observation differs from the receipt",
+                ),
+                production_check(
+                    &format!("{label}.source.execution_mode"),
+                    attestation.execution_mode == "production",
+                    "source attestation was collected in production mode",
+                    "source attestation came from a test or unsupported execution mode",
+                ),
+                production_check(
+                    &format!("{label}.source.claims"),
+                    attestation
+                        .claims
+                        .as_object()
+                        .is_some_and(|claims| !claims.is_empty())
+                        && claims_sha256.as_deref() == Some(expected_claims_sha256)
+                        && claims_sha256.as_deref() == Some(receipt.claims_sha256.as_str()),
+                    "source attestation semantically matches the canonical manifest claims",
+                    "source attestation claims are missing or differ from the manifest",
+                ),
+                production_check(
+                    &format!("{label}.source.collector_evidence"),
+                    producer_valid
+                        && attestation
+                            .evidence
+                            .as_object()
+                            .is_some_and(|evidence| !evidence.is_empty()),
+                    "source attestation identifies its producer and includes structured evidence",
+                    "source attestation producer or structured evidence is missing",
                 ),
             ]);
         }
@@ -2611,6 +4060,36 @@ fn mission_lifecycle_store_checks(
     let stored_mission = mission_json
         .as_deref()
         .and_then(|json| serde_json::from_str::<MissionRecord>(json).ok());
+    let workflow_json = connection
+        .query_row(
+            "SELECT data_json FROM workflows WHERE id=?1",
+            [&execute.workflow_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let workflow_validation = workflow_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<crate::graph::Workflow>(json).ok())
+        .map(|workflow| validate_workflow(&workflow));
+    let terminal_validation_matches =
+        stored_mission.as_ref().is_some_and(|mission| {
+            mission.status == MissionStatus::Completed
+                && mission.revision >= receipt.resume_report.revision
+                && mission.tasks.iter().all(|task| task.status == "completed")
+        }) && workflow_validation.as_ref().is_some_and(|validation| {
+            validation.status == "passed"
+                && validation.promotable
+                && validation.failed_rules.is_empty()
+                && validation.rework_tasks.is_empty()
+        });
+    checks.push(production_check(
+        "mission_operational_lifecycle.store_terminal_validation",
+        terminal_validation_matches,
+        "current mission is completed and its persisted workflow is promotable with no rework",
+        "current mission is non-terminal or its persisted workflow is blocked or requires rework",
+    ));
 
     let handoff_json = connection
         .query_row(
@@ -8345,4 +9824,51 @@ fn status_vocabulary() -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+#[cfg(test)]
+mod production_evidence_assembly_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_receipt_schema_is_bounded_to_the_last_legacy_release() {
+        let legacy = legacy_production_receipt_schema("bounded_load");
+        assert!(production_receipt_schema_supported(
+            "bounded_load",
+            &legacy,
+            LAST_LEGACY_PRODUCTION_RECEIPT_VERSION
+        ));
+        assert!(!production_receipt_schema_supported(
+            "bounded_load",
+            &legacy,
+            env!("CARGO_PKG_VERSION")
+        ));
+        assert!(production_receipt_schema_supported(
+            "bounded_load",
+            &production_source_bound_receipt_schema("bounded_load"),
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+
+    #[test]
+    fn atomic_no_overwrite_writer_rolls_back_after_publication_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let target = Path::new("receipts/bounded_load.json");
+        let error = write_new_contained_production_file_with_post_publish(
+            &root,
+            target,
+            b"{\"status\":\"passed\"}\n",
+            "test receipt",
+            |_| bail!("injected post-publish failure"),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("injected post-publish failure"));
+        assert!(!root.join(target).exists());
+        let receipt_directory = root.join("receipts");
+        assert!(receipt_directory.is_dir());
+        assert_eq!(fs::read_dir(receipt_directory).unwrap().count(), 0);
+    }
 }

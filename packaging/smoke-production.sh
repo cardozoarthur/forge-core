@@ -108,6 +108,110 @@ done <"$smoke_dir/plan.json"
 "${forge_env[@]}" "$forge_binary" --store "$store" store check \
   --output json >"$smoke_dir/check-after.json"
 
+mkdir -p "$smoke_dir/workspace"
+"$forge_binary" events runtime-daemon --help \
+  >"$smoke_dir/runtime-daemon-help.txt"
+"$forge_binary" request supervise --help \
+  >"$smoke_dir/request-supervisor-help.txt"
+grep -Fq -- '--continuous' "$smoke_dir/runtime-daemon-help.txt" || {
+  echo "production smoke: runtime daemon help is missing continuous mode" >&2
+  exit 1
+}
+grep -Fq -- '--max-steps-per-run' "$smoke_dir/request-supervisor-help.txt" || {
+  echo "production smoke: request supervisor help is missing bounded steps" >&2
+  exit 1
+}
+
+"${forge_env[@]}" "$forge_binary" --store "$store" events runtime-daemon \
+  --project-root "$smoke_dir/workspace" \
+  --execute \
+  --dispatch-activations \
+  --max-cycles 1 \
+  --interval-seconds 0 \
+  --recover-stale-services \
+  --scan-schedules \
+  --schedule-executor forge-production-smoke-scheduler \
+  --schedule-max-workers 1 \
+  --schedule-ttl-seconds 30 \
+  --output json \
+  >"$smoke_dir/runtime-daemon.json"
+grep -Eq '"schema_version"[[:space:]]*:[[:space:]]*"forge.event_runtime_daemon.v1"' \
+  "$smoke_dir/runtime-daemon.json" || {
+  echo "production smoke: runtime daemon did not emit its contract" >&2
+  exit 1
+}
+
+supervisor_store="$smoke_dir/request-supervisor.sqlite"
+"${forge_env[@]}" "$forge_binary" --store "$supervisor_store" request start \
+  --goal "Validate request supervisor advancement; constraint: use only temporary local state; deliverable: persisted supervisor evidence" \
+  --origin production-smoke \
+  --output json \
+  >"$smoke_dir/request-supervisor-start.json"
+"${forge_env[@]}" "$forge_binary" --store "$supervisor_store" request supervise \
+  --executor forge-request-supervisor \
+  --ttl-seconds 30 \
+  --max-steps-per-run 1 \
+  --origin production-smoke \
+  --continuous \
+  --max-cycles 1 \
+  --interval-seconds 1 \
+  --output json \
+  >"$smoke_dir/request-supervisor-advance.json"
+grep -Eq '"needs_attention"[[:space:]]*:[[:space:]]*[1-9][0-9]*' \
+  "$smoke_dir/request-supervisor-advance.json" || {
+  echo "production smoke: request supervisor did not park a receipt-required run" >&2
+  exit 1
+}
+
+"${forge_env[@]}" "$forge_binary" --store "$supervisor_store" request start \
+  --goal "Validate stale request recovery; constraint: use only temporary local state; deliverable: persisted recovery evidence" \
+  --origin production-smoke \
+  --output json \
+  >"$smoke_dir/request-supervisor-stale-start.json"
+stale_run_id=""
+while IFS= read -r request_line; do
+  if [[ "$request_line" =~ \"run_id\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+    stale_run_id="${BASH_REMATCH[1]}"
+    break
+  fi
+done <"$smoke_dir/request-supervisor-stale-start.json"
+[[ "$stale_run_id" == run_* ]] || {
+  echo "production smoke: stale recovery fixture did not return a run id" >&2
+  exit 1
+}
+"${forge_env[@]}" "$forge_binary" --store "$supervisor_store" request heartbeat \
+  --run "$stale_run_id" \
+  --executor forge-request-supervisor \
+  --summary "production smoke stale heartbeat" \
+  --ttl-seconds 1 \
+  --origin production-smoke \
+  --output json \
+  >"$smoke_dir/request-supervisor-stale-heartbeat.json"
+sleep 2
+"${forge_env[@]}" "$forge_binary" --store "$supervisor_store" request supervise \
+  --executor forge-request-supervisor \
+  --ttl-seconds 30 \
+  --max-steps-per-run 1 \
+  --origin production-smoke \
+  --output json \
+  >"$smoke_dir/request-supervisor-recover.json"
+grep -Eq '"recovered"[[:space:]]*:[[:space:]]*[1-9][0-9]*' \
+  "$smoke_dir/request-supervisor-recover.json" || {
+  echo "production smoke: request supervisor did not recover a stale owned run" >&2
+  exit 1
+}
+"${forge_env[@]}" "$forge_binary" --store "$supervisor_store" request status \
+  --run "$stale_run_id" \
+  --output json \
+  >"$smoke_dir/request-supervisor-recovered-status.json"
+grep -Eq '"status"[[:space:]]*:[[:space:]]*"needs_attention"' \
+  "$smoke_dir/request-supervisor-recovered-status.json" || {
+  echo "production smoke: stale run was not parked in needs_attention" >&2
+  exit 1
+}
+"${forge_env[@]}" "$forge_binary" --store "$supervisor_store" store check \
+  --output json >"$smoke_dir/request-supervisor-store-check.json"
+
 start_server() {
   server_start_count=$((server_start_count + 1))
   local start_id="$server_start_count"
@@ -333,7 +437,6 @@ stop_server() {
   server_pid=""
 }
 
-mkdir -p "$smoke_dir/workspace"
 start_server
 stop_server KILL
 "${forge_env[@]}" "$forge_binary" --store "$store" store check \
@@ -341,4 +444,4 @@ stop_server KILL
 start_server
 stop_server TERM
 
-echo "Forge production smoke passed: store check, backup, restore, authenticated reads and mutations, bearer rejection, SIGKILL recovery, readiness, and graceful stop."
+echo "Forge production smoke passed: store check, backup, restore, runtime reconciliation, receipt-aware request supervision and stale recovery, authenticated reads and mutations, bearer rejection, SIGKILL recovery, readiness, and graceful stop."

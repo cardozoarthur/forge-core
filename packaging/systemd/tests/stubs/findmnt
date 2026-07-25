@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+field=""
+target_path=""
+while (($# > 0)); do
+  case "$1" in
+    --output)
+      (($# >= 2)) || exit 64
+      field="$2"
+      shift 2
+      ;;
+    --target)
+      (($# >= 2)) || exit 64
+      target_path="$2"
+      shift 2
+      ;;
+    --noheadings | --raw | --first-only)
+      shift
+      ;;
+    *)
+      exit 64
+      ;;
+  esac
+done
+
+[[ -n "$target_path" &&
+  ( "$target_path" = "${TEST_DIRECTORY_MOUNT_TARGET:?}" ||
+    "$target_path" = "$TEST_DIRECTORY_MOUNT_TARGET"/* ) ]] ||
+  exit 1
+
+if [[ "${TEST_DIRECTORY_MOUNT_STATE:-up}" = up ]]; then
+  case "$field" in
+    TARGET) printf '%s\n' "$TEST_DIRECTORY_MOUNT_TARGET" ;;
+    SOURCE) printf '%s\n' "${TEST_DIRECTORY_MOUNT_SOURCE:?}" ;;
+    FSTYPE) printf '%s\n' "${TEST_DIRECTORY_MOUNT_FSTYPE:?}" ;;
+    *) exit 64 ;;
+  esac
+else
+  case "$field" in
+    TARGET) printf '/\n' ;;
+    SOURCE) printf '/dev/fixture-root\n' ;;
+    FSTYPE) printf 'ext4\n' ;;
+    *) exit 64 ;;
+  esac
+fi

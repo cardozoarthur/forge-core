@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+capture_dir="${TEST_CURL_CAPTURE_DIR:?}"
+mkdir -p -- "$capture_dir"
+chmod 0700 -- "$capture_dir"
+
+counter_file="${capture_dir}/count"
+count=0
+if [[ -f "$counter_file" ]]; then
+  read -r count <"$counter_file"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" >"$counter_file"
+printf '%s\n' "$*" >>"${capture_dir}/argv"
+config_file="${capture_dir}/config-${count}"
+umask 077
+tee "$config_file" >/dev/null
+
+[[ "${TEST_CURL_FAIL:-0}" != "1" ]]

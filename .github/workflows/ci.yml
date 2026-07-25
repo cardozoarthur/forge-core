@@ -62,6 +62,18 @@ jobs:
       - name: Run off-host backup smoke
         run: bash packaging/smoke-offhost-backup.sh target/release/forge
 
+      - name: Run provider-neutral adoption self-tests
+        run: bash packaging/provider-adoption/single-host/tests/self-test.sh
+
+      - name: Run production-readiness drill self-tests
+        run: bash packaging/production-readiness/tests/self-test.sh
+
+      - name: Reject untrusted Unix installer fixtures
+        run: bash installer/tests/self-test.sh
+
+      - name: Run systemd runtime self-tests
+        run: bash packaging/systemd/tests/runtime-self-test.sh
+
       - name: Verify distributable crate and complete skill bundle
         shell: bash
         run: |
@@ -116,6 +128,10 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --all-features --locked --target x86_64-pc-windows-msvc
+
+      - name: Reject untrusted PowerShell installer fixtures
+        shell: pwsh
+        run: ./installer/tests/self-test.ps1
 
   supply-chain:
     name: Advisories, licenses and sources

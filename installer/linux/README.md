@@ -8,8 +8,10 @@ executed on native Ubuntu 22.04 runners; release CI rejects ELF symbol
 requirements newer than `GLIBC_2.34`.
 
 Each archive contains `forge`, `LICENSE`, the systemd service bundle, and the
-single-host production runbook. `installer/install.sh` verifies the archive
-against the release checksum manifest before atomically replacing the binary.
+single-host production runbook. With `cosign` installed,
+`installer/install.sh` verifies the checksum manifest's exact Sigstore
+issuer/workflow/tag identity and then verifies the archive before atomically
+replacing the binary.
 It installs to `$HOME/.local/bin` by default but does not modify `PATH`; see
 `installer/README.md` for shell-specific activation.
 

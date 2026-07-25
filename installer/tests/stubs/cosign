@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "${1:-}" == "verify-blob" ]] || exit 64
+shift
+
+bundle=""
+certificate_identity=""
+certificate_issuer=""
+subject=""
+while (($#)); do
+  case "$1" in
+    --bundle)
+      bundle="${2:-}"
+      shift 2
+      ;;
+    --certificate-identity)
+      certificate_identity="${2:-}"
+      shift 2
+      ;;
+    --certificate-oidc-issuer)
+      certificate_issuer="${2:-}"
+      shift 2
+      ;;
+    --*)
+      exit 64
+      ;;
+    *)
+      [[ -z "$subject" ]] || exit 64
+      subject="$1"
+      shift
+      ;;
+  esac
+done
+
+[[ -f "$bundle" && -f "$subject" ]] || exit 1
+expected_issuer="$(awk -F= '$1 == "issuer" { print substr($0, index($0, "=") + 1) }' "$bundle")"
+expected_identity="$(awk -F= '$1 == "identity" { print substr($0, index($0, "=") + 1) }' "$bundle")"
+expected_sha256="$(awk -F= '$1 == "subject_sha256" { print $2 }' "$bundle")"
+if command -v sha256sum >/dev/null 2>&1; then
+  actual_sha256="$(sha256sum "$subject" | awk '{ print $1 }')"
+else
+  actual_sha256="$(shasum -a 256 "$subject" | awk '{ print $1 }')"
+fi
+
+[[ "$certificate_issuer" == "$expected_issuer" ]]
+[[ "$certificate_identity" == "$expected_identity" ]]
+[[ "$actual_sha256" == "$expected_sha256" ]]

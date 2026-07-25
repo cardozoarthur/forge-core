@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+output=""
+url=""
+while (($#)); do
+  case "$1" in
+    -o)
+      output="${2:-}"
+      shift 2
+      ;;
+    --proto)
+      shift 2
+      ;;
+    --tlsv1.2|-*)
+      shift
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+
+[[ -n "$output" && -n "$url" ]]
+asset="${url##*/}"
+printf '%s\n' "$asset" >>"$FORGE_TEST_DOWNLOAD_LOG"
+[[ -f "$FORGE_TEST_RELEASE_DIR/$asset" ]] || exit 22
+cp -- "$FORGE_TEST_RELEASE_DIR/$asset" "$output"

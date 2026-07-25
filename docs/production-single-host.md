@@ -6,6 +6,16 @@ Forge v0.5 supports production operation by one trusted operator on one Linux
 host. The Forge runtime, SQLite store, local Ops service, verified backups, and
 executor policy remain on that host.
 
+Forge Core has no runtime, build, installation, or release dependency on AWS,
+S3, or another cloud provider. The production contract requires a recoverable
+off-host copy, not a specific transport. Operators may implement the uploader
+contract with another host, managed storage, or an object store of their
+choice. The release archive includes only the provider-neutral `file://`
+uploader; cloud-specific uploaders and provisioning belong in separately
+operated addons. The legacy `forge aws` CLI and MCP surfaces only delegate to
+an independently installed plugin when explicitly invoked; this production
+profile never calls them.
+
 The release binary targets GNU Linux on x86_64 or ARMv8-A and requires Linux
 kernel 4.18 or newer plus glibc 2.34 or newer. The supported service profile
 also requires systemd 249 or newer. Ubuntu 22.04 LTS is the tested floor;
@@ -45,6 +55,46 @@ without all three values. It stores them as root-owned `0600` files at
 `/etc/forge/backup-offhost-destination`, and
 `/etc/forge/backup-offhost-generation`; systemd delivers their contents to the
 backup service as credentials.
+
+For a provider-neutral directory or mounted filesystem, use the optional
+`forge-directory-offhost-uploader` and an exact
+`file:///absolute/canonical/path` destination. The directory must already
+exist on a dedicated mount whose resolved target is not `/`, be owned by
+`forge`, and have mode exactly `0700`. The destination must be a subdirectory
+below that mount target so runtime identity checks are independent of the
+service's writable-path bind mount. Every ancestor must be canonical, contain
+no symlink, be owned by root or `forge`, and not be writable by group or other;
+root-owned mount roots are supported. The installer and adapter validate this
+chain, then the installer proves as `forge` file creation, same-directory hard
+links, durable file and directory sync, and cleanup before changing the
+services.
+
+Because `forge-backup.service` otherwise makes only `/var/backups/forge`
+writable, a validated `file://` destination also causes the installer to
+atomically manage:
+
+```text
+/etc/systemd/system/forge-backup.service.d/20-directory-offhost.conf
+```
+
+That drop-in adds `RequiresMountsFor=` and grants `ReadWritePaths=` only for the
+resolved destination. The installer also persists the mount target, source,
+filesystem type, and filesystem ID in the non-secret
+`/etc/forge/backup-offhost-mount-identity`. `forge-backup` and the directory
+adapter revalidate it immediately before every backup, upload, verification,
+and download, so a missing mount cannot silently redirect writes to the host
+directory beneath it. Both files are installed before `daemon-reload` and the
+initial recovery challenge. Re-running the installer with a different
+directory replaces them. Re-running it with a non-file provider removes them.
+Both are part of the same rollback snapshot as the units and provider
+configuration, so a failed promotion restores the previous files or their
+absence. No filesystem grant or mount identity is created for a non-file
+provider.
+
+The ready-to-use adapter and account/directory preparation commands are in
+`packaging/provider-adoption/single-host/README.md`. A second disk in the same
+host is useful for a recovery simulation, but it is not proof of an off-host
+loss domain.
 
 The executable and every parent path component through `/` must be root-owned,
 canonical, non-symlink, and not writable by group or other. Both the installer
@@ -94,19 +144,23 @@ from the backup or restore path removes `CREDENTIALS_DIRECTORY` and all
 off-host configuration-file variables. This reciprocal boundary prevents
 either executable from inheriting the other's authority.
 
-Installation is a fail-closed go-live gate. It disables Ops and the timer,
+Installation is a fail-closed go-live gate. It disables Ops, the workflow
+runtime, the request supervisor, and the backup timer,
 starts Ops only long enough to initialize or open the store, and requires an
 HTTP `200` from an authenticated loopback `/api/snapshot` probe before stopping
 Ops and running `forge-backup.service`. That first backup must complete remote
 upload, digest-only verification, download, `store check`, disposable restore,
-and a second `store check`. After promotion, the installer starts Ops and
-requires the same authenticated probe again before starting the timer. If any
-step fails, both remain stopped and disabled.
+and a second `store check`. After promotion, the installer starts Ops, requires
+the same authenticated probe again, starts the workflow runtime and request
+supervisor, requires both processes to remain active, then starts the backup
+timer. If any step fails, Ops, runtime, request supervision and the timer remain
+stopped and disabled.
 
 Before replacing any managed key, configuration, helper, unit, or binary, the
-installer snapshots the previous files and records whether Ops, backup, and the
-timer were enabled or active. A failed initialization, recovery challenge,
-authenticated readiness probe, timer start, or final status check triggers a
+installer snapshots the previous files and records whether Ops, runtime, request
+supervisor, backup, and timer units were enabled or active. A failed
+initialization, recovery challenge, authenticated readiness probe, runtime or
+request-supervisor start, timer start, or final status check triggers a
 transactional rollback: the candidate services are stopped, previous files and
 unit enablement are restored, `daemon-reload` runs, and only services that were
 previously active are restarted. Treat an explicit “rollback incomplete”
@@ -126,17 +180,19 @@ The installer creates a locked `forge` service account and installs:
 - Ops bearer token: `/etc/forge/ops-token`, delivered through a separate
   systemd credential;
 - loopback Ops endpoint: `http://127.0.0.1:8765`;
-- systemd services: `forge-ops.service` and `forge-backup.timer`.
+- systemd services: `forge-ops.service`, `forge-runtime.service`,
+  `forge-request-supervisor.service`, and `forge-backup.timer`.
 - credential-aware admin wrapper: `/usr/local/sbin/forge-admin`.
 - fail-fast restore drill: `/usr/local/sbin/forge-restore-drill`.
 
 The Ops unit has `UMask=0077`, a read-only host filesystem except for the Forge
 state directory, no Linux capabilities, restricted kernel surfaces and address
 families, and automatic restart on failure. The backup unit is stricter:
-`/var/lib/forge` is read-only and only `/var/backups/forge` is writable, so an
-uploader cannot corrupt the live store. Keep Ops bound to loopback. Use an SSH
-tunnel or a separately managed authenticated TLS reverse proxy for remote
-operator access.
+`/var/lib/forge` is read-only and `/var/backups/forge` plus an explicitly
+validated `file://` destination are the only writable paths, so an uploader
+cannot corrupt the live store. A non-file provider receives no additional
+filesystem write path. Keep Ops bound to loopback. Use an SSH tunnel or a
+separately managed authenticated TLS reverse proxy for remote operator access.
 
 `forge-backup.service` is a bounded oneshot with
 `TimeoutStartSec=30min`. A hung uploader, verification, download, or restore
@@ -159,6 +215,30 @@ It also generates an independent bearer token at `/etc/forge/ops-token`. In
 production mode, the Ops server refuses an inline token and reads only the
 root-owned systemd credential. Do not set `FORGE_OPS_ALLOW_REMOTE`; the
 supported unit remains loopback-only.
+
+### Workflow runtime service
+
+`forge-ops.service` only serves the loopback HTTP surface. The installer also
+enables `forge-runtime.service`, which runs the Forge-owned
+`events runtime-daemon` continuously. It dispatches event activations,
+reconciles stale event-worker leases, and scans due cron and one-shot
+`wait_until` schedules under bounded worker settings. Both units use
+`UMask=0077`, have no Linux capabilities, and may write only below
+`/var/lib/forge`.
+
+`forge-request-supervisor.service` runs the transactional
+`forge request supervise` loop continuously with a 30-second interval. Each pass
+advances at most one bounded step per eligible request, marks stale owned runs
+for attention, and does not take over a run with a fresh heartbeat from another
+executor. A supervisor failure exits non-zero so systemd applies bounded restart
+policy; ordinary handoff, rework, validation, and operator-attention states are
+parked and recorded rather than retried blindly.
+
+The runtime service is part of the fail-closed installation transaction. It is
+started only after the authenticated Ops probe and initial off-host recovery
+challenge pass. The installer requires the runtime process to remain active,
+requires the request supervisor to remain active, and restores the previous
+units, enablement, and active states if promotion fails.
 
 ## Fast production simulation
 
@@ -185,6 +265,54 @@ Inspect the non-mutating evidence plan first:
 ```bash
 forge milestone production-plan --version 0.5 --output json
 ```
+
+Generate an operator draft for the exact Forge release being evaluated. The
+release version must match the running `forge` binary. Both paths below are
+relative to the evidence root; output files are never overwritten. Create the
+private, operator-controlled evidence root before the first command that uses
+it:
+
+```bash
+sudo install -d -m 0700 -o forge -g forge /var/lib/forge/evidence
+sudo /usr/local/sbin/forge-admin \
+  milestone production-evidence-template \
+  --version 0.5 \
+  --release-version 0.5.3 \
+  --evidence-root /var/lib/forge/evidence \
+  --template production-evidence-draft.json \
+  --output json
+```
+
+Every observed claim and every `sources.<kind>.artifact_path` /
+`observed_at_epoch` starts as `null`. Fill all claims from real operator or
+collector output; do not convert missing observations to `true`. Keep each of
+the 13 source artifacts as a non-empty, secret-free UTF-8 regular file inside
+the evidence root. Paste `mission_operational_lifecycle` exactly from the
+`manifest_section` returned by `production-mission-evidence`.
+
+After all `null` values are resolved, assemble source-bound receipts and the
+final manifest:
+
+```bash
+sudo /usr/local/sbin/forge-admin \
+  milestone production-evidence-assemble \
+  --version 0.5 \
+  --release-version 0.5.3 \
+  --evidence-root /var/lib/forge/evidence \
+  --draft production-evidence-draft.json \
+  --receipt-dir receipts/0.5.3 \
+  --manifest production-readiness.json \
+  --output json
+```
+
+Assembly is offline with respect to production infrastructure: it runs no
+probe, changes no service and infers no claim. It requires all 13 kinds,
+rechecks contained non-symlink source paths, freshness and secret scanning,
+then derives source, canonical-claims, receipt and manifest SHA-256 values.
+Outputs use atomic no-overwrite publication. The evaluator revalidates the
+bound source bytes, so later source drift closes readiness. Unbound receipt
+schema `v1` is accepted only for legacy subject version `0.5.2`; release
+`0.5.3` and later require source-bound `v2`.
 
 After collecting fresh, secret-free evidence under one operator-controlled
 directory, evaluate it without running commands or changing infrastructure:
@@ -311,11 +439,10 @@ inventory SHA-256 to:
   timestamps.
 
 Generate the typed bundle from the persisted store-backed records; do not
-hand-author hashes or treat captured terminal text as the receipt. Create the
-operator-controlled evidence root, then run:
+hand-author hashes or treat captured terminal text as the receipt. Reuse the
+same operator-controlled evidence root created above:
 
 ```bash
-sudo install -d -m 0700 -o forge -g forge /var/lib/forge/evidence
 sudo /usr/local/sbin/forge-admin \
   --store /var/lib/forge/forge.sqlite \
   milestone production-mission-evidence \
@@ -323,7 +450,7 @@ sudo /usr/local/sbin/forge-admin \
   --receipt <execution-receipt-id> \
   --evidence-root /var/lib/forge/evidence \
   --artifact mission-operational-lifecycle.json \
-  --release-version 0.5.2 \
+  --release-version 0.5.3 \
   --output json
 ```
 
@@ -394,17 +521,19 @@ sudo bash -c '
 sudo /usr/local/sbin/forge-admin \
   --store /var/lib/forge/forge.sqlite \
   store check --output json
+sudo systemctl --no-pager --full status forge-runtime.service
+sudo systemctl --no-pager --full status forge-request-supervisor.service
 sudo systemctl list-timers forge-backup.timer
 sudo systemctl start forge-backup.service
 sudo systemctl --no-pager --full status forge-backup.service
 ```
 
-Alert on a failed service, repeated restart, failed store check, backup timer
-failure, off-host upload or verification failure, or less than twice the store
-size in free space. Also alert before the newest complete green recovery
-challenge reaches 24 hours of age. A backup run is successful only when its
-final journal message confirms drain, remote recovery challenge, snapshot, and
-retention success.
+Alert when Ops, runtime, or the request supervisor is inactive, the backup timer
+is inactive, a service repeatedly restarts, `store check` fails, off-host upload
+or verification fails, or free space falls below twice the store size.
+Also alert before the newest complete green recovery challenge reaches 24 hours
+of age. A backup run is successful only when its final journal message confirms
+drain, remote recovery challenge, snapshot, and retention success.
 
 ## Backup and restore
 
@@ -455,7 +584,10 @@ sudo /usr/local/sbin/forge-admin \
 The destination must be a new path. To restore:
 
 ```bash
-sudo systemctl stop forge-ops.service
+sudo systemctl stop \
+  forge-request-supervisor.service \
+  forge-runtime.service \
+  forge-ops.service
 selected_backup="/var/backups/forge/forge-pre-upgrade-<timestamp>.sqlite"
 sudo /usr/local/sbin/forge-admin \
   --store /var/lib/forge/forge.sqlite \
@@ -467,7 +599,8 @@ sudo /usr/local/sbin/forge-admin \
 sudo /usr/local/sbin/forge-admin \
   --store /var/lib/forge/forge.sqlite \
   store check --output json
-sudo systemctl start forge-ops.service
+sudo systemctl start forge-ops.service forge-runtime.service
+sudo systemctl start forge-request-supervisor.service
 ```
 
 Restore creates a pre-restore backup of the current store and runs SQLite
@@ -543,20 +676,23 @@ production readiness closed, record the cause, and repeat after remediation.
 2. Run `packaging/smoke-production.sh` and
    `packaging/smoke-offhost-backup.sh` against the new binary.
 3. Create the pre-upgrade backup shown above.
-4. Stop `forge-ops.service`, install the verified binary, and start the service.
+4. Stop `forge-request-supervisor.service`, `forge-runtime.service`, and
+   `forge-ops.service`; install the verified binary; then start Ops, runtime, and
+   the request supervisor in that order.
 5. Run `store check` and probe `/api/snapshot`.
 
 If the candidate does not pass installation, verify that the installer reported
 successful transactional restoration of the previous files and systemd state.
-If rollback is incomplete, keep both services isolated and reinstall the last
-verified release manually. Restore the pre-upgrade store only if the old binary
-cannot read the upgraded store; the restore command preserves another recovery
-copy automatically.
+If rollback is incomplete, keep Ops, runtime and backup services isolated and
+reinstall the last verified release manually. Restore the pre-upgrade store only
+if the old binary cannot read the upgraded store; the restore command preserves
+another recovery copy automatically.
 
 ## Incident minimum
 
-Stop the service before investigating suspected store corruption or secret
+Stop `forge-request-supervisor.service`, `forge-runtime.service`, and
+`forge-ops.service` before investigating suspected store corruption or secret
 exposure. Preserve the store, WAL, SHM, journal excerpt, Forge version, and
 release attestation without printing decrypted secrets. Preserve the separately
 protected keyring needed for recovery. Rotate exposed credentials and the store
-encryption key before returning the service to use.
+encryption key before returning the services to use.

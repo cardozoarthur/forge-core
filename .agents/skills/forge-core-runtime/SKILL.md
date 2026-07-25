@@ -22,3 +22,8 @@ forge validate --workflow <workflow-id> --output json
 ```
 
 Completion means the task goal is definitively ready and validation has no rework tasks. If validation fails, return the task to work with the rework reason.
+
+`forge request step` is a supervised routing boundary, not evidence that the
+task ran. Command, wait, and notification tasks must be executed by their real
+executor and completed with `forge request complete-task --evidence-command
+"<passing gate>"`; Forge returns `handoff_required` when that receipt is absent.

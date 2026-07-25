@@ -1,6 +1,6 @@
 [package]
 name = "forge-core"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 rust-version = "1.94.1"
 license = "MIT"
@@ -20,7 +20,8 @@ include = [
     "/SECURITY.md",
     "/deny.toml",
     "/rust-toolchain.toml",
-    "/docs/production-single-host.md",
+  "/docs/production-single-host.md",
+  "/docs/release-security.md",
     "/examples/**",
     "/installer/**",
     "/packaging/**",

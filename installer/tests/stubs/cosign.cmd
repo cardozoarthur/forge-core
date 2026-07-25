@@ -1,0 +1,3 @@
+@echo off
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0cosign-stub.ps1" %*
+exit /b %ERRORLEVEL%

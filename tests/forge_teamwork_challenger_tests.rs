@@ -122,7 +122,7 @@ fn test_challenger_cognitive_task_handoff_halts() {
     assert!(step_json["reason"]
         .as_str()
         .unwrap()
-        .contains("requires an external executor"));
+        .contains("requires a real executor execution receipt"));
 }
 
 #[test]

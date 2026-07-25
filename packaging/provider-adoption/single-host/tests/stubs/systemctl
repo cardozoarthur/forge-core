@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+failure="${TEST_FAILURE_CATEGORY:-}"
+command="${1:-}"
+shift || true
+
+case "$command" in
+  is-active)
+    [[ "${1:-}" == "--quiet" ]] && shift
+    unit="${1:-}"
+    if [[ "$unit" == "forge-ops.service" && "$failure" == "forge_ops" ]]; then
+      exit 3
+    fi
+    if [[ "$unit" == "forge-runtime.service" && "$failure" == "forge_runtime" ]]; then
+      exit 3
+    fi
+    if [[ "$unit" == "forge-request-supervisor.service" &&
+      "$failure" == "request_supervisor" ]]; then
+      exit 3
+    fi
+    if [[ "$unit" == "forge-backup.timer" && "$failure" == "backup_timer" ]]; then
+      exit 3
+    fi
+    exit 0
+    ;;
+  is-enabled)
+    [[ "${1:-}" == "--quiet" ]] && shift
+    unit="${1:-}"
+    if [[ "$unit" == "forge-backup.timer" && "$failure" == "backup_timer" ]]; then
+      exit 1
+    fi
+    exit 0
+    ;;
+  show)
+    unit="${1:-}"
+    shift || true
+    property=""
+    for argument in "$@"; do
+      case "$argument" in
+        --property=*) property="${argument#--property=}" ;;
+      esac
+    done
+    case "$property" in
+      Result)
+        if [[ "$unit" == "forge-backup.service" && "$failure" == "backup_service" ]]; then
+          printf 'failed\n'
+        else
+          printf 'success\n'
+        fi
+        ;;
+      ExecMainStatus)
+        if [[ "$unit" == "forge-backup.service" && "$failure" == "backup_service" ]]; then
+          printf '1\n'
+        else
+          printf '0\n'
+        fi
+        ;;
+      ExecMainExitTimestampMonotonic)
+        printf '123456\n'
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    exit 64
+    ;;
+esac

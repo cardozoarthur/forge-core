@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${TEST_FAILURE_CATEGORY:-}" == "store_check" ]]; then
+  exit 1
+fi
+exit 0
