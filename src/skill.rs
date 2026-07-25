@@ -412,6 +412,7 @@ Completion means the task goal is definitively ready and validation has no rewor
 "#;
 
 const CONTEXT_SKILL_MD: &str = include_str!("../.agents/skills/forge-core-context/SKILL.md");
+const MISSIONS_SKILL_MD: &str = include_str!("../.agents/skills/forge-core-missions/SKILL.md");
 const DOCUMENTATION_SKILL_MD: &str =
     include_str!("../.agents/skills/forge-core-documentation/SKILL.md");
 const AGENT_SKILL_MD: &str = include_str!("../.agents/skills/forge-core-agent/SKILL.md");
@@ -554,6 +555,10 @@ const SKILL_MODULES: &[SkillModule] = &[
     SkillModule {
         name: "forge-core-runtime",
         markdown: RUNTIME_SKILL_MD,
+    },
+    SkillModule {
+        name: "forge-core-missions",
+        markdown: MISSIONS_SKILL_MD,
     },
     SkillModule {
         name: "forge-core-context",

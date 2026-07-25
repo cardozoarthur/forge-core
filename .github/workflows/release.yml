@@ -98,6 +98,94 @@ jobs:
           cargo audit
           cargo deny check advisories licenses bans sources
 
+      - name: Verify distributable crate and complete skill bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          verification_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$verification_dir"' EXIT
+          package_list="$verification_dir/package-list"
+          expected="$verification_dir/expected"
+          actual="$verification_dir/actual"
+
+          cargo package --list --locked >"$package_list"
+
+          printf '%s\n' \
+            .agents/skills/forge-core/SKILL.md \
+            .agents/skills/forge-core-addons-ui/SKILL.md \
+            .agents/skills/forge-core-agent/SKILL.md \
+            .agents/skills/forge-core-artifacts/SKILL.md \
+            .agents/skills/forge-core-context/SKILL.md \
+            .agents/skills/forge-core-documentation/SKILL.md \
+            .agents/skills/forge-core-executors/SKILL.md \
+            .agents/skills/forge-core-missions/SKILL.md \
+            .agents/skills/forge-core-runtime/SKILL.md \
+            .agents/skills/forge-core-workflow/SKILL.md \
+            .agents/skills/forge-core-workspaces/SKILL.md |
+            LC_ALL=C sort >"$expected"
+          grep -E '^\.agents/skills/[^/]+/SKILL\.md$' "$package_list" |
+            LC_ALL=C sort >"$actual"
+          diff -u "$expected" "$actual"
+
+          for directory in installer packaging src tests; do
+            find "$directory" -type f -print | LC_ALL=C sort >"$expected"
+            grep -E "^${directory}/" "$package_list" | LC_ALL=C sort >"$actual"
+            diff -u "$expected" "$actual"
+          done
+
+          grep -Fx 'docs/production-single-host.md' "$package_list" >/dev/null
+          grep -Fx 'skills/forge-core/SKILL.md' "$package_list" >/dev/null
+          cargo package --locked
+
+      - name: Prove bounded mission-platform inventory 40/40
+        run: |
+          # This is a fast deterministic contract smoke. It must remain
+          # production_ready=false and is not deployment evidence.
+          cargo test --all-features --locked \
+            --test forge_mission_platform_contract \
+            registered_worktree_binding_receipt_allows_the_bounded_probe_to_pass \
+            -- --exact
+
+      - name: Prove operational mission execute-submit-resume lifecycle
+        run: |
+          # This exercises real local command execution and persisted receipts.
+          # It is a pre-publish runtime gate, not the post-installation
+          # production-readiness manifest.
+          cargo test --all-features --locked \
+            --test forge_mission_execution_cli_e2e \
+            cli_execution_receipts_cover_nonzero_timeout_replay_submit_and_reopen \
+            -- --exact
+
+      - name: Verify canonical 1-40 inventory is bound to production governance
+        shell: bash
+        run: |
+          catalog_file="$(mktemp)"
+          plan_file="$(mktemp)"
+          trap 'rm -f -- "$catalog_file" "$plan_file"' EXIT
+
+          target/release/forge squad capabilities --output json >"$catalog_file"
+          target/release/forge milestone production-plan \
+            --version 0.5 \
+            --output json >"$plan_file"
+
+          jq -e '
+            .capability_count == 40
+            and .production_ready == false
+            and (.inventory_sha256 | test("^[0-9a-f]{64}$"))
+            and ([.capabilities[].number] == [range(1; 41)])
+          ' "$catalog_file" >/dev/null
+          jq -e '
+            .capability_inventory_count == 40
+            and .production_ready == false
+            and .required_gate_count == 11
+            and .required_receipt_count == 14
+            and ([.requirements[].gate_id]
+              | index("mission_operational_lifecycle") != null)
+          ' "$plan_file" >/dev/null
+          test \
+            "$(jq -r '.inventory_sha256' "$catalog_file")" = \
+            "$(jq -r '.capability_inventory_sha256' "$plan_file")"
+
   build:
     name: Build ${{ matrix.asset }}
     needs: verify

@@ -177,6 +177,199 @@ bash packaging/smoke-offhost-backup.sh target/release/forge
 These smokes are release gates, not evidence of high availability or
 multi-tenant safety.
 
+### Fail-closed production-readiness decision
+
+Capability completion and operational production readiness are separate gates.
+Inspect the non-mutating evidence plan first:
+
+```bash
+forge milestone production-plan --version 0.5 --output json
+```
+
+After collecting fresh, secret-free evidence under one operator-controlled
+directory, evaluate it without running commands or changing infrastructure:
+
+```bash
+forge milestone production-readiness \
+  --version 0.5 \
+  --manifest production-readiness.json \
+  --evidence-root /absolute/path/to/evidence \
+  --output json
+```
+
+The manifest has 14 independent receipts. The first 13 bind release artifacts
+for all supported targets, SBOM/checksums/Sigstore/provenance, the installed
+binary and authenticated loopback Ops probe, off-host recovery challenge,
+separately protected vault-key escrow, alert delivery, restore RPO/RTO,
+upgrade/rollback and bounded load/crash-restart results. The 14th binds the
+exact canonical mission-platform inventory `1` through `40` and its SHA-256 to
+one real, ordered `execute -> submit -> resume` lifecycle: successful
+execution, queued submission referencing that execution receipt, and resume
+consuming the same handoff.
+
+Evidence must be recent, UTF-8, secret-free, non-symlinked, inside the evidence
+root and SHA-256-bound to both the evaluated release version and the exact
+manifest claims. The command exits non-zero unless all 11 blocking gates pass.
+A generated fixture or a 40/40 bounded mission simulation is not operational
+production evidence and always reports `production_ready=false`.
+
+The release workflow runs a fast 40/40 bounded smoke and a separate operational
+mission-lifecycle smoke before publishing artifacts. Those pre-publish checks
+do not replace this post-installation promotion decision: installation, Ops,
+off-host recovery, escrow, alerting and restore receipts necessarily describe
+the deployed candidate.
+
+### Operational mission drill and evidence
+
+Use the installed candidate and production store for the operational drill.
+Place an approved, forge-owned Git checkout below
+`/var/lib/forge/workspace/<project>`; the admin wrapper permits writes only in
+the managed Forge directories. Keep every JSON response because IDs, revisions,
+receipt hashes and timestamps are part of the 14th production receipt.
+
+```bash
+sudo /usr/local/sbin/forge-admin \
+  --store /var/lib/forge/forge.sqlite \
+  mission start \
+  --goal "<bounded production-candidate objective>" \
+  --squad software-factory \
+  --worktree /var/lib/forge/workspace/<project> \
+  --output json
+
+sudo /usr/local/sbin/forge-admin \
+  --store /var/lib/forge/forge.sqlite \
+  context --workflow <workflow-id> --task <task-id> \
+  --project-root /var/lib/forge/workspace/<project> \
+  --budget 4096 --strict --view compact --output json
+
+sudo /usr/local/sbin/forge-admin \
+  --store /var/lib/forge/forge.sqlite \
+  mission drive <mission-id> --output json
+```
+
+Read the projected task ID from the `start` or latest `inspect` response and
+request strict context while that task is still pending. Continue only when it
+reports `handoff_ready=true` and `guardrail.status=ready`. Then call `drive`,
+require the assignment to use that same task ID, retain its agent ID, request
+the evidence kinds named by the assignment, and repeat `--command` for each
+argument:
+
+```bash
+sudo /usr/local/sbin/forge-admin \
+  --store /var/lib/forge/forge.sqlite \
+  mission execute <mission-id> \
+  --task <task-id> --agent <agent-id> \
+  --idempotency-key <unique-execution-key> \
+  --purpose test --approved-by <operator> \
+  --evidence <required-kind> \
+  --command <executable> --command <argument> \
+  --output json
+
+sudo /usr/local/sbin/forge-admin \
+  --store /var/lib/forge/forge.sqlite \
+  mission submit <mission-id> \
+  --task <task-id> --agent <agent-id> \
+  --idempotency-key <unique-submission-key> \
+  --receipt-id <execution-receipt-id> \
+  --summary "<validated bounded result>" \
+  --output json
+
+sudo /usr/local/sbin/forge-admin \
+  --store /var/lib/forge/forge.sqlite \
+  mission resume <mission-id> --output json
+```
+
+For the production receipt, use a resume response with
+`action=handoff_consumed`; `mission_completed` is the later terminal response,
+not a substitute for the consumed-handoff evidence. Repeat the loop for each
+assignment and any `repair_created` action, then inspect both ledgers and the
+projected workflow:
+
+```bash
+sudo /usr/local/sbin/forge-admin \
+  --store /var/lib/forge/forge.sqlite \
+  mission inspect <mission-id> --output json
+sudo /usr/local/sbin/forge-admin \
+  --store /var/lib/forge/forge.sqlite \
+  mission execution list --mission <mission-id> --output json
+sudo /usr/local/sbin/forge-admin \
+  --store /var/lib/forge/forge.sqlite \
+  validate --workflow <workflow-id> --output json
+```
+
+The typed lifecycle bundle must be `forge.milestone.mission_lifecycle.v1` and
+bind the exact canonical inventory schema, numbers `1` through `40` and
+inventory SHA-256 to:
+
+- a completed, attempted and executed
+  `forge.mission.execution_receipt.v3` with exit code zero;
+- the initial `forge.mission.submit.v1` report in `queued` state, linked to that
+  receipt and carrying non-empty handoff and inbox IDs;
+- a later `forge.mission.drive.v1` resume report with
+  `action=handoff_consumed`, the same handoff accepted, and its inbox consumed;
+- distinct canonical receipt digests and ordered execute, submit and resume
+  timestamps.
+
+Generate the typed bundle from the persisted store-backed records; do not
+hand-author hashes or treat captured terminal text as the receipt. Create the
+operator-controlled evidence root, then run:
+
+```bash
+sudo install -d -m 0700 -o forge -g forge /var/lib/forge/evidence
+sudo /usr/local/sbin/forge-admin \
+  --store /var/lib/forge/forge.sqlite \
+  milestone production-mission-evidence \
+  --mission <mission-id> \
+  --receipt <execution-receipt-id> \
+  --evidence-root /var/lib/forge/evidence \
+  --artifact mission-operational-lifecycle.json \
+  --release-version 0.5.2 \
+  --output json
+```
+
+The command serializes exactly the typed artifact bytes, writes them below the
+evidence root, verifies their SHA-256 against the returned `manifest_section`
+and prints the complete package. Copy that `manifest_section` into
+`production-readiness.json`; do not recalculate or hand-edit its claims. The
+artifact path must be relative and every parent remains inside the evidence
+root. Then evaluate against the same production store:
+
+```bash
+sudo /usr/local/sbin/forge-admin \
+  --store /var/lib/forge/forge.sqlite \
+  milestone production-readiness \
+  --version 0.5 \
+  --manifest /var/lib/forge/evidence/production-readiness.json \
+  --evidence-root /var/lib/forge/evidence \
+  --output json
+```
+
+The evaluator opens the source store read-only, runs its integrity check and
+cross-checks the typed bundle against the persisted execution, handoff, inbox,
+checkpoint and event history. Missing, stale, mismatched or hand-authored
+claims fail closed. A successful 40/40 `simulate-platform` run still proves
+none of these operational facts.
+
+If execution is `failed`, `timed_out` or `indeterminate`, inspect its receipt
+and do not dispatch another assignment. Only after independent evidence proves
+the command had no effect may the operator record:
+
+```bash
+sudo /usr/local/sbin/forge-admin \
+  --store /var/lib/forge/forge.sqlite \
+  mission execution reconcile <receipt-id> \
+  --outcome no_effect_retry \
+  --approved-by <operator> \
+  --reason "<independent no-effect evidence>" \
+  --confirm-no-effect-retry \
+  --output json
+```
+
+Reconciliation cannot rewrite completed or consumed receipts. A stale mission
+revision requires a fresh `inspect`, strict context, `drive` and execution.
+Lease conflicts, dead letters or divergent history require inspection and
+recovery through Forge commands; never edit production SQLite rows manually.
+
 For a local MCP client, start the stdio JSON-RPC server as a child process:
 
 ```bash

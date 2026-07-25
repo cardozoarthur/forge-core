@@ -21,6 +21,7 @@ Forge Core is the workflow orchestration authority. Use `forge plan --goal "<obj
 ## Domain Skill Index
 
 - `forge-core-runtime`: durable workflows, request lifecycle, handoff, schedules, validation and rework.
+- `forge-core-missions`: persistent squad missions, strict context dispatch, execution receipts, submit/resume, reconciliation, and promotion evidence.
 - `forge-core-context`: bounded context, memory policy/search, deferred discovery and node-scoped context routing.
 - `forge-core-artifacts`: workflow artifacts, tags, documents, reports, fetch/list and lineage.
 - `forge-core-executors`: brains, sessions, CLI integration through the stable `forge harness` compatibility namespace, executor quota, `ai-limits`, CLI factory and model fallback.

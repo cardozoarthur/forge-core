@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+## 0.5.2 - 2026-07-24
+
+### Added
+
+- Added first-class versioned Forge Original squads and persistent missions with
+  restricted orchestrators, on-demand agent hierarchy, typed inbox/wakeup
+  handoffs, incremental checkpoints, task harness resolution, cost limits,
+  quality gates and formal repair/revalidation.
+- Added `forge squad capabilities` and `forge mission simulate-platform`, a
+  bounded deterministic probe of all 40 squad/mission backend contracts that
+  explicitly records that models, external runtimes and production operations
+  were not exercised.
+- Added a separate fail-closed production-readiness plan and read-only evaluator
+  for release integrity, installed Ops health, off-host recovery, vault-key
+  escrow, alerting, restore RPO/RTO, upgrade rollback and bounded load evidence.
+- Classified the canonical mission-platform inventory `1` through `40` as
+  `runtime_real`, `bounded_simulation` or `contract_only`, with a stable
+  inventory SHA-256 and no production claim from the bounded 40/40 fixture.
+- Added an eleventh production-readiness gate and fourteenth receipt requiring
+  a hash-bound, ordered operational `execute -> submit -> resume` mission
+  lifecycle in addition to the existing release and deployment evidence.
+
+### Fixed
+
+- Made Unix signal handling and runtime-secret file opening compile cleanly on
+  Windows MSVC, and added a Windows release build to pull-request CI so platform
+  regressions fail before a release tag.
+- Separated capability promotion from operational production readiness so a
+  green milestone manifest can no longer be presented as deployment evidence.
+- Unified mission and workflow task identity around the canonical three-task
+  graph, with transactional state projection, accepted-handoff gate readiness,
+  stale-writer rejection and validation before mission promotion.
+- Made `forge mission simulate-platform` return a failing exit status whenever
+  any capability probe fails, and documented the explicit worktree binding
+  required for the canonical 40/40 simulation.
+
+### Safety
+
+- Mission and platform simulations perform no model execution or external
+  mutation and do not claim production readiness.
+- Release verification treats the fast 40/40 probe as bounded evidence only;
+  it cannot be reused as the operational mission-lifecycle receipt.
+- The production evaluator runs no commands, follows no evidence symlinks,
+  rejects secret-bearing or stale receipts and cryptographically binds each
+  receipt to the evaluated version and claims.
+
 ## 0.5.1 - 2026-07-24
 
 ### Fixed

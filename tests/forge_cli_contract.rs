@@ -22055,6 +22055,7 @@ fn packaged_skill_entrypoint_stays_small_and_routes_to_domain_skills() {
     assert!(skill.contains("## Domain Skill Index"));
     assert!(skill.contains("## Skill Modularity Rule"));
     assert!(skill.contains("forge-core-runtime"));
+    assert!(skill.contains("forge-core-missions"));
     assert!(skill.contains("forge-core-context"));
     assert!(skill.contains("forge-core-artifacts"));
     assert!(skill.contains("forge-core-executors"));
@@ -22126,6 +22127,14 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
                 "forge request start",
                 "forge.task.handoff",
                 "forge schedule worker-status",
+            ],
+        ),
+        (
+            "forge-core-missions",
+            [
+                "forge mission start",
+                "--strict --view compact",
+                "mission execution reconcile",
             ],
         ),
         (
