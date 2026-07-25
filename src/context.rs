@@ -2426,11 +2426,9 @@ pub fn build_context_package_with_checkpoint_project_and_worktree(
         );
     }
 
-    let profile = executor_context_profile(task, latest_checkpoint.as_ref());
-    let effective_budget = profile
-        .max_context_bytes
-        .map(|max_bytes| budget.min(max_bytes))
-        .unwrap_or(budget);
+    let mut profile = executor_context_profile(task, latest_checkpoint.as_ref());
+    let goal_context_required = task_requires_goal_context(task);
+    let allowed_sections = effective_allowed_sections(&profile, goal_context_required);
     let workflow_revision = workflow
         .revisions
         .last()
@@ -2610,12 +2608,16 @@ pub fn build_context_package_with_checkpoint_project_and_worktree(
     let mut secret_vault_references = Vec::new();
     let mut secret_local_ai_fallback_attempted = false;
     let mut prepared = Vec::new();
+    let mut lossless_overlay_extra_bytes = 0usize;
 
     for candidate in candidates {
         if candidate.content.is_empty() {
             continue;
         }
-        let required = profile.required_sections.contains(&candidate.section);
+        let goal_section_required =
+            goal_context_required && is_lossless_goal_section(candidate.section);
+        let required =
+            profile.required_sections.contains(&candidate.section) || goal_section_required;
         if required {
             required_sections.push(candidate.section.to_string());
         }
@@ -2638,7 +2640,17 @@ pub fn build_context_package_with_checkpoint_project_and_worktree(
         let summary = summarize_shard(&sanitized_candidate.content);
         let original_bytes = sanitized_candidate.content.len();
         let source_sha256 = hex_sha256(sanitized_candidate.content.as_bytes());
-        let compressed_content = compress_shard(&sanitized_candidate, &summary);
+        let default_compressed_content = compress_shard(&sanitized_candidate, &summary);
+        let compressed_content = if goal_context_required
+            && is_lossless_goal_section(sanitized_candidate.section)
+        {
+            lossless_overlay_extra_bytes = lossless_overlay_extra_bytes.saturating_add(
+                original_bytes.saturating_sub(original_bytes.min(default_compressed_content.len())),
+            );
+            sanitized_candidate.content.clone()
+        } else {
+            default_compressed_content
+        };
         let minimum_routable_bytes = original_bytes.min(compressed_content.len());
 
         prepared.push(PreparedContextShard {
@@ -2649,7 +2661,9 @@ pub fn build_context_package_with_checkpoint_project_and_worktree(
             compressed_content,
             summary,
             required,
-            allowed: profile.allowed_sections.contains(&candidate.section),
+            allowed: allowed_sections
+                .iter()
+                .any(|section| section == candidate.section),
             original_bytes,
             minimum_routable_bytes,
             source_sha256,
@@ -2664,6 +2678,17 @@ pub fn build_context_package_with_checkpoint_project_and_worktree(
         .filter(|candidate| candidate.required && candidate.allowed)
         .map(|candidate| candidate.minimum_routable_bytes)
         .sum::<usize>();
+    if goal_context_required {
+        if let Some(maximum) = profile.max_context_bytes.as_mut() {
+            *maximum = maximum
+                .saturating_add(lossless_overlay_extra_bytes)
+                .max(required_minimum_bytes);
+        }
+    }
+    let effective_budget = profile
+        .max_context_bytes
+        .map(|max_bytes| budget.min(max_bytes))
+        .unwrap_or(budget);
     let required_original_bytes = prepared
         .iter()
         .filter(|candidate| candidate.required && candidate.allowed)
@@ -2929,8 +2954,13 @@ pub fn build_context_package_with_checkpoint_project_and_worktree(
         local_ai_fallback_attempted: secret_local_ai_fallback_attempted,
         sanitized_context_sha256: context_sha256.clone(),
     };
-    let routing_contract =
-        build_routing_contract(&profile, budget, effective_budget, &required_sections)?;
+    let routing_contract = build_routing_contract(
+        &profile,
+        budget,
+        effective_budget,
+        &allowed_sections,
+        &required_sections,
+    )?;
     let routing_repair = build_routing_repair(
         &routing_summary,
         &shards,
@@ -3103,7 +3133,7 @@ pub fn build_context_package_with_checkpoint_project_and_worktree(
         persona,
         persona_profile,
         persona_contract,
-        executor_profile: profile.to_public(&task.executor, &required_sections),
+        executor_profile: profile.to_public(&task.executor, &allowed_sections, &required_sections),
         execution_policy: task.execution_policy.clone(),
         execution_policy_decision,
         dependency_summary,
@@ -5217,13 +5247,10 @@ fn build_routing_contract(
     profile: &ExecutorContextProfile,
     requested_budget: usize,
     effective_budget: usize,
+    allowed_sections: &[String],
     required_sections: &[String],
 ) -> Result<ContextRoutingContract> {
-    let allowed_sections = profile
-        .allowed_sections
-        .iter()
-        .map(|section| (*section).to_string())
-        .collect::<Vec<_>>();
+    let allowed_sections = allowed_sections.to_vec();
     let required_sections = required_sections.to_vec();
     let optional_sections = allowed_sections
         .iter()
@@ -6431,6 +6458,49 @@ fn task_requires_artifact_context(task: &AtomicTask) -> bool {
         || text.contains("artifact output")
 }
 
+fn task_requires_goal_context(task: &AtomicTask) -> bool {
+    let explicit_requirement = task.context_requirements.iter().any(|requirement| {
+        matches!(
+            requirement.trim().to_ascii_lowercase().as_str(),
+            "human goal" | "explicit constraints"
+        )
+    });
+    let produces_intent = task
+        .expected_output
+        .to_ascii_lowercase()
+        .contains("intentspec");
+    let validates_goal = task.validation_rules.iter().any(|rule| {
+        rule.expected
+            .split(|character: char| !character.is_alphanumeric() && character != '_')
+            .any(|word| word.eq_ignore_ascii_case("goal"))
+    });
+
+    explicit_requirement || (produces_intent && validates_goal)
+}
+
+fn is_lossless_goal_section(section: &str) -> bool {
+    matches!(section, "workflow_goal" | "constraints")
+}
+
+fn effective_allowed_sections(
+    profile: &ExecutorContextProfile,
+    goal_context_required: bool,
+) -> Vec<String> {
+    let mut sections = profile
+        .allowed_sections
+        .iter()
+        .map(|section| (*section).to_string())
+        .collect::<Vec<_>>();
+    if goal_context_required {
+        for section in ["workflow_goal", "constraints"] {
+            if !sections.iter().any(|allowed| allowed == section) {
+                sections.push(section.to_string());
+            }
+        }
+    }
+    sections
+}
+
 fn task_requires_final_completion_audit_context(task: &AtomicTask) -> bool {
     let mut text = format!("{} {} {}", task.title, task.goal, task.expected_output);
     if !task.context_requirements.is_empty() {
@@ -6445,6 +6515,7 @@ impl ExecutorContextProfile {
     fn to_public(
         self,
         executor: &ExecutorKind,
+        allowed_sections: &[String],
         required_sections: &[String],
     ) -> ContextExecutorProfile {
         ContextExecutorProfile {
@@ -6453,11 +6524,7 @@ impl ExecutorContextProfile {
             reasoning_allowed: self.reasoning_allowed,
             deterministic: self.deterministic,
             max_context_bytes: self.max_context_bytes,
-            allowed_sections: self
-                .allowed_sections
-                .iter()
-                .map(|section| (*section).to_string())
-                .collect(),
+            allowed_sections: allowed_sections.to_vec(),
             required_sections: required_sections.to_vec(),
         }
     }

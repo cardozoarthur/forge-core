@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.5.3 - 2026-07-25
+
+### Fixed
+
+- Made intent parsing require the complete sanitized human workflow goal and
+  explicit constraints before executor handoff, blocking with a convergent
+  budget recommendation instead of accepting compressed goal context.
+- Composed lossless goal requirements with deterministic, artifact-manifest,
+  rework and audit profiles while preserving their existing context gates and
+  bounded optional-context limits.
+- Added regression coverage preventing `context_ready` and `handoff_ready`
+  from succeeding when goal-oriented required context is omitted.
+
+### Safety
+
+- Goal-oriented tasks can no longer be promoted when a head or tail portion of
+  the human goal is absent from the routed packet.
+
 ## 0.5.2 - 2026-07-24
 
 ### Added

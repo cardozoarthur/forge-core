@@ -323,7 +323,7 @@ sudo /usr/local/sbin/forge-admin \
   --receipt <execution-receipt-id> \
   --evidence-root /var/lib/forge/evidence \
   --artifact mission-operational-lifecycle.json \
-  --release-version 0.5.2 \
+  --release-version 0.5.3 \
   --output json
 ```
 
