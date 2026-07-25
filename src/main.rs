@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use forge_core::adapter::validate_executor_response_file;
 use forge_core::addon::{
@@ -161,11 +161,27 @@ use forge_core::memory::{
 use forge_core::milestone::{
     attach_milestone_evidence, build_milestone_evidence_plan, build_milestone_export_demo,
     build_milestone_manifest_with_store, build_milestone_research, build_milestone_status,
+    build_production_mission_lifecycle_evidence, build_production_readiness_plan,
     build_replacement_cli_demo_with_options, collect_milestone_evidence,
-    collect_ready_milestone_evidence, prepare_milestone_evidence_inputs,
-    MilestoneAttachEvidenceOptions, MilestoneCliDemoOptions, MilestoneCollectEvidenceOptions,
-    MilestoneCollectReadyEvidenceOptions, MilestoneEvidencePlanOptions,
-    MilestonePrepareEvidenceInputsOptions,
+    collect_ready_milestone_evidence, evaluate_production_readiness,
+    prepare_milestone_evidence_inputs, MilestoneAttachEvidenceOptions, MilestoneCliDemoOptions,
+    MilestoneCollectEvidenceOptions, MilestoneCollectReadyEvidenceOptions,
+    MilestoneEvidencePlanOptions, MilestonePrepareEvidenceInputsOptions,
+    ProductionReadinessOptions,
+};
+use forge_core::mission::{
+    builtin_squad_catalog, clone_squad, drive_mission, install_builtin_squads, install_squad,
+    list_installed_squads, list_missions, load_mission, load_squad, read_squad_manifest,
+    resume_mission, simulate_mission_with_worktree, start_mission, submit_mission,
+    validate_squad_definition, MissionSubmission,
+};
+use forge_core::mission_executor::{
+    build_mission_execution_approval, execute_mission_command, inspect_mission_execution_receipt,
+    list_mission_execution_receipts, plan_mission_execution, reconcile_mission_execution,
+    MissionExecutionReconcileRequest, MissionExecutionRequest,
+};
+use forge_core::mission_platform::{
+    mission_platform_catalog, simulate_mission_platform_with_store,
 };
 use forge_core::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
@@ -234,8 +250,9 @@ use forge_core::worktree::{
 };
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(name = "forge", version, about = "Forge Core workflow runtime")]
@@ -517,6 +534,14 @@ enum Commands {
         #[arg(long)]
         bypass_cache: bool,
     },
+    Squad {
+        #[command(subcommand)]
+        command: SquadCommands,
+    },
+    Mission {
+        #[command(subcommand)]
+        command: MissionCommands,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -538,6 +563,207 @@ enum StoreCommands {
         approved_by: String,
         #[arg(long = "confirm-restore", default_value_t = false)]
         confirm_restore: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SquadCommands {
+    Catalog {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Capabilities {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    InstallOriginals {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Validate {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Install {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    List {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Inspect {
+        id: String,
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Clone {
+        #[arg(long = "source")]
+        source_id: String,
+        #[arg(long = "source-version")]
+        source_version: Option<String>,
+        #[arg(long = "new-id")]
+        new_id: String,
+        #[arg(long = "new-name")]
+        new_name: String,
+        #[arg(long = "new-version")]
+        new_version: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MissionCommands {
+    Simulate {
+        #[arg(long)]
+        goal: String,
+        #[arg(long, default_value = "software-factory")]
+        squad: String,
+        #[arg(long = "squad-version")]
+        squad_version: Option<String>,
+        #[arg(long = "without-rework", default_value_t = false)]
+        without_rework: bool,
+        #[arg(long)]
+        worktree: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    SimulatePlatform {
+        #[arg(long)]
+        goal: String,
+        #[arg(long, default_value = "software-factory")]
+        squad: String,
+        #[arg(long = "squad-version")]
+        squad_version: Option<String>,
+        #[arg(long)]
+        worktree: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Start {
+        #[arg(long)]
+        goal: String,
+        #[arg(long, default_value = "software-factory")]
+        squad: String,
+        #[arg(long = "squad-version")]
+        squad_version: Option<String>,
+        #[arg(long)]
+        worktree: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Drive {
+        id: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Execute {
+        id: String,
+        #[arg(long = "task")]
+        task_id: String,
+        #[arg(long = "agent")]
+        agent_id: String,
+        #[arg(long = "idempotency-key")]
+        idempotency_key: String,
+        #[arg(long)]
+        purpose: String,
+        #[arg(long = "approved-by")]
+        approved_by: Option<String>,
+        #[arg(long = "approval-ttl-seconds", default_value_t = 300)]
+        approval_ttl_seconds: u64,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "allow-trusted-process-runtime")]
+        allow_trusted_process_runtime: bool,
+        #[arg(long = "evidence")]
+        requested_evidence: Vec<String>,
+        #[arg(
+            long = "command",
+            required = true,
+            num_args = 1,
+            allow_hyphen_values = true
+        )]
+        command: Vec<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Execution {
+        #[command(subcommand)]
+        command: MissionExecutionCommands,
+    },
+    Submit {
+        id: String,
+        #[arg(long = "task")]
+        task_id: String,
+        #[arg(long = "agent")]
+        agent_id: String,
+        #[arg(long = "idempotency-key")]
+        idempotency_key: String,
+        #[arg(long = "receipt-id", alias = "receipt")]
+        receipt_id: String,
+        #[arg(long, default_value = "completed")]
+        status: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long = "artifact")]
+        artifacts: Vec<String>,
+        #[arg(long = "risk")]
+        risks: Vec<String>,
+        #[arg(long = "followup")]
+        followups: Vec<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Resume {
+        id: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    List {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Inspect {
+        id: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MissionExecutionCommands {
+    List {
+        #[arg(long)]
+        mission: Option<String>,
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Inspect {
+        receipt_id: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Reconcile {
+        receipt_id: String,
+        #[arg(long)]
+        outcome: String,
+        #[arg(long = "approved-by")]
+        approved_by: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long = "confirm-no-effect-retry")]
+        confirm_no_effect_retry: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -4108,6 +4334,39 @@ enum MilestoneCommands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+    #[command(name = "production-plan")]
+    ProductionPlan {
+        #[arg(long, default_value = "0.5")]
+        version: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    #[command(name = "production-mission-evidence")]
+    ProductionMissionEvidence {
+        #[arg(long)]
+        mission: String,
+        #[arg(long)]
+        receipt: String,
+        #[arg(long = "evidence-root")]
+        evidence_root: PathBuf,
+        #[arg(long, default_value = "mission-operational-lifecycle.json")]
+        artifact: PathBuf,
+        #[arg(long = "release-version", default_value = env!("CARGO_PKG_VERSION"))]
+        release_version: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    #[command(name = "production-readiness")]
+    ProductionReadiness {
+        #[arg(long, default_value = "0.5")]
+        version: String,
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long = "evidence-root")]
+        evidence_root: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
     #[command(name = "attach-evidence")]
     AttachEvidence {
         #[arg(long, default_value = "0.5")]
@@ -4664,6 +4923,279 @@ fn run() -> Result<i32> {
         return run_forge_tui(&cli.store, Some(std::env::current_dir()?));
     };
     match command {
+        Commands::Squad { command } => {
+            match command {
+                SquadCommands::Catalog { output } => {
+                    print_response(output, &builtin_squad_catalog())?;
+                }
+                SquadCommands::Capabilities { output } => {
+                    print_response(output, &mission_platform_catalog())?;
+                }
+                SquadCommands::InstallOriginals { output } => {
+                    let store = ForgeStore::open(&cli.store)?;
+                    print_response(output, &install_builtin_squads(&store)?)?;
+                }
+                SquadCommands::Validate { manifest, output } => {
+                    let squad = read_squad_manifest(&manifest)?;
+                    print_response(output, &validate_squad_definition(&squad)?)?;
+                }
+                SquadCommands::Install { manifest, output } => {
+                    let store = ForgeStore::open(&cli.store)?;
+                    let squad = read_squad_manifest(&manifest)?;
+                    print_response(output, &install_squad(&store, &squad)?)?;
+                }
+                SquadCommands::List { output } => {
+                    let store = ForgeStore::open(&cli.store)?;
+                    print_response(output, &list_installed_squads(&store)?)?;
+                }
+                SquadCommands::Inspect {
+                    id,
+                    version,
+                    output,
+                } => {
+                    let store = ForgeStore::open(&cli.store)?;
+                    print_response(output, &load_squad(&store, &id, version.as_deref())?)?;
+                }
+                SquadCommands::Clone {
+                    source_id,
+                    source_version,
+                    new_id,
+                    new_name,
+                    new_version,
+                    output,
+                } => {
+                    let store = ForgeStore::open(&cli.store)?;
+                    print_response(
+                        output,
+                        &clone_squad(
+                            &store,
+                            &source_id,
+                            source_version.as_deref(),
+                            &new_id,
+                            &new_name,
+                            &new_version,
+                        )?,
+                    )?;
+                }
+            }
+            Ok(0)
+        }
+        Commands::Mission { command } => {
+            let store = ForgeStore::open(&cli.store)?;
+            match command {
+                MissionCommands::Simulate {
+                    goal,
+                    squad,
+                    squad_version,
+                    without_rework,
+                    worktree,
+                    output,
+                } => {
+                    print_response(
+                        output,
+                        &simulate_mission_with_worktree(
+                            &store,
+                            &goal,
+                            &squad,
+                            squad_version.as_deref(),
+                            !without_rework,
+                            worktree.as_deref(),
+                        )?,
+                    )?;
+                }
+                MissionCommands::SimulatePlatform {
+                    goal,
+                    squad,
+                    squad_version,
+                    worktree,
+                    output,
+                } => {
+                    let mission = simulate_mission_with_worktree(
+                        &store,
+                        &goal,
+                        &squad,
+                        squad_version.as_deref(),
+                        true,
+                        worktree.as_deref(),
+                    )?;
+                    let report = simulate_mission_platform_with_store(&store, &mission);
+                    let exit_code = if report.failed_count > 0 { 1 } else { 0 };
+                    print_response(output, &report)?;
+                    return Ok(exit_code);
+                }
+                MissionCommands::Start {
+                    goal,
+                    squad,
+                    squad_version,
+                    worktree,
+                    output,
+                } => {
+                    print_response(
+                        output,
+                        &start_mission(&store, &goal, &squad, squad_version.as_deref(), &worktree)?,
+                    )?;
+                }
+                MissionCommands::Drive { id, output } => {
+                    print_response(output, &drive_mission(&store, &id)?)?;
+                }
+                MissionCommands::Execute {
+                    id,
+                    task_id,
+                    agent_id,
+                    idempotency_key,
+                    purpose,
+                    approved_by,
+                    approval_ttl_seconds,
+                    dry_run,
+                    allow_trusted_process_runtime,
+                    requested_evidence,
+                    command,
+                    output,
+                } => {
+                    let mission = load_mission(&store, &id)?;
+                    let agent = mission
+                        .agents
+                        .iter()
+                        .find(|agent| agent.instance_id == agent_id)
+                        .with_context(|| format!("mission agent not found: {agent_id}"))?;
+                    let harness = mission
+                        .harnesses
+                        .iter()
+                        .rev()
+                        .find(|harness| {
+                            harness.task_id == task_id && harness.agent_id == agent.definition_id
+                        })
+                        .with_context(|| {
+                            format!(
+                                "mission harness not found for task {task_id} and agent {agent_id}"
+                            )
+                        })?;
+                    let mut request = MissionExecutionRequest {
+                        idempotency_key,
+                        mission_id: mission.id.clone(),
+                        workflow_id: mission.workflow_id.clone(),
+                        expected_mission_revision: mission.revision,
+                        task_id,
+                        agent_id,
+                        executor_id: harness.runtime.clone(),
+                        worktree: mission.worktree.clone(),
+                        purpose,
+                        command,
+                        requested_evidence,
+                        approval: None,
+                        dry_run,
+                        allow_trusted_process_runtime,
+                    };
+                    let plan = plan_mission_execution(&store, &request)?;
+                    if !dry_run {
+                        let approved_by = approved_by.as_deref().context(
+                            "mission execution requires --approved-by unless --dry-run is set",
+                        )?;
+                        request.approval = Some(build_mission_execution_approval(
+                            &plan,
+                            approved_by,
+                            approval_ttl_seconds,
+                        )?);
+                    }
+                    let report = execute_mission_command(&store, request)?;
+                    let successful = report.receipt.status == "completed"
+                        && report.receipt.exit_code == Some(0)
+                        && !report.receipt.timed_out;
+                    let dry_run_ready = dry_run && report.receipt.status == "planned";
+                    print_response(output, &report)?;
+                    return Ok(if successful || dry_run_ready { 0 } else { 1 });
+                }
+                MissionCommands::Execution { command } => match command {
+                    MissionExecutionCommands::List {
+                        mission,
+                        task,
+                        output,
+                    } => {
+                        print_response(
+                            output,
+                            &list_mission_execution_receipts(
+                                &store,
+                                mission.as_deref(),
+                                task.as_deref(),
+                            )?,
+                        )?;
+                    }
+                    MissionExecutionCommands::Inspect { receipt_id, output } => {
+                        print_response(
+                            output,
+                            &inspect_mission_execution_receipt(&store, &receipt_id)?,
+                        )?;
+                    }
+                    MissionExecutionCommands::Reconcile {
+                        receipt_id,
+                        outcome,
+                        approved_by,
+                        reason,
+                        confirm_no_effect_retry,
+                        output,
+                    } => {
+                        print_response(
+                            output,
+                            &reconcile_mission_execution(
+                                &store,
+                                MissionExecutionReconcileRequest {
+                                    receipt_id,
+                                    outcome,
+                                    approved_by,
+                                    reason,
+                                    confirm_no_effect_retry,
+                                },
+                            )?,
+                        )?;
+                    }
+                },
+                MissionCommands::Submit {
+                    id,
+                    task_id,
+                    agent_id,
+                    idempotency_key,
+                    receipt_id,
+                    status,
+                    summary,
+                    artifacts,
+                    risks,
+                    followups,
+                    output,
+                } => {
+                    print_response(
+                        output,
+                        &submit_mission(
+                            &store,
+                            &id,
+                            MissionSubmission {
+                                idempotency_key,
+                                execution_receipt_id: receipt_id,
+                                task_id,
+                                agent_id,
+                                status,
+                                summary,
+                                artifacts,
+                                validations: Vec::new(),
+                                risks,
+                                followups,
+                                tests_passed: 0,
+                                tests_failed: 0,
+                            },
+                        )?,
+                    )?;
+                }
+                MissionCommands::Resume { id, output } => {
+                    print_response(output, &resume_mission(&store, &id)?)?;
+                }
+                MissionCommands::List { output } => {
+                    print_response(output, &list_missions(&store)?)?;
+                }
+                MissionCommands::Inspect { id, output } => {
+                    print_response(output, &load_mission(&store, &id)?)?;
+                }
+            }
+            Ok(0)
+        }
         Commands::Teamwork {
             goal,
             detached,
@@ -10330,6 +10862,71 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
+            MilestoneCommands::ProductionPlan { version, output } => {
+                let report = build_production_readiness_plan(&version)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MilestoneCommands::ProductionMissionEvidence {
+                mission,
+                receipt,
+                evidence_root,
+                artifact,
+                release_version,
+                output,
+            } => {
+                let artifact_value = artifact
+                    .to_str()
+                    .context("production mission evidence artifact path must be valid UTF-8")?;
+                let store = ForgeStore::open(&cli.store)?;
+                let package = build_production_mission_lifecycle_evidence(
+                    &store,
+                    &release_version,
+                    &mission,
+                    &receipt,
+                    artifact_value,
+                )?;
+                let artifact_bytes = serde_json::to_vec(&package.artifact)
+                    .context("failed to serialize production mission lifecycle artifact")?;
+                let artifact_sha256 = format!("{:x}", Sha256::digest(&artifact_bytes));
+                if package.manifest_section.evidence.artifact_sha256 != artifact_sha256 {
+                    bail!(
+                        "production mission lifecycle artifact SHA-256 differs from manifest section"
+                    );
+                }
+                let artifact_path = write_contained_production_evidence_artifact(
+                    &evidence_root,
+                    &artifact,
+                    &artifact_bytes,
+                )?;
+                let persisted_bytes = std::fs::read(&artifact_path).with_context(|| {
+                    format!(
+                        "failed to verify production mission evidence artifact {}",
+                        artifact_path.display()
+                    )
+                })?;
+                if persisted_bytes != artifact_bytes {
+                    bail!("persisted production mission evidence differs from canonical bytes");
+                }
+                print_response(output, &package)?;
+                Ok(0)
+            }
+            MilestoneCommands::ProductionReadiness {
+                version,
+                manifest,
+                evidence_root,
+                output,
+            } => {
+                let report = evaluate_production_readiness(ProductionReadinessOptions {
+                    version: &version,
+                    manifest_path: &manifest,
+                    evidence_root: &evidence_root,
+                    store_path: &cli.store,
+                })?;
+                let production_ready = report.production_ready;
+                print_response(output, &report)?;
+                Ok(if production_ready { 0 } else { 1 })
+            }
             MilestoneCommands::AttachEvidence {
                 version,
                 capability_id,
@@ -11024,6 +11621,144 @@ fn forge_production_mode_enabled() -> bool {
         .ok()
         .map(|value| value.trim().to_ascii_lowercase())
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+}
+
+fn write_contained_production_evidence_artifact(
+    evidence_root: &Path,
+    artifact: &Path,
+    bytes: &[u8],
+) -> Result<PathBuf> {
+    if artifact.as_os_str().is_empty()
+        || artifact.is_absolute()
+        || !artifact
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        bail!("production mission evidence artifact must be a contained relative path");
+    }
+
+    let root_metadata = std::fs::symlink_metadata(evidence_root).with_context(|| {
+        format!(
+            "failed to inspect production mission evidence root {}",
+            evidence_root.display()
+        )
+    })?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        bail!("production mission evidence root must be a non-symlink directory");
+    }
+    let canonical_root = std::fs::canonicalize(evidence_root).with_context(|| {
+        format!(
+            "failed to resolve production mission evidence root {}",
+            evidence_root.display()
+        )
+    })?;
+
+    let mut canonical_parent = canonical_root.clone();
+    if let Some(parent) = artifact.parent() {
+        for component in parent.components() {
+            let Component::Normal(segment) = component else {
+                bail!("production mission evidence parent must stay contained");
+            };
+            let candidate = canonical_parent.join(segment);
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(metadata) => {
+                    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                        bail!(
+                            "production mission evidence parent must be a non-symlink directory: {}",
+                            candidate.display()
+                        );
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&candidate).with_context(|| {
+                        format!(
+                            "failed to create production mission evidence directory {}",
+                            candidate.display()
+                        )
+                    })?;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to inspect production mission evidence directory {}",
+                            candidate.display()
+                        )
+                    });
+                }
+            }
+            canonical_parent = std::fs::canonicalize(&candidate).with_context(|| {
+                format!(
+                    "failed to resolve production mission evidence directory {}",
+                    candidate.display()
+                )
+            })?;
+            if !canonical_parent.starts_with(&canonical_root) {
+                bail!("production mission evidence parent escapes evidence root");
+            }
+        }
+    }
+
+    let file_name = artifact
+        .file_name()
+        .context("production mission evidence artifact requires a file name")?;
+    let target = canonical_parent.join(file_name);
+    if let Ok(metadata) = std::fs::symlink_metadata(&target) {
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            bail!("production mission evidence artifact must be a regular non-symlink file");
+        }
+    }
+    let temporary = canonical_parent.join(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let persist_result = (|| -> Result<()> {
+        use std::io::Write as _;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| {
+                format!(
+                    "failed to create production mission evidence staging file {}",
+                    temporary.display()
+                )
+            })?;
+        file.write_all(bytes).with_context(|| {
+            format!(
+                "failed to write production mission evidence staging file {}",
+                temporary.display()
+            )
+        })?;
+        file.sync_all().with_context(|| {
+            format!(
+                "failed to sync production mission evidence staging file {}",
+                temporary.display()
+            )
+        })?;
+        drop(file);
+        std::fs::rename(&temporary, &target).with_context(|| {
+            format!(
+                "failed to atomically publish production mission evidence artifact {}",
+                target.display()
+            )
+        })?;
+        std::fs::File::open(&canonical_parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| {
+                format!(
+                    "failed to sync production mission evidence directory {}",
+                    canonical_parent.display()
+                )
+            })?;
+        Ok(())
+    })();
+    if persist_result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    persist_result?;
+    Ok(target)
 }
 
 fn print_response<T: Serialize>(format: OutputFormat, value: &T) -> Result<()> {

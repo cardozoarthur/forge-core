@@ -2868,6 +2868,27 @@ fn sandbox_runtime_paths(
     })
 }
 
+fn remap_bubblewrap_payload_argument(
+    argument: &str,
+    worktree_root: &Path,
+    runtime_worktree_root: &Path,
+) -> String {
+    let path = Path::new(argument);
+    if !path.is_absolute() {
+        return argument.to_string();
+    }
+    let Ok(resolved_path) = fs::canonicalize(path) else {
+        return argument.to_string();
+    };
+    let Ok(relative_path) = resolved_path.strip_prefix(worktree_root) else {
+        return argument.to_string();
+    };
+    runtime_worktree_root
+        .join(relative_path)
+        .display()
+        .to_string()
+}
+
 fn bubblewrap_command(
     bubblewrap_path: &Path,
     worktree_root: &Path,
@@ -2901,6 +2922,7 @@ fn bubblewrap_command(
     }
     for path in [
         "/etc/hosts",
+        "/etc/alternatives",
         "/etc/resolv.conf",
         "/etc/nsswitch.conf",
         "/etc/ssl/certs",
@@ -2944,7 +2966,16 @@ fn bubblewrap_command(
         runtime_paths.working_directory.display().to_string(),
         "--".to_string(),
     ]);
-    args.extend(command.iter().cloned());
+    let resolved_worktree_root =
+        fs::canonicalize(worktree_root).unwrap_or_else(|_| worktree_root.to_path_buf());
+    if let Some((executable, arguments)) = command.split_first() {
+        args.push(remap_bubblewrap_payload_argument(
+            executable,
+            &resolved_worktree_root,
+            &runtime_paths.worktree_root,
+        ));
+        args.extend(arguments.iter().cloned());
+    }
     args
 }
 
@@ -3553,6 +3584,7 @@ fn process_alive(process_id: u32) -> bool {
     }
 }
 
+#[cfg(unix)]
 fn signal_number(signal: &str) -> Result<i32> {
     match signal {
         "-KILL" => Ok(libc::SIGKILL),
@@ -4155,11 +4187,58 @@ mod tests {
             runtime_paths.working_directory.display().to_string(),
         ]));
         assert!(args.iter().any(|argument| argument == "--unshare-net"));
+        if Path::new("/etc/alternatives").exists() {
+            assert!(contains(&[
+                "--ro-bind".to_string(),
+                "/etc/alternatives".to_string(),
+                "/etc/alternatives".to_string(),
+            ]));
+        }
         assert!(!contains(&[
             "--ro-bind".to_string(),
             "/".to_string(),
             "/".to_string(),
         ]));
+    }
+
+    #[test]
+    fn bubblewrap_remaps_only_a_canonical_worktree_executable_to_guest_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree");
+        let sandbox = worktree.join(".forge/sandboxes/internal");
+        let executable = worktree.join("fixture-bin/cargo");
+        let input = worktree.join("fixture-data/input.txt");
+        let external = temp.path().join("external.txt");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::create_dir_all(input.parent().unwrap()).unwrap();
+        fs::create_dir_all(&sandbox).unwrap();
+        fs::write(&executable, "#!/bin/sh\n").unwrap();
+        fs::write(&input, "input").unwrap();
+        fs::write(&external, "external").unwrap();
+
+        let runtime_paths =
+            sandbox_runtime_paths("bubblewrap", &worktree, &sandbox, &worktree).unwrap();
+        let args = bubblewrap_command(
+            Path::new("/usr/bin/bwrap"),
+            &worktree,
+            &sandbox,
+            &runtime_paths,
+            "deny",
+            &[
+                executable.display().to_string(),
+                input.display().to_string(),
+                external.display().to_string(),
+            ],
+        );
+        let separator = args.iter().position(|argument| argument == "--").unwrap();
+        assert_eq!(
+            &args[separator + 1..],
+            &[
+                "/workspace/fixture-bin/cargo".to_string(),
+                input.display().to_string(),
+                external.display().to_string(),
+            ]
+        );
     }
 
     #[test]

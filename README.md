@@ -50,7 +50,7 @@ Use `j`/`k` para mover o foco no REPL, `enter` para abrir o painel focado, `m` p
 
 ## Status
 
-Current version: `0.5.1`
+Current version: `0.5.2`
 
 Forge v0.5 is production-supported for one trusted operator on one host, with a
 local SQLite store and loopback-only Ops service. Multi-tenant operation, high
@@ -203,6 +203,125 @@ cargo install --path .
 ```bash
 forge plan --goal "Create a delivery platform" --output json
 ```
+
+### Squads, missões e simulação bounded
+
+Forge trata squads versionados e missões persistentes como entidades próprias.
+O orquestrador de um squad é validado como control-plane restrito: pode delegar,
+observar, solicitar reparo e consolidar, mas não recebe shell, escrita em arquivos,
+commit, deploy ou rede. Agentes, handoffs, inbox, checkpoints, gates, custos e
+tentativas de reparo são persistidos incrementalmente no SQLite.
+
+```bash
+forge squad catalog --output json
+forge squad capabilities --output json
+forge mission simulate \
+  --goal "Implement a production-safe Rust API" \
+  --squad software-factory \
+  --output json
+forge mission simulate-platform \
+  --goal "Validate every mission platform backend capability" \
+  --worktree "$PWD" \
+  --output json
+```
+
+`forge squad capabilities` publica o inventário canônico e numerado de `1` a
+`40`, seu SHA-256 e uma classificação explícita por capacidade:
+`runtime_real`, `bounded_simulation` ou `contract_only`. A classificação descreve
+o melhor nível de evidência disponível, não prontidão individual para produção.
+No inventário v0.5 atual são 20 capacidades com caminho real parcial, 14
+demonstradas somente em simulação bounded e 6 limitadas ao contrato.
+
+`simulate-platform` executa uma fixture determinística e rápida para todos os 40
+contratos. Ela não chama modelos, não acessa infraestrutura externa, identifica
+o escopo como `bounded_simulation` e sempre retorna `production_ready=false`;
+portanto não substitui o gate operacional de produção.
+
+Uma missão real usa o mesmo task ID na missão e no workflow. `start` retorna
+`mission.workflow_id` e os IDs das tasks projetadas. Solicite contexto estrito
+enquanto a próxima task ainda está pendente; só então chame `drive`, confirme
+que `assignment.task.id` é o mesmo ID e capture
+`assignment.agent.instance_id`:
+
+```bash
+forge mission start --goal "<objetivo>" --squad software-factory \
+  --worktree /caminho/absoluto/do/worktree --output json
+forge context --workflow <workflow-id> --task <task-id> \
+  --project-root /caminho/absoluto/do/worktree --budget 4096 \
+  --strict --view compact --output json
+forge mission drive <mission-id> --output json
+forge mission execute <mission-id> --task <task-id> --agent <agent-id> \
+  --idempotency-key <chave-execução> --purpose test \
+  --approved-by <operador> --evidence <tipo-exigido> \
+  --command <executável> --command <argumento> --output json
+forge mission submit <mission-id> --task <task-id> --agent <agent-id> \
+  --idempotency-key <chave-submissão> \
+  --receipt-id <execution-receipt-id> \
+  --summary "<entrega validada>" --output json
+forge mission resume <mission-id> --output json
+```
+
+Só execute quando o contexto retornar `handoff_ready=true` e
+`guardrail.status=ready`. Depois de cada `resume`, inspecione a próxima task
+pendente e repita `context --strict → drive → execute → submit → resume` até
+`action=mission_completed`; `repair_created` abre outra iteração, não uma
+conclusão. O receipt de execução v3 vincula revisão, identidade,
+comando, política, sandbox e evidência tipada. A submissão enfileirada deve
+referenciar esse mesmo receipt, e `resume` deve consumir o handoff antes da
+promoção. Confirme ao final:
+
+```bash
+forge mission inspect <mission-id> --output json
+forge mission execution list --mission <mission-id> --output json
+forge validate --workflow <workflow-id> --output json
+```
+
+Materialize o 14º receipt diretamente dos registros persistidos. O comando
+grava os bytes canônicos do artifact dentro de `--evidence-root`, confere o
+SHA-256 e devolve o pacote com `manifest_section` pronto para o manifesto:
+
+```bash
+forge milestone production-mission-evidence \
+  --mission <mission-id> \
+  --receipt <execution-receipt-id> \
+  --evidence-root /caminho/absoluto/das/evidências \
+  --artifact mission-operational-lifecycle.json \
+  --output json
+```
+
+Falhas, timeouts e resultados indeterminados bloqueiam novo dispatch. Após
+comprovação independente de ausência de efeitos, registre a única reconciliação
+segura:
+
+```bash
+forge mission execution reconcile <receipt-id> \
+  --outcome no_effect_retry --approved-by <operador> \
+  --reason "<evidência independente>" \
+  --confirm-no-effect-retry --output json
+```
+
+Revisão obsoleta exige novo `inspect`, contexto estrito, atribuição e execução;
+nunca force nem edite receipts no SQLite. A skill modular
+`forge-core-missions` contém os contratos completos de entrada, saída e
+recuperação.
+
+```bash
+forge milestone production-plan --version 0.5 --output json
+forge milestone production-readiness \
+  --version 0.5 \
+  --manifest production-readiness.json \
+  --evidence-root /absolute/path/to/evidence \
+  --output json
+```
+
+O evaluator é somente leitura e falha fechado quando qualquer evidência de
+release, instalação, backup off-host, escrow, alertas, restore, rollback ou carga
+bounded estiver ausente, vencida, fora do diretório permitido ou sem vínculo
+criptográfico com a versão e os claims avaliados. Além dos 13 receipts
+operacionais existentes, ele exige um 14º receipt composto que vincula o hash
+exato do inventário `1`–`40` a uma cadeia real e ordenada
+`execute → submit → resume`. Uma fixture 40/40 bounded nunca satisfaz esse
+receipt.
 
 ### Git worktree, preview e teste
 
@@ -859,11 +978,12 @@ The installer writes:
 The repository also includes project-local skill definitions:
 
 - `.agents/skills/forge-core/SKILL.md`
+- `.agents/skills/forge-core-missions/SKILL.md`
 - `.agents/skills/forge-core-workspaces/SKILL.md`
 - `.opencode/skills/forge-core/SKILL.md`
 - `skills/forge-core/SKILL.md`
 
-O instalador mantém `forge-core` como router enxuto e instala os módulos de domínio ao lado dele, incluindo `forge-core-workspaces` para worktrees, sandbox e gates de preview/teste.
+O instalador mantém `forge-core` como router enxuto e instala os módulos de domínio ao lado dele, incluindo `forge-core-missions` para o ciclo operacional de missões e `forge-core-workspaces` para worktrees, sandbox e gates de preview/teste.
 
 ## Validation
 

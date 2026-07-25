@@ -129,11 +129,20 @@ use crate::memory::{
 use crate::milestone::{
     attach_milestone_evidence, build_milestone_evidence_plan, build_milestone_export_demo,
     build_milestone_manifest_with_store, build_milestone_research, build_milestone_status,
-    build_replacement_cli_demo_with_options, collect_milestone_evidence,
-    collect_ready_milestone_evidence, prepare_milestone_evidence_inputs,
-    MilestoneAttachEvidenceOptions, MilestoneCliDemoOptions, MilestoneCollectEvidenceOptions,
-    MilestoneCollectReadyEvidenceOptions, MilestoneEvidencePlanOptions,
-    MilestonePrepareEvidenceInputsOptions,
+    build_production_readiness_plan, build_replacement_cli_demo_with_options,
+    collect_milestone_evidence, collect_ready_milestone_evidence, evaluate_production_readiness,
+    prepare_milestone_evidence_inputs, MilestoneAttachEvidenceOptions, MilestoneCliDemoOptions,
+    MilestoneCollectEvidenceOptions, MilestoneCollectReadyEvidenceOptions,
+    MilestoneEvidencePlanOptions, MilestonePrepareEvidenceInputsOptions,
+    ProductionReadinessOptions,
+};
+use crate::mission::{
+    drive_mission, load_mission, resume_mission, start_mission, submit_mission, MissionSubmission,
+};
+use crate::mission_executor::{
+    build_mission_execution_approval, execute_mission_command, inspect_mission_execution_receipt,
+    list_mission_execution_receipts, plan_mission_execution, reconcile_mission_execution,
+    MissionExecutionReconcileRequest, MissionExecutionRequest,
 };
 use crate::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
@@ -272,6 +281,75 @@ struct McpArtifactFetchReport {
     truncated: bool,
     content_sha256: Option<String>,
     content_utf8: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MissionStartInput {
+    goal: String,
+    squad: Option<String>,
+    squad_version: Option<String>,
+    worktree: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MissionIdInput {
+    mission_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MissionExecuteInput {
+    mission_id: String,
+    task_id: String,
+    agent_id: String,
+    idempotency_key: String,
+    purpose: String,
+    command: Vec<String>,
+    evidence: Option<Vec<String>>,
+    approved_by: Option<String>,
+    approval_ttl_seconds: Option<u64>,
+    dry_run: Option<bool>,
+    allow_trusted_process_runtime: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MissionSubmitInput {
+    mission_id: String,
+    task_id: String,
+    agent_id: String,
+    idempotency_key: String,
+    receipt_id: String,
+    status: Option<String>,
+    summary: String,
+    artifacts: Option<Vec<String>>,
+    risks: Option<Vec<String>>,
+    followups: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MissionExecutionListInput {
+    mission_id: Option<String>,
+    task_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MissionExecutionInspectInput {
+    receipt_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MissionExecutionReconcileInput {
+    receipt_id: String,
+    outcome: String,
+    approved_by: String,
+    reason: String,
+    confirm_no_effect_retry: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1947,6 +2025,13 @@ struct MilestoneStatusInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct ProductionReadinessInput {
+    version: Option<String>,
+    manifest: String,
+    evidence_root: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct MilestoneAttachEvidenceInput {
     version: Option<String>,
     capability: Option<String>,
@@ -2274,6 +2359,109 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
         schema_version: MCP_TOOLS_SCHEMA_VERSION.to_string(),
         protocol: "model_context_protocol".to_string(),
         tools: vec![
+            tool(
+                "forge.mission.start",
+                "Start Operational Mission",
+                "Persist an operational mission, restricted orchestrator, task graph and real worktree binding.",
+                object_schema(
+                    &[
+                        ("goal", "string", "mission objective"),
+                        ("squad", "string", "squad id; defaults to software-factory"),
+                        ("squad_version", "string", "optional immutable squad version"),
+                        ("worktree", "string", "real Git worktree path"),
+                    ],
+                    &["goal", "worktree"],
+                ),
+                "forge.mission.start.v1",
+                &["forge", "mission", "start", "--output", "json"],
+                ToolFlags::new(false, true),
+            ),
+            tool(
+                "forge.mission.drive",
+                "Drive Operational Mission",
+                "Consume one pending inbox handoff or create one bounded task assignment and harness.",
+                object_schema(
+                    &[("mission_id", "string", "mission id")],
+                    &["mission_id"],
+                ),
+                "forge.mission.drive.v1",
+                &["forge", "mission", "drive", "<mission-id>", "--output", "json"],
+                ToolFlags::new(false, true),
+            ),
+            tool(
+                "forge.mission.execute",
+                "Execute Mission Assignment",
+                "Execute an assigned command through the mission's pinned worktree sandbox with structured approval provenance and an idempotent receipt. The dry-run branch is read-only; tool metadata remains mutating because the execution branch can launch a process.",
+                mission_execute_input_schema(),
+                "forge.mission.execution_receipt.v3",
+                &["forge", "mission", "execute", "<mission-id>", "--output", "json"],
+                ToolFlags::new(false, true),
+            ),
+            tool(
+                "forge.mission.submit",
+                "Submit Mission Execution Receipt",
+                "Queue a typed task delivery backed by a persisted execution receipt; caller-supplied validation claims are not accepted.",
+                mission_submit_input_schema(),
+                "forge.mission.submit.v1",
+                &["forge", "mission", "submit", "<mission-id>", "--output", "json"],
+                ToolFlags::new(false, true),
+            ),
+            tool(
+                "forge.mission.resume",
+                "Resume Operational Mission",
+                "Lease and consume one persisted mission inbox item after reopening durable state.",
+                object_schema(
+                    &[("mission_id", "string", "mission id")],
+                    &["mission_id"],
+                ),
+                "forge.mission.drive.v1",
+                &["forge", "mission", "resume", "<mission-id>", "--output", "json"],
+                ToolFlags::new(false, true),
+            ),
+            tool(
+                "forge.mission.execution.list",
+                "List Mission Execution Receipts",
+                "List durable execution receipts, optionally filtered by mission.",
+                object_schema(
+                    &[
+                        ("mission_id", "string", "optional mission id filter"),
+                        ("task_id", "string", "optional task id filter"),
+                    ],
+                    &[],
+                ),
+                "forge.mission.execution_receipt_list.v1",
+                &["forge", "mission", "execution", "list", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.mission.execution.inspect",
+                "Inspect Mission Execution Receipt",
+                "Inspect one durable mission execution receipt by receipt id.",
+                object_schema(
+                    &[("receipt_id", "string", "execution receipt id")],
+                    &["receipt_id"],
+                ),
+                "forge.mission.execution_receipt.v3",
+                &["forge", "mission", "execution", "inspect", "<receipt-id>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.mission.execution.reconcile",
+                "Reconcile Mission Execution",
+                "Record an explicitly approved no-effect outcome for an indeterminate, failed or timed-out execution before allowing a new idempotency key.",
+                mission_execution_reconcile_input_schema(),
+                "forge.mission.execution_reconciliation.v1",
+                &[
+                    "forge",
+                    "mission",
+                    "execution",
+                    "reconcile",
+                    "<receipt-id>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(false, true),
+            ),
             tool(
                 "forge.workflow.list",
                 "List Forge Workflows",
@@ -6757,6 +6945,48 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.milestone.production_plan",
+                "Plan Production Readiness Evidence",
+                "Return the fail-closed production-readiness evidence requirements without executing commands, collecting evidence or mutating state.",
+                object_schema(&[("version", "string", "milestone version, currently 0.5")], &[]),
+                "forge.milestone.production_readiness_plan.v1",
+                &[
+                    "forge",
+                    "milestone",
+                    "production-plan",
+                    "--version",
+                    "0.5",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.milestone.production_readiness",
+                "Evaluate Production Readiness",
+                "Evaluate an explicit secret-free manifest and its evidence root read-only, returning the existing fail-closed production-readiness report without executing commands or inventing evidence.",
+                object_schema(&[
+                    ("version", "string", "milestone version, currently 0.5"),
+                    ("manifest", "string", "manifest path inside evidence_root"),
+                    ("evidence_root", "string", "root directory containing the manifest and referenced evidence"),
+                ], &["manifest", "evidence_root"]),
+                "forge.milestone.production_readiness.v1",
+                &[
+                    "forge",
+                    "milestone",
+                    "production-readiness",
+                    "--version",
+                    "0.5",
+                    "--manifest",
+                    "<manifest>",
+                    "--evidence-root",
+                    "<evidence-root>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.milestone.attach_evidence",
                 "Attach Milestone Evidence",
                 "Attach an operator-approved milestone evidence artifact into the Forge store and global event timeline without auto-promoting the milestone.",
@@ -7324,6 +7554,122 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
 
 pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Result<McpCallReport> {
     let result = match tool_name {
+        "forge.mission.start" => {
+            let input: MissionStartInput = parse_input(input)?;
+            serde_json::to_value(start_mission(
+                store,
+                &input.goal,
+                input.squad.as_deref().unwrap_or("software-factory"),
+                input.squad_version.as_deref(),
+                PathBuf::from(input.worktree).as_path(),
+            )?)?
+        }
+        "forge.mission.drive" => {
+            let input: MissionIdInput = parse_input(input)?;
+            serde_json::to_value(drive_mission(store, &input.mission_id)?)?
+        }
+        "forge.mission.execute" => {
+            let input: MissionExecuteInput = parse_input(input)?;
+            let mission = load_mission(store, &input.mission_id)?;
+            let agent = mission
+                .agents
+                .iter()
+                .find(|agent| agent.instance_id == input.agent_id)
+                .with_context(|| format!("mission agent not found: {}", input.agent_id))?;
+            let harness = mission
+                .harnesses
+                .iter()
+                .rev()
+                .find(|harness| {
+                    harness.task_id == input.task_id && harness.agent_id == agent.definition_id
+                })
+                .with_context(|| {
+                    format!(
+                        "mission harness not found for task {} and agent {}",
+                        input.task_id, input.agent_id
+                    )
+                })?;
+            let dry_run = input.dry_run.unwrap_or(false);
+            let mut request = MissionExecutionRequest {
+                idempotency_key: input.idempotency_key,
+                mission_id: mission.id.clone(),
+                workflow_id: mission.workflow_id.clone(),
+                expected_mission_revision: mission.revision,
+                task_id: input.task_id,
+                agent_id: input.agent_id,
+                executor_id: harness.runtime.clone(),
+                worktree: mission.worktree.clone(),
+                purpose: input.purpose,
+                command: input.command,
+                requested_evidence: input.evidence.unwrap_or_default(),
+                approval: None,
+                dry_run,
+                allow_trusted_process_runtime: input.allow_trusted_process_runtime.unwrap_or(false),
+            };
+            let plan = plan_mission_execution(store, &request)?;
+            if !dry_run {
+                let approved_by = input
+                    .approved_by
+                    .as_deref()
+                    .context("mission execution requires approved_by unless dry_run is true")?;
+                request.approval = Some(build_mission_execution_approval(
+                    &plan,
+                    approved_by,
+                    input.approval_ttl_seconds.unwrap_or(300),
+                )?);
+            }
+            serde_json::to_value(execute_mission_command(store, request)?)?
+        }
+        "forge.mission.submit" => {
+            let input: MissionSubmitInput = parse_input(input)?;
+            serde_json::to_value(submit_mission(
+                store,
+                &input.mission_id,
+                MissionSubmission {
+                    idempotency_key: input.idempotency_key,
+                    execution_receipt_id: input.receipt_id,
+                    task_id: input.task_id,
+                    agent_id: input.agent_id,
+                    status: input.status.unwrap_or_else(|| "completed".to_string()),
+                    summary: input.summary,
+                    artifacts: input.artifacts.unwrap_or_default(),
+                    validations: Vec::new(),
+                    risks: input.risks.unwrap_or_default(),
+                    followups: input.followups.unwrap_or_default(),
+                    tests_passed: 0,
+                    tests_failed: 0,
+                },
+            )?)?
+        }
+        "forge.mission.resume" => {
+            let input: MissionIdInput = parse_input(input)?;
+            serde_json::to_value(resume_mission(store, &input.mission_id)?)?
+        }
+        "forge.mission.execution.list" => {
+            let input: MissionExecutionListInput = parse_input(input)?;
+            serde_json::to_value(list_mission_execution_receipts(
+                store,
+                input.mission_id.as_deref(),
+                input.task_id.as_deref(),
+            )?)?
+        }
+        "forge.mission.execution.inspect" => {
+            let input: MissionExecutionInspectInput = parse_input(input)?;
+            serde_json::to_value(inspect_mission_execution_receipt(store, &input.receipt_id)?)?
+        }
+        "forge.mission.execution.reconcile" => {
+            let input: MissionExecutionReconcileInput = parse_input(input)?;
+            serde_json::to_value(reconcile_mission_execution(
+                store,
+                MissionExecutionReconcileRequest {
+                    receipt_id: input.receipt_id,
+                    outcome: input.outcome,
+                    approved_by: input.approved_by,
+                    reason: input.reason,
+                    confirm_no_effect_retry: input.confirm_no_effect_retry,
+                },
+            )?)?
+        }
         "forge.workflow.list" => {
             let input: WorkflowListInput = parse_input(input)?;
             let filters =
@@ -10623,6 +10969,23 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
             serde_json::to_value(build_milestone_manifest_with_store(&version, Some(store))?)?
         }
+        "forge.milestone.production_plan" => {
+            let input: MilestoneStatusInput = parse_input(input)?;
+            let version = input.version.unwrap_or_else(|| "0.5".to_string());
+            serde_json::to_value(build_production_readiness_plan(&version)?)?
+        }
+        "forge.milestone.production_readiness" => {
+            let input: ProductionReadinessInput = parse_input(input)?;
+            let version = input.version.unwrap_or_else(|| "0.5".to_string());
+            let manifest = PathBuf::from(input.manifest);
+            let evidence_root = PathBuf::from(input.evidence_root);
+            serde_json::to_value(evaluate_production_readiness(ProductionReadinessOptions {
+                version: &version,
+                manifest_path: &manifest,
+                evidence_root: &evidence_root,
+                store_path: store.path(),
+            })?)?
+        }
         "forge.milestone.attach_evidence" => {
             let input: MilestoneAttachEvidenceInput = parse_input(input)?;
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
@@ -11130,6 +11493,135 @@ fn context_request_input_schema() -> Value {
     schema["properties"]["view"]["enum"] = json!(["full", "compact"]);
     schema["properties"]["view"]["default"] = json!("compact");
     schema
+}
+
+fn mission_execute_input_schema() -> Value {
+    object_schema(
+        &[
+            ("mission_id", "string", "mission id"),
+            ("task_id", "string", "assigned mission task id"),
+            ("agent_id", "string", "assigned mission agent instance id"),
+            (
+                "idempotency_key",
+                "string",
+                "caller-stable execution idempotency key",
+            ),
+            ("purpose", "string", "bounded command purpose"),
+            (
+                "command",
+                "array",
+                "command argv; no shell interpolation is added",
+            ),
+            (
+                "evidence",
+                "array",
+                "explicit semantic evidence kinds from the assigned task gate contract",
+            ),
+            (
+                "approved_by",
+                "string",
+                "human or policy authority granting execution approval; required unless dry_run is true",
+            ),
+            (
+                "approval_ttl_seconds",
+                "integer",
+                "bounded approval lifetime; defaults to 300 seconds",
+            ),
+            (
+                "dry_run",
+                "boolean",
+                "return a non-persisted planned or blocked preview without spawning a command",
+            ),
+            (
+                "allow_trusted_process_runtime",
+                "boolean",
+                "explicitly authorize the approved non-isolating process fallback",
+            ),
+        ],
+        &[
+            "mission_id",
+            "task_id",
+            "agent_id",
+            "idempotency_key",
+            "purpose",
+            "command",
+        ],
+    )
+}
+
+fn mission_execution_reconcile_input_schema() -> Value {
+    let mut schema = object_schema(
+        &[
+            ("receipt_id", "string", "execution receipt id"),
+            (
+                "outcome",
+                "string",
+                "safe reconciliation outcome; only no_effect_retry is accepted",
+            ),
+            (
+                "approved_by",
+                "string",
+                "human or policy authority approving the reconciliation",
+            ),
+            (
+                "reason",
+                "string",
+                "non-empty evidence explaining why the execution had no effect",
+            ),
+            (
+                "confirm_no_effect_retry",
+                "boolean",
+                "explicit confirmation that retrying cannot duplicate an effect",
+            ),
+        ],
+        &[
+            "receipt_id",
+            "outcome",
+            "approved_by",
+            "reason",
+            "confirm_no_effect_retry",
+        ],
+    );
+    schema["properties"]["outcome"]["enum"] = json!(["no_effect_retry"]);
+    schema["properties"]["confirm_no_effect_retry"]["const"] = json!(true);
+    schema
+}
+
+fn mission_submit_input_schema() -> Value {
+    object_schema(
+        &[
+            ("mission_id", "string", "mission id"),
+            ("task_id", "string", "assigned mission task id"),
+            ("agent_id", "string", "assigned mission agent instance id"),
+            (
+                "idempotency_key",
+                "string",
+                "caller-stable submission idempotency key",
+            ),
+            (
+                "receipt_id",
+                "string",
+                "persisted execution receipt proving the delivery",
+            ),
+            ("status", "string", "completed|repaired|failed|blocked"),
+            ("summary", "string", "delivery summary"),
+            (
+                "artifacts",
+                "array",
+                "optional delivery artifact references",
+            ),
+            ("risks", "array", "optional unresolved risks"),
+            ("followups", "array", "optional follow-up actions"),
+        ],
+        &[
+            "mission_id",
+            "task_id",
+            "agent_id",
+            "idempotency_key",
+            "receipt_id",
+            "summary",
+        ],
+    )
 }
 
 fn task_handoff_input_schema() -> Value {

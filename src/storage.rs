@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SQLITE_RETRY_DELAY: Duration = Duration::from_millis(25);
-const STORE_SCHEMA_VERSION: i64 = 4;
+const STORE_SCHEMA_VERSION: i64 = 5;
 const EVENT_OBSERVABILITY_RECONCILIATION_BATCH_SIZE: usize = 64;
 const EVENT_OBSERVABILITY_RECONCILIATION_CURSOR: &str = "event_observability_schema_v3_rebuild";
 const GLOBAL_EVENTS_OBSERVABILITY_QUEUE_TRIGGER: &str = "trg_global_events_observability_queue";
@@ -548,6 +548,8 @@ fn open_runtime_secret_key_file(path: &Path, no_follow: bool) -> Result<File> {
         let flags = libc::O_CLOEXEC | if no_follow { libc::O_NOFOLLOW } else { 0 };
         options.custom_flags(flags);
     }
+    #[cfg(not(unix))]
+    let _ = no_follow;
     options.open(path).with_context(|| {
         format!(
             "failed to open runtime secret vault key file {}",
@@ -1562,6 +1564,107 @@ fn load_runtime_secret_vault_records(
         .context("failed to inspect runtime secret vault migration state")
 }
 
+pub(crate) fn replace_workflow_tenant_projection_on_connection(
+    connection: &Connection,
+    workflow: &Workflow,
+) -> Result<()> {
+    save_tenant_index_record_on_connection(
+        connection,
+        "workflow",
+        &workflow.id,
+        &workflow.id,
+        workflow,
+        "workflows",
+        &serde_json::json!({
+            "workflow_id": workflow.id,
+            "status": workflow.status,
+            "goal": workflow.goal,
+            "workflow_mode": workflow.intent.workflow_mode.kind,
+        }),
+    )?;
+    connection.execute(
+        "DELETE FROM tenant_index WHERE workflow_id = ?1 AND resource_type = 'artifact'",
+        params![workflow.id],
+    )?;
+    for artifact in &workflow.artifacts {
+        save_tenant_index_record_on_connection(
+            connection,
+            "artifact",
+            &artifact.id,
+            &workflow.id,
+            workflow,
+            "workflow.artifacts",
+            &serde_json::json!({
+                "artifact_id": artifact.id,
+                "kind": artifact.kind,
+                "path": artifact.path,
+                "sha256": artifact.sha256,
+                "created_at": artifact.created_at,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+fn save_tenant_index_record_on_connection(
+    connection: &Connection,
+    resource_type: &str,
+    resource_id: &str,
+    workflow_id: &str,
+    workflow: &Workflow,
+    source: &str,
+    data: &serde_json::Value,
+) -> Result<()> {
+    let context = &workflow.intent.operating_context;
+    connection.execute(
+        r#"
+        INSERT INTO tenant_index (
+            resource_type,
+            resource_id,
+            workflow_id,
+            organization_id,
+            brand_id,
+            product_id,
+            user_id,
+            channel_id,
+            memory_scope,
+            personality_scope,
+            source,
+            data_json,
+            updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, CURRENT_TIMESTAMP)
+        ON CONFLICT(resource_type, resource_id) DO UPDATE SET
+            workflow_id=excluded.workflow_id,
+            organization_id=excluded.organization_id,
+            brand_id=excluded.brand_id,
+            product_id=excluded.product_id,
+            user_id=excluded.user_id,
+            channel_id=excluded.channel_id,
+            memory_scope=excluded.memory_scope,
+            personality_scope=excluded.personality_scope,
+            source=excluded.source,
+            data_json=excluded.data_json,
+            updated_at=CURRENT_TIMESTAMP
+        "#,
+        params![
+            resource_type,
+            resource_id,
+            workflow_id,
+            context.organization.id,
+            context.brand.id,
+            context.product.id,
+            context.user.id,
+            context.channel.id,
+            context.memory_scope,
+            context.personality_scope,
+            source,
+            serde_json::to_string(data)?,
+        ],
+    )?;
+    Ok(())
+}
+
 impl ForgeStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
@@ -1629,9 +1732,21 @@ impl ForgeStore {
     }
 
     pub fn with_transaction<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.with_immediate_transaction(|_| operation())
+    }
+
+    pub(crate) fn with_immediate_transaction<T>(
+        &self,
+        operation: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        // Nested store operations join the ambient transaction so one caller
+        // can atomically compose existing persistence APIs.
+        if !self.connection.is_autocommit() {
+            return operation(&self.connection);
+        }
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
-        match operation() {
+        match operation(&transaction) {
             Ok(value) => {
                 transaction.commit()?;
                 Ok(value)
@@ -1650,29 +1765,105 @@ impl ForgeStore {
                 "SQLite store schema version {version} is newer than supported version {STORE_SCHEMA_VERSION}"
             );
         }
-        if version == STORE_SCHEMA_VERSION {
+        let mission_runtime_repair_required = self.mission_runtime_schema_repair_required()?;
+        if version == STORE_SCHEMA_VERSION && !mission_runtime_repair_required {
             return Ok(());
         }
 
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
-                .context("failed to acquire SQLite store migration lock")?;
-        let locked_version: i64 =
-            transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if locked_version > STORE_SCHEMA_VERSION {
-            anyhow::bail!(
-                "SQLite store schema version {locked_version} is newer than supported version {STORE_SCHEMA_VERSION}"
-            );
+        self.connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .context("failed to suspend SQLite foreign key enforcement for store migration")?;
+        let foreign_keys_enabled: i64 =
+            self.connection
+                .pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+        if foreign_keys_enabled != 0 {
+            anyhow::bail!("SQLite foreign key enforcement could not be suspended for migration");
         }
-        if locked_version < STORE_SCHEMA_VERSION {
-            self.migrate()?;
-            self.initialize_event_observability_reconciliation_cursor()?;
-            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+
+        let migration_result = (|| -> Result<()> {
+            let transaction =
+                Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                    .context("failed to acquire SQLite store migration lock")?;
+            let locked_version: i64 =
+                transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            if locked_version > STORE_SCHEMA_VERSION {
+                anyhow::bail!(
+                    "SQLite store schema version {locked_version} is newer than supported version {STORE_SCHEMA_VERSION}"
+                );
+            }
+            let locked_mission_runtime_repair_required =
+                self.mission_runtime_schema_repair_required()?;
+            if locked_version < STORE_SCHEMA_VERSION || locked_mission_runtime_repair_required {
+                self.migrate()?;
+                if locked_version < 5 || locked_mission_runtime_repair_required {
+                    self.migrate_mission_handoff_idempotency_scope()?;
+                }
+                let foreign_key_violations: i64 = self.connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if foreign_key_violations != 0 {
+                    anyhow::bail!("SQLite store migration produced foreign key violations");
+                }
+                if locked_version < STORE_SCHEMA_VERSION {
+                    self.initialize_event_observability_reconciliation_cursor()?;
+                    transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+                }
+            }
+            transaction
+                .commit()
+                .context("failed to commit SQLite store migration")
+        })();
+
+        let foreign_keys_result = (|| -> Result<()> {
+            self.connection
+                .pragma_update(None, "foreign_keys", "ON")
+                .context("failed to restore SQLite foreign key enforcement after migration")?;
+            let foreign_keys_enabled: i64 =
+                self.connection
+                    .pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+            if foreign_keys_enabled != 1 {
+                anyhow::bail!(
+                    "SQLite foreign key enforcement could not be restored after migration"
+                );
+            }
+            Ok(())
+        })();
+
+        match (migration_result, foreign_keys_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Err(error), Err(foreign_key_error)) => Err(error.context(format!(
+                "additionally failed to restore SQLite foreign key enforcement: {foreign_key_error:#}"
+            ))),
         }
-        transaction
-            .commit()
-            .context("failed to commit SQLite store migration")?;
-        Ok(())
+    }
+
+    fn mission_runtime_schema_repair_required(&self) -> Result<bool> {
+        let required_tables: i64 = self.connection.query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name IN (
+                  'squad_definitions',
+                  'forge_missions',
+                  'mission_agent_instances',
+                  'mission_handoffs',
+                  'mission_runtime_inbox',
+                  'mission_runtime_checkpoints',
+                  'mission_drive_leases',
+                  'mission_handoff_processing',
+                  'mission_execution_receipts',
+                  'mission_execution_reconciliations'
+              )
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(required_tables != 10 || self.mission_handoff_has_global_idempotency_constraint()?)
     }
 
     fn ensure_runtime_secret_vault_encryption_triggers(&self) -> Result<()> {
@@ -1909,6 +2100,92 @@ impl ForgeStore {
         Ok(())
     }
 
+    fn migrate_mission_handoff_idempotency_scope(&self) -> Result<()> {
+        if !self.mission_handoff_has_global_idempotency_constraint()? {
+            return Ok(());
+        }
+
+        self.connection
+            .execute_batch(
+                r#"
+                CREATE TABLE mission_handoffs_v5_migration (
+                    id TEXT PRIMARY KEY,
+                    mission_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    from_agent TEXT NOT NULL,
+                    to_agent TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    data_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    accepted_at TEXT,
+                    UNIQUE (mission_id, idempotency_key)
+                );
+                INSERT INTO mission_handoffs_v5_migration (
+                    id,
+                    mission_id,
+                    task_id,
+                    from_agent,
+                    to_agent,
+                    status,
+                    idempotency_key,
+                    data_json,
+                    created_at,
+                    accepted_at
+                )
+                SELECT
+                    id,
+                    mission_id,
+                    task_id,
+                    from_agent,
+                    to_agent,
+                    status,
+                    idempotency_key,
+                    data_json,
+                    created_at,
+                    accepted_at
+                FROM mission_handoffs;
+                DROP TABLE mission_handoffs;
+                ALTER TABLE mission_handoffs_v5_migration RENAME TO mission_handoffs;
+                CREATE INDEX idx_mission_handoffs_inbox
+                    ON mission_handoffs(mission_id, to_agent, status, created_at);
+                "#,
+            )
+            .context("failed to scope mission handoff idempotency to its mission")
+    }
+
+    fn mission_handoff_has_global_idempotency_constraint(&self) -> Result<bool> {
+        let unique_indexes = {
+            let mut statement = self
+                .connection
+                .prepare("PRAGMA index_list('mission_handoffs')")
+                .context("failed to inspect mission handoff indexes")?;
+            let mut rows = statement.query([])?;
+            let mut indexes = Vec::new();
+            while let Some(row) = rows.next()? {
+                if row.get::<_, i64>(2)? == 1 {
+                    indexes.push(row.get::<_, String>(1)?);
+                }
+            }
+            indexes
+        };
+
+        for index in unique_indexes {
+            let quoted_index = format!("\"{}\"", index.replace('"', "\"\""));
+            let mut statement = self
+                .connection
+                .prepare(&format!("PRAGMA index_info({quoted_index})"))
+                .context("failed to inspect mission handoff unique index")?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, Option<String>>(2))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if columns == [Some("idempotency_key".to_string())] {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn migrate(&self) -> Result<()> {
         self.connection.execute_batch(
             r#"
@@ -1919,6 +2196,162 @@ impl ForgeStore {
                 created_at TEXT NOT NULL,
                 data_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS squad_definitions (
+                id TEXT NOT NULL,
+                version TEXT NOT NULL,
+                name TEXT NOT NULL,
+                composition_sha256 TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                installed_at TEXT NOT NULL,
+                PRIMARY KEY (id, version)
+            );
+            CREATE TABLE IF NOT EXISTS forge_missions (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                squad_id TEXT NOT NULL,
+                squad_version TEXT NOT NULL,
+                status TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_forge_missions_workflow
+                ON forge_missions(workflow_id);
+            CREATE INDEX IF NOT EXISTS idx_forge_missions_status
+                ON forge_missions(status);
+            CREATE TABLE IF NOT EXISTS mission_agent_instances (
+                id TEXT PRIMARY KEY,
+                mission_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                parent_id TEXT,
+                depth INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_mission_agents_mission_status
+                ON mission_agent_instances(mission_id, status);
+            CREATE TABLE IF NOT EXISTS mission_handoffs (
+                id TEXT PRIMARY KEY,
+                mission_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                from_agent TEXT NOT NULL,
+                to_agent TEXT NOT NULL,
+                status TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                accepted_at TEXT,
+                UNIQUE (mission_id, idempotency_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_mission_handoffs_inbox
+                ON mission_handoffs(mission_id, to_agent, status, created_at);
+            CREATE TABLE IF NOT EXISTS mission_runtime_inbox (
+                id TEXT PRIMARY KEY,
+                mission_id TEXT NOT NULL,
+                handoff_id TEXT NOT NULL UNIQUE,
+                recipient_agent TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 3,
+                lease_owner TEXT,
+                lease_expires_at TEXT,
+                last_error TEXT,
+                enqueued_at TEXT NOT NULL,
+                consumed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_mission_runtime_inbox_pending
+                ON mission_runtime_inbox(mission_id, status, enqueued_at);
+            CREATE TABLE IF NOT EXISTS mission_runtime_checkpoints (
+                mission_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                data_sha256 TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (mission_id, revision)
+            );
+            CREATE TABLE IF NOT EXISTS mission_drive_leases (
+                mission_id TEXT PRIMARY KEY,
+                owner TEXT NOT NULL,
+                lease_expires_at TEXT NOT NULL,
+                acquired_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS mission_handoff_processing (
+                handoff_id TEXT PRIMARY KEY,
+                mission_id TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                outcome TEXT,
+                lease_owner TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_mission_handoff_processing_mission_phase
+                ON mission_handoff_processing(mission_id, phase, updated_at);
+            CREATE TABLE IF NOT EXISTS mission_execution_receipts (
+                receipt_id TEXT PRIMARY KEY,
+                idempotency_key TEXT NOT NULL,
+                mission_id TEXT NOT NULL,
+                workflow_id TEXT NOT NULL,
+                mission_revision INTEGER NOT NULL,
+                task_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                executor_id TEXT NOT NULL,
+                worktree_id TEXT,
+                command_sha256 TEXT NOT NULL,
+                request_sha256 TEXT NOT NULL,
+                approval_scope_sha256 TEXT NOT NULL,
+                state TEXT NOT NULL,
+                owner_token TEXT,
+                lease_expires_at TEXT,
+                execution_started_at TEXT,
+                receipt_sha256 TEXT,
+                receipt_json TEXT,
+                consumed_at TEXT,
+                consumed_by_submission TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (mission_id, idempotency_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_mission_execution_receipts_mission
+                ON mission_execution_receipts(mission_id, task_id, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_mission_execution_receipts_state
+                ON mission_execution_receipts(state, lease_expires_at);
+            DROP INDEX IF EXISTS idx_mission_execution_receipts_assignment_guard;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_execution_receipts_assignment_guard
+                ON mission_execution_receipts(mission_id, mission_revision, task_id)
+                WHERE state IN (
+                    'reserved',
+                    'running',
+                    'completed',
+                    'failed',
+                    'timed_out',
+                    'indeterminate'
+                );
+            CREATE TABLE IF NOT EXISTS mission_execution_reconciliations (
+                reconciliation_id TEXT PRIMARY KEY,
+                receipt_id TEXT NOT NULL UNIQUE,
+                mission_id TEXT NOT NULL,
+                workflow_id TEXT NOT NULL,
+                mission_revision INTEGER NOT NULL,
+                task_id TEXT NOT NULL,
+                previous_state TEXT NOT NULL,
+                resulting_state TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                approved_by TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                data_sha256 TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_mission_execution_reconciliations_assignment
+                ON mission_execution_reconciliations(
+                    mission_id,
+                    mission_revision,
+                    task_id,
+                    created_at
+                );
             CREATE TABLE IF NOT EXISTS artifacts (
                 id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
@@ -3015,40 +3448,7 @@ impl ForgeStore {
     }
 
     fn replace_workflow_tenant_projection(&self, workflow: &Workflow) -> Result<()> {
-        self.save_tenant_index_record(
-            "workflow",
-            &workflow.id,
-            &workflow.id,
-            workflow,
-            "workflows",
-            &serde_json::json!({
-                "workflow_id": workflow.id,
-                "status": workflow.status,
-                "goal": workflow.goal,
-                "workflow_mode": workflow.intent.workflow_mode.kind,
-            }),
-        )?;
-        self.connection.execute(
-            "DELETE FROM tenant_index WHERE workflow_id = ?1 AND resource_type = 'artifact'",
-            params![workflow.id],
-        )?;
-        for artifact in &workflow.artifacts {
-            self.save_tenant_index_record(
-                "artifact",
-                &artifact.id,
-                &workflow.id,
-                workflow,
-                "workflow.artifacts",
-                &serde_json::json!({
-                    "artifact_id": artifact.id,
-                    "kind": artifact.kind,
-                    "path": artifact.path,
-                    "sha256": artifact.sha256,
-                    "created_at": artifact.created_at,
-                }),
-            )?;
-        }
-        Ok(())
+        replace_workflow_tenant_projection_on_connection(&self.connection, workflow)
     }
 
     fn save_tenant_index_record(
@@ -7285,6 +7685,368 @@ mod tests {
             origin: "storage_test",
             tenant_context,
         })
+    }
+
+    #[test]
+    fn version_four_store_repairs_all_mission_runtime_tables_during_v5_upgrade() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("incomplete-v4.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE workflows (
+                    id TEXT PRIMARY KEY,
+                    goal TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    data_json TEXT NOT NULL
+                );
+                CREATE TABLE events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workflow_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    data_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE mission_handoffs (
+                    id TEXT PRIMARY KEY,
+                    mission_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    from_agent TEXT NOT NULL,
+                    to_agent TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    data_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    accepted_at TEXT
+                );
+                CREATE INDEX idx_mission_handoffs_inbox
+                    ON mission_handoffs(mission_id, to_agent, status, created_at);
+                CREATE TABLE mission_handoff_children (
+                    id TEXT PRIMARY KEY,
+                    handoff_id TEXT NOT NULL REFERENCES mission_handoffs(id)
+                );
+                INSERT INTO mission_handoffs (
+                    id,
+                    mission_id,
+                    task_id,
+                    from_agent,
+                    to_agent,
+                    status,
+                    idempotency_key,
+                    data_json,
+                    created_at,
+                    accepted_at
+                )
+                VALUES (
+                    'handoff-v4',
+                    'mission-a',
+                    'task-a',
+                    'agent-a',
+                    'agent-b',
+                    'pending',
+                    'shared-key',
+                    '{"legacy":true}',
+                    '2026-07-24T00:00:00Z',
+                    NULL
+                );
+                INSERT INTO mission_handoff_children (id, handoff_id)
+                VALUES ('child-v4', 'handoff-v4');
+                PRAGMA user_version = 4;
+                "#,
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = ForgeStore::open(&path).unwrap();
+        let version: i64 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, STORE_SCHEMA_VERSION);
+        for table in [
+            "squad_definitions",
+            "forge_missions",
+            "mission_agent_instances",
+            "mission_handoffs",
+            "mission_runtime_inbox",
+            "mission_runtime_checkpoints",
+            "mission_drive_leases",
+            "mission_handoff_processing",
+            "mission_execution_receipts",
+        ] {
+            let exists: bool = store
+                .connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "v5 migration must materialize {table}");
+        }
+
+        let preserved_handoff: (String, String) = store
+            .connection
+            .query_row(
+                "SELECT mission_id, data_json FROM mission_handoffs WHERE id = 'handoff-v4'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved_handoff.0, "mission-a");
+        assert_eq!(preserved_handoff.1, r#"{"legacy":true}"#);
+        let preserved_child: String = store
+            .connection
+            .query_row(
+                "SELECT handoff_id FROM mission_handoff_children WHERE id = 'child-v4'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved_child, "handoff-v4");
+        let foreign_key_violations: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_violations, 0);
+
+        let inbox_index_exists: bool = store
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_mission_handoffs_inbox')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(inbox_index_exists);
+
+        store
+            .connection
+            .execute(
+                r#"
+                INSERT INTO mission_handoffs (
+                    id,
+                    mission_id,
+                    task_id,
+                    from_agent,
+                    to_agent,
+                    status,
+                    idempotency_key,
+                    data_json,
+                    created_at
+                )
+                VALUES (
+                    'handoff-v5-other-mission',
+                    'mission-b',
+                    'task-b',
+                    'agent-b',
+                    'agent-c',
+                    'pending',
+                    'shared-key',
+                    '{}',
+                    '2026-07-24T00:01:00Z'
+                )
+                "#,
+                [],
+            )
+            .unwrap();
+        let same_mission_duplicate = store.connection.execute(
+            r#"
+            INSERT INTO mission_handoffs (
+                id,
+                mission_id,
+                task_id,
+                from_agent,
+                to_agent,
+                status,
+                idempotency_key,
+                data_json,
+                created_at
+            )
+            VALUES (
+                'handoff-v5-same-mission',
+                'mission-a',
+                'task-c',
+                'agent-a',
+                'agent-c',
+                'pending',
+                'shared-key',
+                '{}',
+                '2026-07-24T00:02:00Z'
+            )
+            "#,
+            [],
+        );
+        assert!(same_mission_duplicate.is_err());
+    }
+
+    #[test]
+    fn version_five_partial_store_repairs_mission_runtime_schema_idempotently() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("partial-v5.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE mission_handoffs (
+                    id TEXT PRIMARY KEY,
+                    mission_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    from_agent TEXT NOT NULL,
+                    to_agent TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    data_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    accepted_at TEXT
+                );
+                CREATE INDEX idx_mission_handoffs_inbox
+                    ON mission_handoffs(mission_id, to_agent, status, created_at);
+                CREATE TABLE mission_handoff_children (
+                    id TEXT PRIMARY KEY,
+                    handoff_id TEXT NOT NULL REFERENCES mission_handoffs(id)
+                );
+                INSERT INTO mission_handoffs (
+                    id,
+                    mission_id,
+                    task_id,
+                    from_agent,
+                    to_agent,
+                    status,
+                    idempotency_key,
+                    data_json,
+                    created_at
+                )
+                VALUES (
+                    'handoff-partial-v5',
+                    'mission-a',
+                    'task-a',
+                    'agent-a',
+                    'agent-b',
+                    'pending',
+                    'shared-key',
+                    '{"partial":true}',
+                    '2026-07-24T00:00:00Z'
+                );
+                INSERT INTO mission_handoff_children (id, handoff_id)
+                VALUES ('child-partial-v5', 'handoff-partial-v5');
+                PRAGMA user_version = 5;
+                "#,
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = ForgeStore::open(&path).unwrap();
+        let version: i64 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, STORE_SCHEMA_VERSION);
+        let journal_exists: bool = store
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='mission_handoff_processing')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(journal_exists);
+        store
+            .connection
+            .execute(
+                r#"
+                INSERT INTO mission_handoffs (
+                    id,
+                    mission_id,
+                    task_id,
+                    from_agent,
+                    to_agent,
+                    status,
+                    idempotency_key,
+                    data_json,
+                    created_at
+                )
+                VALUES (
+                    'handoff-partial-v5-other-mission',
+                    'mission-b',
+                    'task-b',
+                    'agent-b',
+                    'agent-c',
+                    'pending',
+                    'shared-key',
+                    '{}',
+                    '2026-07-24T00:01:00Z'
+                )
+                "#,
+                [],
+            )
+            .unwrap();
+        let same_mission_duplicate = store.connection.execute(
+            r#"
+            INSERT INTO mission_handoffs (
+                id,
+                mission_id,
+                task_id,
+                from_agent,
+                to_agent,
+                status,
+                idempotency_key,
+                data_json,
+                created_at
+            )
+            VALUES (
+                'handoff-partial-v5-same-mission',
+                'mission-a',
+                'task-c',
+                'agent-a',
+                'agent-c',
+                'pending',
+                'shared-key',
+                '{}',
+                '2026-07-24T00:02:00Z'
+            )
+            "#,
+            [],
+        );
+        assert!(same_mission_duplicate.is_err());
+        drop(store);
+
+        let reopened = ForgeStore::open(&path).unwrap();
+        let version: i64 = reopened
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, STORE_SCHEMA_VERSION);
+        let handoff_count: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM mission_handoffs WHERE idempotency_key = 'shared-key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(handoff_count, 2);
+        let preserved_child: String = reopened
+            .connection
+            .query_row(
+                "SELECT handoff_id FROM mission_handoff_children WHERE id = 'child-partial-v5'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved_child, "handoff-partial-v5");
+        let foreign_key_violations: i64 = reopened
+            .connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_violations, 0);
     }
 
     #[test]

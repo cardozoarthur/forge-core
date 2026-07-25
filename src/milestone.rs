@@ -19,6 +19,19 @@ use crate::ir::{
     ir_schema_version, CreativeArtifact, DesignToken, DocumentSection, DocumentSpec, ScreenSpec,
     SemanticAlias, TokenCollection, TokenType,
 };
+use crate::mission::{
+    load_mission, AgentHandoff, MissionDriveReport, MissionMode, MissionRecord, MissionSubmission,
+    MissionSubmitReport,
+};
+use crate::mission_executor::{
+    load_mission_execution_receipt, verify_mission_execution_receipt, MissionExecutionReceipt,
+    MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION,
+};
+use crate::mission_platform::{
+    mission_platform_catalog, MissionPlatformCatalog, MISSION_PLATFORM_BOUNDED_SIMULATION,
+    MISSION_PLATFORM_CAPABILITY_COUNT, MISSION_PLATFORM_CATALOG_SCHEMA_VERSION,
+    MISSION_PLATFORM_CONTRACT_ONLY, MISSION_PLATFORM_RUNTIME_REAL,
+};
 use crate::multimodal::{
     build_multimodal_runtime_benchmark, resolve_multimodal_feature_flag,
     MultimodalRuntimeBenchmarkOptions,
@@ -29,18 +42,20 @@ use crate::patch::{
 };
 use crate::request::{heartbeat_request, start_async_request, RunActivity};
 use crate::schedule::{create_daily_goal_research_workflow, run_daily_goal_research_smoke};
+use crate::security::{sanitize_prompt_secrets, SecretSanitizationOptions};
 use crate::storage::{ForgeStore, GlobalEventWrite};
 use crate::workflow::{
     attach_creative_artifact, attach_workflow_artifact, set_workflow_token_collection,
     update_workflow_node_brain_routing, WorkflowNodeBrainRoutingUpdateInput,
 };
 use anyhow::{bail, Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 const MILESTONE_STATUS_SCHEMA_VERSION: &str = "forge.milestone.status.v1";
@@ -48,6 +63,32 @@ const MILESTONE_MANIFEST_SCHEMA_VERSION: &str = "forge.milestone.manifest.v1";
 const MILESTONE_ATTACHED_EVIDENCE_SCHEMA_VERSION: &str = "forge.milestone.attached_evidence.v1";
 const MILESTONE_ATTACHED_EVIDENCE_EVENT_KIND: &str = "milestone_evidence_attached";
 const SUPPORTED_MILESTONE: &str = "0.5";
+pub const PRODUCTION_READINESS_MANIFEST_SCHEMA_VERSION: &str =
+    "forge.milestone.production_readiness_manifest.v1";
+pub const PRODUCTION_READINESS_REPORT_SCHEMA_VERSION: &str =
+    "forge.milestone.production_readiness.v1";
+pub const PRODUCTION_READINESS_PLAN_SCHEMA_VERSION: &str =
+    "forge.milestone.production_readiness_plan.v1";
+pub const PRODUCTION_MISSION_LIFECYCLE_RECEIPT_SCHEMA_VERSION: &str =
+    "forge.milestone.mission_lifecycle.v1";
+pub const PRODUCTION_READINESS_REQUIRED_GATE_COUNT: usize = 11;
+pub const PRODUCTION_READINESS_REQUIRED_RECEIPT_COUNT: usize = 14;
+const PRODUCTION_PROFILE: &str = "single_host_linux_v0.5";
+const MAX_PRODUCTION_EVIDENCE_AGE_SECONDS: u64 = 86_400;
+const MAX_PRODUCTION_EVIDENCE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_RESTORE_RPO_SECONDS: u64 = 86_400;
+const MAX_RESTORE_RTO_SECONDS: u64 = 1_800;
+const MAX_BOUNDED_LOAD_SECONDS: u64 = 300;
+const MAX_BOUNDED_LOAD_CONCURRENCY: u64 = 64;
+const MAX_BOUNDED_LOAD_P95_MILLIS: u64 = 2_000;
+const MIN_BOUNDED_LOAD_OPERATIONS: u64 = 100;
+const REQUIRED_RELEASE_TARGETS: [&str; 5] = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MilestoneStatusReport {
@@ -84,9 +125,303 @@ pub struct MilestoneCapability {
 pub struct MilestonePromotionDecision {
     pub decision: String,
     pub promotable: bool,
+    pub readiness_scope: String,
+    pub capability_ready: bool,
+    pub production_ready: bool,
+    pub production_evidence_evaluated: bool,
     pub blocked_by: Vec<String>,
     pub reason: String,
     pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionEvidenceRef {
+    pub artifact_path: String,
+    pub artifact_sha256: String,
+    pub observed_at_epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionReleaseEvidence {
+    pub matrix: ProductionEvidenceRef,
+    pub successful_targets: Vec<String>,
+    pub artifacts: ProductionEvidenceRef,
+    pub binary_sha256_by_target: BTreeMap<String, String>,
+    pub sbom: ProductionEvidenceRef,
+    pub sbom_format: String,
+    pub sbom_component_count: u64,
+    pub checksums: ProductionEvidenceRef,
+    pub checksum_entry_count: u64,
+    pub checksums_verified: bool,
+    pub sigstore: ProductionEvidenceRef,
+    pub sigstore_verified: bool,
+    pub provenance: ProductionEvidenceRef,
+    pub provenance_verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionInstallationEvidence {
+    pub evidence: ProductionEvidenceRef,
+    pub target: String,
+    pub installed_version: String,
+    pub installed_binary_sha256: String,
+    pub service_active: bool,
+    pub store_check_passed: bool,
+    pub ops_authenticated_probe_passed: bool,
+    pub ops_http_status: u16,
+    pub ops_loopback_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionOffHostBackupEvidence {
+    pub evidence: ProductionEvidenceRef,
+    pub recovery_challenge_epoch: u64,
+    pub immutable_upload_passed: bool,
+    pub remote_digest_verified: bool,
+    pub download_digest_verified: bool,
+    pub downloaded_store_check_passed: bool,
+    pub disposable_restore_passed: bool,
+    pub restored_store_check_passed: bool,
+    pub off_host_retention_enabled: bool,
+    pub forge_key_isolated_from_uploader: bool,
+    pub uploader_credentials_isolated_from_forge: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionKeyEscrowEvidence {
+    pub evidence: ProductionEvidenceRef,
+    pub encrypted: bool,
+    pub separate_access_control: bool,
+    pub recovery_key_available: bool,
+    pub restore_with_escrowed_key_tested: bool,
+    pub excluded_from_database_backup: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionAlertEvidence {
+    pub evidence: ProductionEvidenceRef,
+    pub service_failure_alert: bool,
+    pub store_check_alert: bool,
+    pub backup_timer_alert: bool,
+    pub off_host_failure_alert: bool,
+    pub disk_space_alert: bool,
+    pub backup_age_alert: bool,
+    pub delivery_route_verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionRestoreDrillEvidence {
+    pub evidence: ProductionEvidenceRef,
+    pub drill_epoch: u64,
+    pub disposable_recovery_host: bool,
+    pub downloaded_store_check_passed: bool,
+    pub restored_store_check_passed: bool,
+    pub canary_workflow_verified: bool,
+    pub ops_authenticated_probe_passed: bool,
+    pub rpo_seconds: u64,
+    pub rto_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionUpgradeRollbackEvidence {
+    pub evidence: ProductionEvidenceRef,
+    pub target_version: String,
+    pub simulation_completed: bool,
+    pub pre_upgrade_backup_verified: bool,
+    pub upgraded_store_check_passed: bool,
+    pub upgraded_ops_health_passed: bool,
+    pub rollback_completed: bool,
+    pub previous_version_store_check_passed: bool,
+    pub previous_version_ops_health_passed: bool,
+    pub target_reinstalled_and_healthy: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionBoundedLoadEvidence {
+    pub evidence: ProductionEvidenceRef,
+    pub duration_seconds: u64,
+    pub concurrency: u64,
+    pub operation_count: u64,
+    pub error_count: u64,
+    pub p95_latency_millis: u64,
+    pub max_rss_bytes: u64,
+    pub max_rss_limit_bytes: u64,
+    pub timeout_enforced: bool,
+    pub resource_limit_enforced: bool,
+    pub store_check_passed: bool,
+    pub crash_restart_verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionMissionOperationalEvidence {
+    pub evidence: ProductionEvidenceRef,
+    pub capability_inventory_schema_version: String,
+    pub capability_inventory_sha256: String,
+    pub capability_numbers: Vec<u8>,
+    pub mission_id: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub agent_id: String,
+    pub execute_receipt_schema_version: String,
+    pub execute_receipt_id: String,
+    pub execute_receipt_sha256: String,
+    pub execute_status: String,
+    pub execution_attempted: bool,
+    pub executed: bool,
+    pub execute_exit_code: Option<i32>,
+    pub submit_receipt_schema_version: String,
+    pub submit_receipt_sha256: String,
+    pub submit_status: String,
+    pub submit_queued: bool,
+    pub submitted_execute_receipt_sha256: String,
+    pub handoff_id: String,
+    pub inbox_id: String,
+    pub resume_receipt_schema_version: String,
+    pub resume_receipt_sha256: String,
+    pub resume_status: String,
+    pub resume_action: String,
+    pub resumed_handoff_id: String,
+    pub resume_consumed: bool,
+    pub execute_observed_at_epoch: u64,
+    pub submit_observed_at_epoch: u64,
+    pub resume_observed_at_epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionMissionLifecycleReceipt {
+    pub schema_version: String,
+    pub kind: String,
+    pub status: String,
+    pub subject_version: String,
+    pub claims_sha256: String,
+    pub capability_inventory_schema_version: String,
+    pub capability_inventory_sha256: String,
+    pub capability_numbers: Vec<u8>,
+    pub execution_receipt: MissionExecutionReceipt,
+    pub submission: MissionSubmission,
+    pub submit_report: MissionSubmitReport,
+    pub resume_report: MissionDriveReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProductionMissionLifecycleEvidencePackage {
+    pub schema_version: String,
+    pub status: String,
+    pub manifest_section: ProductionMissionOperationalEvidence,
+    pub artifact: ProductionMissionLifecycleReceipt,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionReadinessManifest {
+    pub schema_version: String,
+    pub milestone: String,
+    pub profile: String,
+    pub release_version: String,
+    pub generated_at_epoch: u64,
+    pub release: ProductionReleaseEvidence,
+    pub installation: ProductionInstallationEvidence,
+    pub off_host_backup: ProductionOffHostBackupEvidence,
+    pub key_escrow: ProductionKeyEscrowEvidence,
+    pub alerts: ProductionAlertEvidence,
+    pub restore_drill: ProductionRestoreDrillEvidence,
+    pub upgrade_rollback: ProductionUpgradeRollbackEvidence,
+    pub bounded_load: ProductionBoundedLoadEvidence,
+    pub mission_operational_lifecycle: ProductionMissionOperationalEvidence,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProductionReadinessOptions<'a> {
+    pub version: &'a str,
+    pub manifest_path: &'a Path,
+    pub evidence_root: &'a Path,
+    pub store_path: &'a Path,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProductionReadinessCheck {
+    pub id: String,
+    pub passed: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProductionReadinessGate {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub checks: Vec<ProductionReadinessCheck>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProductionReadinessReport {
+    pub schema_version: String,
+    pub milestone: String,
+    pub profile: String,
+    pub release_version: String,
+    pub evaluation_mode: String,
+    pub capability_ready: bool,
+    pub capability_inventory_count: usize,
+    pub capability_inventory_sha256: String,
+    pub capability_proof_kind_counts: BTreeMap<String, usize>,
+    pub required_gate_count: usize,
+    pub required_receipt_count: usize,
+    pub production_ready: bool,
+    pub decision: String,
+    pub blocked_by: Vec<String>,
+    pub gates: Vec<ProductionReadinessGate>,
+    pub manifest_sha256: String,
+    pub commands_executed: u64,
+    pub mutations_performed: bool,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProductionReadinessRequirement {
+    pub gate_id: String,
+    pub required_evidence: Vec<String>,
+    pub blocking: bool,
+    pub max_evidence_age_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProductionReadinessPlanReport {
+    pub schema_version: String,
+    pub milestone: String,
+    pub profile: String,
+    pub evaluation_mode: String,
+    pub capability_ready: bool,
+    pub capability_inventory_count: usize,
+    pub capability_inventory_sha256: String,
+    pub capability_proof_kind_counts: BTreeMap<String, usize>,
+    pub required_gate_count: usize,
+    pub required_receipt_count: usize,
+    pub production_ready: bool,
+    pub requirements: Vec<ProductionReadinessRequirement>,
+    pub commands_executed: u64,
+    pub mutations_performed: bool,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProductionEvidenceReceipt {
+    schema_version: String,
+    kind: String,
+    status: String,
+    subject_version: String,
+    claims_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -492,16 +827,20 @@ pub fn build_milestone_status(version: &str) -> Result<MilestoneStatusReport> {
         promotion_decision: MilestonePromotionDecision {
             decision: if promotable { "promote" } else { "fail" }.to_string(),
             promotable,
+            readiness_scope: "capability".to_string(),
+            capability_ready: promotable,
+            production_ready: false,
+            production_evidence_evaluated: false,
             blocked_by,
             reason: if promotable {
-                "All required Forge 0.5 capabilities have implementation and validation evidence."
+                "All required Forge 0.5 capabilities have implementation and validation evidence. This capability decision does not assert operational production readiness."
                     .to_string()
             } else {
                 "Forge 0.5 promotion is blocked while any required capability remains planned, blocked or only groundwork."
                     .to_string()
             },
             next_action: if promotable {
-                "Run the production smoke, create an immutable signed tag and publish the verified release artifact bundle."
+                "Evaluate the separate fail-closed production-readiness manifest before publishing or installing the release."
                     .to_string()
             } else {
                 "Close the next required core capability with tests and milestone evidence before reconsidering 0.5 promotion."
@@ -509,6 +848,2054 @@ pub fn build_milestone_status(version: &str) -> Result<MilestoneStatusReport> {
             },
         },
     })
+}
+
+fn mission_platform_inventory_is_exact(catalog: &MissionPlatformCatalog) -> bool {
+    let expected_numbers = (1..=u8::try_from(MISSION_PLATFORM_CAPABILITY_COUNT).unwrap_or(u8::MAX))
+        .collect::<Vec<_>>();
+    let actual_numbers = catalog
+        .capabilities
+        .iter()
+        .map(|capability| capability.number)
+        .collect::<Vec<_>>();
+    let unique_ids = catalog
+        .capabilities
+        .iter()
+        .map(|capability| capability.id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
+        == MISSION_PLATFORM_CAPABILITY_COUNT;
+    let proof_kinds = catalog
+        .capabilities
+        .iter()
+        .map(|capability| capability.proof_kind.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected_proof_kinds = BTreeSet::from([
+        MISSION_PLATFORM_RUNTIME_REAL,
+        MISSION_PLATFORM_BOUNDED_SIMULATION,
+        MISSION_PLATFORM_CONTRACT_ONLY,
+    ]);
+    let expected_proof_kind_counts = BTreeMap::from([
+        (MISSION_PLATFORM_RUNTIME_REAL.to_string(), 20_usize),
+        (MISSION_PLATFORM_BOUNDED_SIMULATION.to_string(), 14_usize),
+        (MISSION_PLATFORM_CONTRACT_ONLY.to_string(), 6_usize),
+    ]);
+    let inventory_hash_matches = serde_json::to_vec(&catalog.capabilities)
+        .ok()
+        .is_some_and(|bytes| hex_sha256(&bytes) == catalog.inventory_sha256);
+    catalog.schema_version == MISSION_PLATFORM_CATALOG_SCHEMA_VERSION
+        && catalog.capability_count == MISSION_PLATFORM_CAPABILITY_COUNT
+        && catalog.capabilities.len() == MISSION_PLATFORM_CAPABILITY_COUNT
+        && actual_numbers == expected_numbers
+        && unique_ids
+        && proof_kinds == expected_proof_kinds
+        && catalog.proof_kind_counts == expected_proof_kind_counts
+        && valid_sha256(&catalog.inventory_sha256)
+        && inventory_hash_matches
+        && !catalog.production_ready
+        && catalog
+            .capabilities
+            .iter()
+            .all(|capability| !capability.production_ready)
+}
+
+pub fn build_production_readiness_plan(version: &str) -> Result<ProductionReadinessPlanReport> {
+    let capability_status = build_milestone_status(version)?;
+    let mission_platform_catalog = mission_platform_catalog();
+    let capability_ready = capability_status.promotion_decision.capability_ready
+        && mission_platform_inventory_is_exact(&mission_platform_catalog);
+    let requirement = |gate_id: &str, evidence: &[&str]| ProductionReadinessRequirement {
+        gate_id: gate_id.to_string(),
+        required_evidence: evidence.iter().map(|value| (*value).to_string()).collect(),
+        blocking: true,
+        max_evidence_age_seconds: MAX_PRODUCTION_EVIDENCE_AGE_SECONDS,
+    };
+
+    Ok(ProductionReadinessPlanReport {
+        schema_version: PRODUCTION_READINESS_PLAN_SCHEMA_VERSION.to_string(),
+        milestone: capability_status.milestone,
+        profile: PRODUCTION_PROFILE.to_string(),
+        evaluation_mode: "plan_only".to_string(),
+        capability_ready,
+        capability_inventory_count: mission_platform_catalog.capability_count,
+        capability_inventory_sha256: mission_platform_catalog.inventory_sha256,
+        capability_proof_kind_counts: mission_platform_catalog.proof_kind_counts,
+        required_gate_count: PRODUCTION_READINESS_REQUIRED_GATE_COUNT,
+        required_receipt_count: PRODUCTION_READINESS_REQUIRED_RECEIPT_COUNT,
+        production_ready: false,
+        requirements: vec![
+            requirement("capability_readiness", &["milestone capability status"]),
+            requirement(
+                "manifest_integrity",
+                &["fresh secret-free production readiness manifest"],
+            ),
+            requirement(
+                "release_integrity",
+                &[
+                    "successful release matrix",
+                    "published artifact manifest",
+                    "CycloneDX SBOM",
+                    "checksum manifest",
+                    "Sigstore verification",
+                    "build provenance",
+                ],
+            ),
+            requirement(
+                "installed_ops_health",
+                &["installed version and binary digest", "authenticated Ops health"],
+            ),
+            requirement(
+                "off_host_recovery",
+                &["complete off-host upload/verify/download/restore challenge"],
+            ),
+            requirement(
+                "key_escrow",
+                &["separately protected encrypted vault-key escrow recovery"],
+            ),
+            requirement(
+                "alerting",
+                &["service, store, backup, off-host, disk and backup-age alerts"],
+            ),
+            requirement(
+                "restore_drill",
+                &["disposable restore drill proving RPO <= 24h and RTO <= 30m"],
+            ),
+            requirement(
+                "upgrade_rollback",
+                &["bounded upgrade and rollback simulation for the target version"],
+            ),
+            requirement(
+                "bounded_load",
+                &["bounded load, resource, crash-restart and store-check simulation"],
+            ),
+            requirement(
+                "mission_operational_lifecycle",
+                &[
+                    "exact canonical capability inventory 1-40",
+                    "real execution receipt",
+                    "queued submission receipt linked to execution",
+                    "resume receipt consuming the same handoff",
+                ],
+            ),
+        ],
+        commands_executed: 0,
+        mutations_performed: false,
+        next_action:
+            "Collect the listed evidence into the secret-free manifest, then run the read-only evaluator; no command or infrastructure mutation is authorized by this plan."
+                .to_string(),
+    })
+}
+
+fn production_mission_operational_claims_value(
+    lifecycle: &ProductionMissionOperationalEvidence,
+) -> serde_json::Value {
+    serde_json::json!({
+        "capability_inventory_schema_version": &lifecycle.capability_inventory_schema_version,
+        "capability_inventory_sha256": &lifecycle.capability_inventory_sha256,
+        "capability_numbers": &lifecycle.capability_numbers,
+        "mission_id": &lifecycle.mission_id,
+        "workflow_id": &lifecycle.workflow_id,
+        "task_id": &lifecycle.task_id,
+        "agent_id": &lifecycle.agent_id,
+        "execute_receipt_schema_version": &lifecycle.execute_receipt_schema_version,
+        "execute_receipt_id": &lifecycle.execute_receipt_id,
+        "execute_receipt_sha256": &lifecycle.execute_receipt_sha256,
+        "execute_status": &lifecycle.execute_status,
+        "execution_attempted": lifecycle.execution_attempted,
+        "executed": lifecycle.executed,
+        "execute_exit_code": lifecycle.execute_exit_code,
+        "submit_receipt_schema_version": &lifecycle.submit_receipt_schema_version,
+        "submit_receipt_sha256": &lifecycle.submit_receipt_sha256,
+        "submit_status": &lifecycle.submit_status,
+        "submit_queued": lifecycle.submit_queued,
+        "submitted_execute_receipt_sha256": &lifecycle.submitted_execute_receipt_sha256,
+        "handoff_id": &lifecycle.handoff_id,
+        "inbox_id": &lifecycle.inbox_id,
+        "resume_receipt_schema_version": &lifecycle.resume_receipt_schema_version,
+        "resume_receipt_sha256": &lifecycle.resume_receipt_sha256,
+        "resume_status": &lifecycle.resume_status,
+        "resume_action": &lifecycle.resume_action,
+        "resumed_handoff_id": &lifecycle.resumed_handoff_id,
+        "resume_consumed": lifecycle.resume_consumed,
+        "execute_observed_at_epoch": lifecycle.execute_observed_at_epoch,
+        "submit_observed_at_epoch": lifecycle.submit_observed_at_epoch,
+        "resume_observed_at_epoch": lifecycle.resume_observed_at_epoch,
+    })
+}
+
+pub fn production_mission_operational_claims_sha256(
+    lifecycle: &ProductionMissionOperationalEvidence,
+) -> Result<String> {
+    let bytes = serde_json::to_vec(&production_mission_operational_claims_value(lifecycle))
+        .context("failed to serialize canonical mission lifecycle claims")?;
+    Ok(hex_sha256(&bytes))
+}
+
+pub fn build_production_mission_lifecycle_evidence(
+    store: &ForgeStore,
+    release_version: &str,
+    mission_id: &str,
+    execution_receipt_id: &str,
+    artifact_path: &str,
+) -> Result<ProductionMissionLifecycleEvidencePackage> {
+    let relative_artifact_path = Path::new(artifact_path);
+    if artifact_path.trim().is_empty()
+        || relative_artifact_path.is_absolute()
+        || !relative_artifact_path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        bail!("mission lifecycle artifact path must be a contained relative path");
+    }
+    if release_version.trim().is_empty() {
+        bail!("mission lifecycle evidence requires a release version");
+    }
+
+    let mission = load_mission(store, mission_id)?;
+    if mission.mode != MissionMode::Workflow || mission.worktree.is_none() {
+        bail!("mission lifecycle evidence requires a real workflow mission bound to a worktree");
+    }
+    let execution_receipt = load_mission_execution_receipt(store, execution_receipt_id)?;
+    verify_mission_execution_receipt(&execution_receipt)?;
+    let execution_sandbox_valid = execution_receipt.sandbox.as_ref().is_some_and(|sandbox| {
+        sandbox.status == "sandbox_completed"
+            && sandbox.runtime == "bubblewrap"
+            && sandbox.filesystem_isolation_enforced
+            && sandbox.network_isolation_enforced
+            && sandbox.command_sha256 == execution_receipt.command_sha256
+            && sandbox.exit_code == Some(0)
+            && !sandbox.timed_out
+            && !sandbox.output_truncated
+            && sandbox.error.is_none()
+    });
+    if execution_receipt.schema_version != MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION
+        || execution_receipt.mission_id != mission.id
+        || execution_receipt.workflow_id != mission.workflow_id
+        || execution_receipt.status != "completed"
+        || !execution_receipt.allowed
+        || !execution_receipt.execution_attempted
+        || !execution_receipt.executed
+        || execution_receipt.exit_code != Some(0)
+        || execution_receipt.timed_out
+        || execution_receipt.approval.is_none()
+        || execution_receipt.policy_trace.is_empty()
+        || execution_receipt
+            .policy_trace
+            .iter()
+            .any(|decision| !decision.allowed)
+        || !execution_sandbox_valid
+        || execution_receipt.claims.is_empty()
+        || execution_receipt.evidence.is_empty()
+        || execution_receipt.consumed_at.is_none()
+    {
+        bail!(
+            "mission lifecycle execution receipt is not an approved, isolated, completed and consumed v3 receipt"
+        );
+    }
+    let execution_reference = format!("execution_receipt:{}", execution_receipt.receipt_id);
+    let execution_digest = format!(
+        "execution_receipt_sha256:{}",
+        execution_receipt.receipt_sha256
+    );
+    let handoff = mission
+        .handoffs
+        .iter()
+        .find(|handoff| {
+            handoff.task_id == execution_receipt.task_id
+                && handoff.from_agent == execution_receipt.agent_id
+                && handoff.validations.contains(&execution_reference)
+                && handoff.validations.contains(&execution_digest)
+        })
+        .cloned()
+        .context("mission lifecycle execution receipt has no persisted submission handoff")?;
+    if handoff.status != "accepted" || handoff.accepted_at.is_none() {
+        bail!("mission lifecycle handoff has not been accepted");
+    }
+    if execution_receipt.consumed_by_submission.as_deref() != Some(handoff.idempotency_key.as_str())
+    {
+        bail!("mission lifecycle execution receipt is consumed by another submission");
+    }
+    let inbox = mission
+        .inbox
+        .iter()
+        .find(|inbox| inbox.handoff_id == handoff.id)
+        .cloned()
+        .context("mission lifecycle handoff has no persisted inbox item")?;
+    if inbox.status != "consumed" || inbox.consumed_at.is_none() {
+        bail!("mission lifecycle inbox item has not been consumed");
+    }
+
+    let connection = Connection::open_with_flags(
+        store.path(),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .context("failed to open mission lifecycle store read-only")?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT data_json
+        FROM mission_runtime_checkpoints
+        WHERE mission_id=?1
+        ORDER BY revision
+        "#,
+    )?;
+    let rows = statement.query_map([mission_id], |row| row.get::<_, String>(0))?;
+    let checkpoints = rows
+        .map(|row| {
+            let json = row?;
+            serde_json::from_str::<MissionRecord>(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    json.len(),
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let submission_snapshot = checkpoints
+        .iter()
+        .find(|checkpoint| {
+            checkpoint
+                .handoffs
+                .iter()
+                .any(|candidate| candidate.id == handoff.id && candidate.status == "queued")
+                && checkpoint
+                    .inbox
+                    .iter()
+                    .any(|candidate| candidate.id == inbox.id && candidate.status == "pending")
+        })
+        .cloned()
+        .context("mission lifecycle submission checkpoint is missing")?;
+    let resume_snapshot = checkpoints
+        .iter()
+        .find(|checkpoint| {
+            checkpoint
+                .handoffs
+                .iter()
+                .any(|candidate| candidate.id == handoff.id && candidate.status == "accepted")
+                && checkpoint
+                    .inbox
+                    .iter()
+                    .any(|candidate| candidate.id == inbox.id && candidate.status == "consumed")
+                && mission_lifecycle_event_order_is_valid(
+                    checkpoint,
+                    &handoff.id,
+                    &execution_receipt.task_id,
+                )
+        })
+        .cloned()
+        .context("mission lifecycle resume checkpoint is missing")?;
+
+    let submission = MissionSubmission {
+        idempotency_key: handoff.idempotency_key.clone(),
+        execution_receipt_id: execution_receipt.receipt_id.clone(),
+        task_id: handoff.task_id.clone(),
+        agent_id: handoff.from_agent.clone(),
+        status: handoff.delivery.status.clone(),
+        summary: handoff.delivery.summary.clone(),
+        artifacts: handoff.delivery.artifacts.clone(),
+        validations: handoff.validations.clone(),
+        risks: handoff.delivery.risks.clone(),
+        followups: handoff.delivery.followups.clone(),
+        tests_passed: handoff.delivery.tests_passed,
+        tests_failed: handoff.delivery.tests_failed,
+    };
+    let submit_report = MissionSubmitReport {
+        schema_version: "forge.mission.submit.v1".to_string(),
+        status: "queued".to_string(),
+        mission_id: mission.id.clone(),
+        handoff_id: handoff.id.clone(),
+        inbox_id: inbox.id.clone(),
+        producer_revision: submission_snapshot.revision,
+        deduplicated: false,
+        accepted: false,
+    };
+    let resume_report = MissionDriveReport {
+        schema_version: "forge.mission.drive.v1".to_string(),
+        status: format!("{:?}", resume_snapshot.status).to_lowercase(),
+        action: "handoff_consumed".to_string(),
+        mission_id: mission.id.clone(),
+        revision: resume_snapshot.revision,
+        assignment: None,
+        handoff_id: Some(handoff.id.clone()),
+        mission: resume_snapshot,
+    };
+    let catalog = mission_platform_catalog();
+    let mut artifact = ProductionMissionLifecycleReceipt {
+        schema_version: PRODUCTION_MISSION_LIFECYCLE_RECEIPT_SCHEMA_VERSION.to_string(),
+        kind: "mission_operational_lifecycle".to_string(),
+        status: "passed".to_string(),
+        subject_version: release_version.to_string(),
+        claims_sha256: String::new(),
+        capability_inventory_schema_version: catalog.schema_version,
+        capability_inventory_sha256: catalog.inventory_sha256,
+        capability_numbers: catalog
+            .capabilities
+            .iter()
+            .map(|capability| capability.number)
+            .collect(),
+        execution_receipt,
+        submission,
+        submit_report,
+        resume_report,
+    };
+    let execute_observed_at_epoch = rfc3339_epoch(&artifact.execution_receipt.finished_at)
+        .context("mission lifecycle execution timestamp is invalid")?;
+    let submit_observed_at_epoch = datetime_epoch(&handoff.created_at)
+        .context("mission lifecycle submission timestamp is invalid")?;
+    let resume_observed_at_epoch = inbox
+        .consumed_at
+        .as_ref()
+        .and_then(datetime_epoch)
+        .context("mission lifecycle resume timestamp is invalid")?;
+    let mut manifest_section = ProductionMissionOperationalEvidence {
+        evidence: ProductionEvidenceRef {
+            artifact_path: artifact_path.to_string(),
+            artifact_sha256: String::new(),
+            observed_at_epoch: resume_observed_at_epoch,
+        },
+        capability_inventory_schema_version: artifact.capability_inventory_schema_version.clone(),
+        capability_inventory_sha256: artifact.capability_inventory_sha256.clone(),
+        capability_numbers: artifact.capability_numbers.clone(),
+        mission_id: artifact.execution_receipt.mission_id.clone(),
+        workflow_id: artifact.execution_receipt.workflow_id.clone(),
+        task_id: artifact.execution_receipt.task_id.clone(),
+        agent_id: artifact.execution_receipt.agent_id.clone(),
+        execute_receipt_schema_version: artifact.execution_receipt.schema_version.clone(),
+        execute_receipt_id: artifact.execution_receipt.receipt_id.clone(),
+        execute_receipt_sha256: artifact.execution_receipt.receipt_sha256.clone(),
+        execute_status: artifact.execution_receipt.status.clone(),
+        execution_attempted: artifact.execution_receipt.execution_attempted,
+        executed: artifact.execution_receipt.executed,
+        execute_exit_code: artifact.execution_receipt.exit_code,
+        submit_receipt_schema_version: artifact.submit_report.schema_version.clone(),
+        submit_receipt_sha256: serialized_sha256(&artifact.submit_report)?,
+        submit_status: artifact.submit_report.status.clone(),
+        submit_queued: artifact.submit_report.status == "queued",
+        submitted_execute_receipt_sha256: artifact.execution_receipt.receipt_sha256.clone(),
+        handoff_id: artifact.submit_report.handoff_id.clone(),
+        inbox_id: artifact.submit_report.inbox_id.clone(),
+        resume_receipt_schema_version: artifact.resume_report.schema_version.clone(),
+        resume_receipt_sha256: serialized_sha256(&artifact.resume_report)?,
+        resume_status: artifact.resume_report.status.clone(),
+        resume_action: artifact.resume_report.action.clone(),
+        resumed_handoff_id: artifact
+            .resume_report
+            .handoff_id
+            .clone()
+            .context("mission lifecycle resume report has no handoff")?,
+        resume_consumed: artifact.resume_report.action == "handoff_consumed",
+        execute_observed_at_epoch,
+        submit_observed_at_epoch,
+        resume_observed_at_epoch,
+    };
+    artifact.claims_sha256 = production_mission_operational_claims_sha256(&manifest_section)?;
+    let artifact_bytes = serde_json::to_vec(&artifact)?;
+    manifest_section.evidence.artifact_sha256 = hex_sha256(&artifact_bytes);
+    Ok(ProductionMissionLifecycleEvidencePackage {
+        schema_version: "forge.milestone.mission_lifecycle_evidence_package.v1".to_string(),
+        status: "ready".to_string(),
+        manifest_section,
+        artifact,
+    })
+}
+
+pub fn production_readiness_claims_sha256(
+    manifest: &ProductionReadinessManifest,
+    kind: &str,
+) -> Result<String> {
+    let claims = match kind {
+        "release_matrix" | "release_artifacts" | "release_sbom" | "release_checksums"
+        | "release_sigstore" | "release_provenance" => serde_json::json!({
+            "successful_targets": &manifest.release.successful_targets,
+            "binary_sha256_by_target": &manifest.release.binary_sha256_by_target,
+            "sbom_format": &manifest.release.sbom_format,
+            "sbom_component_count": manifest.release.sbom_component_count,
+            "checksum_entry_count": manifest.release.checksum_entry_count,
+            "checksums_verified": manifest.release.checksums_verified,
+            "sigstore_verified": manifest.release.sigstore_verified,
+            "provenance_verified": manifest.release.provenance_verified,
+        }),
+        "installation" => serde_json::json!({
+            "target": &manifest.installation.target,
+            "installed_version": &manifest.installation.installed_version,
+            "installed_binary_sha256": &manifest.installation.installed_binary_sha256,
+            "service_active": manifest.installation.service_active,
+            "store_check_passed": manifest.installation.store_check_passed,
+            "ops_authenticated_probe_passed": manifest.installation.ops_authenticated_probe_passed,
+            "ops_http_status": manifest.installation.ops_http_status,
+            "ops_loopback_only": manifest.installation.ops_loopback_only,
+        }),
+        "off_host_recovery" => serde_json::json!({
+            "recovery_challenge_epoch": manifest.off_host_backup.recovery_challenge_epoch,
+            "immutable_upload_passed": manifest.off_host_backup.immutable_upload_passed,
+            "remote_digest_verified": manifest.off_host_backup.remote_digest_verified,
+            "download_digest_verified": manifest.off_host_backup.download_digest_verified,
+            "downloaded_store_check_passed": manifest.off_host_backup.downloaded_store_check_passed,
+            "disposable_restore_passed": manifest.off_host_backup.disposable_restore_passed,
+            "restored_store_check_passed": manifest.off_host_backup.restored_store_check_passed,
+            "off_host_retention_enabled": manifest.off_host_backup.off_host_retention_enabled,
+            "forge_key_isolated_from_uploader": manifest.off_host_backup.forge_key_isolated_from_uploader,
+            "uploader_credentials_isolated_from_forge": manifest.off_host_backup.uploader_credentials_isolated_from_forge,
+        }),
+        "key_escrow" => serde_json::json!({
+            "encrypted": manifest.key_escrow.encrypted,
+            "separate_access_control": manifest.key_escrow.separate_access_control,
+            "recovery_key_available": manifest.key_escrow.recovery_key_available,
+            "restore_with_escrowed_key_tested": manifest.key_escrow.restore_with_escrowed_key_tested,
+            "excluded_from_database_backup": manifest.key_escrow.excluded_from_database_backup,
+        }),
+        "alerting" => serde_json::json!({
+            "service_failure_alert": manifest.alerts.service_failure_alert,
+            "store_check_alert": manifest.alerts.store_check_alert,
+            "backup_timer_alert": manifest.alerts.backup_timer_alert,
+            "off_host_failure_alert": manifest.alerts.off_host_failure_alert,
+            "disk_space_alert": manifest.alerts.disk_space_alert,
+            "backup_age_alert": manifest.alerts.backup_age_alert,
+            "delivery_route_verified": manifest.alerts.delivery_route_verified,
+        }),
+        "restore_drill" => serde_json::json!({
+            "drill_epoch": manifest.restore_drill.drill_epoch,
+            "disposable_recovery_host": manifest.restore_drill.disposable_recovery_host,
+            "downloaded_store_check_passed": manifest.restore_drill.downloaded_store_check_passed,
+            "restored_store_check_passed": manifest.restore_drill.restored_store_check_passed,
+            "canary_workflow_verified": manifest.restore_drill.canary_workflow_verified,
+            "ops_authenticated_probe_passed": manifest.restore_drill.ops_authenticated_probe_passed,
+            "rpo_seconds": manifest.restore_drill.rpo_seconds,
+            "rto_seconds": manifest.restore_drill.rto_seconds,
+        }),
+        "upgrade_rollback" => serde_json::json!({
+            "target_version": &manifest.upgrade_rollback.target_version,
+            "simulation_completed": manifest.upgrade_rollback.simulation_completed,
+            "pre_upgrade_backup_verified": manifest.upgrade_rollback.pre_upgrade_backup_verified,
+            "upgraded_store_check_passed": manifest.upgrade_rollback.upgraded_store_check_passed,
+            "upgraded_ops_health_passed": manifest.upgrade_rollback.upgraded_ops_health_passed,
+            "rollback_completed": manifest.upgrade_rollback.rollback_completed,
+            "previous_version_store_check_passed": manifest.upgrade_rollback.previous_version_store_check_passed,
+            "previous_version_ops_health_passed": manifest.upgrade_rollback.previous_version_ops_health_passed,
+            "target_reinstalled_and_healthy": manifest.upgrade_rollback.target_reinstalled_and_healthy,
+        }),
+        "bounded_load" => serde_json::json!({
+            "duration_seconds": manifest.bounded_load.duration_seconds,
+            "concurrency": manifest.bounded_load.concurrency,
+            "operation_count": manifest.bounded_load.operation_count,
+            "error_count": manifest.bounded_load.error_count,
+            "p95_latency_millis": manifest.bounded_load.p95_latency_millis,
+            "max_rss_bytes": manifest.bounded_load.max_rss_bytes,
+            "max_rss_limit_bytes": manifest.bounded_load.max_rss_limit_bytes,
+            "timeout_enforced": manifest.bounded_load.timeout_enforced,
+            "resource_limit_enforced": manifest.bounded_load.resource_limit_enforced,
+            "store_check_passed": manifest.bounded_load.store_check_passed,
+            "crash_restart_verified": manifest.bounded_load.crash_restart_verified,
+        }),
+        "mission_operational_lifecycle" => {
+            production_mission_operational_claims_value(&manifest.mission_operational_lifecycle)
+        }
+        _ => bail!("unsupported production evidence kind `{kind}`"),
+    };
+    let bytes = serde_json::to_vec(&claims)
+        .context("failed to serialize canonical production evidence claims")?;
+    Ok(hex_sha256(&bytes))
+}
+
+pub fn evaluate_production_readiness(
+    options: ProductionReadinessOptions<'_>,
+) -> Result<ProductionReadinessReport> {
+    let now_epoch =
+        u64::try_from(Utc::now().timestamp()).context("system clock is before the Unix epoch")?;
+    let capability_status = build_milestone_status(options.version)?;
+    let mission_platform_catalog = mission_platform_catalog();
+    let mission_platform_inventory_exact =
+        mission_platform_inventory_is_exact(&mission_platform_catalog);
+    let evidence_root = fs::canonicalize(options.evidence_root).with_context(|| {
+        format!(
+            "failed to resolve production evidence root {}",
+            options.evidence_root.display()
+        )
+    })?;
+    if !evidence_root.is_dir() {
+        bail!(
+            "production evidence root is not a directory: {}",
+            options.evidence_root.display()
+        );
+    }
+    let manifest_path = resolve_production_manifest_path(&evidence_root, options.manifest_path)?;
+    let manifest_bytes = fs::read(&manifest_path).with_context(|| {
+        format!(
+            "failed to read production readiness manifest {}",
+            manifest_path.display()
+        )
+    })?;
+    if manifest_bytes.is_empty()
+        || u64::try_from(manifest_bytes.len()).unwrap_or(u64::MAX) > MAX_PRODUCTION_EVIDENCE_BYTES
+    {
+        bail!(
+            "production readiness manifest must contain 1..={MAX_PRODUCTION_EVIDENCE_BYTES} bytes"
+        );
+    }
+    let manifest_text = std::str::from_utf8(&manifest_bytes)
+        .context("production readiness manifest must be UTF-8 JSON")?;
+    if !production_text_is_secret_free(manifest_text, "production_readiness_manifest") {
+        bail!("production readiness manifest must be secret-free");
+    }
+    let manifest: ProductionReadinessManifest = serde_json::from_slice(&manifest_bytes)
+        .context("failed to parse production readiness manifest")?;
+
+    let capability_ready =
+        capability_status.promotion_decision.capability_ready && mission_platform_inventory_exact;
+    let mut gates = Vec::new();
+    gates.push(production_gate(
+        "capability_readiness",
+        "Capability readiness",
+        vec![
+            production_check(
+                "required_capabilities",
+                capability_status.promotion_decision.capability_ready,
+                "all required milestone capabilities are ready",
+                "one or more required milestone capabilities are not ready",
+            ),
+            production_check(
+                "mission_platform_inventory_1_40",
+                mission_platform_inventory_exact,
+                "canonical mission platform inventory contains exactly classified capabilities 1-40",
+                "mission platform inventory is incomplete, reordered, duplicated or has an unsupported proof classification",
+            ),
+        ],
+    ));
+
+    let evidence_refs = production_evidence_refs(&manifest);
+    let unique_evidence_paths = evidence_refs
+        .iter()
+        .map(|(_, evidence)| evidence.artifact_path.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
+        == evidence_refs.len();
+    let release_version_matches =
+        release_version_matches_milestone(&manifest.release_version, options.version);
+    gates.push(production_gate(
+        "manifest_integrity",
+        "Manifest integrity",
+        vec![
+            production_check(
+                "schema_version",
+                manifest.schema_version == PRODUCTION_READINESS_MANIFEST_SCHEMA_VERSION,
+                "manifest schema is supported",
+                "manifest schema is unsupported",
+            ),
+            production_check(
+                "milestone",
+                manifest.milestone == options.version,
+                "manifest milestone matches the requested capability line",
+                "manifest milestone does not match the requested capability line",
+            ),
+            production_check(
+                "profile",
+                manifest.profile == PRODUCTION_PROFILE,
+                "manifest targets the supported single-host Linux profile",
+                "manifest targets an unsupported production profile",
+            ),
+            production_check(
+                "release_version",
+                release_version_matches,
+                "release version belongs to the milestone line",
+                "release version does not belong to the milestone line",
+            ),
+            production_check(
+                "generated_at",
+                evidence_epoch_is_fresh(
+                    manifest.generated_at_epoch,
+                    now_epoch,
+                    MAX_PRODUCTION_EVIDENCE_AGE_SECONDS,
+                ),
+                "manifest was generated within the allowed evidence window",
+                "manifest timestamp is future-dated, zero or stale",
+            ),
+            production_check(
+                "unique_evidence_paths",
+                unique_evidence_paths,
+                "each required claim has an independent evidence artifact",
+                "one evidence artifact is reused for multiple required claims",
+            ),
+        ],
+    ));
+
+    let successful_targets = manifest
+        .release
+        .successful_targets
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let successful_targets_unique =
+        successful_targets.len() == manifest.release.successful_targets.len();
+    let all_targets_passed = REQUIRED_RELEASE_TARGETS
+        .iter()
+        .all(|target| successful_targets.contains(target));
+    let all_target_digests_present = REQUIRED_RELEASE_TARGETS.iter().all(|target| {
+        manifest
+            .release
+            .binary_sha256_by_target
+            .get(*target)
+            .is_some_and(|digest| valid_sha256(digest))
+    });
+    let mut release_checks = Vec::new();
+    for (kind, evidence) in [
+        ("release_matrix", &manifest.release.matrix),
+        ("release_artifacts", &manifest.release.artifacts),
+        ("release_sbom", &manifest.release.sbom),
+        ("release_checksums", &manifest.release.checksums),
+        ("release_sigstore", &manifest.release.sigstore),
+        ("release_provenance", &manifest.release.provenance),
+    ] {
+        let claims_sha256 = production_readiness_claims_sha256(&manifest, kind)?;
+        release_checks.extend(production_evidence_checks(
+            kind,
+            evidence,
+            &evidence_root,
+            now_epoch,
+            &manifest.release_version,
+            &claims_sha256,
+        ));
+    }
+    release_checks.extend([
+        production_check(
+            "matrix_targets",
+            all_targets_passed && successful_targets_unique,
+            "all required release targets passed exactly once",
+            "release matrix is missing a required target or contains duplicates",
+        ),
+        production_check(
+            "binary_target_digests",
+            all_target_digests_present,
+            "every required target has a lowercase SHA-256 binary digest",
+            "one or more required target binary digests are missing or malformed",
+        ),
+        production_check(
+            "sbom_format",
+            manifest.release.sbom_format == "cyclonedx-json"
+                && manifest.release.sbom_component_count > 0,
+            "non-empty CycloneDX JSON SBOM is recorded",
+            "SBOM format or component count is invalid",
+        ),
+        production_check(
+            "checksums_verified",
+            manifest.release.checksums_verified
+                && manifest.release.checksum_entry_count
+                    >= u64::try_from(REQUIRED_RELEASE_TARGETS.len()).unwrap_or(u64::MAX),
+            "checksum manifest covers and verifies all required target artifacts",
+            "checksum manifest was not verified or does not cover all required targets",
+        ),
+        production_check(
+            "sigstore_verified",
+            manifest.release.sigstore_verified,
+            "Sigstore bundle verification passed",
+            "Sigstore bundle verification is absent or failed",
+        ),
+        production_check(
+            "provenance_verified",
+            manifest.release.provenance_verified,
+            "release build provenance verification passed",
+            "release build provenance verification is absent or failed",
+        ),
+    ]);
+    gates.push(production_gate(
+        "release_integrity",
+        "Release matrix and supply-chain integrity",
+        release_checks,
+    ));
+
+    let installed_target_digest = manifest
+        .release
+        .binary_sha256_by_target
+        .get(&manifest.installation.target);
+    let installation_claims = production_readiness_claims_sha256(&manifest, "installation")?;
+    let mut installation_checks = production_evidence_checks(
+        "installation",
+        &manifest.installation.evidence,
+        &evidence_root,
+        now_epoch,
+        &manifest.release_version,
+        &installation_claims,
+    );
+    installation_checks.extend([
+        production_check(
+            "installed_version",
+            manifest.installation.installed_version == manifest.release_version,
+            "installed Forge version matches the evaluated release",
+            "installed Forge version does not match the evaluated release",
+        ),
+        production_check(
+            "installed_binary",
+            valid_sha256(&manifest.installation.installed_binary_sha256)
+                && installed_target_digest
+                    .is_some_and(|digest| digest == &manifest.installation.installed_binary_sha256),
+            "installed binary digest matches its published target artifact",
+            "installed binary digest is malformed or differs from the published artifact",
+        ),
+        production_check(
+            "service_and_store",
+            manifest.installation.service_active && manifest.installation.store_check_passed,
+            "Forge service is active and the production store check passed",
+            "Forge service is inactive or the production store check failed",
+        ),
+        production_check(
+            "ops_health",
+            manifest.installation.ops_authenticated_probe_passed
+                && manifest.installation.ops_http_status == 200
+                && manifest.installation.ops_loopback_only,
+            "authenticated loopback Ops health returned HTTP 200",
+            "Ops health is unauthenticated, unhealthy or not loopback-only",
+        ),
+    ]);
+    gates.push(production_gate(
+        "installed_ops_health",
+        "Installed version and Ops health",
+        installation_checks,
+    ));
+
+    let backup_claims = production_readiness_claims_sha256(&manifest, "off_host_recovery")?;
+    let mut backup_checks = production_evidence_checks(
+        "off_host_recovery",
+        &manifest.off_host_backup.evidence,
+        &evidence_root,
+        now_epoch,
+        &manifest.release_version,
+        &backup_claims,
+    );
+    backup_checks.extend([
+        production_check(
+            "recovery_challenge_fresh",
+            evidence_epoch_is_fresh(
+                manifest.off_host_backup.recovery_challenge_epoch,
+                now_epoch,
+                MAX_RESTORE_RPO_SECONDS,
+            ),
+            "latest complete off-host recovery challenge is within the RPO window",
+            "off-host recovery challenge timestamp is future-dated, zero or older than the RPO window",
+        ),
+        production_check(
+            "immutable_remote_cycle",
+            manifest.off_host_backup.immutable_upload_passed
+                && manifest.off_host_backup.remote_digest_verified
+                && manifest.off_host_backup.download_digest_verified
+                && manifest.off_host_backup.off_host_retention_enabled,
+            "immutable upload, source-independent verify, download digest and retention passed",
+            "off-host immutable upload, verification, download or retention evidence failed",
+        ),
+        production_check(
+            "recovery_store_checks",
+            manifest.off_host_backup.downloaded_store_check_passed
+                && manifest.off_host_backup.disposable_restore_passed
+                && manifest.off_host_backup.restored_store_check_passed,
+            "downloaded backup and disposable restore both passed store checks",
+            "downloaded backup or disposable restore store check failed",
+        ),
+        production_check(
+            "credential_isolation",
+            manifest.off_host_backup.forge_key_isolated_from_uploader
+                && manifest
+                    .off_host_backup
+                    .uploader_credentials_isolated_from_forge,
+            "Forge vault key and uploader authority stayed mutually isolated",
+            "Forge vault key or uploader authority isolation was not proven",
+        ),
+    ]);
+    gates.push(production_gate(
+        "off_host_recovery",
+        "Off-host backup recovery challenge",
+        backup_checks,
+    ));
+
+    let escrow_claims = production_readiness_claims_sha256(&manifest, "key_escrow")?;
+    let mut escrow_checks = production_evidence_checks(
+        "key_escrow",
+        &manifest.key_escrow.evidence,
+        &evidence_root,
+        now_epoch,
+        &manifest.release_version,
+        &escrow_claims,
+    );
+    escrow_checks.push(production_check(
+        "escrow_controls",
+        manifest.key_escrow.encrypted
+            && manifest.key_escrow.separate_access_control
+            && manifest.key_escrow.recovery_key_available
+            && manifest.key_escrow.restore_with_escrowed_key_tested
+            && manifest.key_escrow.excluded_from_database_backup,
+        "encrypted separately controlled key escrow restored encrypted data and stayed outside the database backup",
+        "key escrow encryption, separation, availability, restore test or backup exclusion is missing",
+    ));
+    gates.push(production_gate(
+        "key_escrow",
+        "Vault-key escrow",
+        escrow_checks,
+    ));
+
+    let alert_claims = production_readiness_claims_sha256(&manifest, "alerting")?;
+    let mut alert_checks = production_evidence_checks(
+        "alerting",
+        &manifest.alerts.evidence,
+        &evidence_root,
+        now_epoch,
+        &manifest.release_version,
+        &alert_claims,
+    );
+    alert_checks.push(production_check(
+        "required_alerts",
+        manifest.alerts.service_failure_alert
+            && manifest.alerts.store_check_alert
+            && manifest.alerts.backup_timer_alert
+            && manifest.alerts.off_host_failure_alert
+            && manifest.alerts.disk_space_alert
+            && manifest.alerts.backup_age_alert
+            && manifest.alerts.delivery_route_verified,
+        "all required operational alerts and their delivery route were verified",
+        "one or more required operational alerts or the delivery route is unverified",
+    ));
+    gates.push(production_gate(
+        "alerting",
+        "Operational alerting",
+        alert_checks,
+    ));
+
+    let restore_claims = production_readiness_claims_sha256(&manifest, "restore_drill")?;
+    let mut restore_checks = production_evidence_checks(
+        "restore_drill",
+        &manifest.restore_drill.evidence,
+        &evidence_root,
+        now_epoch,
+        &manifest.release_version,
+        &restore_claims,
+    );
+    restore_checks.extend([
+        production_check(
+            "drill_fresh",
+            evidence_epoch_is_fresh(
+                manifest.restore_drill.drill_epoch,
+                now_epoch,
+                MAX_PRODUCTION_EVIDENCE_AGE_SECONDS,
+            ),
+            "restore drill completed within the evidence window",
+            "restore drill timestamp is future-dated, zero or stale",
+        ),
+        production_check(
+            "drill_integrity",
+            manifest.restore_drill.disposable_recovery_host
+                && manifest.restore_drill.downloaded_store_check_passed
+                && manifest.restore_drill.restored_store_check_passed
+                && manifest.restore_drill.canary_workflow_verified
+                && manifest.restore_drill.ops_authenticated_probe_passed,
+            "disposable restore, store checks, canary and authenticated Ops probe passed",
+            "restore drill environment, store checks, canary or Ops probe failed",
+        ),
+        production_check(
+            "rpo",
+            manifest.restore_drill.rpo_seconds <= MAX_RESTORE_RPO_SECONDS,
+            "measured restore drill RPO is at most 24 hours",
+            "measured restore drill RPO exceeds 24 hours",
+        ),
+        production_check(
+            "rto",
+            manifest.restore_drill.rto_seconds <= MAX_RESTORE_RTO_SECONDS,
+            "measured restore drill RTO is at most 30 minutes",
+            "measured restore drill RTO exceeds 30 minutes",
+        ),
+    ]);
+    gates.push(production_gate(
+        "restore_drill",
+        "Restore drill RPO/RTO",
+        restore_checks,
+    ));
+
+    let upgrade_claims = production_readiness_claims_sha256(&manifest, "upgrade_rollback")?;
+    let mut upgrade_checks = production_evidence_checks(
+        "upgrade_rollback",
+        &manifest.upgrade_rollback.evidence,
+        &evidence_root,
+        now_epoch,
+        &manifest.release_version,
+        &upgrade_claims,
+    );
+    upgrade_checks.extend([
+        production_check(
+            "target_version",
+            manifest.upgrade_rollback.target_version == manifest.release_version,
+            "upgrade/rollback simulation targets the evaluated release",
+            "upgrade/rollback simulation targets another release",
+        ),
+        production_check(
+            "upgrade_and_rollback",
+            manifest.upgrade_rollback.simulation_completed
+                && manifest.upgrade_rollback.pre_upgrade_backup_verified
+                && manifest.upgrade_rollback.upgraded_store_check_passed
+                && manifest.upgrade_rollback.upgraded_ops_health_passed
+                && manifest.upgrade_rollback.rollback_completed
+                && manifest
+                    .upgrade_rollback
+                    .previous_version_store_check_passed
+                && manifest.upgrade_rollback.previous_version_ops_health_passed
+                && manifest.upgrade_rollback.target_reinstalled_and_healthy,
+            "bounded upgrade, rollback and target reinstall simulation passed",
+            "upgrade, rollback or target reinstall simulation evidence is incomplete",
+        ),
+    ]);
+    gates.push(production_gate(
+        "upgrade_rollback",
+        "Upgrade and rollback simulation",
+        upgrade_checks,
+    ));
+
+    let load_claims = production_readiness_claims_sha256(&manifest, "bounded_load")?;
+    let mut load_checks = production_evidence_checks(
+        "bounded_load",
+        &manifest.bounded_load.evidence,
+        &evidence_root,
+        now_epoch,
+        &manifest.release_version,
+        &load_claims,
+    );
+    load_checks.extend([
+        production_check(
+            "bounded_window",
+            manifest.bounded_load.duration_seconds > 0
+                && manifest.bounded_load.duration_seconds <= MAX_BOUNDED_LOAD_SECONDS
+                && manifest.bounded_load.concurrency > 0
+                && manifest.bounded_load.concurrency <= MAX_BOUNDED_LOAD_CONCURRENCY
+                && manifest.bounded_load.timeout_enforced,
+            "load simulation stayed inside the bounded time and concurrency policy",
+            "load simulation is unbounded, empty or exceeds time/concurrency policy",
+        ),
+        production_check(
+            "load_result",
+            manifest.bounded_load.operation_count >= MIN_BOUNDED_LOAD_OPERATIONS
+                && manifest.bounded_load.error_count == 0
+                && manifest.bounded_load.p95_latency_millis <= MAX_BOUNDED_LOAD_P95_MILLIS,
+            "bounded load completed the minimum operations without errors inside latency policy",
+            "bounded load volume, errors or p95 latency failed policy",
+        ),
+        production_check(
+            "resource_bound",
+            manifest.bounded_load.resource_limit_enforced
+                && manifest.bounded_load.max_rss_limit_bytes > 0
+                && manifest.bounded_load.max_rss_bytes > 0
+                && manifest.bounded_load.max_rss_bytes <= manifest.bounded_load.max_rss_limit_bytes,
+            "load simulation enforced and stayed within its memory limit",
+            "load simulation memory limit is absent, invalid or exceeded",
+        ),
+        production_check(
+            "post_load_recovery",
+            manifest.bounded_load.store_check_passed
+                && manifest.bounded_load.crash_restart_verified,
+            "post-load store check and crash/restart recovery passed",
+            "post-load store check or crash/restart recovery failed",
+        ),
+    ]);
+    gates.push(production_gate(
+        "bounded_load",
+        "Bounded production load simulation",
+        load_checks,
+    ));
+
+    let lifecycle = &manifest.mission_operational_lifecycle;
+    let lifecycle_claims =
+        production_readiness_claims_sha256(&manifest, "mission_operational_lifecycle")?;
+    let mut lifecycle_checks = production_evidence_checks(
+        "mission_operational_lifecycle",
+        &lifecycle.evidence,
+        &evidence_root,
+        now_epoch,
+        &manifest.release_version,
+        &lifecycle_claims,
+    );
+    let lifecycle_receipt =
+        load_production_mission_lifecycle_receipt(&evidence_root, &lifecycle.evidence).ok();
+    lifecycle_checks.push(production_check(
+        "mission_operational_lifecycle.typed_bundle",
+        lifecycle_receipt.is_some(),
+        "mission lifecycle evidence contains typed execute, submit and resume receipts",
+        "mission lifecycle evidence is missing or is not the canonical typed bundle",
+    ));
+    if let Some(receipt) = lifecycle_receipt.as_ref() {
+        let execute = &receipt.execution_receipt;
+        let submit_sha256 = serialized_sha256(&receipt.submit_report).ok();
+        let resume_sha256 = serialized_sha256(&receipt.resume_report).ok();
+        let handoff = receipt
+            .resume_report
+            .mission
+            .handoffs
+            .iter()
+            .find(|handoff| handoff.id == receipt.submit_report.handoff_id);
+        let inbox = receipt
+            .resume_report
+            .mission
+            .inbox
+            .iter()
+            .find(|inbox| inbox.id == receipt.submit_report.inbox_id);
+        let execute_epoch = rfc3339_epoch(&execute.finished_at);
+        let submit_epoch = handoff.and_then(|handoff| datetime_epoch(&handoff.created_at));
+        let resume_epoch =
+            inbox.and_then(|inbox| inbox.consumed_at.as_ref().and_then(datetime_epoch));
+        let expected_execution_reference = format!("execution_receipt:{}", execute.receipt_id);
+        let expected_execution_digest =
+            format!("execution_receipt_sha256:{}", execute.receipt_sha256);
+
+        let execution_verified = execute.schema_version == MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION
+            && verify_mission_execution_receipt(execute).is_ok()
+            && execute.status == "completed"
+            && execute.allowed
+            && execute.execution_attempted
+            && execute.executed
+            && execute.exit_code == Some(0)
+            && !execute.timed_out
+            && execute.approval.is_some()
+            && !execute.policy_trace.is_empty()
+            && execute.policy_trace.iter().all(|decision| decision.allowed)
+            && execute.sandbox.as_ref().is_some_and(|sandbox| {
+                sandbox.status == "sandbox_completed"
+                    && sandbox.runtime == "bubblewrap"
+                    && sandbox.filesystem_isolation_enforced
+                    && sandbox.network_isolation_enforced
+                    && sandbox.command_sha256 == execute.command_sha256
+                    && sandbox.exit_code == Some(0)
+                    && !sandbox.timed_out
+                    && !sandbox.output_truncated
+                    && sandbox.error.is_none()
+            })
+            && !execute.claims.is_empty()
+            && !execute.evidence.is_empty();
+        lifecycle_checks.push(production_check(
+            "mission_operational_lifecycle.typed_execute",
+            execution_verified,
+            "typed execution receipt is hash-valid, approved, isolated and successful",
+            "typed execution receipt is invalid, unapproved, unisolated or unsuccessful",
+        ));
+
+        let submit_links_execution = receipt.submission.execution_receipt_id == execute.receipt_id
+            && receipt.submission.idempotency_key.trim().len() >= 3
+            && receipt.submission.task_id == execute.task_id
+            && receipt.submission.agent_id == execute.agent_id
+            && receipt.submission.status == "completed"
+            && receipt
+                .submission
+                .validations
+                .contains(&expected_execution_reference)
+            && receipt
+                .submission
+                .validations
+                .contains(&expected_execution_digest)
+            && receipt.submit_report.schema_version == "forge.mission.submit.v1"
+            && receipt.submit_report.status == "queued"
+            && receipt.submit_report.mission_id == execute.mission_id
+            && !receipt.submit_report.handoff_id.trim().is_empty()
+            && !receipt.submit_report.inbox_id.trim().is_empty()
+            && receipt.submit_report.producer_revision >= execute.mission_revision
+            && !receipt.submit_report.deduplicated
+            && !receipt.submit_report.accepted;
+        lifecycle_checks.push(production_check(
+            "mission_operational_lifecycle.typed_submit",
+            submit_links_execution,
+            "typed submission references the exact execution receipt and queued handoff",
+            "typed submission is detached from execution or is not the initial queued handoff",
+        ));
+
+        let resume_links_submission = receipt.resume_report.schema_version
+            == "forge.mission.drive.v1"
+            && receipt.resume_report.action == "handoff_consumed"
+            && receipt.resume_report.mission_id == execute.mission_id
+            && receipt.resume_report.handoff_id.as_deref()
+                == Some(receipt.submit_report.handoff_id.as_str())
+            && receipt.resume_report.revision == receipt.resume_report.mission.revision
+            && receipt.resume_report.revision >= receipt.submit_report.producer_revision
+            && receipt.resume_report.mission.workflow_id == execute.workflow_id
+            && handoff.is_some_and(|handoff| {
+                handoff.status == "accepted"
+                    && handoff.accepted_at.is_some()
+                    && handoff.task_id == execute.task_id
+                    && handoff.from_agent == execute.agent_id
+            })
+            && inbox.is_some_and(|inbox| {
+                inbox.handoff_id == receipt.submit_report.handoff_id
+                    && inbox.status == "consumed"
+                    && inbox.consumed_at.is_some()
+            })
+            && mission_lifecycle_event_order_is_valid(
+                &receipt.resume_report.mission,
+                &receipt.submit_report.handoff_id,
+                &execute.task_id,
+            );
+        lifecycle_checks.push(production_check(
+            "mission_operational_lifecycle.typed_resume",
+            resume_links_submission,
+            "typed resume consumed the queued handoff with ordered persisted events",
+            "typed resume is detached, unconsumed or missing ordered lifecycle events",
+        ));
+
+        let bundle_matches_manifest = receipt.capability_inventory_schema_version
+            == lifecycle.capability_inventory_schema_version
+            && receipt.capability_inventory_sha256 == lifecycle.capability_inventory_sha256
+            && receipt.capability_numbers == lifecycle.capability_numbers
+            && execute.mission_id == lifecycle.mission_id
+            && execute.workflow_id == lifecycle.workflow_id
+            && execute.task_id == lifecycle.task_id
+            && execute.agent_id == lifecycle.agent_id
+            && execute.schema_version == lifecycle.execute_receipt_schema_version
+            && execute.receipt_id == lifecycle.execute_receipt_id
+            && execute.receipt_sha256 == lifecycle.execute_receipt_sha256
+            && execute.status == lifecycle.execute_status
+            && execute.execution_attempted == lifecycle.execution_attempted
+            && execute.executed == lifecycle.executed
+            && execute.exit_code == lifecycle.execute_exit_code
+            && receipt.submit_report.schema_version == lifecycle.submit_receipt_schema_version
+            && submit_sha256.as_deref() == Some(lifecycle.submit_receipt_sha256.as_str())
+            && receipt.submit_report.status == lifecycle.submit_status
+            && (receipt.submit_report.status == "queued") == lifecycle.submit_queued
+            && execute.receipt_sha256 == lifecycle.submitted_execute_receipt_sha256
+            && receipt.submit_report.handoff_id == lifecycle.handoff_id
+            && receipt.submit_report.inbox_id == lifecycle.inbox_id
+            && receipt.resume_report.schema_version == lifecycle.resume_receipt_schema_version
+            && resume_sha256.as_deref() == Some(lifecycle.resume_receipt_sha256.as_str())
+            && receipt.resume_report.status == lifecycle.resume_status
+            && receipt.resume_report.action == lifecycle.resume_action
+            && receipt.resume_report.handoff_id.as_deref()
+                == Some(lifecycle.resumed_handoff_id.as_str())
+            && (receipt.resume_report.action == "handoff_consumed") == lifecycle.resume_consumed
+            && execute_epoch == Some(lifecycle.execute_observed_at_epoch)
+            && submit_epoch == Some(lifecycle.submit_observed_at_epoch)
+            && resume_epoch == Some(lifecycle.resume_observed_at_epoch);
+        lifecycle_checks.push(production_check(
+            "mission_operational_lifecycle.bundle_claims",
+            bundle_matches_manifest,
+            "typed lifecycle bundle exactly matches every manifest identity, digest and timestamp",
+            "typed lifecycle bundle differs from one or more manifest claims",
+        ));
+        lifecycle_checks.extend(mission_lifecycle_store_checks(options.store_path, receipt));
+    } else {
+        lifecycle_checks.push(production_check(
+            "mission_operational_lifecycle.store_cross_check",
+            false,
+            "typed lifecycle bundle matches the read-only source store",
+            "source store cannot be cross-checked without a valid typed lifecycle bundle",
+        ));
+    }
+    let expected_capability_numbers = (1..=u8::try_from(MISSION_PLATFORM_CAPABILITY_COUNT)
+        .unwrap_or(u8::MAX))
+        .collect::<Vec<_>>();
+    let stage_receipt_digests = BTreeSet::from([
+        lifecycle.execute_receipt_sha256.as_str(),
+        lifecycle.submit_receipt_sha256.as_str(),
+        lifecycle.resume_receipt_sha256.as_str(),
+    ]);
+    lifecycle_checks.extend([
+        production_check(
+            "mission_operational_lifecycle.inventory",
+            lifecycle.capability_inventory_schema_version
+                == MISSION_PLATFORM_CATALOG_SCHEMA_VERSION
+                && lifecycle.capability_inventory_sha256
+                    == mission_platform_catalog.inventory_sha256
+                && lifecycle.capability_numbers == expected_capability_numbers,
+            "operational lifecycle receipt is bound to the exact canonical capability inventory 1-40",
+            "operational lifecycle receipt is not bound to the canonical capability inventory 1-40",
+        ),
+        production_check(
+            "mission_operational_lifecycle.identity",
+            [
+                lifecycle.mission_id.as_str(),
+                lifecycle.workflow_id.as_str(),
+                lifecycle.task_id.as_str(),
+                lifecycle.agent_id.as_str(),
+                lifecycle.execute_receipt_id.as_str(),
+                lifecycle.handoff_id.as_str(),
+                lifecycle.inbox_id.as_str(),
+            ]
+            .iter()
+            .all(|value| !value.trim().is_empty()),
+            "operational lifecycle identifies mission, workflow, task, agent and receipts",
+            "operational lifecycle identity is incomplete",
+        ),
+        production_check(
+            "mission_operational_lifecycle.schemas",
+            lifecycle.execute_receipt_schema_version == MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION
+                && lifecycle.submit_receipt_schema_version == "forge.mission.submit.v1"
+                && lifecycle.resume_receipt_schema_version == "forge.mission.drive.v1",
+            "execute, submit and resume receipts use canonical runtime schemas",
+            "one or more operational lifecycle receipt schemas are unsupported",
+        ),
+        production_check(
+            "mission_operational_lifecycle.receipt_digests",
+            valid_sha256(&lifecycle.execute_receipt_sha256)
+                && valid_sha256(&lifecycle.submit_receipt_sha256)
+                && valid_sha256(&lifecycle.resume_receipt_sha256)
+                && stage_receipt_digests.len() == 3,
+            "execute, submit and resume receipts have distinct canonical SHA-256 digests",
+            "operational lifecycle receipt digests are malformed or reused",
+        ),
+        production_check(
+            "mission_operational_lifecycle.execute",
+            lifecycle.execute_status == "completed"
+                && lifecycle.execution_attempted
+                && lifecycle.executed
+                && lifecycle.execute_exit_code == Some(0),
+            "mission assignment executed successfully through the operational executor",
+            "mission assignment was not successfully executed through the operational executor",
+        ),
+        production_check(
+            "mission_operational_lifecycle.submit",
+            lifecycle.submit_receipt_schema_version == "forge.mission.submit.v1"
+                && lifecycle.submit_status == "queued"
+                && lifecycle.submit_queued
+                && lifecycle.submitted_execute_receipt_sha256
+                    == lifecycle.execute_receipt_sha256,
+            "submission queued and references the exact execution receipt",
+            "submission was not queued or is detached from the execution receipt",
+        ),
+        production_check(
+            "mission_operational_lifecycle.resume",
+            lifecycle.resume_action == "handoff_consumed"
+                && lifecycle.resume_consumed
+                && lifecycle.resumed_handoff_id == lifecycle.handoff_id
+                && matches!(
+                    lifecycle.resume_status.as_str(),
+                    "running" | "reviewing" | "repairing" | "completed"
+                ),
+            "resume consumed the submitted handoff through the operational mission runtime",
+            "resume did not consume the submitted handoff",
+        ),
+        production_check(
+            "mission_operational_lifecycle.order",
+            lifecycle.execute_observed_at_epoch > 0
+                && lifecycle.execute_observed_at_epoch <= lifecycle.submit_observed_at_epoch
+                && lifecycle.submit_observed_at_epoch <= lifecycle.resume_observed_at_epoch
+                && evidence_epoch_is_fresh(
+                    lifecycle.resume_observed_at_epoch,
+                    now_epoch,
+                    MAX_PRODUCTION_EVIDENCE_AGE_SECONDS,
+                ),
+            "operational receipts prove execute-submit-resume order inside the freshness window",
+            "operational receipt order is invalid, future-dated or stale",
+        ),
+    ]);
+    gates.push(production_gate(
+        "mission_operational_lifecycle",
+        "Operational mission execute-submit-resume lifecycle",
+        lifecycle_checks,
+    ));
+    debug_assert_eq!(gates.len(), PRODUCTION_READINESS_REQUIRED_GATE_COUNT);
+    debug_assert_eq!(
+        evidence_refs.len(),
+        PRODUCTION_READINESS_REQUIRED_RECEIPT_COUNT
+    );
+
+    let blocked_by = gates
+        .iter()
+        .filter(|gate| gate.status != "pass")
+        .map(|gate| gate.id.clone())
+        .collect::<Vec<_>>();
+    let production_ready = capability_ready && blocked_by.is_empty();
+    let next_actions = if production_ready {
+        vec![
+            "Production evidence is complete; an explicit human-controlled promotion may proceed. This evaluator performed no command or mutation."
+                .to_string(),
+        ]
+    } else {
+        blocked_by
+            .iter()
+            .map(|gate| {
+                format!(
+                    "Repair `{gate}` and regenerate fresh secret-free evidence before reevaluation."
+                )
+            })
+            .collect()
+    };
+
+    Ok(ProductionReadinessReport {
+        schema_version: PRODUCTION_READINESS_REPORT_SCHEMA_VERSION.to_string(),
+        milestone: manifest.milestone,
+        profile: manifest.profile,
+        release_version: manifest.release_version,
+        evaluation_mode: "read_only".to_string(),
+        capability_ready,
+        capability_inventory_count: mission_platform_catalog.capability_count,
+        capability_inventory_sha256: mission_platform_catalog.inventory_sha256,
+        capability_proof_kind_counts: mission_platform_catalog.proof_kind_counts,
+        required_gate_count: PRODUCTION_READINESS_REQUIRED_GATE_COUNT,
+        required_receipt_count: PRODUCTION_READINESS_REQUIRED_RECEIPT_COUNT,
+        production_ready,
+        decision: if production_ready {
+            "production_ready"
+        } else {
+            "fail_closed"
+        }
+        .to_string(),
+        blocked_by,
+        gates,
+        manifest_sha256: hex_sha256(&manifest_bytes),
+        commands_executed: 0,
+        mutations_performed: false,
+        next_actions,
+    })
+}
+
+fn production_evidence_refs(
+    manifest: &ProductionReadinessManifest,
+) -> Vec<(&'static str, &ProductionEvidenceRef)> {
+    vec![
+        ("release_matrix", &manifest.release.matrix),
+        ("release_artifacts", &manifest.release.artifacts),
+        ("release_sbom", &manifest.release.sbom),
+        ("release_checksums", &manifest.release.checksums),
+        ("release_sigstore", &manifest.release.sigstore),
+        ("release_provenance", &manifest.release.provenance),
+        ("installation", &manifest.installation.evidence),
+        ("off_host_recovery", &manifest.off_host_backup.evidence),
+        ("key_escrow", &manifest.key_escrow.evidence),
+        ("alerting", &manifest.alerts.evidence),
+        ("restore_drill", &manifest.restore_drill.evidence),
+        ("upgrade_rollback", &manifest.upgrade_rollback.evidence),
+        ("bounded_load", &manifest.bounded_load.evidence),
+        (
+            "mission_operational_lifecycle",
+            &manifest.mission_operational_lifecycle.evidence,
+        ),
+    ]
+}
+
+fn production_gate(
+    id: &str,
+    title: &str,
+    checks: Vec<ProductionReadinessCheck>,
+) -> ProductionReadinessGate {
+    let passed = checks.iter().all(|check| check.passed);
+    ProductionReadinessGate {
+        id: id.to_string(),
+        title: title.to_string(),
+        status: if passed { "pass" } else { "fail" }.to_string(),
+        checks,
+    }
+}
+
+fn production_check(
+    id: &str,
+    passed: bool,
+    pass_reason: &str,
+    fail_reason: &str,
+) -> ProductionReadinessCheck {
+    ProductionReadinessCheck {
+        id: id.to_string(),
+        passed,
+        reason: if passed { pass_reason } else { fail_reason }.to_string(),
+    }
+}
+
+fn production_evidence_checks(
+    label: &str,
+    evidence: &ProductionEvidenceRef,
+    evidence_root: &Path,
+    now_epoch: u64,
+    subject_version: &str,
+    expected_claims_sha256: &str,
+) -> Vec<ProductionReadinessCheck> {
+    let scoped_path = resolve_production_evidence_path(evidence_root, &evidence.artifact_path);
+    let mut checks = vec![
+        production_check(
+            &format!("{label}.sha256_format"),
+            valid_sha256(&evidence.artifact_sha256),
+            "evidence digest is a lowercase SHA-256",
+            "evidence digest is not a lowercase SHA-256",
+        ),
+        production_check(
+            &format!("{label}.fresh"),
+            evidence_epoch_is_fresh(
+                evidence.observed_at_epoch,
+                now_epoch,
+                MAX_PRODUCTION_EVIDENCE_AGE_SECONDS,
+            ),
+            "evidence observation is within the allowed freshness window",
+            "evidence observation is future-dated, zero or stale",
+        ),
+        production_check(
+            &format!("{label}.path"),
+            scoped_path.is_ok(),
+            "evidence path is a regular non-symlink file inside the evidence root",
+            "evidence path is missing, unsafe, outside the evidence root or a symlink",
+        ),
+    ];
+    let Ok(path) = scoped_path else {
+        return checks;
+    };
+    let metadata = fs::metadata(&path);
+    let readable_size = metadata.as_ref().is_ok_and(|metadata| {
+        metadata.is_file() && metadata.len() > 0 && metadata.len() <= MAX_PRODUCTION_EVIDENCE_BYTES
+    });
+    checks.push(production_check(
+        &format!("{label}.size"),
+        readable_size,
+        "evidence artifact is a bounded non-empty regular file",
+        "evidence artifact is empty, too large or not a regular file",
+    ));
+    if !readable_size {
+        return checks;
+    }
+    let bytes = fs::read(&path);
+    checks.push(production_check(
+        &format!("{label}.readable"),
+        bytes.is_ok(),
+        "evidence artifact is readable",
+        "evidence artifact cannot be read",
+    ));
+    let Ok(bytes) = bytes else {
+        return checks;
+    };
+    checks.push(production_check(
+        &format!("{label}.digest"),
+        valid_sha256(&evidence.artifact_sha256) && hex_sha256(&bytes) == evidence.artifact_sha256,
+        "evidence bytes match the declared SHA-256",
+        "evidence bytes do not match the declared SHA-256",
+    ));
+    let text = std::str::from_utf8(&bytes);
+    checks.push(production_check(
+        &format!("{label}.utf8"),
+        text.is_ok(),
+        "evidence artifact is inspectable UTF-8 text",
+        "evidence artifact is opaque or non-UTF-8",
+    ));
+    if let Ok(text) = text {
+        checks.push(production_check(
+            &format!("{label}.secret_free"),
+            production_text_is_secret_free(text, "production_readiness_evidence"),
+            "evidence artifact contains no detected secret material",
+            "evidence artifact contains detected secret material",
+        ));
+        let receipt = if label == "mission_operational_lifecycle" {
+            serde_json::from_str::<ProductionMissionLifecycleReceipt>(text).map(|receipt| {
+                ProductionEvidenceReceipt {
+                    schema_version: receipt.schema_version,
+                    kind: receipt.kind,
+                    status: receipt.status,
+                    subject_version: receipt.subject_version,
+                    claims_sha256: receipt.claims_sha256,
+                }
+            })
+        } else {
+            serde_json::from_str::<ProductionEvidenceReceipt>(text)
+        };
+        checks.push(production_check(
+            &format!("{label}.receipt"),
+            receipt.is_ok(),
+            "evidence artifact is a canonical production receipt",
+            "evidence artifact is not a canonical production receipt",
+        ));
+        if let Ok(receipt) = receipt {
+            let expected_schema = if label == "mission_operational_lifecycle" {
+                PRODUCTION_MISSION_LIFECYCLE_RECEIPT_SCHEMA_VERSION.to_string()
+            } else {
+                format!("forge.milestone.production_evidence.{label}.v1")
+            };
+            checks.extend([
+                production_check(
+                    &format!("{label}.receipt_schema"),
+                    receipt.schema_version == expected_schema,
+                    "evidence receipt schema matches the required gate",
+                    "evidence receipt schema does not match the required gate",
+                ),
+                production_check(
+                    &format!("{label}.receipt_kind"),
+                    receipt.kind == label,
+                    "evidence receipt kind matches the required gate",
+                    "evidence receipt kind does not match the required gate",
+                ),
+                production_check(
+                    &format!("{label}.receipt_status"),
+                    receipt.status == "passed",
+                    "evidence receipt records a passed outcome",
+                    "evidence receipt does not record a passed outcome",
+                ),
+                production_check(
+                    &format!("{label}.receipt_subject"),
+                    receipt.subject_version == subject_version,
+                    "evidence receipt is bound to the evaluated release",
+                    "evidence receipt is bound to another release",
+                ),
+                production_check(
+                    &format!("{label}.receipt_claims"),
+                    valid_sha256(&receipt.claims_sha256)
+                        && receipt.claims_sha256 == expected_claims_sha256,
+                    "evidence receipt is bound to the evaluated claims",
+                    "evidence receipt claims digest is malformed or differs from the manifest",
+                ),
+            ]);
+        }
+    }
+    checks
+}
+
+fn load_production_mission_lifecycle_receipt(
+    evidence_root: &Path,
+    evidence: &ProductionEvidenceRef,
+) -> Result<ProductionMissionLifecycleReceipt> {
+    let path = resolve_production_evidence_path(evidence_root, &evidence.artifact_path)?;
+    let bytes = fs::read(&path).with_context(|| {
+        format!(
+            "failed to read mission lifecycle evidence {}",
+            path.display()
+        )
+    })?;
+    if bytes.is_empty()
+        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PRODUCTION_EVIDENCE_BYTES
+    {
+        bail!("mission lifecycle evidence has an invalid size");
+    }
+    let text =
+        std::str::from_utf8(&bytes).context("mission lifecycle evidence must be UTF-8 JSON")?;
+    if !production_text_is_secret_free(text, "mission_lifecycle_evidence") {
+        bail!("mission lifecycle evidence must be secret-free");
+    }
+    serde_json::from_slice(&bytes).context("failed to parse typed mission lifecycle evidence")
+}
+
+fn serialized_value_matches<T: Serialize, U: Serialize>(left: &T, right: &U) -> bool {
+    serde_json::to_value(left)
+        .and_then(|left| serde_json::to_value(right).map(|right| left == right))
+        .unwrap_or(false)
+}
+
+fn serialized_sha256<T: Serialize>(value: &T) -> Result<String> {
+    Ok(hex_sha256(&serde_json::to_vec(value)?))
+}
+
+fn rfc3339_epoch(value: &str) -> Option<u64> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .and_then(|value| u64::try_from(value.timestamp()).ok())
+}
+
+fn datetime_epoch(value: &DateTime<Utc>) -> Option<u64> {
+    u64::try_from(value.timestamp()).ok()
+}
+
+fn mission_event_sequence(
+    mission: &MissionRecord,
+    kind: &str,
+    handoff_id: &str,
+    task_id: &str,
+) -> Option<usize> {
+    mission
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == kind
+                && (event.correlation_id.as_deref() == Some(handoff_id)
+                    || event.task_id.as_deref() == Some(task_id))
+        })
+        .map(|event| event.sequence)
+}
+
+fn mission_lifecycle_event_order_is_valid(
+    mission: &MissionRecord,
+    handoff_id: &str,
+    task_id: &str,
+) -> bool {
+    let sequences = [
+        mission_event_sequence(mission, "agent.handoff.created", handoff_id, task_id),
+        mission_event_sequence(mission, "agent.inbox.enqueued", handoff_id, task_id),
+        mission_event_sequence(mission, "agent.inbox.leased", handoff_id, task_id),
+        mission_event_sequence(mission, "agent.wakeup.triggered", handoff_id, task_id),
+        mission_event_sequence(mission, "mission.task.completed", handoff_id, task_id),
+        mission_event_sequence(mission, "agent.handoff.accepted", handoff_id, task_id),
+    ];
+    sequences.iter().all(Option::is_some)
+        && sequences
+            .windows(2)
+            .all(|pair| pair[0].is_some_and(|left| pair[1].is_some_and(|right| left < right)))
+}
+
+fn mission_lifecycle_store_checks(
+    store_path: &Path,
+    receipt: &ProductionMissionLifecycleReceipt,
+) -> Vec<ProductionReadinessCheck> {
+    let mut checks = Vec::new();
+    let store_path_metadata = fs::symlink_metadata(store_path);
+    let safe_store_path = store_path_metadata
+        .as_ref()
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
+    checks.push(production_check(
+        "mission_operational_lifecycle.store_path",
+        safe_store_path,
+        "mission lifecycle source store is a regular non-symlink SQLite file",
+        "mission lifecycle source store is missing, unsafe or not a regular file",
+    ));
+    if !safe_store_path {
+        return checks;
+    }
+
+    let connection = Connection::open_with_flags(
+        store_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    );
+    checks.push(production_check(
+        "mission_operational_lifecycle.store_read_only",
+        connection.is_ok(),
+        "mission lifecycle source store opened strictly read-only",
+        "mission lifecycle source store could not be opened read-only",
+    ));
+    let Ok(connection) = connection else {
+        return checks;
+    };
+
+    let quick_check = connection
+        .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+        .ok();
+    checks.push(production_check(
+        "mission_operational_lifecycle.store_integrity",
+        quick_check.as_deref() == Some("ok"),
+        "mission lifecycle source store passes SQLite quick_check",
+        "mission lifecycle source store failed SQLite quick_check",
+    ));
+
+    let execute = &receipt.execution_receipt;
+    let execution_row = connection
+        .query_row(
+            r#"
+            SELECT receipt_sha256, receipt_json, state, consumed_at, consumed_by_submission
+            FROM mission_execution_receipts
+            WHERE receipt_id=?1
+            "#,
+            [&execute.receipt_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let execution_matches = execution_row.as_ref().is_some_and(
+        |(stored_sha256, stored_json, state, consumed_at, consumed_by_submission)| {
+            let mut stored_receipt = stored_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<MissionExecutionReceipt>(json).ok());
+            if let Some(stored_receipt) = stored_receipt.as_mut() {
+                stored_receipt.consumed_at.clone_from(consumed_at);
+                stored_receipt
+                    .consumed_by_submission
+                    .clone_from(consumed_by_submission);
+            }
+            state == "completed"
+                && stored_sha256.as_deref() == Some(execute.receipt_sha256.as_str())
+                && stored_receipt
+                    .as_ref()
+                    .is_some_and(|stored| serialized_value_matches(stored, execute))
+                && consumed_at.is_some()
+                && consumed_by_submission.as_deref()
+                    == Some(receipt.submission.idempotency_key.as_str())
+        },
+    );
+    checks.push(production_check(
+        "mission_operational_lifecycle.store_execution",
+        execution_matches,
+        "execution receipt bytes, digest and submission consumption match the source store",
+        "execution receipt is absent, changed, unconsumed or linked to another submission",
+    ));
+
+    let mission_json = connection
+        .query_row(
+            "SELECT data_json FROM forge_missions WHERE id=?1",
+            [&execute.mission_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let stored_mission = mission_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<MissionRecord>(json).ok());
+
+    let handoff_json = connection
+        .query_row(
+            "SELECT data_json FROM mission_handoffs WHERE id=?1 AND mission_id=?2",
+            [&receipt.submit_report.handoff_id, &execute.mission_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let stored_handoff = handoff_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<AgentHandoff>(json).ok());
+
+    let inbox_row = connection
+        .query_row(
+            r#"
+            SELECT id, handoff_id, recipient_agent, status, attempts, max_attempts,
+                   lease_owner, lease_expires_at, last_error, enqueued_at, consumed_at
+            FROM mission_runtime_inbox
+            WHERE id=?1 AND handoff_id=?2 AND mission_id=?3
+            "#,
+            [
+                &receipt.submit_report.inbox_id,
+                &receipt.submit_report.handoff_id,
+                &execute.mission_id,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, usize>(4)?,
+                    row.get::<_, usize>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                ))
+            },
+        )
+        .optional()
+        .ok()
+        .flatten();
+
+    let submission_checkpoint_json = connection
+        .query_row(
+            r#"
+            SELECT data_json
+            FROM mission_runtime_checkpoints
+            WHERE mission_id=?1 AND revision=?2
+            "#,
+            rusqlite::params![
+                execute.mission_id,
+                i64::try_from(receipt.submit_report.producer_revision).unwrap_or(i64::MAX)
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let submission_checkpoint = submission_checkpoint_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<MissionRecord>(json).ok());
+
+    let resume_checkpoint = connection
+        .query_row(
+            r#"
+            SELECT data_json, data_sha256
+            FROM mission_runtime_checkpoints
+            WHERE mission_id=?1 AND revision=?2
+            "#,
+            rusqlite::params![
+                execute.mission_id,
+                i64::try_from(receipt.resume_report.revision).unwrap_or(i64::MAX)
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .ok()
+        .flatten();
+
+    let expected_receipt_id = format!("execution_receipt:{}", execute.receipt_id);
+    let expected_receipt_sha256 = format!("execution_receipt_sha256:{}", execute.receipt_sha256);
+    let handoff_matches = stored_handoff.as_ref().is_some_and(|handoff| {
+        handoff.status == "accepted"
+            && handoff.accepted_at.is_some()
+            && handoff.idempotency_key == receipt.submission.idempotency_key
+            && handoff.mission_id == execute.mission_id
+            && handoff.task_id == execute.task_id
+            && handoff.from_agent == execute.agent_id
+            && handoff.id == receipt.submit_report.handoff_id
+            && handoff.delivery.task_id == receipt.submission.task_id
+            && handoff.delivery.status == "completed"
+            && handoff.delivery.summary == receipt.submission.summary
+            && handoff.delivery.tests_passed == execute.tests_passed
+            && handoff.delivery.tests_failed == execute.tests_failed
+            && handoff.validations.contains(&expected_receipt_id)
+            && handoff.validations.contains(&expected_receipt_sha256)
+    });
+    let inbox_matches = inbox_row.as_ref().is_some_and(
+        |(
+            id,
+            handoff_id,
+            recipient_agent,
+            status,
+            _attempts,
+            _max_attempts,
+            lease_owner,
+            lease_expires_at,
+            last_error,
+            _enqueued_at,
+            consumed_at,
+        )| {
+            id == &receipt.submit_report.inbox_id
+                && handoff_id == &receipt.submit_report.handoff_id
+                && stored_handoff
+                    .as_ref()
+                    .is_some_and(|handoff| recipient_agent == &handoff.to_agent)
+                && status == "consumed"
+                && consumed_at.is_some()
+                && lease_owner.is_none()
+                && lease_expires_at.is_none()
+                && last_error.is_none()
+        },
+    );
+    let submission_checkpoint_matches = submission_checkpoint.as_ref().is_some_and(|mission| {
+        mission.id == execute.mission_id
+            && mission.revision == receipt.submit_report.producer_revision
+            && mission.handoffs.iter().any(|handoff| {
+                handoff.id == receipt.submit_report.handoff_id && handoff.status == "queued"
+            })
+            && mission.inbox.iter().any(|inbox| {
+                inbox.id == receipt.submit_report.inbox_id && inbox.status == "pending"
+            })
+    });
+    checks.push(production_check(
+        "mission_operational_lifecycle.store_submission",
+        handoff_matches && submission_checkpoint_matches,
+        "queued submission, execution linkage and persisted handoff match the source store",
+        "submission report or handoff linkage does not match the source store",
+    ));
+
+    let resume_checkpoint_matches =
+        resume_checkpoint
+            .as_ref()
+            .is_some_and(|(checkpoint_json, checkpoint_sha256)| {
+                hex_sha256(checkpoint_json.as_bytes()) == *checkpoint_sha256
+                    && serde_json::from_str::<MissionRecord>(checkpoint_json)
+                        .ok()
+                        .is_some_and(|checkpoint| {
+                            serialized_value_matches(&checkpoint, &receipt.resume_report.mission)
+                        })
+            });
+    let current_mission_matches = stored_mission.as_ref().is_some_and(|mission| {
+        mission.id == execute.mission_id
+            && mission.workflow_id == execute.workflow_id
+            && mission.mode == MissionMode::Workflow
+            && mission.worktree.is_some()
+            && mission.revision >= receipt.resume_report.revision
+            && mission.handoffs.iter().any(|handoff| {
+                handoff.id == receipt.submit_report.handoff_id && handoff.status == "accepted"
+            })
+            && mission.inbox.iter().any(|inbox| {
+                inbox.id == receipt.submit_report.inbox_id && inbox.status == "consumed"
+            })
+    });
+    let event_order_matches = stored_mission.as_ref().is_some_and(|mission| {
+        mission_lifecycle_event_order_is_valid(
+            mission,
+            &receipt.submit_report.handoff_id,
+            &execute.task_id,
+        )
+    });
+    checks.push(production_check(
+        "mission_operational_lifecycle.store_resume",
+        inbox_matches && resume_checkpoint_matches && current_mission_matches,
+        "resume snapshot, consumed inbox and current mission match persisted checkpoints",
+        "resume report, inbox consumption or mission checkpoint does not match the source store",
+    ));
+    checks.push(production_check(
+        "mission_operational_lifecycle.store_event_order",
+        event_order_matches,
+        "persisted mission events prove ordered handoff enqueue, wakeup, completion and acceptance",
+        "persisted mission events do not prove the required lifecycle order",
+    ));
+    checks
+}
+
+fn resolve_production_manifest_path(evidence_root: &Path, path: &Path) -> Result<PathBuf> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        if !path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        {
+            bail!("production readiness manifest path must be a contained relative path");
+        }
+        evidence_root.join(path)
+    };
+    let metadata = fs::symlink_metadata(&candidate).with_context(|| {
+        format!(
+            "failed to inspect production readiness manifest {}",
+            candidate.display()
+        )
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        bail!("production readiness manifest must be a regular non-symlink file");
+    }
+    let canonical = fs::canonicalize(&candidate).with_context(|| {
+        format!(
+            "failed to resolve production readiness manifest {}",
+            candidate.display()
+        )
+    })?;
+    if !canonical.starts_with(evidence_root) {
+        bail!("production readiness manifest escapes the evidence root");
+    }
+    Ok(canonical)
+}
+
+fn resolve_production_evidence_path(evidence_root: &Path, value: &str) -> Result<PathBuf> {
+    let relative = Path::new(value);
+    if value.trim().is_empty()
+        || relative.is_absolute()
+        || !relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        bail!("production evidence path must be a contained relative path");
+    }
+    let candidate = evidence_root.join(relative);
+    let metadata = fs::symlink_metadata(&candidate)
+        .with_context(|| format!("failed to inspect production evidence path {value}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        bail!("production evidence path must be a regular non-symlink file");
+    }
+    let canonical = fs::canonicalize(&candidate)
+        .with_context(|| format!("failed to resolve production evidence path {value}"))?;
+    if !canonical.starts_with(evidence_root) {
+        bail!("production evidence path escapes the evidence root");
+    }
+    Ok(canonical)
+}
+
+fn production_text_is_secret_free(text: &str, scope: &str) -> bool {
+    sanitize_prompt_secrets(
+        text,
+        SecretSanitizationOptions {
+            scope: scope.to_string(),
+            enable_regex: true,
+            enable_entropy: false,
+            enable_local_ai_fallback: false,
+            allow_external_ai: false,
+            entropy_threshold: 4.2,
+        },
+    )
+    .detection_count
+        == 0
+}
+
+fn evidence_epoch_is_fresh(observed_at_epoch: u64, now_epoch: u64, max_age: u64) -> bool {
+    observed_at_epoch > 0
+        && observed_at_epoch <= now_epoch
+        && now_epoch.saturating_sub(observed_at_epoch) <= max_age
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn release_version_matches_milestone(release_version: &str, milestone: &str) -> bool {
+    let Some(patch_and_suffix) = release_version.strip_prefix(&format!("{milestone}.")) else {
+        return false;
+    };
+    !patch_and_suffix.is_empty()
+        && patch_and_suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
 }
 
 pub fn build_milestone_research(version: &str) -> Result<MilestoneResearchReport> {
@@ -636,16 +3023,20 @@ pub fn build_milestone_manifest_with_store(
     let promotion_decision = MilestonePromotionDecision {
         decision: if promotable { "promote" } else { "fail" }.to_string(),
         promotable,
+        readiness_scope: "capability".to_string(),
+        capability_ready: promotable,
+        production_ready: false,
+        production_evidence_evaluated: false,
         blocked_by,
         reason: if promotable {
-            "All required Forge 0.5 capabilities have implementation, validation or operator-approved attached evidence."
+            "All required Forge 0.5 capabilities have implementation, validation or operator-approved attached evidence. This capability decision does not assert operational production readiness."
                 .to_string()
         } else {
             "Forge 0.5 promotion is blocked while required capabilities remain planned, blocked, groundwork-only or missing required attached evidence."
                 .to_string()
         },
         next_action: if promotable {
-            "Run an explicit human-controlled release promotion, version-boundary update and artifact bundle before changing the package line to 0.5."
+            "Evaluate the separate fail-closed production-readiness manifest before an explicit human-controlled release promotion."
                 .to_string()
         } else {
             "Collect and attach the missing required milestone evidence kinds before reconsidering 0.5 promotion."

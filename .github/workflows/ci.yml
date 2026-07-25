@@ -28,6 +28,22 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Install Linux sandbox runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          bwrap --version
+          if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl --write kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap \
+            --ro-bind / / \
+            --proc /proc \
+            --dev /dev \
+            --unshare-all \
+            --die-with-parent \
+            /bin/true
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -46,8 +62,60 @@ jobs:
       - name: Run off-host backup smoke
         run: bash packaging/smoke-offhost-backup.sh target/release/forge
 
-      - name: Verify distributable crate
-        run: cargo package --locked
+      - name: Verify distributable crate and complete skill bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          verification_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$verification_dir"' EXIT
+          package_list="$verification_dir/package-list"
+          expected="$verification_dir/expected"
+          actual="$verification_dir/actual"
+
+          cargo package --list --locked >"$package_list"
+
+          printf '%s\n' \
+            .agents/skills/forge-core/SKILL.md \
+            .agents/skills/forge-core-addons-ui/SKILL.md \
+            .agents/skills/forge-core-agent/SKILL.md \
+            .agents/skills/forge-core-artifacts/SKILL.md \
+            .agents/skills/forge-core-context/SKILL.md \
+            .agents/skills/forge-core-documentation/SKILL.md \
+            .agents/skills/forge-core-executors/SKILL.md \
+            .agents/skills/forge-core-missions/SKILL.md \
+            .agents/skills/forge-core-runtime/SKILL.md \
+            .agents/skills/forge-core-workflow/SKILL.md \
+            .agents/skills/forge-core-workspaces/SKILL.md |
+            LC_ALL=C sort >"$expected"
+          grep -E '^\.agents/skills/[^/]+/SKILL\.md$' "$package_list" |
+            LC_ALL=C sort >"$actual"
+          diff -u "$expected" "$actual"
+
+          for directory in installer packaging src tests; do
+            find "$directory" -type f -print | LC_ALL=C sort >"$expected"
+            grep -E "^${directory}/" "$package_list" | LC_ALL=C sort >"$actual"
+            diff -u "$expected" "$actual"
+          done
+
+          grep -Fx 'docs/production-single-host.md' "$package_list" >/dev/null
+          grep -Fx 'skills/forge-core/SKILL.md' "$package_list" >/dev/null
+          cargo package --locked
+
+  windows-msvc:
+    name: Windows MSVC release build
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Show pinned toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Build release binary
+        run: cargo build --release --all-features --locked --target x86_64-pc-windows-msvc
 
   supply-chain:
     name: Advisories, licenses and sources
