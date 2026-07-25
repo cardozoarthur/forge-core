@@ -156,3 +156,8 @@ try {
     }
     Remove-Item -Path $testDir -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+# Expected negative cases leave a non-zero native LASTEXITCODE even though the
+# harness caught and validated the failure. Make the successful harness result
+# authoritative for the process exit status.
+exit 0
