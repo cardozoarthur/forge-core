@@ -41,14 +41,17 @@ function Invoke-InstallerCase {
     $env:FORGE_BIN_DIR = $caseBin
     $env:FORGE_INSTALLER_TEST_MODE = if ($EnableTestMode) { "1" } else { "0" }
     $succeeded = $true
+    $failureMessage = $null
     try {
         & (Join-Path $rootDir "installer/install.ps1") *> $null
     } catch {
         $succeeded = $false
+        $failureMessage = $_.Exception.Message
     }
 
     if ($succeeded -ne $ShouldSucceed) {
-        throw "Installer self-test case '$Label' had unexpected result"
+        $failureDetail = if ($failureMessage) { ": $failureMessage" } else { "" }
+        throw "Installer self-test case '$Label' had unexpected result$failureDetail"
     }
     $installed = Test-Path -PathType Leaf (Join-Path $caseBin "forge.exe")
     if ($installed -ne $ShouldSucceed) {
