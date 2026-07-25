@@ -2922,6 +2922,7 @@ fn bubblewrap_command(
     }
     for path in [
         "/etc/hosts",
+        "/etc/alternatives",
         "/etc/resolv.conf",
         "/etc/nsswitch.conf",
         "/etc/ssl/certs",
@@ -4186,6 +4187,13 @@ mod tests {
             runtime_paths.working_directory.display().to_string(),
         ]));
         assert!(args.iter().any(|argument| argument == "--unshare-net"));
+        if Path::new("/etc/alternatives").exists() {
+            assert!(contains(&[
+                "--ro-bind".to_string(),
+                "/etc/alternatives".to_string(),
+                "/etc/alternatives".to_string(),
+            ]));
+        }
         assert!(!contains(&[
             "--ro-bind".to_string(),
             "/".to_string(),

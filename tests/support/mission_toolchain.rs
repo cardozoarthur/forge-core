@@ -75,7 +75,7 @@ mod tests {
     .unwrap();
     fs::write(
         repository.join(".cargo/config.toml"),
-        "[build]\nrustc = \"/workspace/host-toolchain/bin/rustc\"\ntarget-dir = \"/tmp/forge-target\"\nrustflags = [\"-C\", \"linker=/usr/bin/x86_64-linux-gnu-gcc-11\"]\n",
+        "[build]\nrustc = \"/workspace/host-toolchain/bin/rustc\"\ntarget-dir = \"/tmp/forge-target\"\nrustflags = [\"-C\", \"linker=/usr/bin/cc\"]\n",
     )
     .unwrap();
     guest_bin.join("cargo").to_str().unwrap().to_string()
