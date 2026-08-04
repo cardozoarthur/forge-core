@@ -1,5 +1,7 @@
 use assert_cmd::Command;
+use chrono::Utc;
 use forge_core::artifact::hex_sha256;
+use forge_core::executor::ExecutorState;
 use forge_core::graph::ValidationRule;
 use forge_core::security::{sanitize_prompt_secrets, SecretSanitizationOptions};
 use forge_core::storage::ForgeStore;
@@ -32,6 +34,33 @@ fn task_id(workflow: &Value, title: &str) -> String {
         .and_then(|task| task["id"].as_str())
         .unwrap_or_else(|| panic!("missing task {title}"))
         .to_string()
+}
+
+fn authorize_codex_fixture(store: &ForgeStore) {
+    let command_path = std::env::current_exe()
+        .expect("test executable should have a path")
+        .display()
+        .to_string();
+    let executor = ExecutorState {
+        id: "codex".to_string(),
+        display_name: "Codex test fixture".to_string(),
+        command: "codex".to_string(),
+        installed: true,
+        configured: true,
+        command_path: Some(command_path),
+        config_evidence: vec!["test-only configured executor fixture".to_string()],
+        non_interactive_ready: true,
+        probe_evidence: vec!["test-only non-interactive probe".to_string()],
+        forge_first_ready: false,
+        forge_first_entrypoint: None,
+        harness_status: None,
+        allowed: true,
+        decision_source: "compact_secret_contract_fixture".to_string(),
+        synced_at: Utc::now().to_rfc3339(),
+    };
+    store
+        .save_executor_state("codex", &serde_json::to_value(executor).unwrap())
+        .unwrap();
 }
 
 #[test]
@@ -161,6 +190,7 @@ fn compact_handoff_redacts_expected_output_and_validation_rules_in_complete_json
     let expected_secret = "sk-proj-handoffexpectedabcdefghijklmnopqrstuvwxyzABCD1234567890";
 
     let store = ForgeStore::open(&store_path).unwrap();
+    authorize_codex_fixture(&store);
     let mut workflow = store.load_workflow(&workflow_id).unwrap();
     let task = workflow
         .tasks

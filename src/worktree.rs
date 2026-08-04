@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 pub const WORKTREE_CONFIG_SCHEMA_VERSION: &str = "forge.worktree.config.v1";
 pub const WORKTREE_RECORD_SCHEMA_VERSION: &str = "forge.worktree.record.v1";
 pub const WORKTREE_BINDING_SCHEMA_VERSION: &str = "forge.worktree.binding.v1";
+pub const WORKTREE_MUTATION_CLAIM_SCHEMA_VERSION: &str = "forge.worktree.mutation_claim.v1";
 pub const WORKTREE_DISCOVERY_SCHEMA_VERSION: &str = "forge.worktree.discovery.v1";
 pub const WORKTREE_SANDBOX_PLAN_SCHEMA_VERSION: &str = "forge.worktree.sandbox_plan.v1";
 pub const WORKTREE_SANDBOX_RECEIPT_SCHEMA_VERSION: &str = "forge.worktree.sandbox_receipt.v1";
@@ -158,6 +159,20 @@ pub struct WorktreeBinding {
     #[serde(default)]
     pub config_sha256_at_binding: String,
     pub bound_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeMutationClaim {
+    pub schema_version: String,
+    pub mode: String,
+    pub worktree_id: String,
+    pub worktree_identity_sha256: String,
+    pub repository_root: String,
+    pub worktree_root: String,
+    pub binding_scope: String,
+    pub binding_workflow_revision: u64,
+    pub head: String,
+    pub config_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1320,6 +1335,50 @@ pub fn bound_worktree_context(
     }
     context.binding_drifted = !context.binding_drift_reasons.is_empty();
     Ok(Some(context))
+}
+
+pub fn bound_worktree_mutation_claim(
+    store: &ForgeStore,
+    workflow_id: &str,
+    task_id: &str,
+) -> Result<Option<WorktreeMutationClaim>> {
+    let Some(record) = resolve_bound_worktree(store, workflow_id, Some(task_id))? else {
+        return Ok(None);
+    };
+    let binding = select_binding(&record, Some(workflow_id), Some(task_id)).with_context(|| {
+        format!(
+            "resolved worktree {} has no binding for workflow {workflow_id} task {task_id}",
+            record.id
+        )
+    })?;
+    let repository_root = fs::canonicalize(&record.repository_root).with_context(|| {
+        format!(
+            "failed to canonicalize repository root {} for worktree mutation claim",
+            record.repository_root
+        )
+    })?;
+    let worktree_root = fs::canonicalize(&record.worktree_root).with_context(|| {
+        format!(
+            "failed to canonicalize worktree root {} for worktree mutation claim",
+            record.worktree_root
+        )
+    })?;
+    Ok(Some(WorktreeMutationClaim {
+        schema_version: WORKTREE_MUTATION_CLAIM_SCHEMA_VERSION.to_string(),
+        mode: "exclusive_mutation".to_string(),
+        worktree_id: record.id,
+        worktree_identity_sha256: record.identity_sha256,
+        repository_root: repository_root.display().to_string(),
+        worktree_root: worktree_root.display().to_string(),
+        binding_scope: if binding.task_id.is_some() {
+            "task".to_string()
+        } else {
+            "workflow".to_string()
+        },
+        binding_workflow_revision: binding.workflow_revision,
+        head: record.head,
+        config_sha256: record.config.sha256,
+    }))
 }
 
 pub fn resolve_bound_worktree_root(
@@ -2599,9 +2658,7 @@ fn inspect_git_worktree(path: &Path) -> Result<GitWorktreeState> {
 
 fn inspect_optional_git_worktree(path: &Path) -> Result<Option<GitWorktreeState>> {
     let path = absolute_path(path)?;
-    let probe = Command::new("git")
-        .arg("-C")
-        .arg(&path)
+    let probe = git_inspection_command(&path)
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
         .with_context(|| format!("failed to invoke git in {}", path.display()))?;
@@ -2662,9 +2719,7 @@ fn parse_worktree_porcelain(input: &str) -> Vec<DiscoveredWorktree> {
 }
 
 fn git_output(root: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let output = git_inspection_command(root)
         .args(args)
         .output()
         .with_context(|| format!("failed to invoke git in {}", root.display()))?;
@@ -2680,9 +2735,7 @@ fn git_output(root: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn git_optional_output(root: &Path, args: &[&str]) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let output = git_inspection_command(root)
         .args(args)
         .output()
         .with_context(|| format!("failed to invoke git in {}", root.display()))?;
@@ -2698,6 +2751,48 @@ fn git_optional_output(root: &Path, args: &[&str]) -> Result<Option<String>> {
             root.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         )
+    }
+}
+
+fn git_inspection_command(root: &Path) -> Command {
+    let program = trusted_system_command("git").unwrap_or_else(|| PathBuf::from("git"));
+    let mut command = Command::new(program);
+    command
+        .env_clear()
+        .env(
+            "PATH",
+            std::env::var_os("PATH").unwrap_or_else(worktree_default_git_path),
+        )
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_SYSTEM", worktree_git_null_config_path())
+        .env("GIT_CONFIG_GLOBAL", worktree_git_null_config_path())
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .arg("-C")
+        .arg(root);
+    #[cfg(windows)]
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", system_root);
+    }
+    command
+}
+
+fn worktree_default_git_path() -> std::ffi::OsString {
+    if cfg!(windows) {
+        std::ffi::OsString::from("C:\\Windows\\System32")
+    } else {
+        std::ffi::OsString::from("/usr/local/bin:/usr/bin:/bin")
+    }
+}
+
+fn worktree_git_null_config_path() -> &'static str {
+    if cfg!(windows) {
+        "NUL"
+    } else {
+        "/dev/null"
     }
 }
 

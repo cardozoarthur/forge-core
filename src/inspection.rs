@@ -299,6 +299,7 @@ fn handoff_task(task: &AtomicTask, package: &ContextPackage) -> ContextHandoffTa
         task_id: task.id.clone(),
         title: task.title.clone(),
         executor: executor_kind(&task.executor).to_string(),
+        node_brain_routing: task.node_brain_routing.clone(),
         context_ready: package.context_ready,
         dependency_ready: package.dependency_summary.ready,
         handoff_ready: package.handoff_ready,

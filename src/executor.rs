@@ -640,6 +640,24 @@ struct ExecutorDefinition {
     command: &'static str,
 }
 
+#[derive(Debug, Clone)]
+struct CachedExecutorProbe {
+    non_interactive_ready: bool,
+    evidence: Vec<String>,
+}
+
+const AGY_MODEL_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const AGY_MODEL_PROBE_MAX_ATTEMPTS: usize = 2;
+const EXECUTOR_PROBE_HOME_EVIDENCE_PREFIX: &str = "probe_home:";
+
+pub fn canonical_executor_id(id: &str) -> String {
+    let normalized = id.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "antigravity" | "antigravity-cli" | "agy-cli" => "agy".to_string(),
+        _ => normalized,
+    }
+}
+
 const EXECUTORS: &[ExecutorDefinition] = &[
     ExecutorDefinition {
         id: "codex",
@@ -671,11 +689,6 @@ const EXECUTORS: &[ExecutorDefinition] = &[
         display_name: "Antigravity agy CLI",
         command: "agy",
     },
-    ExecutorDefinition {
-        id: "antigravity",
-        display_name: "Antigravity CLI (legacy alias)",
-        command: "agy",
-    },
 ];
 
 pub fn sync_executors(
@@ -686,6 +699,7 @@ pub fn sync_executors(
     let allow = normalize_set(&options.allow);
     let deny = normalize_set(&options.deny);
     let mut executors = Vec::new();
+    let mut probe_cache = BTreeMap::new();
 
     for definition in EXECUTORS {
         let mut state = probe_executor(
@@ -693,6 +707,7 @@ pub fn sync_executors(
             &options.home,
             &options.executor_paths,
             &options.shim_dirs,
+            &mut probe_cache,
         );
         apply_decision(&mut state, &previous, &allow, &deny, options.prompt)?;
         store.save_executor_state(&state.id, &serde_json::to_value(&state)?)?;
@@ -714,7 +729,9 @@ pub fn load_executors(store: &ForgeStore) -> Result<ExecutorSyncReport> {
         .into_iter()
         .map(serde_json::from_value)
         .collect::<Result<Vec<ExecutorState>, _>>()?;
-    Ok(build_report("loaded", &store.base_dir(), states, store))
+    let states = canonicalize_executor_states(states);
+    let home = executor_probe_home(&states).unwrap_or_else(|| store.base_dir());
+    Ok(build_report("loaded", &home, states, store))
 }
 
 pub fn decide_executor_model_for_task(
@@ -1162,6 +1179,7 @@ fn build_model_decider_prompt(
 }
 
 fn executor_has_authorized_runtime_path_for_id(executors: &[ExecutorState], id: &str) -> bool {
+    let id = canonical_executor_id(id);
     executors
         .iter()
         .find(|executor| executor.id == id)
@@ -1673,18 +1691,32 @@ fn probe_executor(
     home: &Path,
     executor_paths: &[PathBuf],
     shim_dirs: &[PathBuf],
+    probe_cache: &mut BTreeMap<PathBuf, CachedExecutorProbe>,
 ) -> ExecutorState {
     let command_path = find_executable(definition.command, executor_paths);
     let config_evidence = config_evidence(definition.id, home);
     let configured = !config_evidence.is_empty();
 
     let mut non_interactive_ready = false;
-    let mut probe_evidence = Vec::new();
+    let mut probe_evidence = vec![format!(
+        "{EXECUTOR_PROBE_HOME_EVIDENCE_PREFIX}{}",
+        home.display()
+    )];
 
     if let Some(ref path) = command_path {
-        let (ready, evidence) = probe_non_interactive(definition.id, path);
-        non_interactive_ready = ready;
-        probe_evidence = evidence;
+        let cache_key = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let probe = probe_cache
+            .entry(cache_key)
+            .or_insert_with(|| {
+                let (ready, evidence) = probe_non_interactive(definition.id, path);
+                CachedExecutorProbe {
+                    non_interactive_ready: ready,
+                    evidence,
+                }
+            })
+            .clone();
+        non_interactive_ready = probe.non_interactive_ready;
+        probe_evidence.extend(probe.evidence);
     }
     let harness_status = probe_executor_harness(definition.id, home, shim_dirs);
     let forge_first_ready = harness_status
@@ -1894,48 +1926,74 @@ fn probe_model_availability(id: &str, path: &Path) -> (bool, Vec<String>) {
             }
         }
         "agy" | "antigravity" => {
-            let output = run_probe_command(path, &["models"], Duration::from_secs(3));
-            match output {
-                Ok(output) if output.status.is_some_and(|status| status.success()) => {
-                    let models = parse_executor_model_names(&output.stdout);
-                    if models.is_empty() {
-                        evidence.push("no models detected in agy models output".to_string());
-                        (false, evidence)
-                    } else {
+            let timeout = agy_model_probe_timeout();
+            for attempt in 1..=AGY_MODEL_PROBE_MAX_ATTEMPTS {
+                let started_at = Instant::now();
+                let output = run_probe_command(path, &["models"], timeout);
+                match output {
+                    Ok(output) if output.timed_out => {
+                        evidence.push(format!(
+                            "agy models probe attempt {attempt}/{AGY_MODEL_PROBE_MAX_ATTEMPTS} timed out after {}ms",
+                            started_at.elapsed().as_millis()
+                        ));
+                        if attempt < AGY_MODEL_PROBE_MAX_ATTEMPTS {
+                            continue;
+                        }
+                        evidence.push(
+                            "agy models probe exhausted its bounded retry; non-interactive provider/model readiness is not validated"
+                                .to_string(),
+                        );
+                        return (false, evidence);
+                    }
+                    Ok(output) if output.status.is_some_and(|status| status.success()) => {
+                        let models = parse_executor_model_names(&output.stdout);
+                        if models.is_empty() {
+                            evidence.push(format!(
+                                "agy models probe attempt {attempt}/{AGY_MODEL_PROBE_MAX_ATTEMPTS} returned no models"
+                            ));
+                            return (false, evidence);
+                        }
                         evidence.push("agy models listed successfully".to_string());
+                        evidence.push(format!(
+                            "agy models probe succeeded on attempt {attempt}/{AGY_MODEL_PROBE_MAX_ATTEMPTS}"
+                        ));
                         for model in models {
                             evidence.push(format!("agy_model:{model}"));
                         }
-                        (true, evidence)
+                        return (true, evidence);
                     }
-                }
-                Ok(output) if output.timed_out => {
-                    evidence.push(
-                        "agy models probe timed out; non-interactive provider/model readiness is not validated"
-                            .to_string(),
-                    );
-                    (false, evidence)
-                }
-                Ok(output) => {
-                    evidence.push(format!(
-                        "failed to list agy models with exit code {:?}; non-interactive provider/model readiness is not validated",
-                        output.status.and_then(|status| status.code())
-                    ));
-                    if !output.stderr.trim().is_empty() {
-                        evidence.push(format!("probe stderr: {}", output.stderr.trim()));
+                    Ok(output) => {
+                        evidence.push(format!(
+                            "failed to list agy models on attempt {attempt}/{AGY_MODEL_PROBE_MAX_ATTEMPTS} with exit code {:?}; non-interactive provider/model readiness is not validated",
+                            output.status.and_then(|status| status.code())
+                        ));
+                        if !output.stderr.trim().is_empty() {
+                            evidence.push(format!("probe stderr: {}", output.stderr.trim()));
+                        }
+                        return (false, evidence);
                     }
-                    (false, evidence)
-                }
-                Err(error) => {
-                    evidence.push(format!(
-                        "failed to run agy models probe: {error}; non-interactive provider/model readiness is not validated"
-                    ));
-                    (false, evidence)
+                    Err(error) => {
+                        evidence.push(format!(
+                            "failed to run agy models probe on attempt {attempt}/{AGY_MODEL_PROBE_MAX_ATTEMPTS}: {error}; non-interactive provider/model readiness is not validated"
+                        ));
+                        return (false, evidence);
+                    }
                 }
             }
+            (false, evidence)
         }
         _ => (true, evidence),
     }
+}
+
+fn agy_model_probe_timeout() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = env::var("FORGE_TEST_AGY_MODEL_PROBE_TIMEOUT_MS") {
+        if let Ok(milliseconds) = value.parse::<u64>() {
+            return Duration::from_millis(milliseconds.max(25));
+        }
+    }
+    AGY_MODEL_PROBE_TIMEOUT
 }
 
 fn parse_executor_model_names(stdout: &str) -> Vec<String> {
@@ -2059,12 +2117,6 @@ fn apply_decision(
     deny: &BTreeSet<String>,
     prompt: bool,
 ) -> Result<()> {
-    if !state.installed || !state.configured {
-        state.allowed = false;
-        state.decision_source = "unavailable".to_string();
-        return Ok(());
-    }
-
     if deny.contains(&state.id) {
         state.allowed = false;
         state.decision_source = "human_deny".to_string();
@@ -2086,6 +2138,12 @@ fn apply_decision(
             state.decision_source = previous_state.decision_source.clone();
             return Ok(());
         }
+    }
+
+    if !state.installed || !state.configured {
+        state.allowed = false;
+        state.decision_source = "unavailable".to_string();
+        return Ok(());
     }
 
     if prompt && io::stdin().is_terminal() {
@@ -2117,16 +2175,67 @@ fn prompt_for_executor(state: &ExecutorState) -> Result<bool> {
 }
 
 fn load_previous_states(store: &ForgeStore) -> Result<BTreeMap<String, ExecutorState>> {
-    let mut previous = BTreeMap::new();
-    for value in store.load_executor_states()? {
-        let state: ExecutorState = serde_json::from_value(value)?;
-        previous.insert(state.id.clone(), state);
-    }
-    Ok(previous)
+    let states = store
+        .load_executor_states()?
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<Vec<ExecutorState>, _>>()?;
+    Ok(canonicalize_executor_states(states)
+        .into_iter()
+        .map(|state| (state.id.clone(), state))
+        .collect())
 }
 
 fn normalize_set(values: &[String]) -> BTreeSet<String> {
-    values.iter().map(|value| value.to_lowercase()).collect()
+    values
+        .iter()
+        .map(|value| canonical_executor_id(value))
+        .collect()
+}
+
+fn canonicalize_executor_states(states: Vec<ExecutorState>) -> Vec<ExecutorState> {
+    let mut canonical = BTreeMap::new();
+    let mut aliases = Vec::new();
+    for mut state in states {
+        let canonical_id = canonical_executor_id(&state.id);
+        if state.id == canonical_id {
+            state.id = canonical_id.clone();
+            canonical.insert(canonical_id, state);
+        } else {
+            aliases.push((canonical_id, state));
+        }
+    }
+    for (canonical_id, mut alias) in aliases {
+        if let Some(state) = canonical.get_mut(&canonical_id) {
+            if !has_durable_human_decision(state) && has_durable_human_decision(&alias) {
+                state.allowed = alias.allowed;
+                state.decision_source = alias.decision_source;
+            }
+            continue;
+        }
+        alias.id = canonical_id.clone();
+        if canonical_id == "agy" {
+            alias.display_name = "Antigravity agy CLI".to_string();
+            alias.command = "agy".to_string();
+        }
+        canonical.insert(canonical_id, alias);
+    }
+    canonical.into_values().collect()
+}
+
+fn has_durable_human_decision(state: &ExecutorState) -> bool {
+    matches!(state.decision_source.as_str(), "human_allow" | "human_deny")
+}
+
+fn executor_probe_home(states: &[ExecutorState]) -> Option<PathBuf> {
+    states.iter().find_map(|state| {
+        state.probe_evidence.iter().find_map(|evidence| {
+            evidence
+                .strip_prefix(EXECUTOR_PROBE_HOME_EVIDENCE_PREFIX)
+                .filter(|home| !home.trim().is_empty())
+                .map(PathBuf::from)
+        })
+    })
 }
 
 fn find_executable(command: &str, executor_paths: &[PathBuf]) -> Option<PathBuf> {
@@ -2233,8 +2342,7 @@ fn config_candidates(id: &str, home: &Path) -> Vec<PathBuf> {
 fn build_integrations(executors: &[ExecutorState]) -> Vec<ExecutorIntegration> {
     let codex_allowed = executor_is_allowed(executors, "codex");
     let opencode_allowed = executor_is_allowed(executors, "opencode");
-    let agy_allowed =
-        executor_is_allowed(executors, "agy") || executor_is_allowed(executors, "antigravity");
+    let agy_allowed = executor_is_allowed(executors, "agy");
     let ollama_allowed = executor_is_allowed(executors, "ollama");
 
     let mut integrations = Vec::new();
@@ -2391,15 +2499,6 @@ fn preferred_brain_id(executors: &[ExecutorState]) -> Option<String> {
         executor.id == "agy" && executor.allowed && executor.installed && executor.configured
     });
     if agy_ready {
-        return Some("agy".to_string());
-    }
-    let antigravity_ready = executors.iter().any(|executor| {
-        executor.id == "antigravity"
-            && executor.allowed
-            && executor.installed
-            && executor.configured
-    });
-    if antigravity_ready {
         return Some("agy".to_string());
     }
     let opencode_ready = executors.iter().any(|executor| {
@@ -4137,13 +4236,11 @@ fn quota_workload_routes() -> Vec<ExecutorQuotaWorkloadRoute> {
 
 fn discovered_agy_model_names(executors: &[ExecutorState]) -> Vec<String> {
     let mut models = Vec::new();
-    for executor_id in ["agy", "antigravity"] {
-        if let Some(executor) = executors.iter().find(|executor| executor.id == executor_id) {
-            for evidence in &executor.probe_evidence {
-                if let Some(model) = evidence.strip_prefix("agy_model:") {
-                    if let Some(model) = normalize_model_name(model) {
-                        models.push(model);
-                    }
+    if let Some(executor) = executors.iter().find(|executor| executor.id == "agy") {
+        for evidence in &executor.probe_evidence {
+            if let Some(model) = evidence.strip_prefix("agy_model:") {
+                if let Some(model) = normalize_model_name(model) {
+                    models.push(model);
                 }
             }
         }
@@ -4268,8 +4365,9 @@ fn matching_quota_observation<'a>(
     provider: &str,
     model: Option<&str>,
 ) -> Option<&'a ExecutorQuotaObservation> {
+    let executor = canonical_executor_id(executor);
     observations.iter().find(|observation| {
-        observation.executor == executor
+        canonical_executor_id(&observation.executor) == executor
             && (observation.provider == provider || provider == "configured_cli")
             && model
                 .map(|model| observation.model.as_deref() == Some(model))
@@ -4295,6 +4393,7 @@ fn quota_blocks_executor_selection(remaining_quota: &str, rate_limit_risk: &str)
 }
 
 fn executor_is_allowed(executors: &[ExecutorState], id: &str) -> bool {
+    let id = canonical_executor_id(id);
     executors
         .iter()
         .find(|executor| executor.id == id)
@@ -4614,13 +4713,10 @@ mod tests {
             assert!(plan.attachable);
         }
 
-        let legacy_alias = launch_plan
+        assert!(launch_plan
             .launch_plans
             .iter()
-            .find(|plan| plan.brain_id == "antigravity")
-            .unwrap();
-        assert_eq!(legacy_alias.readiness, "needs_sync_or_authorization");
-        assert!(!legacy_alias.attachable);
+            .all(|plan| plan.brain_id != "antigravity"));
     }
 
     #[test]

@@ -27,6 +27,247 @@ fn forge() -> Command {
     Command::cargo_bin("forge").expect("forge binary should build")
 }
 
+fn persist_executor_state(
+    store_path: &Path,
+    id: &str,
+    installed: bool,
+    configured: bool,
+    allowed: bool,
+    non_interactive_ready: bool,
+) {
+    let canonical_id = forge_core::executor::canonical_executor_id(id);
+    let command = if canonical_id == "agy" {
+        "agy".to_string()
+    } else {
+        canonical_id.clone()
+    };
+    let store = ForgeStore::open(store_path).unwrap();
+    store
+        .save_executor_state(
+            &canonical_id,
+            &serde_json::json!({
+                "id": canonical_id.clone(),
+                "display_name": format!("{id} test executor"),
+                "command": command.clone(),
+                "installed": installed,
+                "configured": configured,
+                "command_path": installed.then(|| format!("/tmp/{command}")),
+                "config_evidence": configured.then_some("test configuration").into_iter().collect::<Vec<_>>(),
+                "non_interactive_ready": non_interactive_ready,
+                "probe_evidence": ["test readiness"],
+                "forge_first_ready": false,
+                "forge_first_entrypoint": null,
+                "harness_status": null,
+                "allowed": allowed,
+                "decision_source": if allowed { "human_allow" } else { "human_deny" },
+                "synced_at": "2026-07-29T00:00:00Z"
+            }),
+        )
+        .unwrap();
+}
+
+fn persist_ready_executor_state(store_path: &Path, id: &str) {
+    persist_executor_state(store_path, id, true, true, true, true);
+}
+
+fn persist_fresh_executor_quota(store: &ForgeStore, id: &str) {
+    let executor = forge_core::executor::canonical_executor_id(id);
+    let provider = if executor == "codex" {
+        "openai"
+    } else {
+        "configured_cli"
+    };
+    store
+        .save_executor_quota(
+            &executor,
+            provider,
+            "test",
+            &serde_json::json!({
+                "executor": executor,
+                "provider": provider,
+                "model": "test",
+                "local_vs_non_local": "non_local",
+                "free_vs_paid_if_known": "unknown",
+                "remaining_quota": "available",
+                "rate_limit_risk": "low",
+                "monetary_or_token_cost": "unknown",
+                "latency": "test",
+                "expected_quality": "test",
+                "suitability": "test",
+                "source": "forge_cli_contract_fixture",
+                "observed_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+        .unwrap();
+}
+
+fn register_task_scoped_test_worktree(
+    store: &ForgeStore,
+    workspace_root: &Path,
+    workflow_id: &str,
+    task_id: &str,
+) -> std::path::PathBuf {
+    use forge_core::worktree::{
+        bound_worktree_mutation_claim, register_worktree, WorktreeRegisterOptions,
+    };
+
+    if let Some(claim) = bound_worktree_mutation_claim(store, workflow_id, task_id).unwrap() {
+        assert_eq!(claim.binding_scope, "task");
+        return std::path::PathBuf::from(claim.worktree_root);
+    }
+
+    let safe_task_id = task_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let repository = workspace_root
+        .join("task-scoped-worktrees")
+        .join(&safe_task_id);
+    fs::create_dir_all(&repository).unwrap();
+    assert!(StdCommand::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&repository)
+        .status()
+        .expect("git init should run")
+        .success());
+    configure_test_git_identity(&repository);
+    fs::write(
+        repository.join("README.md"),
+        format!("# Isolated fixture for {task_id}\n"),
+    )
+    .unwrap();
+    assert!(StdCommand::new("git")
+        .args(["add", "README.md"])
+        .current_dir(&repository)
+        .status()
+        .expect("git add should run")
+        .success());
+    assert!(StdCommand::new("git")
+        .args(["commit", "--quiet", "-m", "test fixture"])
+        .current_dir(&repository)
+        .status()
+        .expect("git commit should run")
+        .success());
+
+    let worktree_id = format!(
+        "wt-{}",
+        &hex_sha256(format!("{workflow_id}:{task_id}").as_bytes())[..16]
+    );
+    let report = register_worktree(
+        store,
+        WorktreeRegisterOptions {
+            path: repository.clone(),
+            id: Some(worktree_id),
+            workflow_id: Some(workflow_id.to_string()),
+            task_id: Some(task_id.to_string()),
+            origin: "forge_cli_contract_fixture".to_string(),
+            created_by_forge: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        report
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.task_id.as_deref()),
+        Some(task_id)
+    );
+    let claim = bound_worktree_mutation_claim(store, workflow_id, task_id)
+        .unwrap()
+        .expect("task-scoped worktree claim should exist");
+    assert_eq!(claim.binding_scope, "task");
+    assert_eq!(
+        fs::canonicalize(&repository).unwrap(),
+        fs::canonicalize(claim.worktree_root).unwrap()
+    );
+    repository
+}
+
+fn materialize_and_bind_final_audit_task(
+    store_path: &Path,
+    workspace_root: &Path,
+    run_id: &str,
+    workflow_id: &str,
+) -> String {
+    let blocked = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "request",
+            "drive",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "300",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let blocked: Value = serde_json::from_slice(&blocked).unwrap();
+    assert_eq!(blocked["status"], "dispatch_blocked");
+    let deferred = blocked["dispatch_frontier"]["wave"]["deferred"]
+        .as_array()
+        .expect("blocked audit dispatch should expose deferred work");
+    let audit = deferred
+        .iter()
+        .find(|task| task["title"] == "Audit final completion criteria")
+        .expect("final audit task should be materialized before worktree provisioning");
+    assert_eq!(audit["status"], "deferred_task_worktree_required");
+    let audit_task_id = audit["task_id"].as_str().unwrap().to_string();
+
+    let store = ForgeStore::open(store_path).unwrap();
+    register_task_scoped_test_worktree(&store, workspace_root, workflow_id, &audit_task_id);
+    audit_task_id
+}
+
+fn drive_request_with_ready_host_snapshot(store_path: &Path, run_id: &str) -> Value {
+    let output = forge()
+        .env(
+            "FORGE_TEST_HOST_RESOURCE_SNAPSHOT_JSON",
+            serde_json::json!({
+                "cpu_count": 8,
+                "load_one": 0.25,
+                "memory_available_bytes": 8_u64 * 1024 * 1024 * 1024,
+                "swap_free_bytes": 1024_u64 * 1024 * 1024,
+                "disk_free_bytes": 100_u64 * 1024 * 1024 * 1024,
+                "disk_total_bytes": 200_u64 * 1024 * 1024 * 1024,
+            })
+            .to_string(),
+        )
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "request",
+            "drive",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "300",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
 fn configure_test_git_identity(repo: &Path) {
     for (key, value) in [
         ("user.email", "test@example.com"),
@@ -5251,6 +5492,7 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
 fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
 
     let tools = forge()
         .args(["mcp", "tools", "--output", "json"])
@@ -7363,6 +7605,7 @@ printf 'real_provider_ok\n'
 fn milestone_collect_evidence_selects_replacement_cli_demo_evidence_kinds() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
     let project = temp.path().join("collect-demo-kinds-project");
     fs::create_dir_all(&project).unwrap();
 
@@ -7484,6 +7727,7 @@ fn milestone_collect_evidence_selects_replacement_cli_demo_evidence_kinds() {
 fn milestone_collect_ready_evidence_collects_ready_receipts_and_reports_skips() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
     let project = temp.path().join("collect-ready-project");
     fs::create_dir_all(&project).unwrap();
 
@@ -9340,6 +9584,7 @@ fn mcp_exposes_milestone_export_demo_tool() {
 fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
 
     let output = forge()
         .args([
@@ -9973,6 +10218,7 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
 fn milestone_cli_demo_uses_project_connected_brain_manifest_without_overclaiming_model_execution() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
     let project = temp.path().join("provider-project");
     let forge_dir = project.join(".forge");
     fs::create_dir_all(&forge_dir).unwrap();
@@ -10102,6 +10348,8 @@ printf 'project_connected_provider_ok\n'
 #[test]
 fn milestone_cli_demo_supports_default_relative_store_when_patch_fixture_changes_cwd() {
     let temp = tempdir().unwrap();
+    let default_store = temp.path().join(".forge/forge.sqlite");
+    persist_ready_executor_state(&default_store, "codex");
 
     let output = forge()
         .current_dir(temp.path())
@@ -10160,6 +10408,7 @@ fn milestone_cli_demo_supports_default_relative_store_when_patch_fixture_changes
 fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
 
     assert!(
         forge_core::skill::AGENT_REFERENCE_MD.contains("forge milestone cli-demo"),
@@ -18726,6 +18975,7 @@ fn context_package_exposes_versioned_context_delta_for_resumable_reuse() {
 fn context_package_exposes_versioned_continuation_plan_for_executor_adapters() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
     let output = forge()
         .args([
             "--store",
@@ -21992,6 +22242,7 @@ fn request_drive_surfaces_all_ready_parallel_handoffs() {
 
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store_path, "codex");
     let store = ForgeStore::open(&store_path).unwrap();
     let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
         "Ship independent implementation tracks then merge the result",
@@ -22027,11 +22278,47 @@ fn request_drive_surfaces_all_ready_parallel_handoffs() {
         ),
     ];
     store.save_workflow(&workflow).unwrap();
+    register_task_scoped_test_worktree(&store, temp.path(), &workflow.id, "task-api");
+    register_task_scoped_test_worktree(&store, temp.path(), &workflow.id, "task-ui");
     let run = create_run_record(&workflow, "codex", "running");
     save_run_record(&store, &run).unwrap();
+    store
+        .save_executor_quota(
+            "codex",
+            "openai",
+            "test",
+            &serde_json::json!({
+                "executor": "codex",
+                "provider": "openai",
+                "model": "test",
+                "local_vs_non_local": "non_local",
+                "free_vs_paid_if_known": "unknown",
+                "remaining_quota": "available",
+                "rate_limit_risk": "low",
+                "monetary_or_token_cost": "unknown",
+                "latency": "test",
+                "expected_quality": "test",
+                "suitability": "test",
+                "source": "parallel_frontier_test",
+                "observed_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+        .unwrap();
     drop(store);
 
     let output = forge()
+        .env(
+            "FORGE_TEST_HOST_RESOURCE_SNAPSHOT_JSON",
+            serde_json::json!({
+                "cpu_count": 8,
+                "load_one": 0.25,
+                "memory_available_bytes": 8_u64 * 1024 * 1024 * 1024,
+                "swap_free_bytes": 1024_u64 * 1024 * 1024,
+                "disk_free_bytes": 100_u64 * 1024 * 1024 * 1024,
+                "disk_total_bytes": 200_u64 * 1024 * 1024 * 1024,
+            })
+            .to_string(),
+        )
         .args([
             "--store",
             store_path.to_str().unwrap(),
@@ -22075,6 +22362,8 @@ fn request_drive_surfaces_all_ready_parallel_handoffs() {
             "UI track finished by a parallel executor.",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "parallel task evidence passed",
             "--output",
@@ -22443,7 +22732,7 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
     let module_expectations = [
         (
             "forge-core-runtime",
-            [
+            vec![
                 "forge request start",
                 "forge.task.handoff",
                 "forge schedule worker-status",
@@ -22451,7 +22740,7 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
         ),
         (
             "forge-core-missions",
-            [
+            vec![
                 "forge mission start",
                 "--strict --view compact",
                 "mission execution reconcile",
@@ -22459,7 +22748,7 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
         ),
         (
             "forge-core-context",
-            [
+            vec![
                 "forge.context.request",
                 "forge.context.router.v1",
                 "forge memory search",
@@ -22467,7 +22756,7 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
         ),
         (
             "forge-core-artifacts",
-            [
+            vec![
                 "forge.workflow.attach_artifact",
                 "--tag <tag>",
                 "forge.artifact.fetch",
@@ -22475,7 +22764,7 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
         ),
         (
             "forge-core-executors",
-            [
+            vec![
                 "forge executor-quota ai-limits",
                 "forge request switch-executor",
                 "forge.brain_router",
@@ -22483,7 +22772,7 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
         ),
         (
             "forge-core-workspaces",
-            [
+            vec![
                 "worktree sandbox plan",
                 "--allow-repository-mutation",
                 "not a security boundary",
@@ -22491,7 +22780,7 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
         ),
         (
             "forge-core-addons-ui",
-            [
+            vec![
                 "forge ops renderer-event",
                 "forge.interactive.action_dispatch",
                 "forge interactive action-dispatch",
@@ -22499,7 +22788,7 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
         ),
         (
             "forge-core-documentation",
-            [
+            vec![
                 "## Documentation Contract",
                 "## Documenting Tasks and Subtasks",
                 "forge workflow status",
@@ -22507,15 +22796,16 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
         ),
         (
             "forge-core-agent",
-            [
+            vec![
                 "## Agent and Executor Contract",
-                "forge executor register-profile",
+                "forge sync executors",
+                "forge harness doctor",
                 "## Adapter Credentials and Quotas",
             ],
         ),
         (
             "forge-core-workflow",
-            [
+            vec![
                 "## Workflow Contract",
                 "forge workflow add-task",
                 "forge workflow add-dependency",
@@ -22540,7 +22830,7 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
                 module_skill.len() < 4_000,
                 "module skill {module} should stay small enough for node-scoped loading"
             );
-            for snippet in snippets {
+            for snippet in &snippets {
                 assert!(
                     module_skill.contains(snippet),
                     "module skill {module} should mention {snippet}"
@@ -24856,6 +25146,7 @@ fn mcp_call_mutates_workflow_and_fetches_bounded_artifact_content() {
 fn mcp_call_acquires_bounded_task_handoff_packet_for_agent_executor() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
 
     let planned = forge()
         .args([
@@ -25124,6 +25415,182 @@ fn sync_discovers_agy_models_and_feeds_quota_policy() {
     assert!(!candidates.iter().any(|candidate| {
         candidate["executor"] == "agy" && candidate["model"] == "agy-default"
     }));
+    assert!(!json["executors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|executor| executor["id"] == "antigravity"));
+    assert!(!candidates
+        .iter()
+        .any(|candidate| candidate["executor"] == "antigravity"));
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_canonicalizes_antigravity_retries_cold_agy_and_preserves_probe_home() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let bin = temp.path().join("bin");
+    let counter = temp.path().join("agy-model-probe-count");
+    fs::create_dir_all(temp.path().join(".gemini/antigravity-cli")).unwrap();
+    fs::write(
+        temp.path().join(".gemini/antigravity-cli/settings.json"),
+        "{}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    let agy = bin.join("agy");
+    fs::write(
+        &agy,
+        format!(
+            "#!/usr/bin/env sh\nif [ \"$1\" = \"models\" ]; then\n  count=0\n  if [ -f \"{}\" ]; then count=$(tr -d '\\n' < \"{}\"); fi\n  count=$((count + 1))\n  printf '%s\\n' \"$count\" > \"{}\"\n  if [ \"$count\" -eq 1 ]; then sleep 1; fi\n  printf '%s\\n' 'Gemini 3.5 Flash (High)' 'Claude Sonnet 4.6 (Thinking)'\nelse\n  echo '1.0.16'\nfi\nexit 0\n",
+            counter.display(),
+            counter.display(),
+            counter.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&agy).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&agy, permissions).unwrap();
+
+    let output = forge()
+        .env("FORGE_TEST_AGY_MODEL_PROBE_TIMEOUT_MS", "100")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "executors",
+            "--home",
+            temp.path().to_str().unwrap(),
+            "--executor-path",
+            bin.to_str().unwrap(),
+            "--allow",
+            "antigravity",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let agy_state = find_executor(&json, "agy");
+    assert_eq!(agy_state["allowed"], true);
+    assert_eq!(agy_state["decision_source"], "human_allow");
+    assert_eq!(agy_state["non_interactive_ready"], true);
+    assert!(agy_state["probe_evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|evidence| evidence.as_str().unwrap().contains("attempt 1/2 timed out")));
+    assert!(agy_state["probe_evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|evidence| evidence == "agy models probe succeeded on attempt 2/2"));
+    assert_eq!(
+        fs::read_to_string(&counter).unwrap().trim(),
+        "2",
+        "the canonical Agy adapter should retry once, not probe again through an alias"
+    );
+    assert_eq!(
+        json["executors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|executor| executor["id"] == "agy")
+            .count(),
+        1
+    );
+    assert!(!json["executors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|executor| executor["id"] == "antigravity"));
+
+    let loaded = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "executors",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let loaded_json: Value = serde_json::from_slice(&loaded).unwrap();
+    assert_eq!(loaded_json["home"], temp.path().display().to_string());
+}
+
+#[test]
+fn sync_preserves_human_allow_when_a_later_probe_home_lacks_agy_configuration() {
+    let temp = tempdir().unwrap();
+    let configured_home = temp.path().join("configured-home");
+    let unconfigured_home = temp.path().join("unconfigured-home");
+    let store = temp.path().join("forge.sqlite");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(configured_home.join(".gemini/antigravity-cli")).unwrap();
+    fs::write(
+        configured_home.join(".gemini/antigravity-cli/settings.json"),
+        "{}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(&unconfigured_home).unwrap();
+    write_fake_cli(&bin, "agy");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "executors",
+            "--home",
+            configured_home.to_str().unwrap(),
+            "--executor-path",
+            bin.to_str().unwrap(),
+            "--allow",
+            "agy",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "executors",
+            "--home",
+            unconfigured_home.to_str().unwrap(),
+            "--executor-path",
+            bin.to_str().unwrap(),
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let agy = find_executor(&json, "agy");
+    assert_eq!(agy["configured"], false);
+    assert_eq!(agy["allowed"], true);
+    assert_eq!(agy["decision_source"], "human_allow");
+    assert!(!json["usable"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("agy")));
 }
 
 #[test]
@@ -29443,6 +29910,7 @@ tenant_policy_mode: audit
     )
     .unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
 
     let started = forge()
         .current_dir(temp.path())
@@ -34318,6 +34786,8 @@ fn task_lease_prevents_two_executors_from_acquiring_same_task() {
 fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executor() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
+    persist_ready_executor_state(&store, "opencode");
     let output = forge()
         .args([
             "--store",
@@ -34452,6 +34922,140 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
     assert_eq!(conflict_json["packet"]["lease_status"], "lease_conflict");
     assert_eq!(conflict_json["packet"]["handoff_ready"], true);
     assert_eq!(conflict_json["current_lease"]["executor"], "codex");
+}
+
+#[test]
+fn task_handoff_fails_closed_on_executor_policy_and_leases_canonical_agy_alias() {
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let planned = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Prove executor policy before handoff lease",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let task_id = planned_json["tasks"][0]["id"].as_str().unwrap();
+
+    let cases = [
+        ("missing", None, "executor state is missing"),
+        (
+            "not-installed",
+            Some((false, true, true, true)),
+            "installed=false",
+        ),
+        (
+            "not-configured",
+            Some((true, false, true, true)),
+            "configured=false",
+        ),
+        (
+            "not-authorized",
+            Some((true, true, false, true)),
+            "allowed=false",
+        ),
+        (
+            "not-ready",
+            Some((true, true, true, false)),
+            "non_interactive_ready=false",
+        ),
+    ];
+    for (case, state, expected_failure) in cases {
+        if let Some((installed, configured, allowed, ready)) = state {
+            persist_executor_state(&store_path, "codex", installed, configured, allowed, ready);
+        }
+        let output = forge()
+            .args([
+                "--store",
+                store_path.to_str().unwrap(),
+                "task",
+                "handoff",
+                "--workflow",
+                workflow_id,
+                "--task",
+                task_id,
+                "--executor",
+                "codex",
+                "--ttl-seconds",
+                "600",
+                "--budget",
+                "1200",
+                "--view",
+                "full",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            json["status"], "handoff_blocked_executor_policy",
+            "unexpected status for {case}"
+        );
+        assert_eq!(json["allowed"], false);
+        assert_eq!(json["lease"], Value::Null);
+        assert_eq!(json["packet"]["lease_status"], "not_requested");
+        assert_eq!(
+            json["packet"]["executor_capacity_decision"]["decision"],
+            "stop"
+        );
+        assert_eq!(
+            json["packet"]["executor_capacity_decision"]["capacity_source"],
+            "executor_policy"
+        );
+        assert!(json["reason"].as_str().unwrap().contains(expected_failure));
+        assert!(ForgeStore::open(&store_path)
+            .unwrap()
+            .load_task_lease(workflow_id, task_id)
+            .unwrap()
+            .is_none());
+    }
+
+    persist_ready_executor_state(&store_path, "agy");
+    let handoff = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "antigravity",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1200",
+            "--view",
+            "full",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
+    assert_eq!(handoff_json["status"], "handoff_ready");
+    assert_eq!(handoff_json["selected_executor"], "agy");
+    assert_eq!(handoff_json["packet"]["selected_executor"], "agy");
+    assert_eq!(handoff_json["lease"]["executor"], "agy");
 }
 
 #[test]
@@ -34948,6 +35552,7 @@ fn task_handoff_packet_carries_per_node_brain_routing_for_ai_agents() {
 
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store_path, "gemini");
     let store = ForgeStore::open(&store_path).unwrap();
     let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
         "Run parallel AI research with different node brains.",
@@ -35128,6 +35733,7 @@ fn context_and_handoff_include_project_memory_governance_when_project_root_is_su
 
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store_path, "codex");
     let project_root = temp.path().join("tenant-project");
     fs::create_dir_all(project_root.join(".forge")).unwrap();
 
@@ -35327,6 +35933,7 @@ fn workflow_update_node_brain_hot_swaps_node_routing_without_stopping_workflow()
 
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store_path, "gemini");
     let store = ForgeStore::open(&store_path).unwrap();
     let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
         "Run a workflow whose AI node changes brains while it is active.",
@@ -35514,6 +36121,7 @@ fn workflow_update_node_brain_hot_swaps_node_routing_without_stopping_workflow()
 fn task_handoff_packet_exposes_resume_plan_from_checkpoint_route_key() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
     let output = forge()
         .args([
             "--store",
@@ -35717,6 +36325,7 @@ fn task_handoff_packet_exposes_resume_plan_from_checkpoint_route_key() {
 fn task_handoff_packet_carries_node_scoped_persona_contract() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
     let output = forge()
         .args([
             "--store",
@@ -40675,6 +41284,7 @@ fn request_step_requires_real_receipts_for_ready_deterministic_tasks() {
     let store_dir = temp.path().join("store with spaces");
     fs::create_dir_all(&store_dir).unwrap();
     let store = store_dir.join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
 
     let started = forge()
         .args([
@@ -40854,6 +41464,7 @@ fn request_step_requires_real_receipts_for_ready_deterministic_tasks() {
 fn request_complete_task_records_trace_validates_and_drives_next_action() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
 
     let started = forge()
         .args([
@@ -40881,6 +41492,22 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
             "--store",
             store.to_str().unwrap(),
             "request",
+            "drive",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
             "complete-task",
             "--run",
             run_id,
@@ -40892,6 +41519,8 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
             "Codex parsed the request and recorded an explicit execution receipt.",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "intent parsing receipt passed",
             "--origin",
@@ -40918,6 +41547,8 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
             "Codex extracted requirements and recorded a replayable trace.",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "requirements trace is present and retryable",
             "--tokens-in",
@@ -41056,6 +41687,21 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
             "--store",
             store.to_str().unwrap(),
             "request",
+            "drive",
+            "--run",
+            mcp_run_id,
+            "--executor",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
             "complete-task",
             "--run",
             mcp_run_id,
@@ -41067,6 +41713,8 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
             "Codex parsed the MCP request with a real execution receipt.",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "MCP setup task receipt passed",
             "--origin",
@@ -41083,6 +41731,7 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
         "executor": "codex",
         "summary": "MCP executor recorded task evidence.",
         "evidence_command": "mcp completion gate",
+        "evidence_exit_code": 0,
         "evidence_summary": "mcp completion evidence passed",
         "context_budget": 8000,
         "origin": "mcp"
@@ -42523,6 +43172,7 @@ fn request_drive_persists_completed_run_and_hides_resolved_retry_checkpoint() {
 fn request_drive_requires_final_completion_audit_for_explicit_final_criteria() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
 
     let started = forge()
         .args([
@@ -42547,6 +43197,8 @@ fn request_drive_requires_final_completion_audit_for_explicit_final_criteria() {
     let workflow_id = started_json["workflow_id"].as_str().unwrap();
 
     set_all_task_statuses_in_stored_workflow(&store, workflow_id, "completed");
+    let expected_audit_task_id =
+        materialize_and_bind_final_audit_task(&store, temp.path(), run_id, workflow_id);
 
     let driven = forge()
         .args([
@@ -42577,6 +43229,7 @@ fn request_drive_requires_final_completion_audit_for_explicit_final_criteria() {
         "Audit final completion criteria"
     );
     let audit_task_id = driven_json["handoff_task"]["task_id"].as_str().unwrap();
+    assert_eq!(audit_task_id, expected_audit_task_id);
     assert_eq!(driven_json["task_summary"]["pending"], 1);
     assert_eq!(
         driven_json["task_summary"]["completed"].as_u64().unwrap() + 1,
@@ -42585,7 +43238,11 @@ fn request_drive_requires_final_completion_audit_for_explicit_final_criteria() {
     assert!(driven_json["reason"]
         .as_str()
         .unwrap()
-        .contains("A pending task has ready context"));
+        .contains("handoff lease acquired or reused"));
+    assert!(driven_json["reason"]
+        .as_str()
+        .unwrap()
+        .contains("executor execution has not started"));
     assert!(driven_json["next_command"]
         .as_array()
         .unwrap()
@@ -42854,6 +43511,12 @@ fn request_ensure_final_audit_creates_audit_task_without_driving_a_run() {
     let workflow_id = started_json["workflow_id"].as_str().unwrap();
     set_all_task_statuses_in_stored_workflow(&store, workflow_id, "completed");
     set_workflow_status_in_stored_workflow(&store, workflow_id, "completed");
+    let forge_store = ForgeStore::open(&store).unwrap();
+    let mut versioned_workflow = forge_store.load_workflow(workflow_id).unwrap();
+    for task in &mut versioned_workflow.tasks {
+        task.version = 7;
+    }
+    forge_store.save_workflow(&versioned_workflow).unwrap();
 
     let ensured = forge()
         .args([
@@ -42884,6 +43547,20 @@ fn request_ensure_final_audit_creates_audit_task_without_driving_a_run() {
     assert_eq!(ensured_json["action"], "handoff_final_completion_audit");
     assert_eq!(ensured_json["audit_task_created"], true);
     let audit_task_id = ensured_json["audit_task_id"].as_str().unwrap();
+    let updated_workflow = forge_store.load_workflow(workflow_id).unwrap();
+    let audit_task = updated_workflow
+        .tasks
+        .iter()
+        .find(|task| task.id == audit_task_id)
+        .unwrap();
+    assert_eq!(audit_task.version, 7);
+    assert!(audit_task.dependencies.iter().all(|dependency_id| {
+        updated_workflow
+            .tasks
+            .iter()
+            .find(|task| task.id == *dependency_id)
+            .is_some_and(|dependency| audit_task.version >= dependency.version)
+    }));
     assert_eq!(ensured_json["task_summary"]["pending"], 1);
     assert!(ensured_json["next_command"]
         .as_array()
@@ -43032,7 +43709,10 @@ fn request_ensure_final_audit_repairs_dependencies_when_user_outcome_is_evidence
         ),
     ];
     workflow.tasks[1].status = TaskStatus::Completed;
+    workflow.tasks[1].version = 7;
     workflow.tasks[2].status = TaskStatus::Completed;
+    workflow.tasks[2].version = 5;
+    workflow.tasks[3].version = 1;
     workflow.artifacts = vec![
         ArtifactRecord {
             id: "artifact-report".to_string(),
@@ -43126,6 +43806,158 @@ fn request_ensure_final_audit_repairs_dependencies_when_user_outcome_is_evidence
     assert_eq!(
         audit_task.dependencies,
         vec!["task-report".to_string(), "task-telegram".to_string()]
+    );
+    assert_eq!(audit_task.version, 7);
+    let repair_event = store
+        .load_workflow_events(&workflow_id)
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find(|event| event.kind == "completion_audit_dependencies_repaired")
+        .unwrap();
+    assert_eq!(repair_event.data["previous_version"], 1);
+    assert_eq!(repair_event.data["required_version"], 7);
+    assert_eq!(repair_event.data["new_version"], 7);
+}
+
+#[test]
+fn request_ensure_final_audit_repairs_existing_task_version_when_dependencies_are_current() {
+    use forge_core::graph::{self, ExecutorKind, TaskStatus, ValidationRule};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Deliver final workflow result with final criteria verified.",
+    ));
+    workflow.status = "running".to_string();
+    for (index, task) in workflow.tasks.iter_mut().enumerate() {
+        task.status = TaskStatus::Completed;
+        task.version = index as u64 + 2;
+    }
+    let dependency_ids = workflow
+        .tasks
+        .iter()
+        .map(|task| task.id.clone())
+        .collect::<Vec<_>>();
+    let dependency_refs = dependency_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let max_dependency_version = workflow
+        .tasks
+        .iter()
+        .map(|task| task.version)
+        .max()
+        .unwrap();
+    let mut audit_task = graph::task(
+        "task-audit",
+        "Audit final completion criteria",
+        &dependency_refs,
+        &[],
+        vec![ValidationRule {
+            kind: "artifact".to_string(),
+            command: None,
+            expected: "final completion audit artifact".to_string(),
+        }],
+        "final_completion_audit JSON",
+        (ExecutorKind::Ai, 0.35),
+    );
+    audit_task.version = 1;
+    workflow.tasks.push(audit_task);
+    let workflow_id = workflow.id.clone();
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let ensured = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "request",
+            "ensure-final-audit",
+            "--workflow",
+            &workflow_id,
+            "--executor",
+            "codex",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ensured_json: Value = serde_json::from_slice(&ensured).unwrap();
+    assert_eq!(
+        ensured_json["status"],
+        "final_audit_task_dependencies_repaired"
+    );
+    assert_eq!(ensured_json["audit_task_created"], false);
+    assert_eq!(ensured_json["audit_task_repaired"], true);
+
+    let repeated = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "request",
+            "ensure-final-audit",
+            "--workflow",
+            &workflow_id,
+            "--executor",
+            "codex",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let repeated_json: Value = serde_json::from_slice(&repeated).unwrap();
+    assert_eq!(repeated_json["status"], "final_audit_task_ready");
+    assert_eq!(repeated_json["audit_task_repaired"], false);
+
+    let store = ForgeStore::open(&store_path).unwrap();
+    let updated = store.load_workflow(&workflow_id).unwrap();
+    let audit_task = updated
+        .tasks
+        .iter()
+        .find(|task| task.id == "task-audit")
+        .unwrap();
+    assert_eq!(audit_task.dependencies, dependency_ids);
+    assert_eq!(audit_task.version, max_dependency_version);
+    let repair_revision = updated.revisions.last().unwrap();
+    assert_eq!(
+        repair_revision.change_type,
+        "completion_audit_dependencies_repaired"
+    );
+    let repair_events = store
+        .load_workflow_events(&workflow_id)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "completion_audit_dependencies_repaired")
+        .collect::<Vec<_>>();
+    assert_eq!(repair_events.len(), 1);
+    let repair_event = &repair_events[0];
+    assert_eq!(
+        repair_event.data["previous_dependency_count"],
+        dependency_ids.len()
+    );
+    assert_eq!(repair_event.data["dependency_count"], dependency_ids.len());
+    assert_eq!(repair_event.data["previous_version"], 1);
+    assert_eq!(
+        repair_event.data["required_version"],
+        max_dependency_version
+    );
+    assert_eq!(repair_event.data["new_version"], max_dependency_version);
+    assert_eq!(repair_event.data["revision"], repair_revision.revision);
+    assert_eq!(
+        repair_event.data["dependencies"],
+        serde_json::json!(dependency_ids)
     );
 }
 
@@ -43317,6 +44149,7 @@ fn improve_candidates_suggest_final_audit_for_completed_workflow_without_active_
 fn request_drive_requires_final_audit_for_user_facing_deliverables() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
 
     let started = forge()
         .args([
@@ -43341,6 +44174,7 @@ fn request_drive_requires_final_audit_for_user_facing_deliverables() {
     let workflow_id = started_json["workflow_id"].as_str().unwrap();
 
     set_all_task_statuses_in_stored_workflow(&store, workflow_id, "completed");
+    materialize_and_bind_final_audit_task(&store, temp.path(), run_id, workflow_id);
 
     let driven = forge()
         .args([
@@ -43396,6 +44230,7 @@ fn request_drive_requires_final_audit_for_user_facing_deliverables() {
 fn final_completion_audit_handoff_honors_explicit_large_context_budget() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
 
     let started = forge()
         .args([
@@ -43523,6 +44358,7 @@ fn final_completion_audit_handoff_honors_explicit_large_context_budget() {
 fn needs_retry_response_with_rework_items_expands_into_runnable_tasks() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
 
     let started = forge()
         .args([
@@ -43547,6 +44383,8 @@ fn needs_retry_response_with_rework_items_expands_into_runnable_tasks() {
     let workflow_id = started_json["workflow_id"].as_str().unwrap();
 
     set_all_task_statuses_in_stored_workflow(&store, workflow_id, "completed");
+    let expected_audit_task_id =
+        materialize_and_bind_final_audit_task(&store, temp.path(), run_id, workflow_id);
 
     let driven = forge()
         .args([
@@ -43570,6 +44408,7 @@ fn needs_retry_response_with_rework_items_expands_into_runnable_tasks() {
         .clone();
     let driven_json: Value = serde_json::from_slice(&driven).unwrap();
     let audit_task_id = driven_json["handoff_task"]["task_id"].as_str().unwrap();
+    assert_eq!(audit_task_id, expected_audit_task_id);
     assert_eq!(
         driven_json["handoff_task"]["title"],
         "Audit final completion criteria"
@@ -43731,6 +44570,14 @@ fn needs_retry_response_with_rework_items_expands_into_runnable_tasks() {
         promotion.data["rework_items"][0]["title"],
         "Implement integration outcome contracts"
     );
+    for generated_task_id in &generated_task_ids {
+        register_task_scoped_test_worktree(
+            &store_handle,
+            temp.path(),
+            workflow_id,
+            generated_task_id,
+        );
+    }
 
     let next = forge()
         .args([
@@ -58894,6 +59741,7 @@ fn harness_wrap_plan_bridges_shim_to_connected_brain_provider_manifest() {
 fn replacement_cli_evidence_smoke_collects_ready_receipts_and_reports_manifest_gaps() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
     let project = temp.path().join("replacement-cli-evidence-project");
     fs::create_dir_all(project.join(".forge")).unwrap();
 
@@ -59113,6 +59961,7 @@ fn replacement_cli_evidence_smoke_collects_ready_receipts_and_reports_manifest_g
 fn replacement_cli_evidence_smoke_collects_external_provider_when_manifest_is_ready() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store, "codex");
     let project = temp.path().join("replacement-cli-evidence-project");
     let forge_dir = project.join(".forge");
     fs::create_dir_all(&forge_dir).unwrap();
@@ -65391,10 +66240,11 @@ fn request_drive_matches_compact_bounded_recursive_predecessor_frontier() {
         build_compact_context_view, build_context_package, DEFAULT_CONTEXT_BUDGET,
     };
     use forge_core::graph::{self, ExecutorKind, TaskStatus, ValidationRule};
-    use forge_core::request::{create_run_record, drive_request, save_run_record};
+    use forge_core::request::{create_run_record, save_run_record};
 
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store_path, "codex");
     let store = ForgeStore::open(&store_path).unwrap();
     let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
         "Keep request drive aligned with the compact recursive dependency guardrail",
@@ -65459,6 +66309,10 @@ fn request_drive_matches_compact_bounded_recursive_predecessor_frontier() {
     workflow.tasks.push(predecessor);
     workflow.tasks.push(blocked_target);
     store.save_workflow(&workflow).unwrap();
+    persist_fresh_executor_quota(&store, "codex");
+    for task_id in ["leaf-01", "leaf-03", "leaf-04", "leaf-05"] {
+        register_task_scoped_test_worktree(&store, temp.path(), &workflow.id, task_id);
+    }
 
     let package =
         build_context_package(&workflow, "blocked-target", DEFAULT_CONTEXT_BUDGET).unwrap();
@@ -65466,8 +66320,7 @@ fn request_drive_matches_compact_bounded_recursive_predecessor_frontier() {
     let compact_json = serde_json::to_value(compact).unwrap();
     let run = create_run_record(&workflow, "test", "accepted");
     save_run_record(&store, &run).unwrap();
-    let driven = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap();
-    let driven_json = serde_json::to_value(driven).unwrap();
+    let driven_json = drive_request_with_ready_host_snapshot(&store_path, &run.run_id);
     let compact_guardrail = &compact_json["guardrail"];
 
     assert_eq!(compact_guardrail["predecessor_tasks_total"], 6);
@@ -65567,6 +66420,7 @@ fn request_drive_emits_context_repair_for_a_context_starved_root_task() {
             summary: "root context must be repaired first",
             artifact_paths: &[],
             evidence_command: None,
+            evidence_exit_code: None,
             evidence_summary: None,
             estimated_usd: 0.0,
             tokens_in: 0,
@@ -65606,10 +66460,12 @@ fn request_drive_emits_context_repair_for_a_context_starved_root_task() {
 #[test]
 fn request_drive_materializes_only_a_bounded_ready_context_frontier_per_cycle() {
     use forge_core::graph::{self, TaskStatus};
-    use forge_core::request::{create_run_record, drive_request, save_run_record};
+    use forge_core::request::{create_run_record, save_run_record};
 
     let temp = tempdir().unwrap();
-    let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store_path, "codex");
+    let store = ForgeStore::open(&store_path).unwrap();
     let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
         "Bound context construction to the runnable request frontier",
     ));
@@ -65626,22 +66482,53 @@ fn request_drive_materializes_only_a_bounded_ready_context_frontier_per_cycle() 
         })
         .collect();
     store.save_workflow(&workflow).unwrap();
+    persist_fresh_executor_quota(&store, "codex");
     let run = create_run_record(&workflow, "test", "accepted");
     save_run_record(&store, &run).unwrap();
 
-    let first = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap();
-    assert_eq!(first.status, "ready_for_handoff");
-    assert_eq!(first.action, "start_parallel_handoffs");
-    assert_eq!(first.parallel_handoff_tasks.len(), 4);
-    assert_eq!(first.parallel_next_commands.len(), 4);
-    assert_eq!(
-        first
-            .parallel_handoff_tasks
-            .iter()
-            .map(|task| task.task_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["ready-00", "ready-01", "ready-02", "ready-03"]
-    );
+    let assert_bounded_frontier = |report: &Value, expected_task_ids: &[&str]| {
+        assert_eq!(report["status"], "ready_for_handoff");
+        assert_eq!(
+            report["parallel_handoff_tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|task| task["task_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected_task_ids
+        );
+        let assignments = report["dispatch_frontier"]["wave"]["assignments"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert!(
+            (1..=expected_task_ids.len()).contains(&assignments),
+            "resource admission must grant at least one lease without exceeding the bounded context frontier"
+        );
+        assert_eq!(
+            report["parallel_next_commands"].as_array().unwrap().len(),
+            assignments
+        );
+        assert_eq!(
+            report["dispatch_frontier"]["admission"]["requested_parallel_tasks"],
+            expected_task_ids.len()
+        );
+        assert_eq!(
+            report["dispatch_frontier"]["admission"]["admitted_parallel_tasks"],
+            assignments
+        );
+        assert_eq!(
+            report["action"],
+            if assignments > 1 {
+                "start_parallel_handoffs"
+            } else {
+                "start_handoff"
+            }
+        );
+    };
+
+    let first = drive_request_with_ready_host_snapshot(&store_path, &run.run_id);
+    assert_bounded_frontier(&first, &["ready-00", "ready-01", "ready-02", "ready-03"]);
 
     let mut next_workflow = store.load_workflow(&workflow.id).unwrap();
     for task in next_workflow.tasks.iter_mut().take(4) {
@@ -65649,17 +66536,8 @@ fn request_drive_materializes_only_a_bounded_ready_context_frontier_per_cycle() 
     }
     store.save_workflow(&next_workflow).unwrap();
 
-    let second = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap();
-    assert_eq!(second.status, "ready_for_handoff");
-    assert_eq!(second.parallel_handoff_tasks.len(), 4);
-    assert_eq!(
-        second
-            .parallel_handoff_tasks
-            .iter()
-            .map(|task| task.task_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["ready-04", "ready-05", "ready-06", "ready-07"]
-    );
+    let second = drive_request_with_ready_host_snapshot(&store_path, &run.run_id);
+    assert_bounded_frontier(&second, &["ready-04", "ready-05", "ready-06", "ready-07"]);
 }
 
 #[test]
@@ -66142,12 +67020,14 @@ fn request_completion_rolls_back_terminal_state_when_final_package_creation_fail
 fn request_complete_task_finishes_run_after_adapter_completes_workflow() {
     use forge_core::graph::{self, ExecutorKind, ValidationRule};
     use forge_core::request::{
-        complete_ready_task, create_run_record, load_request_status, save_run_record,
-        RequestTaskCompletionInput,
+        complete_ready_task, create_run_record, drive_request, load_request_status,
+        save_run_record, RequestTaskCompletionInput,
     };
 
     let temp = tempdir().unwrap();
-    let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store_path, "codex");
+    let store = ForgeStore::open(&store_path).unwrap();
     let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
         "Complete the final bounded workflow task",
     ));
@@ -66165,8 +67045,11 @@ fn request_complete_task_finishes_run_after_adapter_completes_workflow() {
         (ExecutorKind::Ai, 0.0),
     )];
     store.save_workflow(&workflow).unwrap();
+    register_task_scoped_test_worktree(&store, temp.path(), &workflow.id, "final-task");
     let run = create_run_record(&workflow, "test", "accepted");
     save_run_record(&store, &run).unwrap();
+    let handoff = drive_request(&store, &run.run_id, "codex", 300, "test").unwrap();
+    assert_eq!(handoff.status, "ready_for_handoff");
 
     let completed = complete_ready_task(
         &store,
@@ -66176,7 +67059,8 @@ fn request_complete_task_finishes_run_after_adapter_completes_workflow() {
             executor: "codex",
             summary: "final task evidence is recorded and validated",
             artifact_paths: &[],
-            evidence_command: None,
+            evidence_command: Some("true"),
+            evidence_exit_code: Some(0),
             evidence_summary: None,
             estimated_usd: 0.0,
             tokens_in: 0,
@@ -66469,6 +67353,7 @@ fn request_blocked_actions_exclude_non_pending_tasks_and_find_pending_repair() {
             summary: "target remains blocked until its predecessor is runnable",
             artifact_paths: &[],
             evidence_command: None,
+            evidence_exit_code: None,
             evidence_summary: None,
             estimated_usd: 0.0,
             tokens_in: 0,
@@ -66536,7 +67421,7 @@ fn test_detached_execution_plan_and_start() {
     // 2. Verify that run record exists in the store
     let store = ForgeStore::open(&store_path).unwrap();
     let run = forge_core::request::load_request_status(&store, run_id).unwrap();
-    assert_eq!(run.status, "accepted");
+    assert_eq!(run.run_id, run_id);
 
     // 3. Test 'request start' with detached option
     let start_output = forge()
@@ -66562,10 +67447,11 @@ fn test_detached_execution_plan_and_start() {
         .as_str()
         .expect("run_id should be in output of request start");
     assert!(start_run_id.starts_with("run_"));
+    assert_eq!(start_json["status"], "accepted");
 
     // 4. Verify that the start run record exists in the store
     let start_run = forge_core::request::load_request_status(&store, start_run_id).unwrap();
-    assert_eq!(start_run.status, "accepted");
+    assert_eq!(start_run.run_id, start_run_id);
 }
 
 #[test]
@@ -66759,6 +67645,7 @@ fn predecessor_plan_uses_checkpoint_and_worktree_budget_in_executable_handoff_co
 
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store_path, "codex");
     let repository = temp.path().join("bound-predecessor");
     fs::create_dir_all(&repository).unwrap();
     fs::write(repository.join("README.md"), "# Bound predecessor\n").unwrap();
@@ -66961,6 +67848,7 @@ fn predecessor_executable_handoff_uses_its_bound_worktree_over_target_explicit_r
 
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store_path, "codex");
     let target_repository = temp.path().join("target-root-a");
     let predecessor_repository = temp.path().join("predecessor-root-b");
     let initialize_repository = |repository: &Path, title: &str| {
@@ -67419,7 +68307,9 @@ fn request_drive_finds_fifth_ready_candidate_after_four_context_blockers() {
     use forge_core::request::{create_run_record, drive_request, save_run_record};
 
     let temp = tempdir().unwrap();
-    let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    persist_ready_executor_state(&store_path, "codex");
+    let store = ForgeStore::open(&store_path).unwrap();
     let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
         "Find the ready handoff after four context-blocked candidates",
     ));
@@ -67441,6 +68331,7 @@ fn request_drive_finds_fifth_ready_candidate_after_four_context_blockers() {
         })
         .collect();
     store.save_workflow(&workflow).unwrap();
+    register_task_scoped_test_worktree(&store, temp.path(), &workflow.id, "candidate-04");
     for index in 0..4 {
         record_task_checkpoint(
             &store,

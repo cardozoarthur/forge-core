@@ -227,6 +227,7 @@ mod tests {
                 title: format!("Task {task_id}"),
                 goal: format!("Goal {task_id}"),
                 dependencies: deps.iter().map(|d| d.to_string()).collect(),
+                active_impediments: vec![],
                 context_requirements: vec![],
                 validation_rules: vec![],
                 expected_output: "output".to_string(),

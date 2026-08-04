@@ -1,6 +1,7 @@
 use crate::artifact::hex_sha256;
 use crate::identity::inspect_project_operating_context;
 use crate::intent::OperatingContextSpec;
+use crate::lease::{validate_task_lease_for_execution, TaskLease};
 use crate::security::{
     evaluate_runtime_security_guardrails, RuntimeSecurityGuardrailReport,
     RuntimeSecurityGuardrailRequest,
@@ -9,6 +10,7 @@ use crate::storage::{
     ForgeStore, GlobalEventWrite, HeadroomBlobWrite, RuntimeSecretVaultAccess,
     StoredHeadroomBlobRecord,
 };
+use crate::worktree::bound_worktree_mutation_claim;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -644,6 +646,8 @@ pub struct CliHarnessExecReceipt {
     pub workflow_id: Option<String>,
     pub task_id: Option<String>,
     pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_lease: Option<TaskLease>,
     pub forge_first: bool,
     pub forge_first_source: String,
     pub context_budget: usize,
@@ -4778,6 +4782,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             stdout_headroom: None,
             stderr_headroom: None,
             secret_injections: Vec::new(),
+            task_lease: None,
         });
         record_harness_exec_event_if_possible(store, workflow_id, task_id, run_id, &mut receipt)?;
         return Ok(receipt);
@@ -4813,6 +4818,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             stdout_headroom: None,
             stderr_headroom: None,
             secret_injections: Vec::new(),
+            task_lease: None,
         });
         record_harness_exec_event_if_possible(store, workflow_id, task_id, run_id, &mut receipt)?;
         return Ok(receipt);
@@ -4848,6 +4854,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             stdout_headroom: None,
             stderr_headroom: None,
             secret_injections: Vec::new(),
+            task_lease: None,
         });
         receipt.notes.push(
             "Project harness policy requires workflow, task and run lineage before real execution."
@@ -4887,10 +4894,83 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             stdout_headroom: None,
             stderr_headroom: None,
             secret_injections: Vec::new(),
+            task_lease: None,
         });
         record_harness_exec_event_if_possible(store, workflow_id, task_id, run_id, &mut receipt)?;
         return Ok(receipt);
     };
+
+    let bound_workspace_claim = match (store, workflow_id, task_id) {
+        (Some(store), Some(workflow_id), Some(task_id)) => {
+            bound_worktree_mutation_claim(store, workflow_id, task_id)?
+        }
+        _ => None,
+    };
+    let task_lease = match (store, workflow_id, task_id, bound_workspace_claim) {
+        (Some(store), Some(workflow_id), Some(task_id), Some(_)) => {
+            match validate_task_lease_for_execution(
+                store,
+                workflow_id,
+                task_id,
+                &wrapper_plan.executor,
+                &cwd_path,
+            ) {
+                Ok(lease) => Some(lease),
+                Err(error) => {
+                    let mut receipt = exec_receipt(CliExecReceiptInput {
+                        wrapper_plan,
+                        command,
+                        command_sha256,
+                        cwd: cwd_display,
+                        forge_first,
+                        dry_run,
+                        allow_exec,
+                        execution_mode: "blocked".to_string(),
+                        project_policy_path: project_policy.path.display().to_string(),
+                        project_policy_status: project_policy_status.to_string(),
+                        require_lineage_for_exec: project_policy.require_lineage_for_exec,
+                        runtime_security_guardrails: runtime_security_guardrails.clone(),
+                        resolved_executable,
+                        resolution_status,
+                        status: "harness_exec_blocked_task_lease".to_string(),
+                        safety_checks,
+                        executed: false,
+                        success: None,
+                        exit_code: None,
+                        stdout_bytes: None,
+                        stderr_bytes: None,
+                        stdout_sha256: None,
+                        stderr_sha256: None,
+                        stdout_excerpt: None,
+                        stderr_excerpt: None,
+                        output_headroom_enabled: token_headroom,
+                        stdout_headroom: None,
+                        stderr_headroom: None,
+                        secret_injections: Vec::new(),
+                        task_lease: None,
+                    });
+                    receipt.notes.push(format!(
+                        "Task lease validation blocked execution: {error:#}"
+                    ));
+                    record_harness_exec_event_if_possible(
+                        Some(store),
+                        Some(workflow_id),
+                        Some(task_id),
+                        run_id,
+                        &mut receipt,
+                    )?;
+                    return Ok(receipt);
+                }
+            }
+        }
+        _ => None,
+    };
+    if let Some(lease) = task_lease.as_ref() {
+        safety_checks.push(format!(
+            "active task lease {} validated for executor and cwd",
+            lease.lease_id
+        ));
+    }
 
     let tenant_context = if let Some(store) = store {
         harness_tenant_context(store, workflow_id)?
@@ -4954,6 +5034,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
                 stdout_headroom: None,
                 stderr_headroom: None,
                 secret_injections,
+                task_lease: task_lease.clone(),
             });
             record_harness_exec_event_if_possible(
                 store,
@@ -5056,6 +5137,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         stdout_headroom,
         stderr_headroom,
         secret_injections,
+        task_lease,
     });
     record_harness_exec_event_if_possible(store, workflow_id, task_id, run_id, &mut receipt)?;
     Ok(receipt)
@@ -6165,6 +6247,7 @@ struct CliExecReceiptInput {
     stdout_headroom: Option<TokenHeadroomReport>,
     stderr_headroom: Option<TokenHeadroomReport>,
     secret_injections: Vec<CliHarnessSecretInjection>,
+    task_lease: Option<TaskLease>,
 }
 
 fn exec_receipt(input: CliExecReceiptInput) -> CliHarnessExecReceipt {
@@ -6182,6 +6265,7 @@ fn exec_receipt(input: CliExecReceiptInput) -> CliHarnessExecReceipt {
         workflow_id,
         task_id,
         run_id,
+        task_lease: input.task_lease,
         forge_first: input.forge_first,
         forge_first_source: input.wrapper_plan.forge_first_source.clone(),
         context_budget: input.wrapper_plan.context_budget,

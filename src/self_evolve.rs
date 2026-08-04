@@ -3620,6 +3620,7 @@ mod tests {
             initial_goal: None,
             status: "running".to_string(),
             created_at: Utc::now(),
+            core_orchestration: crate::graph::CoreOrchestrationSpec::default(),
             runtime: crate::graph::WorkflowRuntimeSpec::default(),
             intent: crate::intent::IntentSpec {
                 goal: BASE_SELF_EVOLUTION_GOAL.to_string(),
@@ -3644,6 +3645,7 @@ mod tests {
             initial_goal: None,
             status: "pending".to_string(),
             created_at: Utc::now(),
+            core_orchestration: crate::graph::CoreOrchestrationSpec::default(),
             runtime: crate::graph::WorkflowRuntimeSpec::default(),
             intent: crate::intent::IntentSpec {
                 goal: "Build a web app".to_string(),

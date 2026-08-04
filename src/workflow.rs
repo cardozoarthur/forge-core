@@ -1,8 +1,9 @@
 use crate::addon::{default_addon_dirs, load_addon_catalog_from_store};
 use crate::artifact::copy_artifact;
 use crate::graph::{
-    node_brain_routing_for_executor, ArtifactRecord, ExecutorKind, NodeBrainAgentSlotSpec,
-    NodeBrainRoutingSpec, TaskStatus, Workflow, WorkflowRevision,
+    node_brain_routing_for_executor, task as build_task, ArtifactRecord, ExecutorKind,
+    NodeBrainAgentSlotSpec, NodeBrainRoutingSpec, TaskImpediment, TaskStatus, Workflow,
+    WorkflowRevision,
 };
 use crate::identity::ensure_workflow_policy;
 use crate::intent::parse_intent_with_catalog_and_context;
@@ -14,13 +15,15 @@ use crate::ir::{
     TokenCollection, TokenImpactPreview, TokenResolutionReport,
 };
 use crate::storage::ForgeStore;
-use crate::validation::{validate_workflow, ValidationReport};
+use crate::validation::{validate_workflow, validate_workflow_structure, ValidationReport};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use uuid::Uuid;
+
+const WORKFLOW_MUTATION_SCHEMA_VERSION: &str = "forge.workflow_mutation.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowGoalUpdateReport {
@@ -74,6 +77,74 @@ pub struct WorkflowTaskUpdateReport {
     pub previous_version: u64,
     pub new_version: u64,
     pub revision: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowTaskAddInput {
+    pub task_id: Option<String>,
+    pub description: String,
+    pub priority: String,
+    pub origin: String,
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowTaskPriorityInput {
+    pub task_id: String,
+    pub priority: String,
+    pub origin: String,
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowTaskDependencyInput {
+    pub task_id: String,
+    pub dependency_task_id: String,
+    pub origin: String,
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowTaskImpedimentInput {
+    pub task_id: String,
+    pub reason: String,
+    pub kind: String,
+    pub origin: String,
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowTaskImpedimentClearInput {
+    pub task_id: String,
+    pub impediment_id: Option<String>,
+    pub origin: String,
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowMutationReport {
+    pub schema_version: String,
+    pub status: String,
+    pub mutation: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub origin: String,
+    pub changed: bool,
+    pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_task_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_task_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependency_task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impediment: Option<TaskImpediment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cleared_impediment_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected_task_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -226,69 +297,94 @@ pub fn update_workflow_goal(
     goal: &str,
     origin: &str,
 ) -> Result<WorkflowGoalUpdateReport> {
-    ensure_workflow_policy(store, workflow_id, "workflow goal update")?;
-    let mut workflow = store.load_workflow(workflow_id)?;
-    let previous_goal = workflow.goal.clone();
-    let previous_intent = workflow.intent.clone();
-    let previous_deliverables = previous_intent.deliverables.clone();
-    let previous_capabilities = previous_intent
-        .required_capabilities
-        .iter()
-        .map(|capability| capability.id.clone())
-        .collect::<Vec<_>>();
-    let addon_catalog = load_addon_catalog_from_store(store, &default_addon_dirs())?;
-    let new_intent = parse_intent_with_catalog_and_context(
-        goal,
-        &addon_catalog,
-        previous_intent.operating_context,
-    );
-    let new_deliverables = new_intent.deliverables.clone();
-    let new_capabilities = new_intent
-        .required_capabilities
-        .iter()
-        .map(|capability| capability.id.clone())
-        .collect::<Vec<_>>();
-    let added_deliverables = diff_added(&previous_deliverables, &new_deliverables);
-    let removed_deliverables = diff_removed(&previous_deliverables, &new_deliverables);
-    workflow.goal = goal.to_string();
-    workflow.intent = new_intent;
-    let revision = push_revision(
-        &mut workflow.revisions,
-        origin,
-        "goal_update",
-        &format!("goal changed from `{previous_goal}` to `{goal}` and intent was reparsed"),
-    );
-    store.save_workflow(&workflow)?;
-    store.record_event(
-        workflow_id,
-        "workflow_goal_updated",
-        &serde_json::json!({
-            "origin": origin,
-            "previous_goal": previous_goal,
-            "new_goal": goal,
-            "revision": revision,
-            "previous_deliverable_count": previous_deliverables.len(),
-            "new_deliverable_count": new_deliverables.len(),
-            "added_deliverables": added_deliverables,
-            "removed_deliverables": removed_deliverables,
-            "previous_capabilities": previous_capabilities,
-            "new_capabilities": new_capabilities
-        }),
-    )?;
+    update_workflow_goal_with_expected_revision(store, workflow_id, goal, origin, None)
+}
 
-    Ok(WorkflowGoalUpdateReport {
-        status: "workflow_goal_updated".to_string(),
-        workflow_id: workflow_id.to_string(),
-        origin: origin.to_string(),
-        previous_goal,
-        new_goal: goal.to_string(),
-        revision,
-        previous_deliverable_count: previous_deliverables.len(),
-        new_deliverable_count: new_deliverables.len(),
-        added_deliverables,
-        removed_deliverables,
-        previous_capabilities,
-        new_capabilities,
+pub fn update_workflow_goal_with_expected_revision(
+    store: &ForgeStore,
+    workflow_id: &str,
+    goal: &str,
+    origin: &str,
+    expected_revision: Option<u64>,
+) -> Result<WorkflowGoalUpdateReport> {
+    let goal = goal.trim();
+    if goal.is_empty() {
+        bail!("workflow goal cannot be empty");
+    }
+    store.with_transaction(|| {
+        ensure_workflow_policy(store, workflow_id, "workflow goal update")?;
+        let mut workflow = store.load_workflow(workflow_id)?;
+        ensure_not_mission_bound(store, &workflow)?;
+        ensure_expected_revision(&workflow, expected_revision)?;
+        ensure_structural_mutation_allowed(&workflow, "update goal")?;
+        ensure_core_orchestration_integrity(&workflow)?;
+        let previous_goal = workflow.goal.clone();
+        let previous_intent = workflow.intent.clone();
+        let previous_deliverables = previous_intent.deliverables.clone();
+        let previous_capabilities = previous_intent
+            .required_capabilities
+            .iter()
+            .map(|capability| capability.id.clone())
+            .collect::<Vec<_>>();
+        if previous_goal == goal {
+            return Ok(WorkflowGoalUpdateReport {
+                status: "workflow_goal_unchanged".to_string(),
+                workflow_id: workflow_id.to_string(),
+                origin: origin.to_string(),
+                previous_goal,
+                new_goal: goal.to_string(),
+                revision: latest_revision(&workflow),
+                previous_deliverable_count: previous_deliverables.len(),
+                new_deliverable_count: previous_deliverables.len(),
+                added_deliverables: Vec::new(),
+                removed_deliverables: Vec::new(),
+                previous_capabilities: previous_capabilities.clone(),
+                new_capabilities: previous_capabilities,
+            });
+        }
+        let addon_catalog = load_addon_catalog_from_store(store, &default_addon_dirs())?;
+        let new_intent = parse_intent_with_catalog_and_context(
+            goal,
+            &addon_catalog,
+            previous_intent.operating_context.clone(),
+        );
+        let new_deliverables = new_intent.deliverables.clone();
+        let new_capabilities = new_intent
+            .required_capabilities
+            .iter()
+            .map(|capability| capability.id.clone())
+            .collect::<Vec<_>>();
+        let added_deliverables = diff_added(&previous_deliverables, &new_deliverables);
+        let removed_deliverables = diff_removed(&previous_deliverables, &new_deliverables);
+        workflow.goal = goal.to_string();
+        workflow.intent = new_intent;
+        let revision = push_revision(
+            &mut workflow.revisions,
+            origin,
+            "goal_update",
+            &format!("goal changed from `{previous_goal}` to `{goal}` and intent was reparsed"),
+        );
+        let report = WorkflowGoalUpdateReport {
+            status: "workflow_goal_updated".to_string(),
+            workflow_id: workflow_id.to_string(),
+            origin: origin.to_string(),
+            previous_goal,
+            new_goal: goal.to_string(),
+            revision,
+            previous_deliverable_count: previous_deliverables.len(),
+            new_deliverable_count: new_deliverables.len(),
+            added_deliverables,
+            removed_deliverables,
+            previous_capabilities,
+            new_capabilities,
+        };
+        store.save_workflow(&workflow)?;
+        store.record_event(
+            workflow_id,
+            "workflow_goal_updated",
+            &serde_json::to_value(&report)?,
+        )?;
+        Ok(report)
     })
 }
 
@@ -411,88 +507,882 @@ pub fn update_workflow_task(
     workflow_id: &str,
     input: WorkflowTaskUpdateInput<'_>,
 ) -> Result<WorkflowTaskUpdateReport> {
-    ensure_workflow_policy(store, workflow_id, "workflow task update")?;
-    let mut workflow = store.load_workflow(workflow_id)?;
-    let Some(task) = workflow
-        .tasks
-        .iter_mut()
-        .find(|task| task.id == input.task_id)
-    else {
-        bail!(
-            "task {} not found in workflow {}",
-            input.task_id,
-            workflow_id
+    update_workflow_task_with_expected_revision(store, workflow_id, input, None)
+}
+
+pub fn update_workflow_task_with_expected_revision(
+    store: &ForgeStore,
+    workflow_id: &str,
+    input: WorkflowTaskUpdateInput<'_>,
+    expected_revision: Option<u64>,
+) -> Result<WorkflowTaskUpdateReport> {
+    store.with_transaction(|| {
+        ensure_workflow_policy(store, workflow_id, "workflow task update")?;
+        let mut workflow = store.load_workflow(workflow_id)?;
+        ensure_not_mission_bound(store, &workflow)?;
+        ensure_expected_revision(&workflow, expected_revision)?;
+        ensure_structural_mutation_allowed(&workflow, "update task")?;
+        ensure_core_orchestration_integrity(&workflow)?;
+        ensure_no_task_lease(store, workflow_id, input.task_id)?;
+        let task_index = workflow_task_index(&workflow, input.task_id)?;
+        ensure_task_definition_mutable(&workflow.tasks[task_index], "update")?;
+
+        let task = &mut workflow.tasks[task_index];
+        let previous_title = task.title.clone();
+        let previous_goal = task.goal.clone();
+        let previous_expected_output = task.expected_output.clone();
+        let previous_version = task.version;
+
+        if let Some(title) = input.title.filter(|value| !value.trim().is_empty()) {
+            task.title = title.trim().to_string();
+        }
+        if let Some(goal) = input.goal.filter(|value| !value.trim().is_empty()) {
+            task.goal = goal.trim().to_string();
+            task.work_item.goal_validation.goal = task.goal.clone();
+        }
+        if let Some(expected_output) = input
+            .expected_output
+            .filter(|value| !value.trim().is_empty())
+        {
+            task.expected_output = expected_output.trim().to_string();
+        }
+
+        let changed = previous_title != task.title
+            || previous_goal != task.goal
+            || previous_expected_output != task.expected_output;
+        if changed {
+            task.version = task.version.saturating_add(1);
+        }
+        let new_title = task.title.clone();
+        let new_goal = task.goal.clone();
+        let new_expected_output = task.expected_output.clone();
+
+        if !changed {
+            return Ok(WorkflowTaskUpdateReport {
+                status: "workflow_task_unchanged".to_string(),
+                workflow_id: workflow_id.to_string(),
+                task_id: input.task_id.to_string(),
+                origin: input.origin.to_string(),
+                previous_title,
+                new_title,
+                previous_goal,
+                new_goal,
+                previous_expected_output,
+                new_expected_output,
+                previous_version,
+                new_version: previous_version,
+                revision: latest_revision(&workflow),
+            });
+        }
+
+        propagate_dependency_version_boundary(&mut workflow.tasks);
+        ensure_core_orchestration_integrity(&workflow)?;
+        let new_version = workflow.tasks[task_index].version;
+        let revision = push_revision(
+            &mut workflow.revisions,
+            input.origin,
+            "task_updated",
+            &format!(
+                "updated task {} from version {} to {}",
+                input.task_id, previous_version, new_version
+            ),
         );
-    };
-
-    let previous_title = task.title.clone();
-    let previous_goal = task.goal.clone();
-    let previous_expected_output = task.expected_output.clone();
-    let previous_version = task.version;
-
-    if let Some(title) = input.title.filter(|value| !value.trim().is_empty()) {
-        task.title = title.trim().to_string();
-    }
-    if let Some(goal) = input.goal.filter(|value| !value.trim().is_empty()) {
-        task.goal = goal.trim().to_string();
-        task.work_item.goal_validation.goal = task.goal.clone();
-    }
-    if let Some(expected_output) = input
-        .expected_output
-        .filter(|value| !value.trim().is_empty())
-    {
-        task.expected_output = expected_output.trim().to_string();
-    }
-    task.version = task.version.saturating_add(1);
-
-    let new_title = task.title.clone();
-    let new_goal = task.goal.clone();
-    let new_expected_output = task.expected_output.clone();
-    let new_version = task.version;
-
-    let revision = push_revision(
-        &mut workflow.revisions,
-        input.origin,
-        "task_updated",
-        &format!(
-            "updated task {} from version {} to {}",
-            input.task_id, previous_version, new_version
-        ),
-    );
-    store.save_workflow(&workflow)?;
-    store.record_event(
-        workflow_id,
-        "workflow_task_updated",
-        &serde_json::json!({
-            "origin": input.origin,
-            "task_id": input.task_id,
-            "previous_title": previous_title,
-            "new_title": new_title,
-            "previous_goal": previous_goal,
-            "new_goal": new_goal,
-            "previous_expected_output": previous_expected_output,
-            "new_expected_output": new_expected_output,
-            "previous_version": previous_version,
-            "new_version": new_version,
-            "revision": revision
-        }),
-    )?;
-
-    Ok(WorkflowTaskUpdateReport {
-        status: "workflow_task_updated".to_string(),
-        workflow_id: workflow_id.to_string(),
-        task_id: input.task_id.to_string(),
-        origin: input.origin.to_string(),
-        previous_title,
-        new_title,
-        previous_goal,
-        new_goal,
-        previous_expected_output,
-        new_expected_output,
-        previous_version,
-        new_version,
-        revision,
+        let report = WorkflowTaskUpdateReport {
+            status: "workflow_task_updated".to_string(),
+            workflow_id: workflow_id.to_string(),
+            task_id: input.task_id.to_string(),
+            origin: input.origin.to_string(),
+            previous_title,
+            new_title,
+            previous_goal,
+            new_goal,
+            previous_expected_output,
+            new_expected_output,
+            previous_version,
+            new_version,
+            revision,
+        };
+        store.save_workflow(&workflow)?;
+        store.record_event(
+            workflow_id,
+            "workflow_task_updated",
+            &serde_json::to_value(&report)?,
+        )?;
+        Ok(report)
     })
+}
+
+pub fn add_workflow_task(
+    store: &ForgeStore,
+    workflow_id: &str,
+    input: WorkflowTaskAddInput,
+) -> Result<WorkflowMutationReport> {
+    let description = required_text(&input.description, "task description")?;
+    let priority = normalize_workflow_priority(&input.priority)?;
+    let requested_task_id = input
+        .task_id
+        .as_deref()
+        .map(|value| required_task_id(value, "task id"))
+        .transpose()?;
+    store.with_transaction(|| {
+        ensure_workflow_policy(store, workflow_id, "workflow task add")?;
+        let mut workflow = store.load_workflow(workflow_id)?;
+        ensure_not_mission_bound(store, &workflow)?;
+        ensure_expected_revision(&workflow, input.expected_revision)?;
+        ensure_structural_mutation_allowed(&workflow, "add task")?;
+        ensure_core_orchestration_integrity(&workflow)?;
+
+        let task_id = requested_task_id
+            .clone()
+            .unwrap_or_else(|| next_dynamic_task_id(&workflow));
+        let mut task = build_task(
+            &task_id,
+            &description,
+            &[],
+            &["workflow goal", "current task graph", "mutation origin"],
+            Vec::new(),
+            &format!("Validated outcome for {description}"),
+            (ExecutorKind::Ai, 0.01),
+        );
+        task.goal = format!("{description}: reach a definitively ready state");
+        task.work_item.goal_validation.goal = task.goal.clone();
+        task.work_item.priority = priority.clone();
+
+        if let Some(existing) = workflow.tasks.iter().find(|task| task.id == task_id) {
+            if serde_json::to_value(existing)? == serde_json::to_value(&task)? {
+                return Ok(workflow_mutation_report(
+                    "workflow_task_unchanged",
+                    "add_task",
+                    workflow_id,
+                    &task_id,
+                    &input.origin,
+                    false,
+                    latest_revision(&workflow),
+                    Some(existing.version),
+                    Some(existing.version),
+                    Some(priority.clone()),
+                    None,
+                    None,
+                    Vec::new(),
+                    vec![task_id.clone()],
+                ));
+            }
+            bail!("task id {task_id} already exists with a different definition");
+        }
+
+        workflow.tasks.push(task);
+        ensure_core_orchestration_integrity(&workflow)?;
+        let revision = push_revision(
+            &mut workflow.revisions,
+            &input.origin,
+            "task_added",
+            &format!("added task {task_id} with {priority} priority"),
+        );
+        let report = workflow_mutation_report(
+            "workflow_task_added",
+            "add_task",
+            workflow_id,
+            &task_id,
+            &input.origin,
+            true,
+            revision,
+            None,
+            Some(1),
+            Some(priority),
+            None,
+            None,
+            Vec::new(),
+            vec![task_id.clone()],
+        );
+        store.save_workflow(&workflow)?;
+        store.record_event(
+            workflow_id,
+            "workflow_task_added",
+            &serde_json::to_value(&report)?,
+        )?;
+        Ok(report)
+    })
+}
+
+pub fn set_workflow_task_priority(
+    store: &ForgeStore,
+    workflow_id: &str,
+    input: WorkflowTaskPriorityInput,
+) -> Result<WorkflowMutationReport> {
+    let priority = normalize_workflow_priority(&input.priority)?;
+    store.with_transaction(|| {
+        ensure_workflow_policy(store, workflow_id, "workflow task priority update")?;
+        let mut workflow = store.load_workflow(workflow_id)?;
+        ensure_not_mission_bound(store, &workflow)?;
+        ensure_expected_revision(&workflow, input.expected_revision)?;
+        ensure_structural_mutation_allowed(&workflow, "reprioritize task")?;
+        ensure_core_orchestration_integrity(&workflow)?;
+        let task_index = workflow_task_index(&workflow, &input.task_id)?;
+        ensure_task_runtime_mutable(&workflow.tasks[task_index], "reprioritize")?;
+        ensure_no_task_lease(store, workflow_id, &input.task_id)?;
+        let previous_version = workflow.tasks[task_index].version;
+        if workflow.tasks[task_index].work_item.priority == priority {
+            return Ok(workflow_mutation_report(
+                "workflow_task_priority_unchanged",
+                "set_priority",
+                workflow_id,
+                &input.task_id,
+                &input.origin,
+                false,
+                latest_revision(&workflow),
+                Some(previous_version),
+                Some(previous_version),
+                Some(priority),
+                None,
+                None,
+                Vec::new(),
+                vec![input.task_id.clone()],
+            ));
+        }
+        workflow.tasks[task_index].work_item.priority = priority.clone();
+        workflow.tasks[task_index].version = previous_version.saturating_add(1);
+        let mut affected_task_ids = propagate_dependency_version_boundary(&mut workflow.tasks);
+        affected_task_ids.push(input.task_id.clone());
+        normalize_ids(&mut affected_task_ids);
+        ensure_core_orchestration_integrity(&workflow)?;
+        let new_version = workflow.tasks[task_index].version;
+        let revision = push_revision(
+            &mut workflow.revisions,
+            &input.origin,
+            "task_priority_updated",
+            &format!("set task {} priority to {priority}", input.task_id),
+        );
+        let report = workflow_mutation_report(
+            "workflow_task_priority_updated",
+            "set_priority",
+            workflow_id,
+            &input.task_id,
+            &input.origin,
+            true,
+            revision,
+            Some(previous_version),
+            Some(new_version),
+            Some(priority),
+            None,
+            None,
+            Vec::new(),
+            affected_task_ids,
+        );
+        store.save_workflow(&workflow)?;
+        store.record_event(
+            workflow_id,
+            "workflow_task_priority_updated",
+            &serde_json::to_value(&report)?,
+        )?;
+        Ok(report)
+    })
+}
+
+pub fn add_workflow_task_dependency(
+    store: &ForgeStore,
+    workflow_id: &str,
+    input: WorkflowTaskDependencyInput,
+) -> Result<WorkflowMutationReport> {
+    mutate_workflow_task_dependency(store, workflow_id, input, true)
+}
+
+pub fn remove_workflow_task_dependency(
+    store: &ForgeStore,
+    workflow_id: &str,
+    input: WorkflowTaskDependencyInput,
+) -> Result<WorkflowMutationReport> {
+    mutate_workflow_task_dependency(store, workflow_id, input, false)
+}
+
+fn mutate_workflow_task_dependency(
+    store: &ForgeStore,
+    workflow_id: &str,
+    input: WorkflowTaskDependencyInput,
+    add: bool,
+) -> Result<WorkflowMutationReport> {
+    store.with_transaction(|| {
+        let action = if add {
+            "workflow task dependency add"
+        } else {
+            "workflow task dependency remove"
+        };
+        ensure_workflow_policy(store, workflow_id, action)?;
+        let mut workflow = store.load_workflow(workflow_id)?;
+        ensure_not_mission_bound(store, &workflow)?;
+        ensure_expected_revision(&workflow, input.expected_revision)?;
+        ensure_structural_mutation_allowed(
+            &workflow,
+            if add {
+                "add task dependency"
+            } else {
+                "remove task dependency"
+            },
+        )?;
+        ensure_core_orchestration_integrity(&workflow)?;
+        ensure_no_task_lease(store, workflow_id, &input.task_id)?;
+        let task_index = workflow_task_index(&workflow, &input.task_id)?;
+        let _dependency_index = workflow_task_index(&workflow, &input.dependency_task_id)?;
+        if input.task_id == input.dependency_task_id {
+            bail!("task {} cannot depend on itself", input.task_id);
+        }
+        ensure_task_definition_mutable(
+            &workflow.tasks[task_index],
+            if add {
+                "add a dependency to"
+            } else {
+                "remove a dependency from"
+            },
+        )?;
+        let previous_version = workflow.tasks[task_index].version;
+        let contains = workflow.tasks[task_index]
+            .dependencies
+            .contains(&input.dependency_task_id);
+        if contains == add {
+            return Ok(workflow_mutation_report(
+                if add {
+                    "workflow_task_dependency_unchanged"
+                } else {
+                    "workflow_task_dependency_absent"
+                },
+                if add {
+                    "add_dependency"
+                } else {
+                    "remove_dependency"
+                },
+                workflow_id,
+                &input.task_id,
+                &input.origin,
+                false,
+                latest_revision(&workflow),
+                Some(previous_version),
+                Some(previous_version),
+                None,
+                Some(input.dependency_task_id.clone()),
+                None,
+                Vec::new(),
+                vec![input.task_id.clone()],
+            ));
+        }
+        if add {
+            workflow.tasks[task_index]
+                .dependencies
+                .push(input.dependency_task_id.clone());
+        } else {
+            workflow.tasks[task_index]
+                .dependencies
+                .retain(|dependency| dependency != &input.dependency_task_id);
+        }
+        workflow.tasks[task_index].version = previous_version.saturating_add(1);
+        let mut affected_task_ids = propagate_dependency_version_boundary(&mut workflow.tasks);
+        affected_task_ids.push(input.task_id.clone());
+        normalize_ids(&mut affected_task_ids);
+        ensure_core_orchestration_integrity(&workflow)?;
+        let new_version = workflow.tasks[task_index].version;
+        let (status, mutation, change_type, event_kind, summary) = if add {
+            (
+                "workflow_task_dependency_added",
+                "add_dependency",
+                "task_dependency_added",
+                "workflow_task_dependency_added",
+                format!(
+                    "task {} now depends on {}",
+                    input.task_id, input.dependency_task_id
+                ),
+            )
+        } else {
+            (
+                "workflow_task_dependency_removed",
+                "remove_dependency",
+                "task_dependency_removed",
+                "workflow_task_dependency_removed",
+                format!(
+                    "removed dependency {} from task {}",
+                    input.dependency_task_id, input.task_id
+                ),
+            )
+        };
+        let revision = push_revision(
+            &mut workflow.revisions,
+            &input.origin,
+            change_type,
+            &summary,
+        );
+        let report = workflow_mutation_report(
+            status,
+            mutation,
+            workflow_id,
+            &input.task_id,
+            &input.origin,
+            true,
+            revision,
+            Some(previous_version),
+            Some(new_version),
+            None,
+            Some(input.dependency_task_id),
+            None,
+            Vec::new(),
+            affected_task_ids,
+        );
+        store.save_workflow(&workflow)?;
+        store.record_event(workflow_id, event_kind, &serde_json::to_value(&report)?)?;
+        Ok(report)
+    })
+}
+
+pub fn set_workflow_task_impediment(
+    store: &ForgeStore,
+    workflow_id: &str,
+    input: WorkflowTaskImpedimentInput,
+) -> Result<WorkflowMutationReport> {
+    let reason = required_text(&input.reason, "impediment reason")?;
+    let kind = normalize_workflow_impediment_kind(&input.kind)?;
+    store.with_transaction(|| {
+        ensure_workflow_policy(store, workflow_id, "workflow task impediment set")?;
+        let mut workflow = store.load_workflow(workflow_id)?;
+        ensure_not_mission_bound(store, &workflow)?;
+        ensure_expected_revision(&workflow, input.expected_revision)?;
+        ensure_structural_mutation_allowed(&workflow, "set task impediment")?;
+        ensure_core_orchestration_integrity(&workflow)?;
+        ensure_no_task_lease(store, workflow_id, &input.task_id)?;
+        let task_index = workflow_task_index(&workflow, &input.task_id)?;
+        ensure_task_runtime_mutable(&workflow.tasks[task_index], "block")?;
+        let previous_version = workflow.tasks[task_index].version;
+        if let Some(existing) = workflow.tasks[task_index]
+            .active_impediments
+            .iter()
+            .find(|impediment| {
+                impediment.reason == reason
+                    && impediment.kind == kind
+                    && impediment.origin == input.origin
+            })
+            .cloned()
+        {
+            return Ok(workflow_mutation_report(
+                "workflow_task_impediment_unchanged",
+                "set_impediment",
+                workflow_id,
+                &input.task_id,
+                &input.origin,
+                false,
+                latest_revision(&workflow),
+                Some(previous_version),
+                Some(previous_version),
+                None,
+                None,
+                Some(existing),
+                Vec::new(),
+                vec![input.task_id.clone()],
+            ));
+        }
+        if workflow.tasks[task_index].status == TaskStatus::Blocked
+            && workflow.tasks[task_index].work_item.backlog_state != "blocked_by_active_impediment"
+        {
+            bail!(
+                "task {} is blocked by another authority and cannot be overwritten",
+                input.task_id
+            );
+        }
+        let impediment = TaskImpediment {
+            id: format!("imp_{}", Uuid::new_v4().to_string().replace('-', "")),
+            kind,
+            reason,
+            origin: input.origin.clone(),
+            created_at: Utc::now(),
+        };
+        workflow.tasks[task_index]
+            .active_impediments
+            .push(impediment.clone());
+        workflow.tasks[task_index].status = TaskStatus::Blocked;
+        workflow.tasks[task_index].work_item.backlog_state =
+            "blocked_by_active_impediment".to_string();
+        workflow.tasks[task_index].version = previous_version.saturating_add(1);
+        let mut affected_task_ids = propagate_dependency_version_boundary(&mut workflow.tasks);
+        affected_task_ids.push(input.task_id.clone());
+        normalize_ids(&mut affected_task_ids);
+        ensure_core_orchestration_integrity(&workflow)?;
+        let new_version = workflow.tasks[task_index].version;
+        let revision = push_revision(
+            &mut workflow.revisions,
+            &input.origin,
+            "task_impediment_set",
+            &format!("set impediment {} on task {}", impediment.id, input.task_id),
+        );
+        let report = workflow_mutation_report(
+            "workflow_task_impediment_set",
+            "set_impediment",
+            workflow_id,
+            &input.task_id,
+            &input.origin,
+            true,
+            revision,
+            Some(previous_version),
+            Some(new_version),
+            None,
+            None,
+            Some(impediment),
+            Vec::new(),
+            affected_task_ids,
+        );
+        store.save_workflow(&workflow)?;
+        store.record_event(
+            workflow_id,
+            "workflow_task_impediment_set",
+            &serde_json::to_value(&report)?,
+        )?;
+        Ok(report)
+    })
+}
+
+pub fn clear_workflow_task_impediment(
+    store: &ForgeStore,
+    workflow_id: &str,
+    input: WorkflowTaskImpedimentClearInput,
+) -> Result<WorkflowMutationReport> {
+    store.with_transaction(|| {
+        ensure_workflow_policy(store, workflow_id, "workflow task impediment clear")?;
+        let mut workflow = store.load_workflow(workflow_id)?;
+        ensure_not_mission_bound(store, &workflow)?;
+        ensure_expected_revision(&workflow, input.expected_revision)?;
+        ensure_structural_mutation_allowed(&workflow, "clear task impediment")?;
+        ensure_core_orchestration_integrity(&workflow)?;
+        ensure_no_task_lease(store, workflow_id, &input.task_id)?;
+        let task_index = workflow_task_index(&workflow, &input.task_id)?;
+        ensure_task_runtime_mutable(&workflow.tasks[task_index], "unblock")?;
+        let previous_version = workflow.tasks[task_index].version;
+        let dependency_ready =
+            workflow.tasks[task_index]
+                .dependencies
+                .iter()
+                .all(|dependency_id| {
+                    workflow
+                        .tasks
+                        .iter()
+                        .find(|task| task.id == *dependency_id)
+                        .is_some_and(|task| task.status == TaskStatus::Completed)
+                });
+        let previous_ids = workflow.tasks[task_index]
+            .active_impediments
+            .iter()
+            .map(|impediment| impediment.id.clone())
+            .collect::<BTreeSet<_>>();
+        if let Some(impediment_id) = input.impediment_id.as_deref() {
+            workflow.tasks[task_index]
+                .active_impediments
+                .retain(|impediment| impediment.id != impediment_id);
+        } else {
+            workflow.tasks[task_index]
+                .active_impediments
+                .retain(|impediment| impediment.kind != "manual");
+        }
+        let remaining_ids = workflow.tasks[task_index]
+            .active_impediments
+            .iter()
+            .map(|impediment| impediment.id.clone())
+            .collect::<BTreeSet<_>>();
+        let cleared_impediment_ids = previous_ids
+            .difference(&remaining_ids)
+            .cloned()
+            .collect::<Vec<_>>();
+        if cleared_impediment_ids.is_empty() {
+            return Ok(workflow_mutation_report(
+                "workflow_task_impediment_unchanged",
+                "clear_impediment",
+                workflow_id,
+                &input.task_id,
+                &input.origin,
+                false,
+                latest_revision(&workflow),
+                Some(previous_version),
+                Some(previous_version),
+                None,
+                None,
+                None,
+                Vec::new(),
+                vec![input.task_id.clone()],
+            ));
+        }
+        if workflow.tasks[task_index].active_impediments.is_empty()
+            && workflow.tasks[task_index].status == TaskStatus::Blocked
+            && workflow.tasks[task_index].work_item.backlog_state == "blocked_by_active_impediment"
+        {
+            workflow.tasks[task_index].status = TaskStatus::Pending;
+            workflow.tasks[task_index].work_item.backlog_state = if dependency_ready {
+                "ready".to_string()
+            } else {
+                "waiting_on_dependencies".to_string()
+            };
+        }
+        workflow.tasks[task_index].version = previous_version.saturating_add(1);
+        let mut affected_task_ids = propagate_dependency_version_boundary(&mut workflow.tasks);
+        affected_task_ids.push(input.task_id.clone());
+        normalize_ids(&mut affected_task_ids);
+        ensure_core_orchestration_integrity(&workflow)?;
+        let new_version = workflow.tasks[task_index].version;
+        let revision = push_revision(
+            &mut workflow.revisions,
+            &input.origin,
+            "task_impediment_cleared",
+            &format!(
+                "cleared {} impediment(s) from task {}",
+                cleared_impediment_ids.len(),
+                input.task_id
+            ),
+        );
+        let report = workflow_mutation_report(
+            "workflow_task_impediment_cleared",
+            "clear_impediment",
+            workflow_id,
+            &input.task_id,
+            &input.origin,
+            true,
+            revision,
+            Some(previous_version),
+            Some(new_version),
+            None,
+            None,
+            None,
+            cleared_impediment_ids,
+            affected_task_ids,
+        );
+        store.save_workflow(&workflow)?;
+        store.record_event(
+            workflow_id,
+            "workflow_task_impediment_cleared",
+            &serde_json::to_value(&report)?,
+        )?;
+        Ok(report)
+    })
+}
+
+fn ensure_core_orchestration_integrity(workflow: &Workflow) -> Result<()> {
+    let violations = validate_workflow_structure(workflow);
+    if violations.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "workflow {} failed Core orchestration integrity: {}",
+        workflow.id,
+        violations
+            .iter()
+            .map(|violation| format!(
+                "{}:{}:{}",
+                violation.kind, violation.task_id, violation.message
+            ))
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
+}
+
+fn ensure_structural_mutation_allowed(workflow: &Workflow, action: &str) -> Result<()> {
+    match workflow.status.trim().to_ascii_lowercase().as_str() {
+        "completed" | "complete" | "cancelled" | "failed" => bail!(
+            "cannot {action} on terminal workflow {} while status is {}; create a new workflow before changing its task graph",
+            workflow.id,
+            workflow.status
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn ensure_not_mission_bound(store: &ForgeStore, workflow: &Workflow) -> Result<()> {
+    if store.workflow_is_mission_bound(&workflow.id)? {
+        bail!(
+            "workflow {} is mission-bound; generic workflow mutations require a mission-aware adapter",
+            workflow.id
+        );
+    }
+    Ok(())
+}
+
+fn ensure_expected_revision(workflow: &Workflow, expected_revision: Option<u64>) -> Result<()> {
+    let Some(expected_revision) = expected_revision else {
+        return Ok(());
+    };
+    let current_revision = latest_revision(workflow);
+    if current_revision != expected_revision {
+        bail!(
+            "stale workflow revision for {}: expected {}, current {}; reload workflow state and retry",
+            workflow.id,
+            expected_revision,
+            current_revision
+        );
+    }
+    Ok(())
+}
+
+fn ensure_no_task_lease(store: &ForgeStore, workflow_id: &str, task_id: &str) -> Result<()> {
+    if store.load_task_lease(workflow_id, task_id)?.is_some() {
+        bail!(
+            "task {task_id} in workflow {workflow_id} has an active execution lease; release or cancel the handoff before mutation"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_task_definition_mutable(task: &crate::graph::AtomicTask, action: &str) -> Result<()> {
+    match task.status {
+        TaskStatus::Pending | TaskStatus::Blocked => Ok(()),
+        _ => bail!(
+            "cannot {action} task {} while status is {}",
+            task.id,
+            format!("{:?}", task.status).to_ascii_lowercase()
+        ),
+    }
+}
+
+fn ensure_task_runtime_mutable(task: &crate::graph::AtomicTask, action: &str) -> Result<()> {
+    match task.status {
+        TaskStatus::Pending | TaskStatus::Blocked => Ok(()),
+        _ => bail!(
+            "cannot {action} task {} while status is {}",
+            task.id,
+            format!("{:?}", task.status).to_ascii_lowercase()
+        ),
+    }
+}
+
+fn workflow_task_index(workflow: &Workflow, task_id: &str) -> Result<usize> {
+    workflow
+        .tasks
+        .iter()
+        .position(|task| task.id == task_id)
+        .with_context(|| format!("task {task_id} not found in workflow {}", workflow.id))
+}
+
+fn required_text(value: &str, field: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("{field} cannot be empty");
+    }
+    Ok(value.to_string())
+}
+
+fn required_task_id(value: &str, field: &str) -> Result<String> {
+    let value = required_text(value, field)?;
+    if !value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        bail!("{field} must contain only ASCII letters, digits, '-' or '_'");
+    }
+    Ok(value)
+}
+
+fn normalize_workflow_priority(value: &str) -> Result<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "high" | "p0" | "p1" => Ok("high".to_string()),
+        "medium" | "p2" => Ok("medium".to_string()),
+        "low" | "p3" => Ok("low".to_string()),
+        other => {
+            bail!("unsupported workflow task priority `{other}`; expected high, medium or low")
+        }
+    }
+}
+
+fn normalize_workflow_impediment_kind(value: &str) -> Result<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "manual" => Ok("manual".to_string()),
+        "resource" => Ok("resource".to_string()),
+        "authorization" => Ok("authorization".to_string()),
+        "policy" => Ok("policy".to_string()),
+        other => bail!(
+            "unsupported workflow task impediment kind `{other}`; expected manual, resource, authorization or policy"
+        ),
+    }
+}
+
+fn next_dynamic_task_id(workflow: &Workflow) -> String {
+    let existing = workflow
+        .tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut sequence = workflow.tasks.len().saturating_add(1);
+    loop {
+        let candidate = format!("task-{sequence:03}");
+        if !existing.contains(candidate.as_str()) {
+            return candidate;
+        }
+        sequence = sequence.saturating_add(1);
+    }
+}
+
+fn propagate_dependency_version_boundary(tasks: &mut [crate::graph::AtomicTask]) -> Vec<String> {
+    let mut propagated = BTreeSet::new();
+    loop {
+        let versions = tasks
+            .iter()
+            .map(|task| (task.id.clone(), task.version))
+            .collect::<BTreeMap<_, _>>();
+        let mut changed = false;
+        for task in tasks.iter_mut() {
+            let minimum_dependency_version = task
+                .dependencies
+                .iter()
+                .filter_map(|dependency| versions.get(dependency))
+                .copied()
+                .max()
+                .unwrap_or(task.version);
+            if task.version < minimum_dependency_version {
+                task.version = minimum_dependency_version;
+                propagated.insert(task.id.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    propagated.into_iter().collect()
+}
+
+fn normalize_ids(ids: &mut Vec<String>) {
+    ids.sort();
+    ids.dedup();
+}
+
+fn latest_revision(workflow: &Workflow) -> u64 {
+    workflow
+        .revisions
+        .last()
+        .map(|revision| revision.revision)
+        .unwrap_or(0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workflow_mutation_report(
+    status: &str,
+    mutation: &str,
+    workflow_id: &str,
+    task_id: &str,
+    origin: &str,
+    changed: bool,
+    revision: u64,
+    previous_task_version: Option<u64>,
+    new_task_version: Option<u64>,
+    priority: Option<String>,
+    dependency_task_id: Option<String>,
+    impediment: Option<TaskImpediment>,
+    cleared_impediment_ids: Vec<String>,
+    affected_task_ids: Vec<String>,
+) -> WorkflowMutationReport {
+    WorkflowMutationReport {
+        schema_version: WORKFLOW_MUTATION_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        mutation: mutation.to_string(),
+        workflow_id: workflow_id.to_string(),
+        task_id: task_id.to_string(),
+        origin: origin.to_string(),
+        changed,
+        revision,
+        previous_task_version,
+        new_task_version,
+        priority,
+        dependency_task_id,
+        impediment,
+        cleared_impediment_ids,
+        affected_task_ids,
+    }
 }
 
 pub fn parse_node_brain_agent_slot(value: &str) -> Result<NodeBrainAgentSlotSpec> {

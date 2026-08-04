@@ -1,8 +1,14 @@
 use assert_cmd::Command;
+use chrono::Utc;
+use forge_core::executor::ExecutorState;
+use forge_core::storage::ForgeStore;
 use rusqlite::{params, Connection};
 use serde_json::Value;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::path::Path;
+use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -65,11 +71,110 @@ fn forge() -> Command {
     Command::cargo_bin("forge").expect("forge binary should build")
 }
 
+fn git(repository: &Path, args: &[&str]) {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn initialize_repository(repository: &Path) {
+    fs::create_dir_all(repository).unwrap();
+    let output = ProcessCommand::new("git")
+        .arg("init")
+        .arg("--initial-branch=main")
+        .arg(repository)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    git(
+        repository,
+        &["config", "user.email", "forge@example.invalid"],
+    );
+    git(
+        repository,
+        &["config", "user.name", "Forge Teamwork Stress Tests"],
+    );
+    fs::write(repository.join("README.md"), "teamwork stress fixture\n").unwrap();
+    git(repository, &["add", "README.md"]);
+    git(
+        repository,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+    );
+}
+
+fn save_ready_executor(store: &ForgeStore, executor: &str) {
+    let state = ExecutorState {
+        id: executor.to_string(),
+        display_name: format!("{executor} test executor"),
+        command: executor.to_string(),
+        installed: true,
+        configured: true,
+        command_path: Some(std::env::current_exe().unwrap().display().to_string()),
+        config_evidence: vec!["teamwork stress fixture".to_string()],
+        non_interactive_ready: true,
+        probe_evidence: vec!["teamwork stress fixture probe".to_string()],
+        forge_first_ready: false,
+        forge_first_entrypoint: None,
+        harness_status: None,
+        allowed: true,
+        decision_source: "teamwork_stress_test".to_string(),
+        synced_at: Utc::now().to_rfc3339(),
+    };
+    store
+        .save_executor_state(executor, &serde_json::to_value(state).unwrap())
+        .unwrap();
+    store
+        .save_executor_quota(
+            executor,
+            executor,
+            "test",
+            &serde_json::json!({
+                "executor": executor,
+                "provider": executor,
+                "model": "test",
+                "local_vs_non_local": "non_local",
+                "free_vs_paid_if_known": "unknown",
+                "remaining_quota": "available",
+                "rate_limit_risk": "low",
+                "monetary_or_token_cost": "unknown",
+                "latency": "test",
+                "expected_quality": "test",
+                "suitability": "teamwork stress handoff",
+                "source": "teamwork_stress_test",
+                "observed_at": Utc::now().to_rfc3339()
+            }),
+        )
+        .unwrap();
+}
+
 /// 1. Blocked/cognitive tasks halt correctly and trigger `handoff_required`
 #[test]
 fn test_stress_cognitive_tasks_halting() {
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("forge.sqlite");
+    let repository = temp.path().join("repository");
+    let worktree_root = temp.path().join("teamwork-worktrees");
+    initialize_repository(&repository);
 
     // Initiate teamwork goal
     let output = forge()
@@ -82,6 +187,11 @@ fn test_stress_cognitive_tasks_halting() {
             "--output",
             "json",
         ])
+        .arg("--repository")
+        .arg(&repository)
+        .arg("--worktree-root")
+        .arg(&worktree_root)
+        .arg("--allow-repository-mutation")
         .assert()
         .success()
         .get_output()
@@ -89,7 +199,10 @@ fn test_stress_cognitive_tasks_halting() {
         .clone();
 
     let json: Value = serde_json::from_slice(&output).unwrap();
-    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let workflow_id = json["teamwork"]["workflow_id"].as_str().unwrap();
+    let store = ForgeStore::open(&store_path).unwrap();
+    save_ready_executor(&store, "codex");
+    drop(store);
     let connection = Connection::open(&store_path).unwrap();
     let run_id: String = connection
         .query_row(
@@ -111,6 +224,8 @@ fn test_stress_cognitive_tasks_halting() {
                 "step",
                 "--run",
                 run_id.as_str(),
+                "--executor",
+                "codex",
                 "--output",
                 "json",
             ])
@@ -127,6 +242,15 @@ fn test_stress_cognitive_tasks_halting() {
     }
 
     assert_eq!(step_json["status"], "handoff_required");
+    assert_eq!(
+        step_json["drive_before"]["dispatch_frontier"]["admission"]["quota_status"],
+        "fresh"
+    );
+    assert_eq!(
+        step_json["drive_before"]["dispatch_frontier"]["wave"]["assignments"][0]["workspace_claim"]
+            ["binding_scope"],
+        "task"
+    );
     let reason = step_json["reason"].as_str().unwrap();
     assert!(
         reason.contains("requires a real executor execution receipt")

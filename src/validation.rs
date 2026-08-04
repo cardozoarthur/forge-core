@@ -2,7 +2,7 @@ use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutorKind, PersonaRoutingSpec, TaskStatus, Workflow,
 };
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FailedRule {
@@ -27,24 +27,166 @@ pub struct ReworkTask {
     pub reason: String,
 }
 
-pub fn validate_workflow(workflow: &Workflow) -> ValidationReport {
+pub fn validate_workflow_structure(workflow: &Workflow) -> Vec<FailedRule> {
     let mut failed_rules = Vec::new();
-    let mut rework_tasks = Vec::new();
+    let policy = &workflow.core_orchestration;
+    let mut policy_violations = Vec::new();
+    if policy.authority != "forge_core" {
+        policy_violations.push(format!(
+            "authority must be forge_core, found {}",
+            policy.authority
+        ));
+    }
+    for (name, enabled) in [
+        ("dynamic_workflow", policy.dynamic_workflow),
+        ("parallel_task_handoffs", policy.parallel_task_handoffs),
+        ("parallel_agent_nodes", policy.parallel_agent_nodes),
+        ("fan_out_fan_in", policy.fan_out_fan_in),
+        ("mutations_revisioned", policy.mutations_revisioned),
+        ("receipts_required", policy.receipts_required),
+        (
+            "validation_before_promotion",
+            policy.validation_before_promotion,
+        ),
+        ("priority_scheduling", policy.priority_scheduling),
+        ("resource_gates_required", policy.resource_gates_required),
+        ("quota_gates_required", policy.quota_gates_required),
+    ] {
+        if !enabled {
+            policy_violations.push(format!("{name} must be enabled"));
+        }
+    }
+    if !(1..=64).contains(&policy.max_parallel_tasks) {
+        policy_violations.push(format!(
+            "max_parallel_tasks must be between 1 and 64, found {}",
+            policy.max_parallel_tasks
+        ));
+    }
+    if !(1..=64).contains(&policy.max_parallel_agents_per_node) {
+        policy_violations.push(format!(
+            "max_parallel_agents_per_node must be between 1 and 64, found {}",
+            policy.max_parallel_agents_per_node
+        ));
+    }
+    if !policy_violations.is_empty() {
+        failed_rules.push(FailedRule {
+            task_id: "_workflow".to_string(),
+            kind: "core_orchestration".to_string(),
+            message: policy_violations.join("; "),
+        });
+    }
 
+    for (index, revision) in workflow.revisions.iter().enumerate() {
+        let expected_revision = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+        if revision.revision != expected_revision {
+            failed_rules.push(FailedRule {
+                task_id: "_workflow".to_string(),
+                kind: "revision".to_string(),
+                message: format!(
+                    "workflow revision history must be contiguous from 1: expected {expected_revision}, found {}",
+                    revision.revision
+                ),
+            });
+            break;
+        }
+    }
+
+    let mut counts = BTreeMap::<String, usize>::new();
     for task in &workflow.tasks {
+        *counts.entry(task.id.clone()).or_default() += 1;
+    }
+    for (task_id, count) in &counts {
+        if *count > 1 {
+            failed_rules.push(FailedRule {
+                task_id: task_id.clone(),
+                kind: "graph".to_string(),
+                message: format!("duplicate task id {task_id} appears {count} times"),
+            });
+        }
+    }
+
+    let task_ids = counts.keys().cloned().collect::<BTreeSet<_>>();
+    let mut indegree = task_ids
+        .iter()
+        .map(|task_id| (task_id.clone(), 0usize))
+        .collect::<BTreeMap<_, _>>();
+    let mut dependents = BTreeMap::<String, Vec<String>>::new();
+    for task in &workflow.tasks {
+        let mut unique_dependencies = BTreeSet::new();
         for dependency in &task.dependencies {
-            if !workflow
-                .tasks
-                .iter()
-                .any(|candidate| &candidate.id == dependency)
-            {
+            if !unique_dependencies.insert(dependency.clone()) {
+                failed_rules.push(FailedRule {
+                    task_id: task.id.clone(),
+                    kind: "graph".to_string(),
+                    message: format!(
+                        "task {} contains duplicate dependency {dependency}",
+                        task.id
+                    ),
+                });
+                continue;
+            }
+            if dependency == &task.id {
+                failed_rules.push(FailedRule {
+                    task_id: task.id.clone(),
+                    kind: "graph".to_string(),
+                    message: format!("task {} cannot depend on itself", task.id),
+                });
+                continue;
+            }
+            if !task_ids.contains(dependency) {
                 failed_rules.push(FailedRule {
                     task_id: task.id.clone(),
                     kind: "graph".to_string(),
                     message: format!("missing dependency {dependency}"),
                 });
+                continue;
+            }
+            if let Some(value) = indegree.get_mut(&task.id) {
+                *value = value.saturating_add(1);
+            }
+            dependents
+                .entry(dependency.clone())
+                .or_default()
+                .push(task.id.clone());
+        }
+    }
+
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(task_id, degree)| (*degree == 0).then_some(task_id.clone()))
+        .collect::<VecDeque<_>>();
+    let mut visited = BTreeSet::new();
+    while let Some(task_id) = ready.pop_front() {
+        if !visited.insert(task_id.clone()) {
+            continue;
+        }
+        if let Some(children) = dependents.get(&task_id) {
+            for child in children {
+                if let Some(degree) = indegree.get_mut(child) {
+                    *degree = degree.saturating_sub(1);
+                    if *degree == 0 {
+                        ready.push_back(child.clone());
+                    }
+                }
             }
         }
+    }
+    for task_id in task_ids.difference(&visited) {
+        failed_rules.push(FailedRule {
+            task_id: task_id.clone(),
+            kind: "graph".to_string(),
+            message: format!("task {task_id} participates in a dependency cycle"),
+        });
+    }
+
+    failed_rules
+}
+
+pub fn validate_workflow(workflow: &Workflow) -> ValidationReport {
+    let mut failed_rules = validate_workflow_structure(workflow);
+    let mut rework_tasks = Vec::new();
+
+    for task in &workflow.tasks {
         if task.status != TaskStatus::Completed {
             failed_rules.push(FailedRule {
                 task_id: task.id.clone(),
@@ -63,6 +205,22 @@ pub fn validate_workflow(workflow: &Workflow) -> ValidationReport {
                 goal: task.goal.clone(),
                 reason: "goal evidence is missing or not definitively ready; return to work"
                     .to_string(),
+            });
+        }
+        if !task.active_impediments.is_empty() {
+            failed_rules.push(FailedRule {
+                task_id: task.id.clone(),
+                kind: "impediment".to_string(),
+                message: format!(
+                    "task {} has {} active impediment(s)",
+                    task.id,
+                    task.active_impediments.len()
+                ),
+            });
+            rework_tasks.push(ReworkTask {
+                task_id: task.id.clone(),
+                goal: task.goal.clone(),
+                reason: "active impediments must be cleared before promotion".to_string(),
             });
         }
         if let Some(persona) = &task.persona {
@@ -380,6 +538,7 @@ mod tests {
             title: "extra".to_string(),
             goal: "extra goal".to_string(),
             dependencies: vec![],
+            active_impediments: vec![],
             context_requirements: vec![],
             validation_rules: vec![],
             expected_output: "output".to_string(),

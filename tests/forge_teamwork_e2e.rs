@@ -1,9 +1,16 @@
 use assert_cmd::Command;
+use chrono::Utc;
+use forge_core::executor::ExecutorState;
 use forge_core::storage::ForgeStore;
+use forge_core::teamwork::{prepare_teamwork_worktrees, TeamworkWorktreePrepareOptions};
 use predicates::prelude::PredicateBooleanExt;
 use rusqlite::{params, Connection};
+use std::collections::BTreeSet;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::path::Path;
+use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -76,6 +83,194 @@ fn stored_run_id_for_workflow(store_path: &std::path::Path, workflow_id: &str) -
             |row| row.get(0),
         )
         .unwrap()
+}
+
+fn git(repository: &Path, args: &[&str]) {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn initialize_repository(repository: &Path) {
+    fs::create_dir_all(repository).unwrap();
+    let output = ProcessCommand::new("git")
+        .arg("init")
+        .arg("--initial-branch=main")
+        .arg(repository)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    git(
+        repository,
+        &["config", "user.email", "forge@example.invalid"],
+    );
+    git(
+        repository,
+        &["config", "user.name", "Forge Teamwork E2E Tests"],
+    );
+    fs::write(repository.join("README.md"), "teamwork e2e fixture\n").unwrap();
+    git(repository, &["add", "README.md"]);
+    git(
+        repository,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+    );
+}
+
+fn save_ready_executor(store: &ForgeStore, executor: &str) {
+    let state = ExecutorState {
+        id: executor.to_string(),
+        display_name: format!("{executor} test executor"),
+        command: executor.to_string(),
+        installed: true,
+        configured: true,
+        command_path: Some(std::env::current_exe().unwrap().display().to_string()),
+        config_evidence: vec!["teamwork e2e fixture".to_string()],
+        non_interactive_ready: true,
+        probe_evidence: vec!["teamwork e2e fixture probe".to_string()],
+        forge_first_ready: false,
+        forge_first_entrypoint: None,
+        harness_status: None,
+        allowed: true,
+        decision_source: "teamwork_e2e_test".to_string(),
+        synced_at: Utc::now().to_rfc3339(),
+    };
+    store
+        .save_executor_state(executor, &serde_json::to_value(state).unwrap())
+        .unwrap();
+    store
+        .save_executor_quota(
+            executor,
+            executor,
+            "test",
+            &serde_json::json!({
+                "executor": executor,
+                "provider": executor,
+                "model": "test",
+                "local_vs_non_local": "non_local",
+                "free_vs_paid_if_known": "unknown",
+                "remaining_quota": "available",
+                "rate_limit_risk": "low",
+                "monetary_or_token_cost": "unknown",
+                "latency": "test",
+                "expected_quality": "test",
+                "suitability": "teamwork e2e",
+                "source": "teamwork_e2e_test",
+                "observed_at": Utc::now().to_rfc3339()
+            }),
+        )
+        .unwrap();
+}
+
+fn prepare_teamwork_execution_fixture(temporary_root: &Path, store_path: &Path, workflow_id: &str) {
+    let repository = temporary_root.join("repository");
+    let worktree_root = temporary_root.join("teamwork-worktrees");
+    initialize_repository(&repository);
+    let store = ForgeStore::open(store_path).unwrap();
+    for executor in ["codex", "agy", "opencode", "claude"] {
+        save_ready_executor(&store, executor);
+    }
+    prepare_teamwork_worktrees(
+        &store,
+        TeamworkWorktreePrepareOptions {
+            workflow_id: workflow_id.to_string(),
+            repository,
+            worktree_root,
+            branch_prefix: "forge/teamwork-e2e".to_string(),
+            origin: "teamwork-e2e-test".to_string(),
+            allow_repository_mutation: true,
+        },
+    )
+    .unwrap();
+}
+
+fn canonical_executor(executor: &str) -> &str {
+    match executor {
+        "antigravity" | "antigravity-cli" | "agy-cli" => "agy",
+        other => other,
+    }
+}
+
+fn next_request_executor(store_path: &Path, run_id: &str) -> String {
+    let store = ForgeStore::open(store_path).unwrap();
+    let run = forge_core::request::load_run_record(&store, run_id).unwrap();
+    let workflow = store.load_workflow(&run.workflow_id).unwrap();
+    let completed = workflow
+        .tasks
+        .iter()
+        .filter(|task| task.status == forge_core::graph::TaskStatus::Completed)
+        .map(|task| task.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let Some(task) = workflow.tasks.iter().find(|task| {
+        task.status == forge_core::graph::TaskStatus::Pending
+            && task
+                .dependencies
+                .iter()
+                .all(|dependency| completed.contains(dependency.as_str()))
+    }) else {
+        return "forge_cli".to_string();
+    };
+    task.node_brain_routing
+        .default_brain
+        .as_deref()
+        .or_else(|| {
+            task.node_brain_routing
+                .agent_slots
+                .iter()
+                .find_map(|slot| slot.brain_id.as_deref())
+        })
+        .map(canonical_executor)
+        .unwrap_or_else(|| {
+            if task.node_brain_routing.scope == "agentic_ai_node" {
+                "codex"
+            } else {
+                "forge_cli"
+            }
+        })
+        .to_string()
+}
+
+fn dispatch_task_for_completion(store_path: &Path, run_id: &str, task_id: &str, executor: &str) {
+    let output = forge()
+        .arg("--store")
+        .arg(store_path)
+        .args([
+            "request",
+            "step",
+            "--run",
+            run_id,
+            "--executor",
+            executor,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let step: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(step["status"], "handoff_required", "{step:#}");
+    assert_eq!(step_task_id(&step), Some(task_id));
 }
 
 // ============================================================================
@@ -593,6 +788,7 @@ fn test_f3_cognitive_task_handoff_halts() {
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = json["workflow_id"].as_str().unwrap();
+    prepare_teamwork_execution_fixture(temp.path(), &store_path, workflow_id);
     let run_id = stored_run_id_for_workflow(&store_path, workflow_id);
     let run_id = run_id.as_str();
 
@@ -601,7 +797,16 @@ fn test_f3_cognitive_task_handoff_halts() {
         let step_output = forge()
             .arg("--store")
             .arg(store_path.to_str().unwrap())
-            .args(["request", "step", "--run", run_id, "--output", "json"])
+            .args([
+                "request",
+                "step",
+                "--run",
+                run_id,
+                "--executor",
+                "codex",
+                "--output",
+                "json",
+            ])
             .assert()
             .success()
             .get_output()
@@ -709,10 +914,11 @@ fn test_f3_checkpoint_saving_and_update() {
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = json["workflow_id"].as_str().unwrap();
+    prepare_teamwork_execution_fixture(temp.path(), &store_path, workflow_id);
     let run_id = stored_run_id_for_workflow(&store_path, workflow_id);
     let run_id = run_id.as_str();
-    let first_task_id = "task-005";
-    wait_for_task_ready(&store_path, run_id, first_task_id);
+    let (first_task_id, first_executor, context_sha256, workflow_revision) =
+        wait_for_task_ready(&store_path, run_id, "task-005");
 
     let complete_out = forge()
         .arg("--store")
@@ -723,13 +929,15 @@ fn test_f3_checkpoint_saving_and_update() {
             "--run",
             run_id,
             "--task",
-            first_task_id,
+            &first_task_id,
             "--executor",
-            "codex",
+            &first_executor,
             "--summary",
             "Task completed successfully",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "teamwork checkpoint receipt passed",
             "--estimated-usd",
@@ -747,11 +955,37 @@ fn test_f3_checkpoint_saving_and_update() {
         .stdout
         .clone();
     println!("COMPLETE OUT: {}", String::from_utf8(complete_out).unwrap());
+    let workflow_revision = workflow_revision.to_string();
+    forge()
+        .arg("--store")
+        .arg(store_path.to_str().unwrap())
+        .args([
+            "task",
+            "checkpoint",
+            "--workflow",
+            workflow_id,
+            "--task",
+            &first_task_id,
+            "--executor",
+            &first_executor,
+            "--state",
+            "completed",
+            "--summary",
+            "Task completion checkpoint recorded by the executor fixture",
+            "--context-sha256",
+            &context_sha256,
+            "--workflow-revision",
+            &workflow_revision,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
 
     let conn = Connection::open(&store_path).unwrap();
     let mut stmt = conn.prepare("SELECT state, executor FROM task_checkpoints WHERE workflow_id = ? AND task_id = ? AND executor = ?").unwrap();
     let mut rows = stmt
-        .query(params![workflow_id, first_task_id, "codex"])
+        .query(params![workflow_id, first_task_id, first_executor])
         .unwrap();
     let row = rows
         .next()
@@ -760,7 +994,7 @@ fn test_f3_checkpoint_saving_and_update() {
     let state_str: String = row.get(0).unwrap();
     let executor: String = row.get(1).unwrap();
     assert!(!state_str.is_empty());
-    assert_eq!(executor, "codex");
+    assert_eq!(executor, first_executor);
 }
 
 /// Test 15: Running a workflow simulation outputs scheduling details and predicted costs
@@ -1579,6 +1813,10 @@ fn test_t2_f3_complete_task_extreme_values() {
         ],
     )
     .unwrap();
+    save_ready_executor(&store, "codex");
+    drop(conn);
+    drop(store);
+    dispatch_task_for_completion(&store_path, &run.run_id, "task-001", "codex");
 
     let _assert = forge()
         .arg("--store")
@@ -1596,6 +1834,8 @@ fn test_t2_f3_complete_task_extreme_values() {
             "Extreme completion",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "extreme-value completion receipt passed",
             "--estimated-usd",
@@ -1869,6 +2109,10 @@ fn test_t3_heuristics_execution_cost_ledger_updates() {
         ],
     )
     .unwrap();
+    save_ready_executor(&store, "codex");
+    drop(conn);
+    drop(store);
+    dispatch_task_for_completion(&store_path, &run_id, "task-001", "codex");
 
     let _assert = forge()
         .arg("--store")
@@ -1886,6 +2130,8 @@ fn test_t3_heuristics_execution_cost_ledger_updates() {
             "Completed task for cost",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "cost-ledger completion receipt passed",
             "--estimated-usd",
@@ -2021,8 +2267,6 @@ fn bind_all_contexts(store_path: &std::path::Path, workflow_id: &str) {
                         workflow_id,
                         "--task",
                         task_id,
-                        "--project-root",
-                        ".",
                         "--output",
                         "json",
                     ])
@@ -2033,43 +2277,142 @@ fn bind_all_contexts(store_path: &std::path::Path, workflow_id: &str) {
     }
 }
 
-fn wait_for_task_ready(store_path: &std::path::Path, run_id: &str, expected_task_id: &str) {
+fn step_task_id(step: &serde_json::Value) -> Option<&str> {
+    step["stepped_task"]["task_id"]
+        .as_str()
+        .or_else(|| step["handoff_task"]["task_id"].as_str())
+        .or_else(|| step["drive_before"]["handoff_task"]["task_id"].as_str())
+        .or_else(|| {
+            step["drive_before"]["dispatch_frontier"]["wave"]["assignments"][0]["task_id"].as_str()
+        })
+        .or_else(|| step["drive_before"]["parallel_handoff_tasks"][0]["task_id"].as_str())
+        .or_else(|| step["parallel_handoff_tasks"][0]["task_id"].as_str())
+}
+
+fn step_selected_executor<'a>(step: &'a serde_json::Value, requested_executor: &'a str) -> &'a str {
+    step["drive_before"]["dispatch_frontier"]["wave"]["assignments"][0]["selected_executor"]
+        .as_str()
+        .or_else(|| {
+            step["drive_after"]["dispatch_frontier"]["wave"]["assignments"][0]["selected_executor"]
+                .as_str()
+        })
+        .map(canonical_executor)
+        .unwrap_or(requested_executor)
+}
+
+fn task_matches_expected(actual_task_id: &str, expected_task_id: &str) -> bool {
+    actual_task_id == expected_task_id
+        || actual_task_id
+            .strip_prefix(expected_task_id)
+            .is_some_and(|suffix| suffix.starts_with('-'))
+}
+
+fn apply_deferred_teamwork_git_fan_in(
+    store_path: &std::path::Path,
+    step: &serde_json::Value,
+) -> bool {
+    let Some(workflow_id) = step["workflow_id"]
+        .as_str()
+        .or_else(|| step["drive_before"]["workflow_id"].as_str())
+    else {
+        return false;
+    };
+    let deferred = step["drive_before"]["dispatch_frontier"]["wave"]["deferred"]
+        .as_array()
+        .or_else(|| step["dispatch_frontier"]["wave"]["deferred"].as_array());
+    let Some(deferred) = deferred else {
+        return false;
+    };
+    let task_ids = deferred
+        .iter()
+        .filter(|task| task["status"] == "deferred_git_fan_in_required")
+        .filter_map(|task| task["task_id"].as_str())
+        .collect::<BTreeSet<_>>();
+    for task_id in &task_ids {
+        forge()
+            .arg("--store")
+            .arg(store_path.to_str().unwrap())
+            .args([
+                "worktree",
+                "integrate-dependencies",
+                "--workflow",
+                workflow_id,
+                "--task",
+                task_id,
+                "--allow-repository-mutation",
+                "--approved-by",
+                "teamwork-e2e-test",
+                "--reason",
+                "converge completed E2E dependency worktrees before join dispatch",
+                "--origin",
+                "teamwork-e2e-test",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+    !task_ids.is_empty()
+}
+
+fn wait_for_task_ready(
+    store_path: &std::path::Path,
+    run_id: &str,
+    expected_task_id: &str,
+) -> (String, String, String, u64) {
     let mut attempts = 0;
     loop {
+        let requested_executor = next_request_executor(store_path, run_id);
         let output = forge()
             .arg("--store")
             .arg(store_path.to_str().unwrap())
-            .args(["request", "step", "--run", run_id, "--output", "json"])
+            .args([
+                "request",
+                "step",
+                "--run",
+                run_id,
+                "--executor",
+                &requested_executor,
+                "--output",
+                "json",
+            ])
             .assert()
             .success()
             .get_output()
             .stdout
             .clone();
         let step_json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-
-        let mut current_task_id = String::new();
-        if let Some(task_id) = step_json["stepped_task"]["task_id"].as_str() {
-            current_task_id = task_id.to_string();
-        } else if let Some(task_id) = step_json["handoff_task"]["task_id"].as_str() {
-            current_task_id = task_id.to_string();
-        } else if let Some(task_id) = step_json["drive_before"]["handoff_task"]["task_id"].as_str()
-        {
-            current_task_id = task_id.to_string();
-        } else if let Some(tasks) = step_json["drive_before"]["parallel_handoff_tasks"].as_array() {
-            if !tasks.is_empty() {
-                current_task_id = tasks[0]["task_id"].as_str().unwrap_or("").to_string();
-            }
-        } else if let Some(tasks) = step_json["parallel_handoff_tasks"].as_array() {
-            if !tasks.is_empty() {
-                current_task_id = tasks[0]["task_id"].as_str().unwrap_or("").to_string();
-            }
+        if apply_deferred_teamwork_git_fan_in(store_path, &step_json) {
+            continue;
         }
-
-        if current_task_id == expected_task_id {
-            break;
-        }
-        if step_json["status"] == "handoff_required" && !current_task_id.is_empty() {
-            complete_task_with_test_receipt(store_path, run_id, &current_task_id);
+        if step_json["status"] == "handoff_required" {
+            let current_task_id = step_task_id(&step_json)
+                .expect("handoff_required must identify the task holding the active lease");
+            let selected_executor =
+                step_selected_executor(&step_json, &requested_executor).to_string();
+            if task_matches_expected(current_task_id, expected_task_id) {
+                let context_sha256 = step_json["drive_before"]["dispatch_frontier"]["wave"]
+                    ["assignments"][0]["context_sha256"]
+                    .as_str()
+                    .or_else(|| step_json["stepped_task"]["context_sha256"].as_str())
+                    .expect("handoff assignment must preserve its context hash");
+                let workflow_revision = step_json["drive_before"]["dispatch_frontier"]["wave"]
+                    ["workflow_revision"]
+                    .as_u64()
+                    .expect("handoff assignment must preserve its workflow revision");
+                return (
+                    current_task_id.to_string(),
+                    selected_executor,
+                    context_sha256.to_string(),
+                    workflow_revision,
+                );
+            }
+            complete_task_with_test_receipt(
+                store_path,
+                run_id,
+                current_task_id,
+                &selected_executor,
+            );
             continue;
         }
 
@@ -2084,7 +2427,12 @@ fn wait_for_task_ready(store_path: &std::path::Path, run_id: &str, expected_task
     }
 }
 
-fn complete_task_with_test_receipt(store_path: &std::path::Path, run_id: &str, task_id: &str) {
+fn complete_task_with_test_receipt(
+    store_path: &std::path::Path,
+    run_id: &str,
+    task_id: &str,
+    executor: &str,
+) {
     forge()
         .arg("--store")
         .arg(store_path.to_str().unwrap())
@@ -2096,11 +2444,13 @@ fn complete_task_with_test_receipt(store_path: &std::path::Path, run_id: &str, t
             "--task",
             task_id,
             "--executor",
-            "forge_cli",
+            executor,
             "--summary",
             "Teamwork test executor completed the delegated task.",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "teamwork test execution receipt passed",
             "--output",
@@ -2113,16 +2463,29 @@ fn complete_task_with_test_receipt(store_path: &std::path::Path, run_id: &str, t
 fn wait_for_run_completed(store_path: &std::path::Path, run_id: &str) {
     let mut attempts = 0;
     loop {
+        let requested_executor = next_request_executor(store_path, run_id);
         let output = forge()
             .arg("--store")
             .arg(store_path.to_str().unwrap())
-            .args(["request", "step", "--run", run_id, "--output", "json"])
+            .args([
+                "request",
+                "step",
+                "--run",
+                run_id,
+                "--executor",
+                &requested_executor,
+                "--output",
+                "json",
+            ])
             .assert()
             .success()
             .get_output()
             .stdout
             .clone();
         let step_json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        if apply_deferred_teamwork_git_fan_in(store_path, &step_json) {
+            continue;
+        }
         if step_json["status"] == "completed"
             || step_json["status"] == "complete"
             || step_json["drive_before"]["status"] == "completed"
@@ -2130,13 +2493,10 @@ fn wait_for_run_completed(store_path: &std::path::Path, run_id: &str) {
         {
             break;
         }
-        let current_task_id = step_json["stepped_task"]["task_id"]
-            .as_str()
-            .or_else(|| step_json["handoff_task"]["task_id"].as_str())
-            .or_else(|| step_json["drive_before"]["handoff_task"]["task_id"].as_str());
         if step_json["status"] == "handoff_required" {
-            if let Some(task_id) = current_task_id {
-                complete_task_with_test_receipt(store_path, run_id, task_id);
+            if let Some(task_id) = step_task_id(&step_json) {
+                let selected_executor = step_selected_executor(&step_json, &requested_executor);
+                complete_task_with_test_receipt(store_path, run_id, task_id, selected_executor);
                 continue;
             }
         }
@@ -2171,6 +2531,7 @@ fn test_t4_scenario_1_jwt_auth() {
 
     let plan_json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = plan_json["workflow_id"].as_str().unwrap();
+    prepare_teamwork_execution_fixture(temp.path(), &store_path, workflow_id);
     let run_id = stored_run_id_for_workflow(&store_path, workflow_id);
     let run_id = run_id.as_str();
 
@@ -2220,7 +2581,8 @@ fn test_t4_scenario_1_jwt_auth() {
     bind_all_contexts(&store_path, workflow_id);
 
     // 4. Complete task-005 (Worker implementation)
-    wait_for_task_ready(&store_path, run_id, "task-005");
+    let (implementation_task_id, implementation_executor, _, _) =
+        wait_for_task_ready(&store_path, run_id, "task-005");
     forge()
         .arg("--store")
         .arg(store_path.to_str().unwrap())
@@ -2230,13 +2592,15 @@ fn test_t4_scenario_1_jwt_auth() {
             "--run",
             run_id,
             "--task",
-            "task-005",
+            &implementation_task_id,
             "--executor",
-            "codex",
+            &implementation_executor,
             "--summary",
             "Worker successfully implemented Rust JWT signing and verification code module",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "JWT implementation receipt passed",
             "--output",
@@ -2246,7 +2610,8 @@ fn test_t4_scenario_1_jwt_auth() {
         .success();
 
     // 5. Complete task-006 (Validation/cargo test)
-    wait_for_task_ready(&store_path, run_id, "task-006");
+    let (validation_task_id, validation_executor, _, _) =
+        wait_for_task_ready(&store_path, run_id, "task-006");
     forge()
         .arg("--store")
         .arg(store_path.to_str().unwrap())
@@ -2256,13 +2621,15 @@ fn test_t4_scenario_1_jwt_auth() {
             "--run",
             run_id,
             "--task",
-            "task-006",
+            &validation_task_id,
             "--executor",
-            "antigravity",
+            &validation_executor,
             "--summary",
             "Validation run successful",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "JWT validation receipt passed",
             "--output",
@@ -2272,7 +2639,8 @@ fn test_t4_scenario_1_jwt_auth() {
         .success();
 
     // 6. Complete task-008 (Auditor review & documentation)
-    wait_for_task_ready(&store_path, run_id, "task-008");
+    let (audit_task_id, audit_executor, _, _) =
+        wait_for_task_ready(&store_path, run_id, "task-008");
     forge()
         .arg("--store")
         .arg(store_path.to_str().unwrap())
@@ -2282,13 +2650,15 @@ fn test_t4_scenario_1_jwt_auth() {
             "--run",
             run_id,
             "--task",
-            "task-008",
+            &audit_task_id,
             "--executor",
-            "opencode",
+            &audit_executor,
             "--summary",
             "Auditor reviewed and verified JWT module logic passes security constraints",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "JWT audit receipt passed",
             "--output",
@@ -2321,6 +2691,7 @@ fn test_t4_scenario_2_csv_pipeline() {
 
     let plan_json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = plan_json["workflow_id"].as_str().unwrap();
+    prepare_teamwork_execution_fixture(temp.path(), &store_path, workflow_id);
     let run_id = stored_run_id_for_workflow(&store_path, workflow_id);
     let run_id = run_id.as_str();
 
@@ -2388,7 +2759,8 @@ fn test_t4_scenario_2_csv_pipeline() {
     bind_all_contexts(&store_path, workflow_id);
 
     // 5. Complete task-005
-    wait_for_task_ready(&store_path, run_id, "task-005");
+    let (implementation_task_id, implementation_executor, _, _) =
+        wait_for_task_ready(&store_path, run_id, "task-005");
     forge()
         .arg("--store")
         .arg(store_path.to_str().unwrap())
@@ -2398,13 +2770,15 @@ fn test_t4_scenario_2_csv_pipeline() {
             "--run",
             run_id,
             "--task",
-            "task-005",
+            &implementation_task_id,
             "--executor",
-            "antigravity",
+            &implementation_executor,
             "--summary",
             "CSV pipeline task executed and completed successfully",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "CSV implementation receipt passed",
             "--output",
@@ -2414,7 +2788,8 @@ fn test_t4_scenario_2_csv_pipeline() {
         .success();
 
     // 6. Complete task-006
-    wait_for_task_ready(&store_path, run_id, "task-006");
+    let (validation_task_id, validation_executor, _, _) =
+        wait_for_task_ready(&store_path, run_id, "task-006");
     forge()
         .arg("--store")
         .arg(store_path.to_str().unwrap())
@@ -2424,13 +2799,15 @@ fn test_t4_scenario_2_csv_pipeline() {
             "--run",
             run_id,
             "--task",
-            "task-006",
+            &validation_task_id,
             "--executor",
-            "antigravity",
+            &validation_executor,
             "--summary",
             "Validation run successful",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "CSV validation receipt passed",
             "--output",
@@ -2440,7 +2817,8 @@ fn test_t4_scenario_2_csv_pipeline() {
         .success();
 
     // 7. Complete task-008
-    wait_for_task_ready(&store_path, run_id, "task-008");
+    let (documentation_task_id, documentation_executor, _, _) =
+        wait_for_task_ready(&store_path, run_id, "task-008");
     forge()
         .arg("--store")
         .arg(store_path.to_str().unwrap())
@@ -2450,13 +2828,15 @@ fn test_t4_scenario_2_csv_pipeline() {
             "--run",
             run_id,
             "--task",
-            "task-008",
+            &documentation_task_id,
             "--executor",
-            "antigravity",
+            &documentation_executor,
             "--summary",
             "CSV pipeline documentation generated",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "CSV documentation receipt passed",
             "--output",
@@ -2602,6 +2982,7 @@ fn test_t4_scenario_5_adversarial_audit() {
 
     let plan_json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = plan_json["workflow_id"].as_str().unwrap();
+    prepare_teamwork_execution_fixture(temp.path(), &store_path, workflow_id);
     let run_id = stored_run_id_for_workflow(&store_path, workflow_id);
     let run_id = run_id.as_str();
 
@@ -2618,7 +2999,8 @@ fn test_t4_scenario_5_adversarial_audit() {
     bind_all_contexts(&store_path, workflow_id);
 
     // 3. Complete task-005
-    wait_for_task_ready(&store_path, run_id, "task-005");
+    let (implementation_task_id, implementation_executor, _, _) =
+        wait_for_task_ready(&store_path, run_id, "task-005");
     forge()
         .arg("--store")
         .arg(store_path.to_str().unwrap())
@@ -2628,13 +3010,15 @@ fn test_t4_scenario_5_adversarial_audit() {
             "--run",
             run_id,
             "--task",
-            "task-005",
+            &implementation_task_id,
             "--executor",
-            "codex",
+            &implementation_executor,
             "--summary",
             "Worker implemented constant-time comparison helper (constant_time_compare) to secure signatures",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "security implementation receipt passed",
             "--output",
@@ -2644,7 +3028,8 @@ fn test_t4_scenario_5_adversarial_audit() {
         .success();
 
     // 4. Complete task-006
-    wait_for_task_ready(&store_path, run_id, "task-006");
+    let (validation_task_id, validation_executor, _, _) =
+        wait_for_task_ready(&store_path, run_id, "task-006");
     forge()
         .arg("--store")
         .arg(store_path.to_str().unwrap())
@@ -2654,13 +3039,15 @@ fn test_t4_scenario_5_adversarial_audit() {
             "--run",
             run_id,
             "--task",
-            "task-006",
+            &validation_task_id,
             "--executor",
-            "opencode",
+            &validation_executor,
             "--summary",
             "Validation run successful",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "security validation receipt passed",
             "--output",
@@ -2670,7 +3057,8 @@ fn test_t4_scenario_5_adversarial_audit() {
         .success();
 
     // 5. Complete task-008
-    wait_for_task_ready(&store_path, run_id, "task-008");
+    let (audit_task_id, audit_executor, _, _) =
+        wait_for_task_ready(&store_path, run_id, "task-008");
     let complete_out = forge()
         .arg("--store")
         .arg(store_path.to_str().unwrap())
@@ -2680,13 +3068,15 @@ fn test_t4_scenario_5_adversarial_audit() {
             "--run",
             run_id,
             "--task",
-            "task-008",
+            &audit_task_id,
             "--executor",
-            "opencode",
+            &audit_executor,
             "--summary",
             "Auditor verified that the constant-time comparison fix successfully mitigates the signature timing side-channel attack",
             "--evidence-command",
             "true",
+            "--evidence-exit-code",
+            "0",
             "--evidence-summary",
             "security audit receipt passed",
             "--output",

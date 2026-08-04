@@ -21,7 +21,7 @@ Forge owns:
 - workflow cost accounting;
 - promotion and self-improvement gates.
 
-Codex, OpenCode, Gemini CLI, Claude Code, Ollama and other engines should be usable as execution targets. They receive bounded task packets and return structured results. Forge decides what context they receive, what they are allowed to do, how their output is validated and whether the workflow can advance.
+Codex, Agy/Antigravity, OpenCode, legacy Gemini CLI, Claude Code, Ollama and other engines should be usable as execution targets. They receive bounded task packets and return structured results. Forge decides what context they receive, what they are allowed to do, how their output is validated and whether the workflow can advance.
 
 Close coupling is still valuable when it reduces friction. The target architecture supports both directions:
 
@@ -40,7 +40,7 @@ Close coupling is still valuable when it reduces friction. The target architectu
 - Addon registry: loads first-party and project-local Addon manifests, exposes capabilities, permissions, views, workflow extensions, artifact types, event types and integrations.
 - Capability registry: resolves goals into required capabilities and missing capabilities before workflow planning. The Core consumes capability ids and workflow-extension contracts; domain-specific behavior must live behind Addons.
 - Execution runtime: coordinates task execution and trace collection.
-- Worktree execution workspace: registers concrete Git worktrees, persists revisioned workflow/task bindings and approved manifest hashes, guards intended modification paths through explicit predecessors, routes effective policy into context/handoff, and emits guarded preview/test plans and receipts.
+- Worktree execution workspace: registers concrete Git worktrees, persists revisioned workflow/task bindings and approved manifest hashes, guards intended modification paths through explicit predecessors, routes effective policy into context/handoff, emits guarded preview/test plans and receipts, and performs rollback-safe dependency fan-in for joins.
 - CLI integration: wraps external brain CLIs with Forge-owned context, lineage, headroom, shim and execution controls. Its internal module is `cli_integration`; the public `forge harness` and `forge.harness.*` namespaces remain compatibility contracts.
 - Executor policy: detects installed/configured CLIs and persists human authorization before use.
 - Runtime substrate policy: detects Docker/Kubernetes/Knative and persists human authorization before use.
@@ -52,11 +52,88 @@ Close coupling is still valuable when it reduces friction. The target architectu
 - Operational memory: persists workflows, events and generated artifacts.
 - Self-improvement loop: generates experimental changes without unrestricted promotion.
 
+## Dynamic and Parallel Core Orchestration
+
+Dynamic workflows and parallel teamwork are universal Forge Core capabilities, not
+optional Addons. Every persisted workflow carries a `CoreOrchestrationSpec` owned
+by `forge_core`. The contract requires revisioned graph mutations, priority-aware
+parallel handoffs, fan-out/fan-in support, executor receipts, quota and host
+resource gates, and validation before promotion.
+
+The primary creation surfaces accept one explicit, provider-agnostic N:N
+contract. CLI `forge plan` and `forge request start` use repeatable
+`--lane <id>=<executor>:<count>` plus optional `--max-parallel-agents`; MCP
+`forge.run.start` accepts equivalent structured `lanes` and
+`max_parallel_agents`. All three call the same Core materializer and persist
+the normalized `forge.core.parallel_team.v1` declaration at
+`core_orchestration.parallel_team`. The specialized `forge teamwork` surface
+remains available, but it is not a separate orchestration authority.
+
+Parallel topology is opt-in and fail-closed. With no lane declaration, the
+generic planner keeps its serial DAG. Forge does not infer fan-out from vague
+natural-language references to teams, and it rejects duplicate/invalid lanes,
+zero counts, capacity inconsistencies and `auto` as a lane executor. Planning
+persists a graph; it does not itself execute external agents. The existing
+explicit `--detached` mode may create a run and background driver, but process
+launch remains governed by the runtime execution boundary.
+
+The productive executor bridge is `forge request execute-wave`. A dispatch wave
+may contain several tasks routed independently to the same or different brains
+(for example, three Agy frontend branches and five Codex backend branches).
+Admission is per task and remains bounded by the workflow limit, host resources,
+fresh executor quota and graph readiness. Mutating Codex/Agy tasks require
+task-scoped Git worktree claims; runtime execution is deduplicated by workflow,
+task and lease, and every receipt preserves its dispatch revision, task version
+and context hash. Executor exit is operational evidence only. Task completion
+and promotion remain behind the explicit validation path.
+
+The task graph may change while a workflow is running. A caller can add or update
+a pending task, reprioritize it, add or remove a dependency, or set and clear an
+active impediment through the same Core functions used by CLI, MCP and inbound
+events. Every effective mutation is transactional, creates one workflow revision
+and one correlated event, supports an expected-revision guard, and revalidates
+unique task ids and an acyclic dependency graph. Terminal workflows, mission-bound
+graphs without a mission-aware adapter, leased tasks and task definitions already
+running or completed fail closed.
+
+The request runtime computes a deterministic priority frontier and may acquire
+multiple independent task handoffs and leases in one execution wave. The workflow
+policy supplies the configured ceiling; current CPU load, available memory, swap,
+disk pressure and fresh executor quota evidence may reduce that ceiling. Missing
+or stale evidence reduces concurrency instead of permitting unrestricted fan-out.
+An assignment with `execution_started=false` proves admission and lease ownership,
+not that an external executor process has already started.
+
+Mission squads compile supported orchestration topologies into the persisted task
+DAG. `fan_out_fan_in` materializes an intake node, multiple independent delivery
+branches and a join/reviewer node that depends on every branch. Mission drive may
+return several active `assignments` in one wave while preserving the legacy
+singular `assignment` field as an alias of the first item. The join remains
+blocked until every parent has an accepted receipt and the relevant quality gates
+pass.
+
+Teamwork joins and the final auditor additionally carry the Core validation rule
+`git_dependency_fan_in`. After all dependency tasks are completed,
+`forge worktree integrate-dependencies --workflow <workflow-id> --task <join-id>`
+produces a mutation-free plan. Applying the same command with
+`--allow-repository-mutation`, `--approved-by` and `--reason` takes a non-blocking
+destination lock, revalidates task-scoped ownership, worktree identity,
+configuration hash, frozen binding revisions, clean trees, source heads and
+changed-path hashes, then creates one deterministic-order integration commit.
+The destination rebind and hashed receipt event are persisted in one SQLite
+transaction. A conflict or persistence failure restores and verifies the exact
+pre-integration head. Replay is idempotent, but a missing, malformed, superseded
+or drifted receipt fails closed and keeps the join or auditor blocked.
+
 ## v0 Boundary
 
-The current version is a local Rust CLI, MCP tool surface and skill package. It includes SQLite persistence, simulated execution, AI/non-AI/wait/notification task kinds, executor sync/policy, runtime substrate sync/policy, goal-oriented work items, rework validation, runtime goal/artifact mutation, MCP tools for workflow list/inspect/start/resume/status/context/validation/artifact fetch, cluster registry/placement metadata, per-node cluster scheduling posture, explicit remote-AI placement blocking, cluster handoff manifests, cost report generation, controlled improvement artifacts with changelog generation, Addon catalog inspection, persistent Addon lifecycle registry, SQLite-materialized Addon capability indexing, trusted local Addon package marketplace indexing with package fetch/import into a local cache, local-process and controlled external-API Addon worker execution over HTTP/HTTPS with env-backed or credential-vault-backed HMAC/Bearer auth through the runtime dispatch ledger, external planning-strategy execution with Core reference equivalence audits, token-headroom reports, Forge-first CLI wrapper planning, non-destructive PATH shim installation, reversible stdout/stderr headroom receipts and global timeline events for guarded CLI execution, capability-first intent resolution, project operating context loading with brand identity/design system/operating policy, a persisted identity registry for organization/brand/product/user/channel records, cross-channel identity links/resolution, role-derived identity membership permissions, a physical tenant index for workflows/runs/artifacts/events, tenant-aware event stream projection, a tenant-aware global inbound event inbox with route support for `start_workflow`, `continue_workflow`, `modify_workflow`, `pause_workflow`, `resume_workflow` and validation-gated `complete_workflow`, a first bounded HTTP webhook ingress listener for real POST requests, a tenant-aware managed event service registry plus bounded worker and webhook-ingress service execution with persistent lease/heartbeat/health, a first generic `http`/`webhook` egress emitter for declared Addon event adapters with optional HMAC-SHA256 signing or Bearer token injection from env or credential-vault over `http://` or `https://`, plus a governed Telegram Bot API egress transport for message/document/report delivery through the built-in notification Addon. It does not yet include remote distributed execution, real provider adapters, SaaS UI, remote Addon registry mirrors/auto-update, WASM plugins, automatic first-party builder replacement by external planners, production transport-specific WhatsApp/email adapters or fully decoupled production transport workers.
+The current version is a local Rust CLI, MCP tool surface and skill package. It includes SQLite persistence, simulated execution plus bounded live local Codex/Agy CLI process waves, AI/non-AI/wait/notification task kinds, executor sync/policy, runtime substrate sync/policy, goal-oriented work items, rework validation, runtime goal/artifact mutation, MCP tools for workflow list/inspect/start/resume/status/context/validation/artifact fetch, cluster registry/placement metadata, per-node cluster scheduling posture, explicit remote-AI placement blocking, cluster handoff manifests, cost report generation, controlled improvement artifacts with changelog generation, Addon catalog inspection, persistent Addon lifecycle registry, SQLite-materialized Addon capability indexing, trusted local Addon package marketplace indexing with package fetch/import into a local cache, local-process and controlled external-API Addon worker execution over HTTP/HTTPS with env-backed or credential-vault-backed HMAC/Bearer auth through the runtime dispatch ledger, external planning-strategy execution with Core reference equivalence audits, token-headroom reports, Forge-first CLI wrapper planning, non-destructive PATH shim installation, reversible stdout/stderr headroom receipts and global timeline events for guarded CLI execution, capability-first intent resolution, project operating context loading with brand identity/design system/operating policy, a persisted identity registry for organization/brand/product/user/channel records, cross-channel identity links/resolution, role-derived identity membership permissions, a physical tenant index for workflows/runs/artifacts/events, tenant-aware event stream projection, a tenant-aware global inbound event inbox with route support for `start_workflow`, `continue_workflow`, `modify_workflow`, `pause_workflow`, `resume_workflow` and validation-gated `complete_workflow`, a first bounded HTTP webhook ingress listener for real POST requests, a tenant-aware managed event service registry plus bounded worker and webhook-ingress service execution with persistent lease/heartbeat/health, a first generic `http`/`webhook` egress emitter for declared Addon event adapters with optional HMAC-SHA256 signing or Bearer token injection from env or credential-vault over `http://` or `https://`, plus a governed Telegram Bot API egress transport for message/document/report delivery through the built-in notification Addon. It does not yet include remote distributed execution, native provider API adapters, SaaS UI, remote Addon registry mirrors/auto-update, WASM plugins, automatic first-party builder replacement by external planners, production transport-specific WhatsApp/email adapters or fully decoupled production transport workers.
 
-The local boundary also includes registered Git worktrees and internal preview/test sandboxes. `forge plan --worktree` and `forge request start --worktree` bind an existing id or path; `forge worktree discover|create|register|bind|init|list|inspect` manage the execution workspace; and `forge worktree sandbox plan|run --purpose preview|test` expose non-executing plans and bounded receipts. This does not add remote execution, automatic worktree deletion or implicit infrastructure mutation.
+The local boundary also includes registered Git worktrees, internal preview/test sandboxes and explicit elastic team execution. `forge plan --worktree` and `forge request start --worktree` bind an existing id or path; `forge teamwork` persists the elastic lane graph, `forge worktree prepare-teamwork` previews/applies task-scoped worktrees to that same workflow, `forge request execute-wave` runs the admitted dependency frontier, `forge worktree integrate-dependencies` converges completed branches, `forge worktree discover|create|register|bind|init|list|inspect` manage the execution workspace, and `forge worktree sandbox plan|run --purpose preview|test` expose non-executing plans and bounded receipts. This does not add remote execution, automatic worktree deletion or implicit infrastructure mutation.
+
+The primary `plan`/`request start` lane contract therefore enters the same
+worktree preparation, dependency-readiness and guardrail path as specialized
+teamwork planning; it is not a shortcut around workspace admission.
 
 ## Multimodal Safety Boundary
 
@@ -100,7 +177,7 @@ Addon manifests can declare a `compatibility` block with `forge_version_req`, `a
 
 `forge addons capabilities --output json` exposes `forge.addon_capability_index.v1`. This is a materialized SQLite index derived from installed Addon manifests, with lifecycle-aware rows for each installed capability. It supports Addon id, capability id and lifecycle filters in CLI and MCP so planners, ops views and future marketplace/search surfaces can query capabilities without reparsing every manifest.
 
-`forge addons contracts --type planning_strategy --output json` exposes `forge.addon_runtime_contracts.v1`, derived from the active Addon catalog. It lists declarative `planning_strategy`, `replanning_strategy`, `validator`, `executor` and `handoff` contracts with capability id, workflow extension id, runtime, entrypoint, inputs, outputs and required permissions. Each contract includes `permission_gate` using `forge.addon_permission_gate.v1`, projecting whether the contract is allowed, unauthorized for missing human approval, blocked by undeclared permissions, or disabled with the declared tools, resources, integrations, actions and tenant scopes. Built-in first-party builders are now visible as runtime contracts, and external Addons can declare validators or executors in YAML/JSON without adding hard-coded Core branches. `forge addons planners --output json` exposes `forge.addon_planner_registry.v1`, a narrowed registry over `planning_strategy` and `replanning_strategy` contracts. It distinguishes Core-owned first-party builders from external runtime-contract planners and returns policy status, dispatchability, commands and MCP tools. `forge addons dispatch-planner --contract <contract-id> --goal "<goal>" --output json` narrows dispatch to `planning_strategy`/`replanning_strategy` contracts and persists a standardized `forge.addon_planner_dispatch_input.v1` payload with goal, constraints, optional workflow/task ids, planner metadata and context. `forge addons execute-planner --addon <addon-id> --contract <contract-id> --worker <worker-id> --goal "<goal>" --output json` executes a registered planner worker through the same local-process or controlled external-API boundary, injects a Core reference workflow into `context.core_reference`, validates the returned task graph and emits a replacement-readiness equivalence audit. Valid but non-equivalent planner results stay review-required; Forge does not silently replace first-party builders. `forge addons execute-validator --addon <addon-id> --contract <contract-id> --worker <worker-id> --subject <subject> --input '<json>' --context '<json>' --output json` executes a registered validator worker through the same boundary with a standardized `forge.addon_validator_dispatch_input.v1` envelope, validates the returned `forge.addon_validator_result.v1` decision shape, separates schema issues from reported validation issues and emits `forge.addon_validator_execution.v1` without embedding domain-specific validation logic in Core. `forge addons execute-executor --addon <addon-id> --contract <contract-id> --worker <worker-id> --task <task-ref> --input '<json>' --context '<json>' --output json` executes a registered executor worker through the same boundary with a standardized `forge.addon_executor_dispatch_input.v1` envelope, validates the returned `forge.addon_executor_result.v1` status shape, counts generic outputs/artifacts/events and emits `forge.addon_executor_execution.v1` without embedding domain-specific execution logic in Core. `forge addons execute-handoff --addon <addon-id> --contract <contract-id> --worker <worker-id> --handoff <handoff-ref> --input '<json>' --context '<json>' --output json` executes a registered handoff worker through the same boundary with a standardized `forge.addon_handoff_dispatch_input.v1` envelope, validates the returned `forge.addon_handoff_result.v1` target/receipt/status shape, counts generic artifacts/events and emits `forge.addon_handoff_execution.v1` without embedding transport, partner or channel-specific handoff logic in Core.
+`forge addons contracts --type planning_strategy --output json` exposes `forge.addon_runtime_contracts.v1`, derived from the active Addon catalog. It lists declarative `planning_strategy`, `replanning_strategy`, `validator`, `executor` and `handoff` contracts with capability id, workflow extension id, runtime, entrypoint, inputs, outputs and required permissions. Each contract includes `permission_gate` using `forge.addon_permission_gate.v1`, projecting whether the contract is allowed, unauthorized for missing human approval, blocked by undeclared permissions, or disabled with the declared tools, resources, integrations, actions and tenant scopes. Built-in first-party builders are now visible as runtime contracts, and external Addons can declare validators or executors in YAML/JSON without adding hard-coded Core branches. `forge addons planners --output json` exposes `forge.addon_planner_registry.v1`, a narrowed registry over `planning_strategy` and `replanning_strategy` contracts. It distinguishes Core-owned first-party builders from external runtime-contract planners and returns policy status, dispatchability, commands and MCP tools. `forge addons dispatch-planner --contract <contract-id> --goal "<goal>" --output json` narrows dispatch to `planning_strategy`/`replanning_strategy` contracts and persists a standardized `forge.addon_planner_dispatch_input.v1` payload with goal, constraints, optional workflow/task ids, planner metadata and context. `forge addons execute-planner --addon <addon-id> --contract <contract-id> --worker <worker-id> --goal "<goal>" --output json` executes a registered planner worker through the same local-process or controlled external-API boundary, injects a Core reference workflow into `context.core_reference`, validates the returned task graph and emits a replacement-readiness equivalence audit. Valid but non-equivalent planner results stay review-required; Forge does not silently replace first-party builders. `forge addons execute-validator --addon <addon-id> --contract <contract-id> --worker <worker-id> --subject <subject> --workflow <workflow-id> --task <task-id> --input '<json>' --context '<json>' --output json` executes a registered validator worker through the same boundary with a standardized `forge.addon_validator_dispatch_input.v1` envelope, validates the returned `forge.addon_validator_result.v1` decision shape, separates schema issues from reported validation issues and emits `forge.addon_validator_execution.v1` without embedding domain-specific validation logic in Core. Workflow and task must be supplied together; the pair is persisted as the only workflow binding authorized to consume that result. `forge addons apply-validator-outcome --dispatch <dispatch-id> --workflow <workflow-id> --task <task-id> --expected-revision <revision> --output json` then applies the valid result explicitly as `forge.addon_validator_outcome_application.v1`: `passed` adds revisioned evidence without promotion, `failed` creates a correlated rework impediment, and `review_required` opens a blocking human interaction. The router enforces tenant policy, optimistic revision matching, immutable binding and idempotent replay. `forge addons execute-executor --addon <addon-id> --contract <contract-id> --worker <worker-id> --task <task-ref> --input '<json>' --context '<json>' --output json` executes a registered executor worker through the same boundary with a standardized `forge.addon_executor_dispatch_input.v1` envelope, validates the returned `forge.addon_executor_result.v1` status shape, counts generic outputs/artifacts/events and emits `forge.addon_executor_execution.v1` without embedding domain-specific execution logic in Core. `forge addons execute-handoff --addon <addon-id> --contract <contract-id> --worker <worker-id> --handoff <handoff-ref> --input '<json>' --context '<json>' --output json` executes a registered handoff worker through the same boundary with a standardized `forge.addon_handoff_dispatch_input.v1` envelope, validates the returned `forge.addon_handoff_result.v1` target/receipt/status shape, counts generic artifacts/events and emits `forge.addon_handoff_execution.v1` without embedding transport, partner or channel-specific handoff logic in Core.
 
 `forge addons contract-policy --contract <contract-id> --output json` exposes `forge.addon_runtime_contract_policy.v1`. It evaluates matching runtime contracts before dispatch and reports `dispatch_allowed`, `status`, issues, runtime, entrypoint and the same permission gate. The current policy is read-only and blocks contracts that lack an enabled permission gate, runtime or entrypoint; it is the pre-execution boundary for future signed/WASM/external API dispatchers.
 

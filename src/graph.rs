@@ -283,6 +283,15 @@ pub struct WorkItemSpec {
     pub goal_validation: GoalValidationSpec,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskImpediment {
+    pub id: String,
+    pub kind: String,
+    pub reason: String,
+    pub origin: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HumanInteractionSpec {
     #[serde(default = "human_interaction_schema_version")]
@@ -451,6 +460,8 @@ pub struct AtomicTask {
     pub title: String,
     pub goal: String,
     pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub active_impediments: Vec<TaskImpediment>,
     pub context_requirements: Vec<String>,
     pub validation_rules: Vec<ValidationRule>,
     pub expected_output: String,
@@ -514,6 +525,89 @@ pub struct WorkflowRevision {
     pub change_type: String,
     pub summary: String,
     pub created_at: DateTime<Utc>,
+}
+
+pub const CORE_PARALLEL_TEAM_SCHEMA_VERSION: &str = "forge.core.parallel_team.v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoreParallelLaneSpec {
+    pub id: String,
+    pub executor_id: String,
+    pub agent_count: usize,
+    pub parallel_group: String,
+    pub responsibility: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoreParallelTeamSpec {
+    #[serde(default = "core_parallel_team_schema_version")]
+    pub schema_version: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub lanes: Vec<CoreParallelLaneSpec>,
+    #[serde(default)]
+    pub max_parallel_agents: usize,
+}
+
+impl CoreParallelTeamSpec {
+    pub fn explicit(
+        source: impl Into<String>,
+        lanes: Vec<CoreParallelLaneSpec>,
+        max_parallel_agents: usize,
+    ) -> Self {
+        Self {
+            schema_version: core_parallel_team_schema_version(),
+            source: source.into(),
+            lanes,
+            max_parallel_agents,
+        }
+    }
+}
+
+fn core_parallel_team_schema_version() -> String {
+    CORE_PARALLEL_TEAM_SCHEMA_VERSION.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CoreOrchestrationSpec {
+    pub authority: String,
+    pub dynamic_workflow: bool,
+    pub parallel_task_handoffs: bool,
+    pub parallel_agent_nodes: bool,
+    pub fan_out_fan_in: bool,
+    pub mutations_revisioned: bool,
+    pub receipts_required: bool,
+    pub validation_before_promotion: bool,
+    pub priority_scheduling: bool,
+    pub max_parallel_tasks: usize,
+    pub max_parallel_agents_per_node: usize,
+    pub resource_gates_required: bool,
+    pub quota_gates_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_team: Option<CoreParallelTeamSpec>,
+}
+
+impl Default for CoreOrchestrationSpec {
+    fn default() -> Self {
+        Self {
+            authority: "forge_core".to_string(),
+            dynamic_workflow: true,
+            parallel_task_handoffs: true,
+            parallel_agent_nodes: true,
+            fan_out_fan_in: true,
+            mutations_revisioned: true,
+            receipts_required: true,
+            validation_before_promotion: true,
+            priority_scheduling: true,
+            max_parallel_tasks: 4,
+            max_parallel_agents_per_node: 4,
+            resource_gates_required: true,
+            quota_gates_required: true,
+            parallel_team: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -599,6 +693,8 @@ pub struct Workflow {
     pub created_at: DateTime<Utc>,
     pub intent: IntentSpec,
     #[serde(default)]
+    pub core_orchestration: CoreOrchestrationSpec,
+    #[serde(default)]
     pub runtime: WorkflowRuntimeSpec,
     pub tasks: Vec<AtomicTask>,
     #[serde(default)]
@@ -622,6 +718,7 @@ pub fn create_workflow(intent: IntentSpec) -> Workflow {
         initial_goal: Some(intent.goal.clone()),
         status: "pending".to_string(),
         created_at: Utc::now(),
+        core_orchestration: CoreOrchestrationSpec::default(),
         runtime: WorkflowRuntimeSpec::from_intent(&intent),
         intent,
         tasks,
@@ -791,6 +888,7 @@ pub fn task(
             .iter()
             .map(|item| (*item).to_string())
             .collect(),
+        active_impediments: Vec::new(),
         context_requirements: context_requirements
             .iter()
             .map(|item| (*item).to_string())
@@ -1027,19 +1125,22 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
     if !autonomous_extensions_required {
         let loop_kind = detect_loop_kind(&intent.goal);
         if let Some(kind) = loop_kind {
-            tasks.push(loop_node_task("task-009", &["task-003"], kind));
+            let task_id = next_task_id(&tasks);
+            tasks.push(loop_node_task(&task_id, &["task-003"], kind));
         } else if let Some(policy) = windows_software_policy.clone() {
-            tasks.push(windows_software_task("task-009", &["task-003"], policy));
+            let task_id = next_task_id(&tasks);
+            tasks.push(windows_software_task(&task_id, &["task-003"], policy));
         } else if let Some(policy) = reusable_local_code_policy(local_code_policy.as_ref()) {
+            let task_id = next_task_id(&tasks);
             tasks.push(deterministic_non_ai_task(
-                "task-009",
+                &task_id,
                 &["task-003"],
                 policy.clone(),
             ));
         }
 
         if let Some(kind) = detect_loop_kind(&intent.goal) {
-            let loop_node_id = format!("task-{:03}", tasks.len());
+            let loop_node_id = next_task_id(&tasks);
             let loop_id = tasks
                 .iter()
                 .find(|t| t.title.contains("Run explicit loop"))
@@ -1087,8 +1188,9 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
     }
 
     if autonomous_extensions_required {
+        let immediate_id = next_task_id(&tasks);
         let mut immediate = task(
-            "task-009",
+            &immediate_id,
             "Execute immediate workflow action",
             &["task-003"],
             &["goal", "current runtime state"],
@@ -1106,14 +1208,15 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         let wait_until_at = detect_wait_until_at(&intent.goal);
         let wait_is_one_shot =
             wait_until_at.is_some() && !intent.goal.to_lowercase().contains("cron");
+        let wait_id = next_task_id(&tasks);
         let mut wait = task(
-            "task-010",
+            &wait_id,
             if wait_is_one_shot {
                 "Wait until scheduled continuation"
             } else {
                 "Wait for scheduled continuation"
             },
-            &["task-009"],
+            &[&immediate_id],
             &["schedule", "workflow state"],
             vec![rule(
                 "schedule",
@@ -1147,21 +1250,23 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         });
         tasks.push(wait);
 
+        let deterministic_id = next_task_id(&tasks);
         let deterministic = if let Some(policy) = windows_software_policy {
-            windows_software_task("task-011", &["task-010"], policy)
+            windows_software_task(&deterministic_id, &[&wait_id], policy)
         } else {
             let deterministic_policy = local_code_policy
                 .unwrap_or_else(|| default_execution_policy(&ExecutorKind::Command));
-            deterministic_non_ai_task("task-011", &["task-010"], deterministic_policy)
+            deterministic_non_ai_task(&deterministic_id, &[&wait_id], deterministic_policy)
         };
         tasks.push(deterministic);
 
         if let Some(email) = extract_email(&intent.goal) {
+            let notification_id = next_task_id(&tasks);
             let mut notification = with_persona(
                 task(
-                    "task-012",
+                    &notification_id,
                     "Send workflow cost email",
-                    &["task-011"],
+                    &[&deterministic_id],
                     &["workflow costs", "notification target"],
                     vec![rule(
                         "notification",
@@ -2057,7 +2162,7 @@ fn persona(mode: &str, voice: &str, tone: &str) -> PersonaRoutingSpec {
     }
 }
 
-fn default_execution_policy(executor: &ExecutorKind) -> ExecutionPolicySpec {
+pub(crate) fn default_execution_policy(executor: &ExecutorKind) -> ExecutionPolicySpec {
     match executor {
         ExecutorKind::Ai => ExecutionPolicySpec {
             mode: "model_executor".to_string(),

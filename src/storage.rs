@@ -708,6 +708,34 @@ pub struct TaskLeaseWrite<'a> {
     pub data: &'a serde_json::Value,
 }
 
+pub struct ExecutorRuntimeClaimWrite<'a> {
+    pub workflow_id: &'a str,
+    pub task_id: &'a str,
+    pub lease_id: &'a str,
+    pub execution_id: &'a str,
+    pub owner_token: &'a str,
+    pub executor: &'a str,
+    pub request_sha256: &'a str,
+    pub claimed_at: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredExecutorRuntimeClaim {
+    pub workflow_id: String,
+    pub task_id: String,
+    pub lease_id: String,
+    pub execution_id: String,
+    pub owner_token: String,
+    pub executor: String,
+    pub request_sha256: String,
+    pub state: String,
+    pub receipt_json: Option<String>,
+    pub claimed_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MemoryPromotionQuery<'a> {
     pub from_scope: Option<&'a str>,
@@ -1766,7 +1794,11 @@ impl ForgeStore {
             );
         }
         let mission_runtime_repair_required = self.mission_runtime_schema_repair_required()?;
-        if version == STORE_SCHEMA_VERSION && !mission_runtime_repair_required {
+        let executor_runtime_repair_required = self.executor_runtime_schema_repair_required()?;
+        if version == STORE_SCHEMA_VERSION
+            && !mission_runtime_repair_required
+            && !executor_runtime_repair_required
+        {
             return Ok(());
         }
 
@@ -1793,7 +1825,12 @@ impl ForgeStore {
             }
             let locked_mission_runtime_repair_required =
                 self.mission_runtime_schema_repair_required()?;
-            if locked_version < STORE_SCHEMA_VERSION || locked_mission_runtime_repair_required {
+            let locked_executor_runtime_repair_required =
+                self.executor_runtime_schema_repair_required()?;
+            if locked_version < STORE_SCHEMA_VERSION
+                || locked_mission_runtime_repair_required
+                || locked_executor_runtime_repair_required
+            {
                 self.migrate()?;
                 if locked_version < 5 || locked_mission_runtime_repair_required {
                     self.migrate_mission_handoff_idempotency_scope()?;
@@ -1864,6 +1901,15 @@ impl ForgeStore {
             |row| row.get(0),
         )?;
         Ok(required_tables != 10 || self.mission_handoff_has_global_idempotency_constraint()?)
+    }
+
+    fn executor_runtime_schema_repair_required(&self) -> Result<bool> {
+        let table_exists: i64 = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'executor_runtime_claims')",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(table_exists == 0)
     }
 
     fn ensure_runtime_secret_vault_encryption_triggers(&self) -> Result<()> {
@@ -2852,6 +2898,24 @@ impl ForgeStore {
                 data_json TEXT NOT NULL,
                 PRIMARY KEY (workflow_id, task_id)
             );
+            CREATE TABLE IF NOT EXISTS executor_runtime_claims (
+                workflow_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                lease_id TEXT NOT NULL,
+                execution_id TEXT NOT NULL,
+                owner_token TEXT NOT NULL,
+                executor TEXT NOT NULL,
+                request_sha256 TEXT NOT NULL,
+                state TEXT NOT NULL,
+                receipt_json TEXT,
+                claimed_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (workflow_id, task_id, lease_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_executor_runtime_claims_state
+                ON executor_runtime_claims (state, updated_at);
             CREATE TABLE IF NOT EXISTS task_checkpoints (
                 id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
@@ -3383,6 +3447,15 @@ impl ForgeStore {
             workflows.push(serde_json::from_str(&row?)?);
         }
         Ok(workflows)
+    }
+
+    pub fn workflow_is_mission_bound(&self, workflow_id: &str) -> Result<bool> {
+        let bound: i64 = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM forge_missions WHERE workflow_id = ?1)",
+            params![workflow_id],
+            |row| row.get(0),
+        )?;
+        Ok(bound != 0)
     }
 
     pub fn load_recent_workflows(&self, limit: usize) -> Result<Vec<Workflow>> {
@@ -7258,6 +7331,38 @@ impl ForgeStore {
             .transpose()
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_extend_task_lease_for_runtime(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        lease_id: &str,
+        now: &str,
+        extended_expires_at: &str,
+        lease: &serde_json::Value,
+    ) -> Result<bool> {
+        let changed = self.connection.execute(
+            r#"
+            UPDATE task_leases
+            SET expires_at = ?5, data_json = ?6
+            WHERE workflow_id = ?1
+              AND task_id = ?2
+              AND lease_id = ?3
+              AND expires_at > ?4
+              AND expires_at < ?5
+            "#,
+            params![
+                workflow_id,
+                task_id,
+                lease_id,
+                now,
+                extended_expires_at,
+                serde_json::to_string(lease)?,
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
     pub fn load_task_leases(&self) -> Result<Vec<serde_json::Value>> {
         let mut statement = self
             .connection
@@ -7268,6 +7373,144 @@ impl ForgeStore {
             leases.push(serde_json::from_str(&row?)?);
         }
         Ok(leases)
+    }
+
+    pub fn try_claim_executor_runtime(&self, claim: ExecutorRuntimeClaimWrite<'_>) -> Result<bool> {
+        let changed = self.connection.execute(
+            r#"
+            INSERT OR IGNORE INTO executor_runtime_claims (
+                workflow_id,
+                task_id,
+                lease_id,
+                execution_id,
+                owner_token,
+                executor,
+                request_sha256,
+                state,
+                claimed_at,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'claimed', ?8, ?8)
+            "#,
+            params![
+                claim.workflow_id,
+                claim.task_id,
+                claim.lease_id,
+                claim.execution_id,
+                claim.owner_token,
+                claim.executor,
+                claim.request_sha256,
+                claim.claimed_at,
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn load_executor_runtime_claim(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        lease_id: &str,
+    ) -> Result<Option<StoredExecutorRuntimeClaim>> {
+        self.connection
+            .query_row(
+                r#"
+                SELECT
+                    workflow_id,
+                    task_id,
+                    lease_id,
+                    execution_id,
+                    owner_token,
+                    executor,
+                    request_sha256,
+                    state,
+                    receipt_json,
+                    claimed_at,
+                    started_at,
+                    finished_at,
+                    updated_at
+                FROM executor_runtime_claims
+                WHERE workflow_id = ?1 AND task_id = ?2 AND lease_id = ?3
+                "#,
+                params![workflow_id, task_id, lease_id],
+                |row| {
+                    Ok(StoredExecutorRuntimeClaim {
+                        workflow_id: row.get(0)?,
+                        task_id: row.get(1)?,
+                        lease_id: row.get(2)?,
+                        execution_id: row.get(3)?,
+                        owner_token: row.get(4)?,
+                        executor: row.get(5)?,
+                        request_sha256: row.get(6)?,
+                        state: row.get(7)?,
+                        receipt_json: row.get(8)?,
+                        claimed_at: row.get(9)?,
+                        started_at: row.get(10)?,
+                        finished_at: row.get(11)?,
+                        updated_at: row.get(12)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn mark_executor_runtime_started(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        lease_id: &str,
+        owner_token: &str,
+        started_at: &str,
+    ) -> Result<bool> {
+        let changed = self.connection.execute(
+            r#"
+            UPDATE executor_runtime_claims
+            SET state = 'running', started_at = ?5, updated_at = ?5
+            WHERE workflow_id = ?1
+              AND task_id = ?2
+              AND lease_id = ?3
+              AND owner_token = ?4
+              AND state = 'claimed'
+            "#,
+            params![workflow_id, task_id, lease_id, owner_token, started_at],
+        )?;
+        Ok(changed == 1)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn finish_executor_runtime_claim(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        lease_id: &str,
+        owner_token: &str,
+        receipt: &serde_json::Value,
+        finished_at: &str,
+    ) -> Result<bool> {
+        let changed = self.connection.execute(
+            r#"
+            UPDATE executor_runtime_claims
+            SET state = 'finished',
+                receipt_json = ?5,
+                finished_at = ?6,
+                updated_at = ?6
+            WHERE workflow_id = ?1
+              AND task_id = ?2
+              AND lease_id = ?3
+              AND owner_token = ?4
+              AND state IN ('claimed', 'running')
+            "#,
+            params![
+                workflow_id,
+                task_id,
+                lease_id,
+                owner_token,
+                serde_json::to_string(receipt)?,
+                finished_at,
+            ],
+        )?;
+        Ok(changed == 1)
     }
 
     pub fn delete_task_lease(

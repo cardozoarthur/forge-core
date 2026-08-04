@@ -74,6 +74,7 @@ pub struct CreateChoiceInteractionRequest<'a> {
     pub choices: &'a [String],
     pub timeout_seconds: Option<u64>,
     pub origin: &'a str,
+    pub expected_revision: Option<u64>,
 }
 
 struct CreateInteractionRequest<'a> {
@@ -85,6 +86,7 @@ struct CreateInteractionRequest<'a> {
     form: Option<HumanFormSchema>,
     timeout_seconds: Option<u64>,
     origin: &'a str,
+    expected_revision: Option<u64>,
 }
 
 pub fn summarize_human_interactions(tasks: &[AtomicTask]) -> HumanInteractionSummary {
@@ -164,6 +166,7 @@ pub fn create_choice_interaction(
             form: None,
             timeout_seconds: request.timeout_seconds,
             origin: request.origin,
+            expected_revision: request.expected_revision,
         },
     )
 }
@@ -200,6 +203,7 @@ pub fn create_form_interaction(
             form: Some(form),
             timeout_seconds,
             origin,
+            expected_revision: None,
         },
     )
 }
@@ -398,6 +402,22 @@ fn create_interaction(
     request: CreateInteractionRequest<'_>,
 ) -> Result<HumanInteractionReport> {
     let mut workflow = store.load_workflow(request.workflow_id)?;
+    let current_revision = workflow
+        .revisions
+        .last()
+        .map(|revision| revision.revision)
+        .unwrap_or(0);
+    if request
+        .expected_revision
+        .is_some_and(|expected_revision| expected_revision != current_revision)
+    {
+        bail!(
+            "stale workflow revision for {}: expected {}, current {}; reload workflow state and retry",
+            request.workflow_id,
+            request.expected_revision.unwrap_or_default(),
+            current_revision
+        );
+    }
     let interaction = HumanInteractionSpec {
         schema_version: "forge.human_interaction.v1".to_string(),
         interaction_id: format!("hi_{}", compact_uuid()),

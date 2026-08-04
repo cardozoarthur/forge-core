@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use forge_core::lease::acquire_task_lease;
 use forge_core::storage::ForgeStore;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -30,6 +31,32 @@ fn run_json_with_failure(command: &mut Command) -> Value {
         String::from_utf8_lossy(&output.stdout)
     );
     serde_json::from_slice(&output.stdout).expect("blocked forge output should be JSON")
+}
+
+fn persist_ready_executor(store_path: &Path, executor: &str) {
+    let store = ForgeStore::open(store_path).unwrap();
+    store
+        .save_executor_state(
+            executor,
+            &serde_json::json!({
+                "id": executor,
+                "display_name": format!("{executor} worktree test executor"),
+                "command": executor,
+                "installed": true,
+                "configured": true,
+                "command_path": "/bin/true",
+                "config_evidence": ["worktree test fixture"],
+                "non_interactive_ready": true,
+                "probe_evidence": ["worktree test fixture"],
+                "forge_first_ready": false,
+                "forge_first_entrypoint": null,
+                "harness_status": null,
+                "allowed": true,
+                "decision_source": "worktree_test_fixture",
+                "synced_at": "2026-07-29T00:00:00Z"
+            }),
+        )
+        .unwrap();
 }
 
 fn init_repository(path: &Path) {
@@ -105,6 +132,7 @@ fn worktree_binding_routes_context_and_runs_internal_test_sandbox() {
     let worktree_path = temp.path().join("feature-preview");
     let store = temp.path().join("forge.sqlite");
     init_repository(&repository);
+    persist_ready_executor(&store, "codex");
 
     let created =
         create_registered_worktree(&store, &repository, &worktree_path, "feature/preview");
@@ -202,6 +230,40 @@ fn worktree_binding_routes_context_and_runs_internal_test_sandbox() {
         handoff["packet"]["worktree"]["worktree_root"],
         worktree_path.display().to_string()
     );
+    assert_eq!(
+        handoff["lease"]["workspace_claim"]["worktree_id"],
+        worktree_id
+    );
+
+    let harness_exec = run_json(forge().arg("--store").arg(&store).args([
+        "harness",
+        "exec",
+        "--executor",
+        "codex",
+        "--workflow",
+        workflow_id,
+        "--task",
+        "task-001",
+        "--execute",
+        "--allow-exec",
+        "--output",
+        "json",
+        "--",
+        "/bin/sh",
+        "-c",
+        "pwd",
+    ]));
+    assert_eq!(harness_exec["status"], "harness_exec_completed");
+    assert_eq!(harness_exec["executed"], true);
+    assert_eq!(
+        harness_exec["task_lease"]["lease_id"],
+        handoff["lease"]["lease_id"]
+    );
+    assert_eq!(
+        harness_exec["task_lease"]["workspace_claim"]["worktree_id"],
+        worktree_id
+    );
+    assert_eq!(harness_exec["cwd"], worktree_path.display().to_string());
 
     let sandbox_plan = run_json(forge().arg("--store").arg(&store).args([
         "worktree",
@@ -432,6 +494,32 @@ fn task_binding_precedes_workflow_binding() {
     assert!(status_ids.contains(&first_id));
     assert!(status_ids.contains(&second_id));
 
+    let missing_lease = run_json(forge().arg("--store").arg(&store).args([
+        "harness",
+        "exec",
+        "--executor",
+        "codex",
+        "--workflow",
+        workflow_id,
+        "--task",
+        "task-001",
+        "--execute",
+        "--allow-exec",
+        "--output",
+        "json",
+        "--",
+        "/bin/true",
+    ]));
+    assert_eq!(missing_lease["status"], "harness_exec_blocked_task_lease");
+    assert_eq!(missing_lease["executed"], false);
+    assert!(missing_lease["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|note| note
+            .as_str()
+            .is_some_and(|note| note.contains("active task lease is required"))));
+
     let project_root_conflict = forge()
         .arg("--store")
         .arg(&store)
@@ -478,11 +566,145 @@ fn task_binding_precedes_workflow_binding() {
 }
 
 #[test]
+fn exclusive_worktree_claim_blocks_same_checkout_across_tasks_and_workflows() {
+    let temp = tempdir().unwrap();
+    let repository = temp.path().join("repository");
+    let shared_path = temp.path().join("shared-worktree");
+    let isolated_path = temp.path().join("isolated-worktree");
+    let store_path = temp.path().join("forge.sqlite");
+    init_repository(&repository);
+    let shared = create_registered_worktree(
+        &store_path,
+        &repository,
+        &shared_path,
+        "feature/shared-claim",
+    );
+    let isolated = create_registered_worktree(
+        &store_path,
+        &repository,
+        &isolated_path,
+        "feature/isolated-claim",
+    );
+    let shared_id = shared["worktree"]["id"].as_str().unwrap();
+    let isolated_id = isolated["worktree"]["id"].as_str().unwrap();
+
+    let first_workflow = run_json(
+        forge()
+            .current_dir(&repository)
+            .arg("--store")
+            .arg(&store_path)
+            .args([
+                "plan",
+                "--goal",
+                "Exercise exclusive worktree claims within one workflow",
+                "--output",
+                "json",
+            ]),
+    );
+    let first_workflow_id = first_workflow["workflow_id"].as_str().unwrap();
+    run_json(
+        forge()
+            .arg("--store")
+            .arg(&store_path)
+            .args(["worktree", "bind", "--worktree", shared_id])
+            .args(["--workflow", first_workflow_id, "--output", "json"]),
+    );
+
+    let store = ForgeStore::open(&store_path).unwrap();
+    let first = acquire_task_lease(&store, first_workflow_id, "task-001", "codex", 300).unwrap();
+    assert_eq!(first.status, "lease_acquired");
+    let first_lease = first.lease.as_ref().unwrap();
+    assert_eq!(
+        first_lease.workspace_claim.as_ref().unwrap().worktree_id,
+        shared_id
+    );
+
+    let sibling = acquire_task_lease(&store, first_workflow_id, "task-002", "agy", 300).unwrap();
+    assert_eq!(sibling.status, "lease_blocked_workspace_conflict");
+    assert!(!sibling.allowed);
+    let sibling_conflict = sibling.workspace_conflict.as_ref().unwrap();
+    assert_eq!(sibling_conflict.held_by_lease_id, first_lease.lease_id);
+    assert_eq!(sibling_conflict.held_by_task_id, "task-001");
+    assert!(store
+        .load_task_lease(first_workflow_id, "task-002")
+        .unwrap()
+        .is_none());
+    drop(store);
+
+    let second_workflow = run_json(
+        forge()
+            .current_dir(&repository)
+            .arg("--store")
+            .arg(&store_path)
+            .args([
+                "plan",
+                "--goal",
+                "Exercise exclusive worktree claims across workflows",
+                "--output",
+                "json",
+            ]),
+    );
+    let second_workflow_id = second_workflow["workflow_id"].as_str().unwrap();
+    run_json(
+        forge()
+            .arg("--store")
+            .arg(&store_path)
+            .args(["worktree", "bind", "--worktree", shared_id])
+            .args(["--workflow", second_workflow_id, "--output", "json"]),
+    );
+
+    let store = ForgeStore::open(&store_path).unwrap();
+    let cross_workflow =
+        acquire_task_lease(&store, second_workflow_id, "task-001", "agy", 300).unwrap();
+    assert_eq!(cross_workflow.status, "lease_blocked_workspace_conflict");
+    assert_eq!(
+        cross_workflow
+            .workspace_conflict
+            .as_ref()
+            .unwrap()
+            .held_by_workflow_id,
+        first_workflow_id
+    );
+    drop(store);
+
+    run_json(
+        forge()
+            .arg("--store")
+            .arg(&store_path)
+            .args(["worktree", "bind", "--worktree", isolated_id])
+            .args([
+                "--workflow",
+                second_workflow_id,
+                "--task",
+                "task-001",
+                "--output",
+                "json",
+            ]),
+    );
+    let store = ForgeStore::open(&store_path).unwrap();
+    let isolated_lease =
+        acquire_task_lease(&store, second_workflow_id, "task-001", "agy", 300).unwrap();
+    assert_eq!(isolated_lease.status, "lease_acquired");
+    assert_eq!(
+        isolated_lease
+            .lease
+            .as_ref()
+            .unwrap()
+            .workspace_claim
+            .as_ref()
+            .unwrap()
+            .worktree_root,
+        isolated_path.display().to_string()
+    );
+}
+
+#[test]
 fn custom_worktree_id_survives_binding_context_and_handoff() {
     let temp = tempdir().unwrap();
     let repository = temp.path().join("repository");
     let store = temp.path().join("forge.sqlite");
     init_repository(&repository);
+    persist_ready_executor(&store, "codex");
 
     let registered = run_json(
         forge()

@@ -1,13 +1,13 @@
 use crate::addon::{
-    addon_observability_report, authorize_addon_permission, claim_addon_runtime_contract_dispatch,
-    complete_addon_runtime_contract_dispatch, create_addon_migration_workflow,
-    create_addon_package_lock, default_addon_dirs, disable_addon, downgrade_addon, enable_addon,
-    enqueue_addon_planner_dispatch, enqueue_addon_runtime_contract_dispatch,
-    evaluate_addon_runtime_contract_policy, execute_addon_executor, execute_addon_handoff,
-    execute_addon_planning_strategy, execute_addon_runtime_contract_dispatch,
-    execute_addon_validator, fetch_addon_package, install_addon, install_addon_package,
-    list_addon_capability_index, list_addon_event_adapters, list_addon_marketplace,
-    list_addon_permission_authorizations, list_addon_planner_registry,
+    addon_observability_report, apply_addon_validator_outcome, authorize_addon_permission,
+    claim_addon_runtime_contract_dispatch, complete_addon_runtime_contract_dispatch,
+    create_addon_migration_workflow, create_addon_package_lock, default_addon_dirs, disable_addon,
+    downgrade_addon, enable_addon, enqueue_addon_planner_dispatch,
+    enqueue_addon_runtime_contract_dispatch, evaluate_addon_runtime_contract_policy,
+    execute_addon_executor, execute_addon_handoff, execute_addon_planning_strategy,
+    execute_addon_runtime_contract_dispatch, execute_addon_validator, fetch_addon_package,
+    install_addon, install_addon_package, list_addon_capability_index, list_addon_event_adapters,
+    list_addon_marketplace, list_addon_permission_authorizations, list_addon_planner_registry,
     list_addon_runtime_contract_dispatches, list_addon_runtime_contracts,
     list_addon_runtime_workers, list_addon_trust_store, list_addon_views, list_installed_addons,
     load_addon_catalog_from_store, package_addon, plan_addon_lifecycle, publish_addon_package,
@@ -26,7 +26,9 @@ use crate::addon::{
     AddonRuntimeWorkerRegistrationInput as AddonRuntimeWorkerRegistrationRequest,
     AddonTrustKeyInput as AddonTrustKeyRequest,
     AddonValidatorDispatchInput as AddonValidatorDispatchRequest,
-    AddonValidatorExecutionInput as AddonValidatorExecutionRequest, CapabilityRegistrySyncInput,
+    AddonValidatorExecutionInput as AddonValidatorExecutionRequest,
+    AddonValidatorOutcomeApplyInput as AddonValidatorOutcomeApplyRequest,
+    CapabilityRegistrySyncInput,
 };
 use crate::artifact::{hex_sha256, list_workflow_artifacts, ListedArtifact};
 use crate::aws_ops::{
@@ -80,6 +82,12 @@ use crate::executor::{
     record_shell_session_plan, BrainSessionLifecycleOptions, BrainSessionsReportOptions,
     ShellLaunchPlanOptions,
 };
+use crate::executor_runtime::{
+    execute_request_executor_wave, RequestExecutorWaveOptions,
+    DEFAULT_REQUEST_EXECUTOR_WAVE_CONTEXT_BUDGET, DEFAULT_REQUEST_EXECUTOR_WAVE_EXECUTOR,
+    DEFAULT_REQUEST_EXECUTOR_WAVE_TIMEOUT_SECONDS, DEFAULT_REQUEST_EXECUTOR_WAVE_TTL_SECONDS,
+};
+use crate::graph::CoreParallelTeamSpec;
 use crate::handoff::{
     build_predecessor_handoff_plans, build_task_handoff_response_with_project, TaskHandoffView,
     EXECUTOR_HANDOFF_COMPACT_SCHEMA_VERSION, EXECUTOR_HANDOFF_SCHEMA_VERSION,
@@ -166,8 +174,9 @@ use crate::registry::{
 use crate::request::{
     cancel_request, complete_ready_task, create_final_delivery_package, drive_request,
     ensure_final_audit, heartbeat_request, list_requests, load_request_status,
-    recover_stale_request, resume_async_request, start_async_request_with_idempotency,
-    step_request, switch_request_executor, RequestExecutorSwitchInput, RequestTaskCompletionInput,
+    recover_stale_request, resume_async_request,
+    start_async_request_with_idempotency_and_parallel_team, step_request, switch_request_executor,
+    RequestExecutorSwitchInput, RequestTaskCompletionInput,
 };
 use crate::schedule::{
     aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
@@ -178,14 +187,23 @@ use crate::security::{
     sanitize_prompt_secrets_with_vault, SecretSanitizationOptions, SecretVaultPersistOptions,
 };
 use crate::storage::ForgeStore;
+use crate::teamwork::{
+    plan_teamwork_workflow, plan_teamwork_workflow_with_config, TeamworkLaneConfig,
+    TeamworkParallelConfig,
+};
 use crate::validation::{validate_workflow, ValidationReport};
 use crate::workflow::{
-    attach_creative_artifact, attach_workflow_artifact_with_tags, get_workflow_token_collection,
-    inspect_creative_artifact, inspect_creative_collaboration, list_creative_artifacts,
-    parse_node_brain_agent_slot, patch_workflow_token, record_creative_collaboration_event,
-    resolve_workflow_tokens, set_workflow_token_collection, update_workflow_goal,
-    update_workflow_node_brain_routing, CreativeCollaborationEventRequest,
-    WorkflowNodeBrainRoutingUpdateInput,
+    add_workflow_task, add_workflow_task_dependency, attach_creative_artifact,
+    attach_workflow_artifact_with_tags, clear_workflow_task_impediment,
+    get_workflow_token_collection, inspect_creative_artifact, inspect_creative_collaboration,
+    list_creative_artifacts, parse_node_brain_agent_slot, patch_workflow_token,
+    record_creative_collaboration_event, remove_workflow_task_dependency, resolve_workflow_tokens,
+    set_workflow_task_impediment, set_workflow_task_priority, set_workflow_token_collection,
+    update_workflow_goal_with_expected_revision, update_workflow_node_brain_routing,
+    update_workflow_task_with_expected_revision, CreativeCollaborationEventRequest,
+    WorkflowNodeBrainRoutingUpdateInput, WorkflowTaskAddInput, WorkflowTaskDependencyInput,
+    WorkflowTaskImpedimentClearInput, WorkflowTaskImpedimentInput, WorkflowTaskPriorityInput,
+    WorkflowTaskUpdateInput,
 };
 use crate::worktree::{
     bound_worktree_context, create_worktree_guard_predecessor_task,
@@ -599,12 +617,28 @@ struct AddonValidatorExecutionInput {
     worker: Option<String>,
     worker_id: Option<String>,
     subject: String,
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    task: Option<String>,
+    task_id: Option<String>,
     input: Option<serde_json::Value>,
     context: Option<serde_json::Value>,
     lease_seconds: Option<u64>,
     source: Option<String>,
     dry_run: Option<bool>,
     addon_dirs: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddonValidatorOutcomeApplyInput {
+    dispatch: Option<String>,
+    dispatch_id: Option<String>,
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    task: Option<String>,
+    task_id: Option<String>,
+    expected_revision: u64,
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1779,6 +1813,9 @@ struct RunStartInput {
     origin: Option<String>,
     #[serde(default)]
     idempotency_key: Option<String>,
+    #[serde(default)]
+    lanes: Vec<TeamworkLaneInput>,
+    max_parallel_agents: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1814,6 +1851,20 @@ struct RunStepInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct RunExecuteWaveInput {
+    run_id: String,
+    executor: Option<String>,
+    ttl_seconds: Option<u64>,
+    timeout_seconds: Option<u64>,
+    context_budget: Option<usize>,
+    max_parallel: Option<usize>,
+    allow_exec: bool,
+    approved_by: String,
+    reason: String,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RunCompleteTaskInput {
     run_id: String,
     task_id: String,
@@ -1822,6 +1873,7 @@ struct RunCompleteTaskInput {
     #[serde(default)]
     artifacts: Vec<String>,
     evidence_command: Option<String>,
+    evidence_exit_code: Option<i32>,
     evidence_summary: Option<String>,
     estimated_usd: Option<f64>,
     tokens_in: Option<i64>,
@@ -1867,6 +1919,70 @@ struct WorkflowUpdateGoalInput {
     workflow_id: String,
     goal: String,
     origin: String,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowAddTaskInput {
+    workflow_id: String,
+    task_id: Option<String>,
+    description: String,
+    priority: String,
+    origin: String,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowUpdateTaskInput {
+    workflow_id: String,
+    task_id: String,
+    title: Option<String>,
+    goal: Option<String>,
+    expected_output: Option<String>,
+    origin: String,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowSetPriorityInput {
+    workflow_id: String,
+    task_id: String,
+    priority: String,
+    origin: String,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowDependencyInput {
+    workflow_id: String,
+    task_id: String,
+    depends_on: String,
+    origin: String,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowSetImpedimentInput {
+    workflow_id: String,
+    task_id: String,
+    reason: String,
+    #[serde(default = "default_workflow_impediment_kind")]
+    kind: String,
+    origin: String,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowClearImpedimentInput {
+    workflow_id: String,
+    task_id: String,
+    impediment_id: Option<String>,
+    origin: String,
+    expected_revision: Option<u64>,
+}
+
+fn default_workflow_impediment_kind() -> String {
+    "manual".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1880,6 +1996,70 @@ struct WorkflowUpdateNodeBrainInput {
     agent_slots: Vec<String>,
     max_parallel_agents: Option<usize>,
     origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamworkPlanInput {
+    goal: String,
+    #[serde(default)]
+    lanes: Vec<TeamworkLaneInput>,
+    max_parallel_agents: Option<usize>,
+    #[serde(default)]
+    bypass_cache: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamworkLaneInput {
+    id: String,
+    brain: String,
+    agent_count: usize,
+    parallel_group: Option<String>,
+    responsibility: Option<String>,
+}
+
+impl TeamworkLaneInput {
+    fn into_config(self) -> TeamworkLaneConfig {
+        let id = self.id;
+        TeamworkLaneConfig {
+            parallel_group: self
+                .parallel_group
+                .unwrap_or_else(|| "implementation-wave-001".to_string()),
+            responsibility: self
+                .responsibility
+                .unwrap_or_else(|| format!("Deliver independent bounded work for the {id} lane.")),
+            id,
+            brain: self.brain,
+            agent_count: self.agent_count,
+        }
+    }
+}
+
+fn explicit_parallel_team_from_mcp_lanes(
+    lanes: Vec<TeamworkLaneInput>,
+    max_parallel_agents: Option<usize>,
+    source: &str,
+) -> Result<Option<CoreParallelTeamSpec>> {
+    if lanes.is_empty() {
+        if max_parallel_agents.is_some() {
+            anyhow::bail!("max_parallel_agents requires at least one lane");
+        }
+        return Ok(None);
+    }
+
+    let lanes = lanes
+        .into_iter()
+        .map(TeamworkLaneInput::into_config)
+        .collect::<Vec<_>>();
+    let derived_parallelism = lanes.iter().try_fold(0usize, |total, lane| {
+        total
+            .checked_add(lane.agent_count)
+            .context("parallel team lane agent count overflow")
+    })?;
+    let config = TeamworkParallelConfig {
+        lanes,
+        max_parallel_agents: max_parallel_agents.unwrap_or(derived_parallelism),
+    };
+    crate::teamwork::core_parallel_team_from_teamwork(&config, source).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -4462,13 +4642,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.addons.execute_validator",
                 "Execute Addon Validator With Result Audit",
-                "Dispatch a validator runtime contract to a registered worker, validate the returned decision envelope and record the normal dispatch/claim/completion audit.",
+                "Dispatch a validator runtime contract to a registered worker, validate the returned decision envelope and record the normal dispatch/claim/completion audit. Supply workflow_id and task_id together to bind the result for later explicit application.",
                 object_schema(
                     &[
                         ("addon_id", "string", "optional Addon id filter"),
                         ("contract_id", "string", "validator runtime contract id"),
                         ("worker_id", "string", "registered runtime worker id"),
                         ("subject", "string", "entity or artifact being validated"),
+                        ("workflow_id", "string", "optional workflow binding; requires task_id"),
+                        ("task_id", "string", "optional task binding; requires workflow_id"),
                         ("input", "object", "validator input payload"),
                         ("context", "object", "optional validator context payload"),
                         ("lease_seconds", "integer", "external worker claim lease"),
@@ -4493,6 +4675,47 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "<worker-id>",
                     "--subject",
                     "<subject>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(false, true),
+            ),
+            tool(
+                "forge.addons.apply_validator_outcome",
+                "Apply Addon Validator Outcome",
+                "Explicitly apply one completed, workflow-bound validator result. Passed records revisioned evidence without promotion; failed creates correlated rework feedback; review_required creates a blocking human interaction. Replays are idempotent.",
+                object_schema(
+                    &[
+                        ("dispatch_id", "string", "completed validator dispatch id"),
+                        ("workflow_id", "string", "bound workflow id"),
+                        ("task_id", "string", "bound workflow task id"),
+                        (
+                            "expected_revision",
+                            "integer",
+                            "required optimistic concurrency revision",
+                        ),
+                        ("origin", "string", "application origin"),
+                    ],
+                    &[
+                        "dispatch_id",
+                        "workflow_id",
+                        "task_id",
+                        "expected_revision",
+                    ],
+                ),
+                "forge.addon_validator_outcome_application.v1",
+                &[
+                    "forge",
+                    "addons",
+                    "apply-validator-outcome",
+                    "--dispatch",
+                    "<dispatch-id>",
+                    "--workflow",
+                    "<workflow-id>",
+                    "--task",
+                    "<task-id>",
+                    "--expected-revision",
+                    "<revision>",
                     "--output",
                     "json",
                 ],
@@ -6138,11 +6361,21 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             object_schema(&[
                 ("goal", "string", "human objective"),
                 ("origin", "string", "codex|opencode|skill|mcp"),
-                (
-                    "idempotency_key",
-                    "string",
-                    "optional retry key scoped to origin",
-                ),
+                        (
+                            "idempotency_key",
+                            "string",
+                            "optional retry key scoped to origin",
+                        ),
+                        (
+                            "lanes",
+                            "array",
+                            "optional explicit independent lane objects with id, brain and agent_count",
+                        ),
+                        (
+                            "max_parallel_agents",
+                            "integer",
+                            "optional admission ceiling across all declared lane agents",
+                        ),
             ], &["goal"]),
                 "forge.request_start.v1",
                 &["forge", "request", "start", "--goal", "<goal>", "--output", "json"],
@@ -6205,6 +6438,26 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
+                "forge.run.execute_wave",
+                "Execute Admitted Executor Wave",
+                "Drive a run, admit a bounded dependency-ready frontier and execute its task-worktree-bound Codex/Agy processes in parallel. Requires explicit allow_exec, approved_by and reason authorization. Process receipts never complete or promote Forge tasks; reviewed validation must still use forge.run.complete_task.",
+                object_schema(&[
+                    ("run_id", "string", "run id"),
+                    ("executor", "string", "executor router id; defaults to auto"),
+                    ("ttl_seconds", "integer", "dispatch lease TTL; bounded default is 300 seconds"),
+                    ("timeout_seconds", "integer", "per-process timeout; bounded default is 1800 seconds"),
+                    ("context_budget", "integer", "per-task bounded context budget; default is 4096 bytes"),
+                    ("max_parallel", "integer", "optional execution ceiling; defaults to at most 8 and worker count is capped by admitted assignments"),
+                    ("allow_exec", "boolean", "explicit process-launch authorization; must be true"),
+                    ("approved_by", "string", "non-empty operator approval provenance"),
+                    ("reason", "string", "non-empty process execution authorization reason"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["run_id", "allow_exec", "approved_by", "reason"]),
+                "forge.request_executor_wave.v1",
+                &["forge", "request", "execute-wave", "--run", "<run-id>", "--allow-exec", "--approved-by", "<operator>", "--reason", "<reason>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
                 "forge.run.complete_task",
                 "Complete Ready Task With Evidence",
                 "Record executor evidence for the current ready handoff task, generate a replayable execution trace, validate the executor response, promote the task and drive the next action.",
@@ -6213,18 +6466,19 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("task_id", "string", "ready task id to complete"),
                     ("executor", "string", "codex|opencode|skill|mcp|custom executor id"),
                     ("summary", "string", "executor result summary without secrets"),
-                    ("artifacts", "array", "optional local artifact paths to attach"),
-                    ("evidence_command", "string", "optional command or gate that produced passing evidence"),
-                    ("evidence_summary", "string", "optional passing evidence summary"),
+                ("artifacts", "array", "optional local artifact paths to attach"),
+                ("evidence_command", "string", "command or gate that produced the submitted evidence"),
+                ("evidence_exit_code", "integer", "real exit code produced by evidence_command"),
+                ("evidence_summary", "string", "optional passing evidence summary"),
                     ("estimated_usd", "number", "non-negative estimated executor cost"),
                     ("tokens_in", "integer", "non-negative input token count"),
                     ("tokens_out", "integer", "non-negative output token count"),
                     ("ttl_seconds", "integer", "heartbeat freshness TTL"),
                     ("context_budget", "integer", "context budget used when re-driving the ready handoff before completion"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
-                ], &["run_id", "task_id", "summary"]),
+                ], &["run_id", "task_id", "summary", "evidence_command", "evidence_exit_code"]),
                 "forge.request_task_completion.v1",
-                &["forge", "request", "complete-task", "--run", "<run-id>", "--task", "<task-id>", "--summary", "<summary>", "--budget", "<bytes>", "--output", "json"],
+                &["forge", "request", "complete-task", "--run", "<run-id>", "--task", "<task-id>", "--summary", "<summary>", "--evidence-command", "<passing-gate>", "--evidence-exit-code", "<observed-exit-code>", "--budget", "<bytes>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -6318,13 +6572,181 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.workflow.update_goal",
                 "Update Workflow Goal",
                 "Mutate the workflow goal through Forge with revision tracking and origin trace.",
-                object_schema(&[
-                    ("workflow_id", "string", "workflow id"),
-                    ("goal", "string", "new goal"),
-                    ("origin", "string", "codex|opencode|skill|mcp"),
-                ], &["workflow_id", "goal", "origin"]),
+            object_schema(&[
+                ("workflow_id", "string", "workflow id"),
+                ("goal", "string", "new goal"),
+                ("origin", "string", "codex|opencode|skill|mcp"),
+                (
+                    "expected_revision",
+                    "integer",
+                    "optional optimistic concurrency revision",
+                ),
+            ], &["workflow_id", "goal", "origin"]),
                 "forge.workflow_goal_update.v1",
-                &["forge", "workflow", "update-goal", "--workflow", "<workflow-id>", "--output", "json"],
+            &["forge", "workflow", "update-goal", "--workflow", "<workflow-id>", "--output", "json"],
+            ToolFlags::new(true, true),
+        ),
+        tool(
+            "forge.workflow.add_task",
+            "Add Workflow Task",
+            "Add a task to a live Forge workflow with an atomic revisioned graph mutation.",
+            object_schema(&[
+                ("workflow_id", "string", "workflow id"),
+                ("task_id", "string", "optional explicit task id"),
+                ("description", "string", "task description and goal"),
+                ("priority", "string", "high|medium|low"),
+                ("origin", "string", "codex|opencode|skill|mcp"),
+                (
+                    "expected_revision",
+                    "integer",
+                    "optional optimistic concurrency revision",
+                ),
+            ], &["workflow_id", "description", "priority", "origin"]),
+            "forge.workflow_mutation.v1",
+            &["forge", "workflow", "add-task", "--workflow", "<workflow-id>", "--description", "<description>", "--output", "json"],
+            ToolFlags::new(true, true),
+        ),
+        tool(
+            "forge.workflow.update_task",
+            "Update Workflow Task",
+            "Update a mutable task's title, goal or expected output with revision tracking.",
+            object_schema(&[
+                ("workflow_id", "string", "workflow id"),
+                ("task_id", "string", "task id"),
+                ("title", "string", "optional new title"),
+                ("goal", "string", "optional new task goal"),
+                ("expected_output", "string", "optional new expected output"),
+                ("origin", "string", "codex|opencode|skill|mcp"),
+                (
+                    "expected_revision",
+                    "integer",
+                    "optional optimistic concurrency revision",
+                ),
+            ], &["workflow_id", "task_id", "origin"]),
+            "forge.workflow_task_update.v1",
+            &["forge", "workflow", "update-task", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+            ToolFlags::new(true, true),
+        ),
+        tool(
+            "forge.workflow.set_priority",
+            "Set Workflow Task Priority",
+            "Set a task priority through an atomic revisioned Forge graph mutation.",
+            object_schema(&[
+                ("workflow_id", "string", "workflow id"),
+                ("task_id", "string", "task id"),
+                ("priority", "string", "high|medium|low"),
+                ("origin", "string", "codex|opencode|skill|mcp"),
+                (
+                    "expected_revision",
+                    "integer",
+                    "optional optimistic concurrency revision",
+                ),
+            ], &["workflow_id", "task_id", "priority", "origin"]),
+            "forge.workflow_mutation.v1",
+            &["forge", "workflow", "set-priority", "--workflow", "<workflow-id>", "--task", "<task-id>", "--priority", "<priority>", "--output", "json"],
+            ToolFlags::new(true, true),
+        ),
+        tool(
+            "forge.workflow.add_dependency",
+            "Add Workflow Task Dependency",
+            "Add a dependency edge after validating that the live workflow graph remains acyclic.",
+            object_schema(&[
+                ("workflow_id", "string", "workflow id"),
+                ("task_id", "string", "task id"),
+                ("depends_on", "string", "predecessor task id"),
+                ("origin", "string", "codex|opencode|skill|mcp"),
+                (
+                    "expected_revision",
+                    "integer",
+                    "optional optimistic concurrency revision",
+                ),
+            ], &["workflow_id", "task_id", "depends_on", "origin"]),
+            "forge.workflow_mutation.v1",
+            &["forge", "workflow", "add-dependency", "--workflow", "<workflow-id>", "--task", "<task-id>", "--depends-on", "<predecessor-task-id>", "--output", "json"],
+            ToolFlags::new(true, true),
+        ),
+        tool(
+            "forge.workflow.remove_dependency",
+            "Remove Workflow Task Dependency",
+            "Remove a dependency edge through an atomic revisioned Forge graph mutation.",
+            object_schema(&[
+                ("workflow_id", "string", "workflow id"),
+                ("task_id", "string", "task id"),
+                ("depends_on", "string", "predecessor task id"),
+                ("origin", "string", "codex|opencode|skill|mcp"),
+                (
+                    "expected_revision",
+                    "integer",
+                    "optional optimistic concurrency revision",
+                ),
+            ], &["workflow_id", "task_id", "depends_on", "origin"]),
+            "forge.workflow_mutation.v1",
+            &["forge", "workflow", "remove-dependency", "--workflow", "<workflow-id>", "--task", "<task-id>", "--depends-on", "<predecessor-task-id>", "--output", "json"],
+            ToolFlags::new(true, true),
+        ),
+        tool(
+            "forge.workflow.set_impediment",
+            "Set Workflow Task Impediment",
+            "Block a task with a structured active impediment and revisioned audit event.",
+            object_schema(&[
+                ("workflow_id", "string", "workflow id"),
+                ("task_id", "string", "task id"),
+                ("reason", "string", "human-readable blocking reason"),
+                ("kind", "string", "optional impediment kind; defaults to manual"),
+                ("origin", "string", "codex|opencode|skill|mcp"),
+                (
+                    "expected_revision",
+                    "integer",
+                    "optional optimistic concurrency revision",
+                ),
+            ], &["workflow_id", "task_id", "reason", "origin"]),
+            "forge.workflow_mutation.v1",
+            &["forge", "workflow", "set-impediment", "--workflow", "<workflow-id>", "--task", "<task-id>", "--reason", "<reason>", "--output", "json"],
+            ToolFlags::new(true, true),
+        ),
+        tool(
+            "forge.workflow.clear_impediment",
+            "Clear Workflow Task Impediment",
+            "Clear one impediment by id, or clear only manual impediments when no id is provided.",
+            object_schema(&[
+                ("workflow_id", "string", "workflow id"),
+                ("task_id", "string", "task id"),
+                ("impediment_id", "string", "optional impediment id; omit to clear manual impediments only"),
+                ("origin", "string", "codex|opencode|skill|mcp"),
+                (
+                    "expected_revision",
+                    "integer",
+                    "optional optimistic concurrency revision",
+                ),
+            ], &["workflow_id", "task_id", "origin"]),
+            "forge.workflow_mutation.v1",
+            &["forge", "workflow", "clear-impediment", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+            ToolFlags::new(true, true),
+        ),
+            tool(
+                "forge.teamwork.plan",
+                "Plan Elastic Teamwork",
+                "Create an auditable fan-out/fan-in workflow with one or more independent lanes. Each lane chooses its executor brain and agent count, such as three Agy frontend agents and five Codex backend agents.",
+                object_schema(&[
+                    ("goal", "string", "teamwork objective"),
+                    (
+                        "lanes",
+                        "array",
+                        "optional lane objects with id, brain, agent_count, optional parallel_group and optional responsibility",
+                    ),
+                    (
+                        "max_parallel_agents",
+                        "integer",
+                        "optional admission ceiling across all lane agents",
+                    ),
+                    (
+                        "bypass_cache",
+                        "boolean",
+                        "optionally bypass advisory benchmark cache",
+                    ),
+                ], &["goal"]),
+                "forge.teamwork.plan.v1",
+                &["forge", "teamwork", "--goal", "<goal>", "--lane", "frontend=agy:3", "--lane", "backend=codex:5", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -7561,6 +7983,44 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
 
 pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Result<McpCallReport> {
     let result = match tool_name {
+        "forge.teamwork.plan" => {
+            let input: TeamworkPlanInput = parse_input(input)?;
+            if input.lanes.is_empty() && input.max_parallel_agents.is_none() {
+                serde_json::to_value(plan_teamwork_workflow(
+                    store,
+                    &input.goal,
+                    false,
+                    input.bypass_cache,
+                )?)?
+            } else {
+                let lanes = if input.lanes.is_empty() {
+                    TeamworkParallelConfig::default().lanes
+                } else {
+                    input
+                        .lanes
+                        .into_iter()
+                        .map(TeamworkLaneInput::into_config)
+                        .collect()
+                };
+                let derived_parallelism = lanes.iter().try_fold(0usize, |total, lane| {
+                    total
+                        .checked_add(lane.agent_count)
+                        .context("teamwork lane agent count overflow")
+                })?;
+                serde_json::to_value(plan_teamwork_workflow_with_config(
+                    store,
+                    &input.goal,
+                    false,
+                    input.bypass_cache,
+                    TeamworkParallelConfig {
+                        lanes,
+                        max_parallel_agents: input
+                            .max_parallel_agents
+                            .unwrap_or(derived_parallelism),
+                    },
+                )?)?
+            }
+        }
         "forge.mission.start" => {
             let input: MissionStartInput = parse_input(input)?;
             serde_json::to_value(start_mission(
@@ -9053,6 +9513,8 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let worker_id = input.worker_id.or(input.worker).ok_or_else(|| {
                 anyhow::anyhow!("forge.addons.execute_validator requires worker_id")
             })?;
+            let workflow_id = input.workflow_id.or(input.workflow);
+            let task_id = input.task_id.or(input.task);
             serde_json::to_value(execute_addon_validator(
                 store,
                 &catalog,
@@ -9061,6 +9523,8 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                         addon_id: addon_id.as_deref(),
                         contract_id: &contract_id,
                         subject: &input.subject,
+                        workflow_id: workflow_id.as_deref(),
+                        task_id: task_id.as_deref(),
                         input: input.input.unwrap_or_else(|| serde_json::json!({})),
                         context: input.context.unwrap_or_else(|| serde_json::json!({})),
                         source: input.source.as_deref().unwrap_or("mcp"),
@@ -9068,6 +9532,29 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     },
                     worker_id: &worker_id,
                     lease_seconds: input.lease_seconds.unwrap_or(300),
+                },
+            )?)?
+        }
+        "forge.addons.apply_validator_outcome" => {
+            let input: AddonValidatorOutcomeApplyInput = parse_input(input)?;
+            let dispatch_id = input.dispatch_id.or(input.dispatch).ok_or_else(|| {
+                anyhow::anyhow!("forge.addons.apply_validator_outcome requires dispatch_id")
+            })?;
+            let workflow_id = input.workflow_id.or(input.workflow).ok_or_else(|| {
+                anyhow::anyhow!("forge.addons.apply_validator_outcome requires workflow_id")
+            })?;
+            let task_id = input.task_id.or(input.task).ok_or_else(|| {
+                anyhow::anyhow!("forge.addons.apply_validator_outcome requires task_id")
+            })?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(apply_addon_validator_outcome(
+                store,
+                AddonValidatorOutcomeApplyRequest {
+                    dispatch_id: &dispatch_id,
+                    workflow_id: &workflow_id,
+                    task_id: &task_id,
+                    expected_revision: input.expected_revision,
+                    origin: &origin,
                 },
             )?)?
         }
@@ -10051,12 +10538,18 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.run.start" => {
             let input: RunStartInput = parse_input(input)?;
+            let parallel_team = explicit_parallel_team_from_mcp_lanes(
+                input.lanes,
+                input.max_parallel_agents,
+                "forge.run.start.mcp",
+            )?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
-            serde_json::to_value(start_async_request_with_idempotency(
+            serde_json::to_value(start_async_request_with_idempotency_and_parallel_team(
                 store,
                 &input.goal,
                 &origin,
                 input.idempotency_key.as_deref(),
+                parallel_team,
             )?)?
         }
         "forge.run.resume" => {
@@ -10099,6 +10592,34 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
+        "forge.run.execute_wave" => {
+            let input: RunExecuteWaveInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            let executor = input
+                .executor
+                .unwrap_or_else(|| DEFAULT_REQUEST_EXECUTOR_WAVE_EXECUTOR.to_string());
+            serde_json::to_value(execute_request_executor_wave(
+                store,
+                &RequestExecutorWaveOptions {
+                    run_id: &input.run_id,
+                    requested_executor: &executor,
+                    ttl_seconds: input
+                        .ttl_seconds
+                        .unwrap_or(DEFAULT_REQUEST_EXECUTOR_WAVE_TTL_SECONDS),
+                    timeout_seconds: input
+                        .timeout_seconds
+                        .unwrap_or(DEFAULT_REQUEST_EXECUTOR_WAVE_TIMEOUT_SECONDS),
+                    context_budget: input
+                        .context_budget
+                        .unwrap_or(DEFAULT_REQUEST_EXECUTOR_WAVE_CONTEXT_BUDGET),
+                    max_parallel: input.max_parallel,
+                    allow_exec: input.allow_exec,
+                    approved_by: &input.approved_by,
+                    reason: &input.reason,
+                    origin: &origin,
+                },
+            )?)?
+        }
         "forge.run.complete_task" => {
             let input: RunCompleteTaskInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
@@ -10117,6 +10638,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     summary: &input.summary,
                     artifact_paths: &artifacts,
                     evidence_command: input.evidence_command.as_deref(),
+                    evidence_exit_code: input.evidence_exit_code,
                     evidence_summary: input.evidence_summary.as_deref(),
                     estimated_usd: input.estimated_usd.unwrap_or(0.0),
                     tokens_in: input.tokens_in.unwrap_or(0),
@@ -10188,11 +10710,107 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.workflow.update_goal" => {
             let input: WorkflowUpdateGoalInput = parse_input(input)?;
-            serde_json::to_value(update_workflow_goal(
+            serde_json::to_value(update_workflow_goal_with_expected_revision(
                 store,
                 &input.workflow_id,
                 &input.goal,
                 &input.origin,
+                input.expected_revision,
+            )?)?
+        }
+        "forge.workflow.add_task" => {
+            let input: WorkflowAddTaskInput = parse_input(input)?;
+            serde_json::to_value(add_workflow_task(
+                store,
+                &input.workflow_id,
+                WorkflowTaskAddInput {
+                    task_id: input.task_id,
+                    description: input.description,
+                    priority: input.priority,
+                    origin: input.origin,
+                    expected_revision: input.expected_revision,
+                },
+            )?)?
+        }
+        "forge.workflow.update_task" => {
+            let input: WorkflowUpdateTaskInput = parse_input(input)?;
+            serde_json::to_value(update_workflow_task_with_expected_revision(
+                store,
+                &input.workflow_id,
+                WorkflowTaskUpdateInput {
+                    task_id: &input.task_id,
+                    title: input.title.as_deref(),
+                    goal: input.goal.as_deref(),
+                    expected_output: input.expected_output.as_deref(),
+                    origin: &input.origin,
+                },
+                input.expected_revision,
+            )?)?
+        }
+        "forge.workflow.set_priority" => {
+            let input: WorkflowSetPriorityInput = parse_input(input)?;
+            serde_json::to_value(set_workflow_task_priority(
+                store,
+                &input.workflow_id,
+                WorkflowTaskPriorityInput {
+                    task_id: input.task_id,
+                    priority: input.priority,
+                    origin: input.origin,
+                    expected_revision: input.expected_revision,
+                },
+            )?)?
+        }
+        "forge.workflow.add_dependency" => {
+            let input: WorkflowDependencyInput = parse_input(input)?;
+            serde_json::to_value(add_workflow_task_dependency(
+                store,
+                &input.workflow_id,
+                WorkflowTaskDependencyInput {
+                    task_id: input.task_id,
+                    dependency_task_id: input.depends_on,
+                    origin: input.origin,
+                    expected_revision: input.expected_revision,
+                },
+            )?)?
+        }
+        "forge.workflow.remove_dependency" => {
+            let input: WorkflowDependencyInput = parse_input(input)?;
+            serde_json::to_value(remove_workflow_task_dependency(
+                store,
+                &input.workflow_id,
+                WorkflowTaskDependencyInput {
+                    task_id: input.task_id,
+                    dependency_task_id: input.depends_on,
+                    origin: input.origin,
+                    expected_revision: input.expected_revision,
+                },
+            )?)?
+        }
+        "forge.workflow.set_impediment" => {
+            let input: WorkflowSetImpedimentInput = parse_input(input)?;
+            serde_json::to_value(set_workflow_task_impediment(
+                store,
+                &input.workflow_id,
+                WorkflowTaskImpedimentInput {
+                    task_id: input.task_id,
+                    reason: input.reason,
+                    kind: input.kind,
+                    origin: input.origin,
+                    expected_revision: input.expected_revision,
+                },
+            )?)?
+        }
+        "forge.workflow.clear_impediment" => {
+            let input: WorkflowClearImpedimentInput = parse_input(input)?;
+            serde_json::to_value(clear_workflow_task_impediment(
+                store,
+                &input.workflow_id,
+                WorkflowTaskImpedimentClearInput {
+                    task_id: input.task_id,
+                    impediment_id: input.impediment_id,
+                    origin: input.origin,
+                    expected_revision: input.expected_revision,
+                },
             )?)?
         }
         "forge.workflow.update_node_brain" => {
@@ -10241,6 +10859,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     choices: &input.choices,
                     timeout_seconds: input.timeout_seconds,
                     origin: &origin,
+                    expected_revision: None,
                 },
             )?)?
         }
@@ -11680,19 +12299,60 @@ impl ToolFlags {
 fn object_schema(properties: &[(&str, &str, &str)], required: &[&str]) -> Value {
     let mut props = serde_json::Map::new();
     for (name, value_type, description) in properties {
-        props.insert(
-            (*name).to_string(),
+        let property_schema = if *name == "lanes" && *value_type == "array" {
+            parallel_lane_array_schema(description)
+        } else {
             json!({
                 "type": value_type,
                 "description": description
-            }),
-        );
+            })
+        };
+        props.insert((*name).to_string(), property_schema);
     }
     json!({
         "type": "object",
         "additionalProperties": false,
         "properties": props,
         "required": required,
+    })
+}
+
+fn parallel_lane_array_schema(description: &str) -> Value {
+    json!({
+        "type": "array",
+        "description": description,
+        "minItems": 1,
+        "maxItems": 64,
+        "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+                    "description": "canonical lane id such as frontend or backend"
+                },
+                "brain": {
+                    "type": "string",
+                    "description": "explicit executor id or supported alias; auto is rejected"
+                },
+                "agent_count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 64,
+                    "description": "maximum independent agents in this lane"
+                },
+                "parallel_group": {
+                    "type": "string",
+                    "description": "optional shared parallel wave id"
+                },
+                "responsibility": {
+                    "type": "string",
+                    "description": "optional bounded lane responsibility"
+                }
+            },
+            "required": ["id", "brain", "agent_count"]
+        }
     })
 }
 

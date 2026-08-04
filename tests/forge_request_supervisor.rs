@@ -282,7 +282,7 @@ fn status_update_and_executor_switch_remain_available_without_a_supervisor_lease
 #[test]
 fn parks_handoff_boundary_once_with_structured_reason_and_cleared_lease() {
     let (_temporary, store) = open_store();
-    let workflow = workflow_with_tasks(&store, &[ExecutorKind::Ai]);
+    let workflow = workflow_with_tasks(&store, &[ExecutorKind::Command]);
     let run = save_run(&store, &workflow, "accepted", |_| {});
 
     let first = supervise_requests_once(&store, &options()).unwrap();

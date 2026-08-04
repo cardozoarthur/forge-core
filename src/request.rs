@@ -1,24 +1,31 @@
 use crate::adapter::{validate_executor_response_file, ExecutorResponseValidationReport};
 use crate::addon::{default_addon_dirs, load_addon_catalog_from_store};
 use crate::artifact::{hex_sha256, list_workflow_artifacts, write_json_artifact};
-use crate::checkpoint::{load_workflow_checkpoints, TaskCheckpoint};
+use crate::checkpoint::{load_latest_task_checkpoint, load_workflow_checkpoints, TaskCheckpoint};
 use crate::context::{
     build_context_handoff_summary_for_task_ids_with_task_projects,
-    build_context_handoff_summary_with_task_projects, compact_text, compact_validation_rule,
-    summarize_context_handoff_tasks, unresolved_predecessor_frontier, ContextHandoffBlocker,
-    ContextHandoffSummary, ContextHandoffTask, COMPACT_EXPECTED_OUTPUT_BYTE_LIMIT,
-    COMPACT_PREDECESSOR_TASK_LIMIT, COMPACT_PREDECESSOR_VALIDATION_RULE_LIMIT,
-    COMPACT_TASK_GOAL_BYTE_LIMIT, COMPACT_TASK_ID_BYTE_LIMIT, COMPACT_TASK_TITLE_BYTE_LIMIT,
-    DEFAULT_CONTEXT_BUDGET,
+    build_context_handoff_summary_with_task_projects,
+    build_context_package_with_checkpoint_and_project,
+    build_context_package_with_checkpoint_project_and_worktree, compact_text,
+    compact_validation_rule, summarize_context_handoff_tasks, unresolved_predecessor_frontier,
+    ContextHandoffBlocker, ContextHandoffSummary, ContextHandoffTask,
+    COMPACT_EXPECTED_OUTPUT_BYTE_LIMIT, COMPACT_PREDECESSOR_TASK_LIMIT,
+    COMPACT_PREDECESSOR_VALIDATION_RULE_LIMIT, COMPACT_TASK_GOAL_BYTE_LIMIT,
+    COMPACT_TASK_ID_BYTE_LIMIT, COMPACT_TASK_TITLE_BYTE_LIMIT, DEFAULT_CONTEXT_BUDGET,
+};
+use crate::executor::{
+    canonical_executor_id, load_executors, ExecutorQuotaObservation, ExecutorState,
 };
 use crate::graph::{
-    create_workflow, task, AtomicTask, ExecutorKind, TaskStatus, ValidationRule, Workflow,
-    WorkflowRevision,
+    create_workflow, task, AtomicTask, CoreParallelTeamSpec, ExecutorKind, NodeBrainRoutingSpec,
+    TaskStatus, ValidationRule, Workflow, WorkflowRevision,
 };
+use crate::handoff::build_task_handoff_with_project;
 use crate::identity::{
     ensure_operating_context_policy, ensure_workflow_policy, load_project_operating_context,
 };
 use crate::intent::{parse_intent, parse_intent_with_catalog_and_context};
+use crate::lease::{release_task_lease, TaskLease};
 use crate::outcome::{
     assess_workflow_outcome, assess_workflow_outcome_with_evidence,
     is_final_completion_audit_artifact, workflow_has_explicit_final_criteria,
@@ -30,22 +37,35 @@ use crate::registry::{
 };
 use crate::security::sanitize_workflow_secrets_for_storage;
 use crate::storage::ForgeStore;
+use crate::teamwork_fan_in::{current_teamwork_fan_in_status, TEAMWORK_GIT_FAN_IN_VALIDATION_RULE};
 use crate::workflow::{
     prepare_workflow_artifact_attach, record_prepared_workflow_artifact, ArtifactAttachReport,
     PreparedArtifactAttach,
 };
-use crate::worktree::{resolve_bound_worktree_root, WorktreeContextReport};
+use crate::worktree::{
+    bound_worktree_context, bound_worktree_mutation_claim, resolve_bound_worktree_root,
+    WorktreeContextReport, WorktreeMutationClaim,
+};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::ffi::CString;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use uuid::Uuid;
 
 const COMPLETION_AUDIT_HANDOFF_CONTEXT_BUDGET: usize = 12000;
 const REWORK_HANDOFF_CONTEXT_BUDGET: usize = 4096;
-const REQUEST_CONTEXT_FRONTIER_LIMIT: usize = 4;
+const REQUEST_CONTEXT_FRONTIER_HARD_LIMIT: usize = 64;
+const PARALLEL_QUOTA_OBSERVATION_MAX_AGE_SECONDS: i64 = 900;
+const PARALLEL_MIN_MEMORY_PER_TASK_BYTES: u64 = 512 * 1024 * 1024;
+const PARALLEL_MIN_DISK_FREE_BYTES: u64 = 1024 * 1024 * 1024;
+const PARALLEL_LOW_DISK_FREE_RATIO: f64 = 0.15;
 
 #[cfg(test)]
 static FINAL_DELIVERY_PREPARATION_DELAY: std::sync::Mutex<Option<(String, u64)>> =
@@ -110,6 +130,8 @@ pub struct RequestStartReport {
     pub handoff_contract: AgentHandoffContract,
     pub reuse_candidates: Vec<WorkflowReuseCandidate>,
     pub attached_subflows: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_team: Option<CoreParallelTeamSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeContextReport>,
     #[serde(skip)]
@@ -281,6 +303,8 @@ pub struct RequestDriveReport {
     pub next_command: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parallel_next_commands: Vec<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_frontier: Option<DispatchFrontier>,
     pub final_delivery_package: Option<RequestFinalDeliveryPackageReport>,
     pub reason: String,
     pub updated_at: DateTime<Utc>,
@@ -299,10 +323,86 @@ pub struct RequestDriveRework {
 pub struct RequestDriveTask {
     pub task_id: String,
     pub title: String,
+    pub priority: String,
     pub executor: String,
+    pub node_brain_routing: NodeBrainRoutingSpec,
     pub handoff_status: String,
     pub context_sha256: String,
     pub context_routing_cache_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchAssignment {
+    pub task_id: String,
+    pub title: String,
+    pub priority: String,
+    pub selected_executor: String,
+    #[serde(default)]
+    pub executor_routing_source: String,
+    #[serde(default)]
+    pub task_version: u64,
+    pub handoff_status: String,
+    pub context_sha256: String,
+    pub lease_id: String,
+    pub lease_expires_at: DateTime<Utc>,
+    pub lease_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_claim: Option<WorktreeMutationClaim>,
+    pub execution_started: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeferredDispatchTask {
+    pub task_id: String,
+    pub title: String,
+    pub priority: String,
+    pub status: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchResourceAdmission {
+    pub status: String,
+    pub requested_parallel_tasks: usize,
+    pub admitted_parallel_tasks: usize,
+    pub existing_active_leases: usize,
+    pub requested_new_handoffs: usize,
+    pub admitted_new_handoffs: usize,
+    pub cpu_count: Option<usize>,
+    pub load_one: Option<f64>,
+    pub memory_available_bytes: Option<u64>,
+    pub swap_free_bytes: Option<u64>,
+    pub disk_free_bytes: Option<u64>,
+    pub disk_total_bytes: Option<u64>,
+    pub disk_free_ratio: Option<f64>,
+    pub quota_status: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub executor_quota_statuses: BTreeMap<String, String>,
+    pub resource_status: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionWave {
+    pub schema_version: String,
+    pub wave_id: String,
+    pub workflow_id: String,
+    pub workflow_revision: u64,
+    pub assignments: Vec<DispatchAssignment>,
+    pub deferred: Vec<DeferredDispatchTask>,
+    pub execution_started: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchFrontier {
+    pub schema_version: String,
+    pub status: String,
+    pub max_parallel_tasks: usize,
+    pub admission: DispatchResourceAdmission,
+    pub wave: ExecutionWave,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -360,6 +460,7 @@ pub struct RequestTaskCompletionInput<'a> {
     pub summary: &'a str,
     pub artifact_paths: &'a [PathBuf],
     pub evidence_command: Option<&'a str>,
+    pub evidence_exit_code: Option<i32>,
     pub evidence_summary: Option<&'a str>,
     pub estimated_usd: f64,
     pub tokens_in: i64,
@@ -387,6 +488,13 @@ pub struct RequestTaskCompletionReport {
     pub drive_after: Option<RequestDriveReport>,
     pub reason: String,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct ObservedExecutorRuntimeReceipt {
+    execution_id: String,
+    receipt_sha256: String,
+    git: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -794,6 +902,7 @@ pub fn start_pm_session(
         handoff_contract,
         reuse_candidates,
         attached_subflows,
+        parallel_team: None,
         worktree: None,
         idempotent_replay: false,
     })
@@ -804,6 +913,7 @@ fn build_request_start_idempotency_attempt(
     origin: &str,
     project_root: &Path,
     idempotency_key: &str,
+    parallel_team: Option<&CoreParallelTeamSpec>,
 ) -> Result<RequestStartIdempotencyAttempt> {
     let normalized_origin = origin.trim();
     if normalized_origin.is_empty() {
@@ -835,11 +945,19 @@ fn build_request_start_idempotency_attempt(
     });
     let project_context_bytes = serde_json::to_vec(&project_context)?;
     let project_context_sha256 = hex_sha256(&project_context_bytes);
-    let request_fingerprint = serde_json::json!({
-        "schema_version": "forge.request_start_fingerprint.v1",
-        "goal": goal,
-        "project_context_sha256": project_context_sha256,
-    });
+    let request_fingerprint = match parallel_team {
+        Some(parallel_team) => serde_json::json!({
+            "schema_version": "forge.request_start_fingerprint.v2",
+            "goal": goal,
+            "project_context_sha256": project_context_sha256,
+            "parallel_team": semantic_parallel_team_fingerprint(parallel_team),
+        }),
+        None => serde_json::json!({
+            "schema_version": "forge.request_start_fingerprint.v1",
+            "goal": goal,
+            "project_context_sha256": project_context_sha256,
+        }),
+    };
 
     Ok(RequestStartIdempotencyAttempt {
         origin: normalized_origin.to_string(),
@@ -848,6 +966,16 @@ fn build_request_start_idempotency_attempt(
         ),
         request_fingerprint_sha256: hex_sha256(&serde_json::to_vec(&request_fingerprint)?),
         project_context_sha256,
+    })
+}
+
+fn semantic_parallel_team_fingerprint(parallel_team: &CoreParallelTeamSpec) -> serde_json::Value {
+    let mut lanes = parallel_team.lanes.clone();
+    lanes.sort_by(|left, right| left.id.cmp(&right.id));
+    serde_json::json!({
+        "schema_version": "forge.request_start_parallel_team_fingerprint.v1",
+        "lanes": lanes,
+        "max_parallel_agents": parallel_team.max_parallel_agents,
     })
 }
 
@@ -946,13 +1074,30 @@ pub fn start_async_request_with_idempotency(
     origin: &str,
     idempotency_key: Option<&str>,
 ) -> Result<RequestStartReport> {
+    start_async_request_with_idempotency_and_parallel_team(
+        store,
+        goal,
+        origin,
+        idempotency_key,
+        None,
+    )
+}
+
+pub fn start_async_request_with_idempotency_and_parallel_team(
+    store: &ForgeStore,
+    goal: &str,
+    origin: &str,
+    idempotency_key: Option<&str>,
+    parallel_team: Option<CoreParallelTeamSpec>,
+) -> Result<RequestStartReport> {
     let project_root = std::env::current_dir()?;
-    start_async_request_with_project_and_idempotency(
+    start_async_request_with_project_idempotency_and_parallel_team(
         store,
         goal,
         origin,
         &project_root,
         idempotency_key,
+        parallel_team,
     )
 }
 
@@ -972,8 +1117,37 @@ pub fn start_async_request_with_project_and_idempotency(
     project_root: &Path,
     idempotency_key: Option<&str>,
 ) -> Result<RequestStartReport> {
+    start_async_request_with_project_idempotency_and_parallel_team(
+        store,
+        goal,
+        origin,
+        project_root,
+        idempotency_key,
+        None,
+    )
+}
+
+pub fn start_async_request_with_project_idempotency_and_parallel_team(
+    store: &ForgeStore,
+    goal: &str,
+    origin: &str,
+    project_root: &Path,
+    idempotency_key: Option<&str>,
+    parallel_team: Option<CoreParallelTeamSpec>,
+) -> Result<RequestStartReport> {
+    let parallel_team = parallel_team
+        .map(crate::teamwork::normalize_explicit_parallel_team)
+        .transpose()?;
     let idempotency_attempt = idempotency_key
-        .map(|key| build_request_start_idempotency_attempt(goal, origin, project_root, key))
+        .map(|key| {
+            build_request_start_idempotency_attempt(
+                goal,
+                origin,
+                project_root,
+                key,
+                parallel_team.as_ref(),
+            )
+        })
         .transpose()?;
 
     let transaction_outcome = store.with_transaction(|| {
@@ -999,6 +1173,9 @@ pub fn start_async_request_with_project_and_idempotency(
         ensure_operating_context_policy(store, &operating_context, "request start")?;
         let intent = parse_intent_with_catalog_and_context(goal, &addon_catalog, operating_context);
         let mut workflow = create_workflow(intent);
+        if let Some(parallel_team) = parallel_team.clone() {
+            crate::teamwork::materialize_explicit_parallel_team(&mut workflow, parallel_team)?;
+        }
         let _ = sanitize_workflow_secrets_for_storage(store, &mut workflow, origin)?;
         let reuse_candidates = find_reuse_candidates(store, &workflow)?;
         let attached_subflows =
@@ -1065,6 +1242,10 @@ pub fn start_async_request_with_project_and_idempotency(
                 )
             }
         };
+    let parallel_team = store
+        .load_workflow(&run.workflow_id)?
+        .core_orchestration
+        .parallel_team;
     let handoff_contract = build_agent_handoff_contract(store, &run, flow_resolution.clone());
     Ok(RequestStartReport {
         status: "accepted".to_string(),
@@ -1077,6 +1258,7 @@ pub fn start_async_request_with_project_and_idempotency(
         handoff_contract,
         reuse_candidates,
         attached_subflows,
+        parallel_team,
         worktree: None,
         idempotent_replay,
     })
@@ -1823,7 +2005,7 @@ pub fn drive_request(
     )
 }
 
-fn drive_request_with_context_budget(
+pub fn drive_request_with_context_budget(
     store: &ForgeStore,
     run_id: &str,
     executor: &str,
@@ -1906,6 +2088,7 @@ fn drive_request_with_options(
             blocked_tasks: Vec::new(),
             next_command: Vec::new(),
             parallel_next_commands: Vec::new(),
+            dispatch_frontier: None,
             final_delivery_package: None,
             reason: reason.to_string(),
             updated_at: run.updated_at,
@@ -1963,6 +2146,7 @@ fn drive_request_with_options(
             ),
             next_command,
             parallel_next_commands: Vec::new(),
+            dispatch_frontier: None,
             final_delivery_package: None,
             reason: "Latest accepted executor response requested retry; rework must be handled before blind forward progress.".to_string(),
             updated_at: heartbeat.updated_at,
@@ -2024,6 +2208,7 @@ fn drive_request_with_options(
             ),
             next_command,
             parallel_next_commands: Vec::new(),
+            dispatch_frontier: None,
             final_delivery_package: None,
             reason: attention_reason.to_string(),
             updated_at: attention_run.updated_at,
@@ -2087,6 +2272,7 @@ fn drive_request_with_options(
                     blocked_tasks: Vec::new(),
                     next_command,
                     parallel_next_commands: Vec::new(),
+                    dispatch_frontier: None,
                     final_delivery_package: None,
                     reason,
                     updated_at,
@@ -2131,6 +2317,7 @@ fn drive_request_with_options(
             blocked_tasks: Vec::new(),
             next_command,
             parallel_next_commands: Vec::new(),
+            dispatch_frontier: None,
             final_delivery_package: None,
             reason: "All workflow tasks are complete; request step deferred final delivery so SQLite can commit before package files are published.".to_string(),
             updated_at: Utc::now(),
@@ -2185,12 +2372,15 @@ fn drive_request_with_options(
             let final_delivery_package = prepared_final_delivery_package.commit(store)?;
             #[cfg(test)]
             {
-                let delay_ms = FINAL_DELIVERY_COMMIT_DELAY
+                let mut configured_delay = FINAL_DELIVERY_COMMIT_DELAY
                     .lock()
-                    .expect("final delivery commit delay lock poisoned")
-                    .take()
-                    .filter(|(run_id, _)| run_id == &current_run.run_id)
-                    .map(|(_, delay_ms)| delay_ms);
+                    .expect("final delivery commit delay lock poisoned");
+                let delay_ms = configured_delay
+                    .as_ref()
+                    .is_some_and(|(run_id, _)| run_id == &current_run.run_id)
+                    .then(|| configured_delay.take().map(|(_, delay_ms)| delay_ms))
+                    .flatten();
+                drop(configured_delay);
                 if let Some(delay_ms) = delay_ms {
                     std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 }
@@ -2229,66 +2419,162 @@ fn drive_request_with_options(
             blocked_tasks: Vec::new(),
             next_command: Vec::new(),
             parallel_next_commands: Vec::new(),
+            dispatch_frontier: None,
             final_delivery_package: Some(final_delivery_package),
             reason: completion_reason,
             updated_at: completed_at,
         });
     }
 
-    let parallel_handoff_tasks = ready_handoff_tasks(&workflow, &handoff_summary.tasks);
-    if let Some(task) = parallel_handoff_tasks.first().cloned() {
-        let heartbeat = heartbeat_request_with_expected_snapshot(
-            store,
-            run_id,
-            executor,
-            "forge drive selected a runnable handoff",
-            ttl_seconds,
-            None,
-            origin,
-            Some((&run, &workflow, &checkpoints)),
-            supervisor_fence,
-        )?;
-        let handoff_budget = context_budget_override
-            .unwrap_or_else(|| handoff_context_budget_for_task(&workflow, &task.task_id));
-        let next_command = handoff_command(
-            store,
-            &workflow.id,
-            &task.task_id,
-            executor,
-            ttl_seconds,
-            handoff_budget,
-        );
-        let parallel_next_commands = parallel_handoff_tasks
+    let parallel_handoff_tasks = ready_handoff_tasks(store, &workflow, &handoff_summary.tasks)?;
+    if !parallel_handoff_tasks.is_empty() {
+        let (heartbeat, dispatch_frontier) = store.with_transaction(|| {
+            let heartbeat = heartbeat_request_with_expected_snapshot(
+                store,
+                run_id,
+                executor,
+                "forge drive selected a runnable handoff",
+                ttl_seconds,
+                None,
+                origin,
+                Some((&run, &workflow, &checkpoints)),
+                supervisor_fence,
+            )?;
+            let dispatch_run = load_run_record_for_action(store, run_id, "create dispatch wave")?;
+            let dispatch_workflow = store.load_workflow(&workflow.id)?;
+            let (current_run, _) = load_current_request_snapshot(
+                store,
+                &dispatch_run,
+                &dispatch_workflow,
+                "create dispatch wave",
+            )?;
+            ensure_request_checkpoints_match(
+                store,
+                &workflow.id,
+                &checkpoints,
+                "create dispatch wave",
+            )?;
+            ensure_request_supervisor_fence(
+                &current_run,
+                supervisor_fence,
+                "create dispatch wave",
+            )?;
+            let dispatch_frontier = build_dispatch_frontier(
+                store,
+                &dispatch_workflow,
+                &parallel_handoff_tasks,
+                &handoff_summary.tasks,
+                &project_roots,
+                executor,
+                ttl_seconds,
+                context_budget_override,
+            )?;
+            let lease_correlations = dispatch_frontier
+                .wave
+                .assignments
+                .iter()
+                .map(|assignment| {
+                    serde_json::json!({
+                        "task_id": assignment.task_id,
+                        "selected_executor": assignment.selected_executor,
+                        "executor_routing_source": assignment.executor_routing_source,
+                        "task_version": assignment.task_version,
+                        "lease_id": assignment.lease_id,
+                        "lease_expires_at": assignment.lease_expires_at,
+                        "lease_state": assignment.lease_state,
+                        "workspace_claim": assignment.workspace_claim,
+                        "execution_started": assignment.execution_started,
+                    })
+                })
+                .collect::<Vec<_>>();
+            store.record_event(
+                &workflow.id,
+                "request_dispatch_wave_created",
+                &serde_json::json!({
+                    "run_id": run.run_id,
+                    "origin": origin,
+                    "requested_executor": executor,
+                    "workflow_revision": dispatch_frontier.wave.workflow_revision,
+                    "wave": &dispatch_frontier.wave,
+                    "admission": &dispatch_frontier.admission,
+                    "lease_correlations": lease_correlations,
+                    "execution_started": false,
+                }),
+            )?;
+            Ok((heartbeat, dispatch_frontier))
+        })?;
+        let assigned_task_ids = dispatch_frontier
+            .wave
+            .assignments
             .iter()
-            .map(|task| {
-                handoff_command(
+            .map(|assignment| assignment.task_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let admitted_handoff_tasks = parallel_handoff_tasks
+            .iter()
+            .filter(|task| assigned_task_ids.contains(task.task_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let parallel_next_commands = dispatch_frontier
+            .wave
+            .assignments
+            .iter()
+            .filter_map(|assignment| {
+                let task = admitted_handoff_tasks
+                    .iter()
+                    .find(|task| task.task_id == assignment.task_id)?;
+                Some(handoff_command(
                     store,
                     &workflow.id,
                     &task.task_id,
-                    executor,
+                    &assignment.selected_executor,
                     ttl_seconds,
                     context_budget_override.unwrap_or_else(|| {
                         handoff_context_budget_for_task(&workflow, &task.task_id)
                     }),
-                )
+                ))
             })
             .collect::<Vec<_>>();
-        let parallel_ready_count = parallel_handoff_tasks.len();
-        let action = if parallel_ready_count > 1 {
+        let next_command = parallel_next_commands.first().cloned().unwrap_or_else(|| {
+            let mut command = forge_command_prefix(store);
+            command.extend([
+                "request".to_string(),
+                "status".to_string(),
+                "--run".to_string(),
+                run_id.to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]);
+            command
+        });
+        let assigned_count = admitted_handoff_tasks.len();
+        let deferred_count = dispatch_frontier.wave.deferred.len();
+        let action = if assigned_count > 1 {
             "start_parallel_handoffs"
-        } else {
+        } else if assigned_count == 1 {
             "start_handoff"
+        } else {
+            "wait_for_dispatch_admission"
         };
-        let reason = if parallel_ready_count > 1 {
+        let reason = if assigned_count > 1 {
             format!(
-                "{parallel_ready_count} pending tasks have ready context and dependencies; start parallel executor handoffs within quota and resource limits."
+                "{assigned_count} parallel handoff leases acquired or reused; executor execution has not started. {deferred_count} task(s) were deferred by the bounded frontier or admission gates."
+            )
+        } else if assigned_count == 1 {
+            format!(
+                "One handoff lease acquired or reused; executor execution has not started. {deferred_count} task(s) were deferred by the bounded frontier or admission gates."
             )
         } else {
-            "A pending task has ready context and dependencies; start executor handoff.".to_string()
+            format!(
+                "No handoff lease was admitted; executor execution has not started. {deferred_count} task(s) remain deferred by quota, host-resource, context, or dependency gates."
+            )
         };
         return Ok(RequestDriveReport {
             schema_version: "forge.request_drive.v1".to_string(),
-            status: "ready_for_handoff".to_string(),
+            status: if assigned_count == 0 {
+                "dispatch_blocked".to_string()
+            } else {
+                "ready_for_handoff".to_string()
+            },
             action: action.to_string(),
             run_id: run.run_id,
             workflow_id: workflow.id.clone(),
@@ -2300,7 +2586,7 @@ fn drive_request_with_options(
             checkpoint_count: checkpoints.len(),
             latest_checkpoint,
             rework: None,
-            handoff_task: Some(task),
+            handoff_task: admitted_handoff_tasks.first().cloned(),
             parallel_handoff_tasks,
             blocked_tasks: drive_blocked_tasks(
                 store,
@@ -2312,6 +2598,7 @@ fn drive_request_with_options(
             ),
             next_command,
             parallel_next_commands,
+            dispatch_frontier: Some(dispatch_frontier),
             final_delivery_package: None,
             reason,
             updated_at: heartbeat.updated_at,
@@ -2372,6 +2659,7 @@ fn drive_request_with_options(
         blocked_tasks,
         next_command,
         parallel_next_commands: Vec::new(),
+        dispatch_frontier: None,
         final_delivery_package: None,
         reason: reason.to_string(),
         updated_at: blocked_run.updated_at,
@@ -2489,6 +2777,318 @@ fn step_request_with_options(
     })
 }
 
+fn request_task_handoff_ready_for_completion(
+    store: &ForgeStore,
+    workflow: &Workflow,
+    task_id: &str,
+    context_budget: Option<usize>,
+) -> Result<bool> {
+    let task_ids = vec![task_id.to_string()];
+    let project_roots = worktree_project_roots_for_task_ids(store, workflow, &task_ids)?;
+    let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
+    let summary = build_context_handoff_summary_for_task_ids_with_task_projects(
+        workflow,
+        context_budget.unwrap_or_else(|| request_drive_context_budget(workflow)),
+        &checkpoints,
+        &project_roots,
+        &task_ids,
+    )?;
+    Ok(summary.tasks.first().is_some_and(|task| task.handoff_ready))
+}
+
+fn ensure_completion_receipt_input(
+    task_id: &str,
+    input: &RequestTaskCompletionInput<'_>,
+) -> Result<()> {
+    if input
+        .evidence_command
+        .is_none_or(|command| command.trim().is_empty())
+    {
+        anyhow::bail!(
+            "request task {} requires an explicit non-empty caller-attested evidence command before promotion",
+            task_id
+        );
+    }
+    if input.evidence_exit_code.is_none() {
+        anyhow::bail!(
+            "request task {} requires an explicit caller-attested evidence exit code before promotion",
+            task_id
+        );
+    }
+    Ok(())
+}
+
+fn ensure_preexisting_completion_lease(
+    task_id: &str,
+    input: &RequestTaskCompletionInput<'_>,
+    lease: Option<&TaskLease>,
+) -> Result<()> {
+    let lease = lease.with_context(|| {
+        format!(
+            "request task {} must already have an active executor lease before completion evidence is submitted",
+            task_id
+        )
+    })?;
+    if lease.expires_at <= Utc::now() {
+        anyhow::bail!(
+            "request task {} executor lease {} expired before completion evidence was submitted",
+            task_id,
+            lease.lease_id
+        );
+    }
+    if input.executor != "auto" && input.executor != lease.executor {
+        anyhow::bail!(
+            "request task {} completion executor {} does not match pre-existing lease executor {}",
+            task_id,
+            input.executor,
+            lease.executor,
+        );
+    }
+    Ok(())
+}
+
+fn task_requires_implementation_commit(task: &AtomicTask) -> bool {
+    task.node_brain_routing
+        .agent_slots
+        .iter()
+        .any(|slot| slot.parallel_group == "implementation-wave-001")
+}
+
+fn runtime_receipt_text<'a>(
+    receipt: &'a serde_json::Value,
+    field: &str,
+    task_id: &str,
+) -> Result<&'a str> {
+    receipt[field]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .with_context(|| {
+            format!("request task {task_id} executor runtime receipt requires non-empty `{field}`")
+        })
+}
+
+fn completion_git_output(root: &Path, args: &[&str]) -> Result<String> {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to inspect Git state for observed executor completion in {}",
+                root.display()
+            )
+        })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "Git state inspection failed for observed executor completion in {}: {}",
+            root.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn worktree_claim_identity_unchanged(
+    leased: &WorktreeMutationClaim,
+    current: &WorktreeMutationClaim,
+) -> bool {
+    leased.schema_version == current.schema_version
+        && leased.mode == current.mode
+        && leased.worktree_id == current.worktree_id
+        && leased.worktree_identity_sha256 == current.worktree_identity_sha256
+        && leased.repository_root == current.repository_root
+        && leased.worktree_root == current.worktree_root
+        && leased.binding_scope == current.binding_scope
+        && leased.binding_workflow_revision == current.binding_workflow_revision
+        && leased.config_sha256 == current.config_sha256
+}
+
+fn ensure_caller_attested_workspace_claim_unchanged(
+    store: &ForgeStore,
+    workflow: &Workflow,
+    task: &AtomicTask,
+    lease: &TaskLease,
+) -> Result<()> {
+    let current_claim = bound_worktree_mutation_claim(store, &workflow.id, &task.id)?;
+    if current_claim != lease.workspace_claim {
+        anyhow::bail!(
+            "request task {} caller-attested completion worktree claim drifted after dispatch",
+            task.id
+        );
+    }
+    Ok(())
+}
+
+fn observed_executor_runtime_receipt(
+    store: &ForgeStore,
+    workflow: &Workflow,
+    task: &AtomicTask,
+    lease: &TaskLease,
+) -> Result<Option<ObservedExecutorRuntimeReceipt>> {
+    let Some(claim) = store.load_executor_runtime_claim(&workflow.id, &task.id, &lease.lease_id)?
+    else {
+        return Ok(None);
+    };
+    if claim.state != "finished" {
+        anyhow::bail!(
+            "request task {} executor runtime claim {} must be finished before promotion, found {}",
+            task.id,
+            claim.execution_id,
+            claim.state
+        );
+    }
+    let receipt_json = claim.receipt_json.as_deref().with_context(|| {
+        format!(
+            "request task {} finished executor runtime claim {} has no receipt",
+            task.id, claim.execution_id
+        )
+    })?;
+    let receipt = serde_json::from_str::<serde_json::Value>(receipt_json).with_context(|| {
+        format!(
+            "request task {} executor runtime claim {} has invalid receipt JSON",
+            task.id, claim.execution_id
+        )
+    })?;
+    let execution_id = runtime_receipt_text(&receipt, "execution_id", &task.id)?;
+    let receipt_workflow_id = runtime_receipt_text(&receipt, "workflow_id", &task.id)?;
+    let receipt_task_id = runtime_receipt_text(&receipt, "task_id", &task.id)?;
+    let receipt_lease_id = runtime_receipt_text(&receipt, "lease_id", &task.id)?;
+    let receipt_executor = runtime_receipt_text(&receipt, "executor", &task.id)?;
+    let receipt_worktree_id = runtime_receipt_text(&receipt, "worktree_id", &task.id)?;
+    let lease_worktree = lease.workspace_claim.as_ref().with_context(|| {
+        format!(
+            "request task {} observed executor receipt requires task-scoped worktree claim",
+            task.id
+        )
+    })?;
+    if claim.execution_id != execution_id
+        || claim.workflow_id != workflow.id
+        || claim.task_id != task.id
+        || claim.lease_id != lease.lease_id
+        || claim.executor != lease.executor
+        || receipt_workflow_id != workflow.id
+        || receipt_task_id != task.id
+        || receipt_lease_id != lease.lease_id
+        || receipt_executor != lease.executor
+        || receipt_worktree_id != lease_worktree.worktree_id
+    {
+        anyhow::bail!(
+            "request task {} executor runtime receipt correlation failed for execution {}",
+            task.id,
+            claim.execution_id
+        );
+    }
+    if receipt["success"].as_bool() != Some(true) {
+        anyhow::bail!(
+            "request task {} executor runtime receipt {} did not succeed",
+            task.id,
+            claim.execution_id
+        );
+    }
+    let git = receipt
+        .get("git")
+        .filter(|value| value.is_object())
+        .with_context(|| {
+            format!(
+                "request task {} executor runtime receipt {} has no observed Git receipt",
+                task.id, claim.execution_id
+            )
+        })?;
+    if git["status"].as_str() != Some("observed") {
+        anyhow::bail!(
+            "request task {} executor runtime receipt {} Git status must be observed",
+            task.id,
+            claim.execution_id
+        );
+    }
+    if git["base_is_ancestor"].as_bool() != Some(true) {
+        anyhow::bail!(
+            "request task {} executor runtime receipt {} Git base must remain an ancestor",
+            task.id,
+            claim.execution_id
+        );
+    }
+    if git["dirty"].as_bool() != Some(false) || git["clean"].as_bool() != Some(true) {
+        anyhow::bail!(
+            "request task {} executor runtime receipt {} Git worktree must be clean",
+            task.id,
+            claim.execution_id
+        );
+    }
+    if task_requires_implementation_commit(task)
+        && git["commit_count"].as_u64().is_none_or(|count| count == 0)
+    {
+        anyhow::bail!(
+            "request task {} implementation worker requires at least one observed Git commit",
+            task.id
+        );
+    }
+    let receipt_head = git["head"]
+        .as_str()
+        .filter(|head| !head.trim().is_empty())
+        .with_context(|| {
+            format!(
+                "request task {} executor runtime receipt {} has no observed Git head",
+                task.id, claim.execution_id
+            )
+        })?;
+    let receipt_base_head = runtime_receipt_text(git, "base_head", &task.id)?;
+    if receipt_base_head != lease_worktree.head {
+        anyhow::bail!(
+            "request task {} executor runtime receipt {} Git base does not match leased dispatch head",
+            task.id,
+            claim.execution_id
+        );
+    }
+    let current_claim = bound_worktree_mutation_claim(store, &workflow.id, &task.id)?
+        .with_context(|| {
+            format!(
+                "request task {} observed executor completion lost its worktree binding",
+                task.id
+            )
+        })?;
+    if !worktree_claim_identity_unchanged(lease_worktree, &current_claim) {
+        anyhow::bail!(
+            "request task {} observed executor worktree binding drifted before promotion",
+            task.id
+        );
+    }
+    if current_claim.head != receipt_head {
+        anyhow::bail!(
+            "request task {} observed executor worktree metadata HEAD drifted before promotion: receipt={} current={}",
+            task.id,
+            receipt_head,
+            current_claim.head
+        );
+    }
+    let worktree_root = PathBuf::from(&current_claim.worktree_root);
+    let current_head = completion_git_output(&worktree_root, &["rev-parse", "HEAD"])?;
+    if current_head != receipt_head {
+        anyhow::bail!(
+            "request task {} observed executor worktree HEAD drifted before promotion: receipt={} current={}",
+            task.id,
+            receipt_head,
+            current_head
+        );
+    }
+    let current_status = completion_git_output(
+        &worktree_root,
+        &["status", "--porcelain=v1", "--untracked-files=normal"],
+    )?;
+    if !current_status.is_empty() {
+        anyhow::bail!(
+            "request task {} observed executor worktree became dirty before promotion",
+            task.id
+        );
+    }
+    Ok(Some(ObservedExecutorRuntimeReceipt {
+        execution_id: claim.execution_id,
+        receipt_sha256: hex_sha256(receipt_json.as_bytes()),
+        git: git.clone(),
+    }))
+}
+
 pub fn complete_ready_task(
     store: &ForgeStore,
     run_id: &str,
@@ -2509,18 +3109,19 @@ pub fn complete_ready_task(
                 input.task_id, preflight_workflow.id
             )
         })?;
-    if matches!(
-        preflight_task.executor,
-        ExecutorKind::Command | ExecutorKind::Wait | ExecutorKind::Notification
-    ) && input
-        .evidence_command
-        .is_none_or(|command| command.trim().is_empty())
-    {
-        anyhow::bail!(
-            "request task {} uses executor {:?}; an explicit non-empty evidence command receipt is required before promotion",
-            preflight_task.id,
-            preflight_task.executor
-        );
+    let preflight_lease = store
+        .load_task_lease(&preflight_workflow.id, &preflight_task.id)?
+        .map(serde_json::from_value::<TaskLease>)
+        .transpose()
+        .context("active task lease payload is invalid")?;
+    if request_task_handoff_ready_for_completion(
+        store,
+        &preflight_workflow,
+        &preflight_task.id,
+        input.context_budget,
+    )? {
+        ensure_completion_receipt_input(&preflight_task.id, &input)?;
+        ensure_preexisting_completion_lease(&preflight_task.id, &input, preflight_lease.as_ref())?;
     }
 
     let drive_before = drive_request_with_context_budget(
@@ -2539,7 +3140,6 @@ pub fn complete_ready_task(
         .iter()
         .find(|task| task.task_id == input.task_id)
         .cloned()
-        .or_else(|| drive_before.handoff_task.clone())
     else {
         return Ok(RequestTaskCompletionReport {
             schema_version: "forge.request_task_completion.v1".to_string(),
@@ -2602,6 +3202,94 @@ pub fn complete_ready_task(
                 input.task_id, workflow.id
             )
         })?;
+    ensure_completion_receipt_input(&task.id, &input)?;
+    ensure_preexisting_completion_lease(&task.id, &input, preflight_lease.as_ref())?;
+    let preflight_lease = preflight_lease
+        .as_ref()
+        .expect("completion lease was validated immediately before correlation");
+    let lease = store
+        .load_task_lease(&workflow.id, &task.id)?
+        .map(serde_json::from_value::<TaskLease>)
+        .transpose()
+        .context("active task lease payload is invalid")?
+        .with_context(|| {
+            format!(
+                "request task {} lost its pre-existing completion lease {}",
+                task.id, preflight_lease.lease_id
+            )
+        })?;
+    if lease.lease_id != preflight_lease.lease_id
+        || lease.workflow_id != workflow.id
+        || lease.task_id != task.id
+        || lease.executor != preflight_lease.executor
+        || lease.workspace_claim != preflight_lease.workspace_claim
+        || lease.acquired_at != preflight_lease.acquired_at
+        || lease.expires_at != preflight_lease.expires_at
+        || lease.expires_at <= Utc::now()
+    {
+        anyhow::bail!(
+            "request task {} completion lease changed after preflight: expected workflow={} task={} lease={} executor={} workspace_claim={:?} acquired_at={} expires_at={} with future expiry, found workflow={} task={} lease={} executor={} workspace_claim={:?} acquired_at={} expires_at={}",
+            task.id,
+            preflight_lease.workflow_id,
+            preflight_lease.task_id,
+            preflight_lease.lease_id,
+            preflight_lease.executor,
+            preflight_lease.workspace_claim,
+            preflight_lease.acquired_at,
+            preflight_lease.expires_at,
+            lease.workflow_id,
+            lease.task_id,
+            lease.lease_id,
+            lease.executor,
+            lease.workspace_claim,
+            lease.acquired_at,
+            lease.expires_at,
+        );
+    }
+    if input.executor != "auto" && input.executor != lease.executor {
+        anyhow::bail!(
+            "request task {} completion executor {} does not match active lease executor {}",
+            task.id,
+            input.executor,
+            lease.executor,
+        );
+    }
+    let (dispatch_workflow_revision, acquisition_assignment) =
+        load_dispatch_acquisition(store, &workflow.id, &task.id, &lease.lease_id)?.with_context(
+            || {
+                format!(
+                    "request task {} lease {} has no recorded dispatch acquisition receipt",
+                    task.id, lease.lease_id
+                )
+            },
+        )?;
+    let current_workflow_revision = workflow_revision(&workflow);
+    if dispatch_workflow_revision > current_workflow_revision
+        || (acquisition_assignment.task_version != 0
+            && acquisition_assignment.task_version != task.version)
+        || acquisition_assignment.selected_executor != lease.executor
+        || acquisition_assignment.workspace_claim != lease.workspace_claim
+        || acquisition_assignment.lease_expires_at > lease.expires_at
+    {
+        anyhow::bail!(
+            "request task {} dispatch receipt is stale or mismatched: acquired_revision={} current_revision={} acquired_task_version={} current_task_version={} acquired_executor={} lease_executor={} acquired_workspace_claim={:?} lease_workspace_claim={:?} acquired_expiry={} lease_expiry={}",
+            task.id,
+            dispatch_workflow_revision,
+            current_workflow_revision,
+            acquisition_assignment.task_version,
+            task.version,
+            acquisition_assignment.selected_executor,
+            lease.executor,
+            acquisition_assignment.workspace_claim,
+            lease.workspace_claim,
+            acquisition_assignment.lease_expires_at,
+            lease.expires_at,
+        );
+    }
+    let observed_runtime = observed_executor_runtime_receipt(store, &workflow, task, &lease)?;
+    if observed_runtime.is_none() {
+        ensure_caller_attested_workspace_claim_unchanged(store, &workflow, task, &lease)?;
+    }
     let mut attached_artifacts = Vec::new();
     for artifact_path in input.artifact_paths {
         attached_artifacts.push(crate::workflow::attach_workflow_artifact(
@@ -2620,10 +3308,15 @@ pub fn complete_ready_task(
         workflow: &workflow,
         task,
         handoff_task: &handoff_task,
+        lease: &lease,
+        dispatch_workflow_revision,
+        dispatch_task_version: acquisition_assignment.task_version,
+        dispatch_context_sha256: &acquisition_assignment.context_sha256,
         run_id,
         completion: &input,
         attached_artifacts: &attached_artifacts,
         drive_before: &drive_before,
+        observed_runtime: observed_runtime.as_ref(),
         generated_at,
     });
     let trace_relative_path = format!(
@@ -2650,50 +3343,44 @@ pub fn complete_ready_task(
 
     let evidence_command = input
         .evidence_command
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            let mut command = forge_command_prefix(store);
-            command.extend([
-                "request".to_string(),
-                "complete-task".to_string(),
-                "--run".to_string(),
-                run_id.to_string(),
-                "--task".to_string(),
-                input.task_id.to_string(),
-                "--executor".to_string(),
-                input.executor.to_string(),
-                "--summary".to_string(),
-                "<executor-summary>".to_string(),
-                "--ttl-seconds".to_string(),
-                input.ttl_seconds.to_string(),
-            ]);
-            if let Some(budget) = input.context_budget {
-                command.extend(["--budget".to_string(), budget.to_string()]);
-            }
-            command.extend(["--output".to_string(), "json".to_string()]);
-            render_forge_command(&command)
-        });
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .context("caller-attested evidence command is required")?
+        .to_string();
+    let evidence_exit_code = input
+        .evidence_exit_code
+        .context("caller-attested evidence exit code is required")?;
     let evidence_summary = input
         .evidence_summary
         .filter(|summary| !summary.trim().is_empty())
         .unwrap_or(input.summary);
+    let execution_receipt = completion_execution_receipt_payload(
+        &lease,
+        dispatch_workflow_revision,
+        acquisition_assignment.task_version,
+        &acquisition_assignment.context_sha256,
+        observed_runtime.as_ref(),
+        Some(&evidence_command),
+        Some(evidence_exit_code),
+    );
     let response_payload = serde_json::json!({
         "schema_version": "forge.executor_response.v1",
         "task_id": task.id,
         "status": "completed",
         "artifacts": response_artifacts,
         "trace_ref": trace_artifact.artifact.path,
+        "execution_receipt": execution_receipt,
         "cost": {
             "estimated_usd": input.estimated_usd,
             "tokens_in": input.tokens_in,
             "tokens_out": input.tokens_out
         },
         "validation_evidence": [
-            {
-                "command": evidence_command,
-                "exit_code": 0,
-                "summary": evidence_summary
-            }
+                {
+                    "command": evidence_command,
+                    "exit_code": evidence_exit_code,
+                    "summary": evidence_summary
+                }
         ]
     });
     let response_relative_path = format!(
@@ -2743,7 +3430,7 @@ pub fn complete_ready_task(
         validation: Some(validation),
         drive_before,
         drive_after,
-        reason: "Forge recorded executor evidence, generated a replayable execution trace, validated the response, and drove the run forward.".to_string(),
+        reason: "Forge recorded caller-attested executor evidence correlated to an active lease; it did not directly observe execution. It generated a replayable trace, validated the response, and drove the run forward.".to_string(),
         updated_at: Utc::now(),
     })
 }
@@ -2961,12 +3648,15 @@ fn prepare_final_delivery_package(
     ensure_workflow_policy(store, &workflow.id, "workflow artifact attach")?;
     #[cfg(test)]
     {
-        let delay_ms = FINAL_DELIVERY_PREPARATION_DELAY
+        let mut configured_delay = FINAL_DELIVERY_PREPARATION_DELAY
             .lock()
-            .expect("final delivery preparation delay lock poisoned")
-            .take()
-            .filter(|(run_id, _)| run_id == &run.run_id)
-            .map(|(_, delay_ms)| delay_ms);
+            .expect("final delivery preparation delay lock poisoned");
+        let delay_ms = configured_delay
+            .as_ref()
+            .is_some_and(|(configured_run_id, _)| configured_run_id == &run.run_id)
+            .then(|| configured_delay.take().map(|(_, delay_ms)| delay_ms))
+            .flatten();
+        drop(configured_delay);
         if let Some(delay_ms) = delay_ms {
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         }
@@ -3534,11 +4224,53 @@ struct ExecutionTracePayloadInput<'a> {
     workflow: &'a Workflow,
     task: &'a AtomicTask,
     handoff_task: &'a RequestDriveTask,
+    lease: &'a TaskLease,
+    dispatch_workflow_revision: u64,
+    dispatch_task_version: u64,
+    dispatch_context_sha256: &'a str,
     run_id: &'a str,
     completion: &'a RequestTaskCompletionInput<'a>,
     attached_artifacts: &'a [ArtifactAttachReport],
     drive_before: &'a RequestDriveReport,
+    observed_runtime: Option<&'a ObservedExecutorRuntimeReceipt>,
     generated_at: DateTime<Utc>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn completion_execution_receipt_payload(
+    lease: &TaskLease,
+    dispatch_workflow_revision: u64,
+    dispatch_task_version: u64,
+    dispatch_context_sha256: &str,
+    observed_runtime: Option<&ObservedExecutorRuntimeReceipt>,
+    evidence_command: Option<&str>,
+    evidence_exit_code: Option<i32>,
+) -> serde_json::Value {
+    let execution_observed = observed_runtime.is_some();
+    serde_json::json!({
+        "evidence_source": if execution_observed {
+            "forge_executor_runtime"
+        } else {
+            "caller_attested"
+        },
+        "attestation_source": if execution_observed {
+            "forge_runtime"
+        } else {
+            "caller"
+        },
+        "execution_observed": execution_observed,
+        "execution_id": observed_runtime.map(|runtime| runtime.execution_id.as_str()),
+        "receipt_sha256": observed_runtime.map(|runtime| runtime.receipt_sha256.as_str()),
+        "git": observed_runtime.map(|runtime| &runtime.git),
+        "lease_id": lease.lease_id,
+        "executor": lease.executor,
+        "lease_expires_at": lease.expires_at,
+        "workflow_revision": dispatch_workflow_revision,
+        "task_version": dispatch_task_version,
+        "context_sha256": dispatch_context_sha256,
+        "evidence_command": evidence_command,
+        "evidence_exit_code": evidence_exit_code
+    })
 }
 
 fn build_execution_trace_payload(input: ExecutionTracePayloadInput<'_>) -> serde_json::Value {
@@ -3567,6 +4299,15 @@ fn build_execution_trace_payload(input: ExecutionTracePayloadInput<'_>) -> serde
         "--output".to_string(),
         "json".to_string(),
     ]);
+    let execution_receipt = completion_execution_receipt_payload(
+        input.lease,
+        input.dispatch_workflow_revision,
+        input.dispatch_task_version,
+        input.dispatch_context_sha256,
+        input.observed_runtime,
+        completion.evidence_command,
+        completion.evidence_exit_code,
+    );
     serde_json::json!({
         "schema_version": "forge.execution_trace.v1",
         "run_id": input.run_id,
@@ -3575,7 +4316,7 @@ fn build_execution_trace_payload(input: ExecutionTracePayloadInput<'_>) -> serde
         "task_id": task.id,
         "task_title": task.title,
         "task_executor": task.executor,
-        "selected_executor": completion.executor,
+        "selected_executor": input.lease.executor,
         "origin": completion.origin,
         "generated_at": input.generated_at,
         "summary": completion.summary,
@@ -3586,6 +4327,7 @@ fn build_execution_trace_payload(input: ExecutionTracePayloadInput<'_>) -> serde
             "context_sha256": handoff_task.context_sha256,
             "context_routing_cache_key": handoff_task.context_routing_cache_key
         },
+        "execution_receipt": execution_receipt,
         "drive_before": {
             "status": drive_before.status,
             "action": drive_before.action,
@@ -3678,11 +4420,37 @@ fn latest_open_rework(
     Ok(None)
 }
 
+fn active_task_lease_ids(store: &ForgeStore, workflow: &Workflow) -> Result<BTreeSet<String>> {
+    let now = Utc::now();
+    let mut active = BTreeSet::new();
+    for task in workflow
+        .tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Pending)
+    {
+        let Some(value) = store.load_task_lease(&workflow.id, &task.id)? else {
+            continue;
+        };
+        let lease = serde_json::from_value::<TaskLease>(value).with_context(|| {
+            format!(
+                "task lease for workflow {} task {} is invalid",
+                workflow.id, task.id
+            )
+        })?;
+        if lease.expires_at > now {
+            active.insert(task.id.clone());
+        }
+    }
+    Ok(active)
+}
+
 fn ready_handoff_tasks(
+    store: &ForgeStore,
     workflow: &Workflow,
     handoff_tasks: &[ContextHandoffTask],
-) -> Vec<RequestDriveTask> {
-    handoff_tasks
+) -> Result<Vec<RequestDriveTask>> {
+    let active_lease_task_ids = active_task_lease_ids(store, workflow)?;
+    let mut ready = handoff_tasks
         .iter()
         .filter_map(|handoff| {
             let task = workflow
@@ -3695,22 +4463,54 @@ fn ready_handoff_tasks(
             Some(RequestDriveTask {
                 task_id: handoff.task_id.clone(),
                 title: handoff.title.clone(),
+                priority: task.work_item.priority.clone(),
                 executor: handoff.executor.clone(),
+                node_brain_routing: handoff.node_brain_routing.clone(),
                 handoff_status: handoff.handoff_status.clone(),
                 context_sha256: handoff.context_sha256.clone(),
                 context_routing_cache_key: None,
             })
         })
-        .take(REQUEST_CONTEXT_FRONTIER_LIMIT)
-        .collect()
+        .collect::<Vec<_>>();
+    ready.sort_by(|left, right| {
+        active_lease_task_ids
+            .contains(&right.task_id)
+            .cmp(&active_lease_task_ids.contains(&left.task_id))
+            .then_with(|| {
+                task_priority_rank(&left.priority).cmp(&task_priority_rank(&right.priority))
+            })
+            .then_with(|| left.task_id.cmp(&right.task_id))
+    });
+    let frontier_limit = workflow_parallel_task_limit(workflow)
+        .max(active_lease_task_ids.len())
+        .min(REQUEST_CONTEXT_FRONTIER_HARD_LIMIT);
+    ready.truncate(frontier_limit);
+    Ok(ready)
 }
 
-fn request_context_frontier_task_ids(workflow: &Workflow) -> Vec<String> {
-    let pending = workflow
+fn request_context_frontier_task_ids(
+    store: &ForgeStore,
+    workflow: &Workflow,
+) -> Result<Vec<String>> {
+    let active_lease_task_ids = active_task_lease_ids(store, workflow)?;
+    let frontier_limit = workflow_parallel_task_limit(workflow)
+        .max(active_lease_task_ids.len())
+        .min(REQUEST_CONTEXT_FRONTIER_HARD_LIMIT);
+    let mut pending = workflow
         .tasks
         .iter()
         .filter(|task| task.status == TaskStatus::Pending)
         .collect::<Vec<_>>();
+    pending.sort_by(|left, right| {
+        active_lease_task_ids
+            .contains(&right.id)
+            .cmp(&active_lease_task_ids.contains(&left.id))
+            .then_with(|| {
+                task_priority_rank(&left.work_item.priority)
+                    .cmp(&task_priority_rank(&right.work_item.priority))
+            })
+            .then_with(|| left.id.cmp(&right.id))
+    });
     let ready = pending
         .iter()
         .copied()
@@ -3728,13 +4528,1202 @@ fn request_context_frontier_task_ids(workflow: &Workflow) -> Vec<String> {
         .map(|task| task.id.clone())
         .collect::<Vec<_>>();
     if !ready.is_empty() {
-        return ready;
+        return Ok(ready);
     }
-    pending
+    Ok(pending
         .into_iter()
-        .take(REQUEST_CONTEXT_FRONTIER_LIMIT)
+        .take(frontier_limit)
         .map(|task| task.id.clone())
-        .collect()
+        .collect())
+}
+
+fn task_priority_rank(priority: &str) -> u8 {
+    match priority.trim().to_ascii_lowercase().as_str() {
+        "high" | "p0" | "p1" => 0,
+        "medium" | "p2" | "normal" | "" => 1,
+        "low" | "p3" => 2,
+        _ => 1,
+    }
+}
+
+fn workflow_parallel_task_limit(workflow: &Workflow) -> usize {
+    workflow
+        .core_orchestration
+        .max_parallel_tasks
+        .clamp(1, REQUEST_CONTEXT_FRONTIER_HARD_LIMIT)
+}
+
+#[derive(Debug, Clone)]
+struct TaskExecutorSelection {
+    executor: String,
+    source: String,
+    requires_fresh_quota: bool,
+}
+
+#[derive(Debug, Clone)]
+struct TaskExecutorRoutingBlock {
+    status: String,
+    reason: String,
+    blocking_refs: Vec<String>,
+}
+
+fn task_requires_task_scoped_worktree(task: &AtomicTask, executor: &str) -> bool {
+    let routing = &task.node_brain_routing;
+    let routed_as_agentic = routing.scope == "agentic_ai_node"
+        || routing
+            .default_brain
+            .as_deref()
+            .is_some_and(|brain| !brain.trim().is_empty())
+        || !routing.agent_slots.is_empty();
+    (matches!(&task.executor, ExecutorKind::Ai | ExecutorKind::Mixed) || routed_as_agentic)
+        && matches!(
+            canonical_executor_id(executor).as_str(),
+            "codex" | "agy" | "auto"
+        )
+}
+
+fn task_requires_dependency_git_fan_in(task: &AtomicTask) -> bool {
+    task.validation_rules
+        .iter()
+        .any(|rule| rule.kind == TEAMWORK_GIT_FAN_IN_VALIDATION_RULE)
+}
+
+fn task_git_fan_in_routing_block(
+    store: &ForgeStore,
+    workflow_id: &str,
+    task: &AtomicTask,
+) -> Option<TaskExecutorRoutingBlock> {
+    if !task_requires_dependency_git_fan_in(task) {
+        return None;
+    }
+    match current_teamwork_fan_in_status(store, workflow_id, &task.id) {
+        Ok(status) if status.current => None,
+        Ok(status) => {
+            let mut blocking_refs = vec![
+                task.id.clone(),
+                TEAMWORK_GIT_FAN_IN_VALIDATION_RULE.to_string(),
+            ];
+            if let Some(receipt_sha256) = status.receipt_sha256 {
+                blocking_refs.push(receipt_sha256);
+            }
+            Some(TaskExecutorRoutingBlock {
+                status: "deferred_git_fan_in_required".to_string(),
+                reason: format!(
+                    "task {} requires a current successful dependency Git fan-in receipt before executor dispatch: {}; run `forge worktree integrate-dependencies --workflow {} --task {} --allow-repository-mutation --approved-by <operator> --reason <reason> --output json`",
+                    task.id, status.reason, workflow_id, task.id
+                ),
+                blocking_refs,
+            })
+        }
+        Err(error) => Some(TaskExecutorRoutingBlock {
+            status: "deferred_git_fan_in_required".to_string(),
+            reason: format!(
+                "task {} dependency Git fan-in status failed closed: {error:#}",
+                task.id
+            ),
+            blocking_refs: vec![
+                task.id.clone(),
+                TEAMWORK_GIT_FAN_IN_VALIDATION_RULE.to_string(),
+            ],
+        }),
+    }
+}
+
+fn task_worktree_requirement_block(
+    workflow_id: &str,
+    task: &AtomicTask,
+    executor: &str,
+    claim: Option<&WorktreeMutationClaim>,
+) -> Option<TaskExecutorRoutingBlock> {
+    if !task_requires_task_scoped_worktree(task, executor) {
+        return None;
+    }
+    let executor = canonical_executor_id(executor);
+    match claim {
+        Some(claim) if claim.binding_scope == "task" => None,
+        Some(claim) => Some(TaskExecutorRoutingBlock {
+            status: "deferred_task_worktree_required".to_string(),
+            reason: format!(
+                "agentic task {} routed to {} resolves worktree {} with binding_scope={}; bind a distinct worktree directly to workflow {} task {} before dispatch",
+                task.id,
+                executor,
+                claim.worktree_id,
+                claim.binding_scope,
+                workflow_id,
+                task.id
+            ),
+            blocking_refs: vec![claim.worktree_id.clone(), "task_scoped_worktree".to_string()],
+        }),
+        None => Some(TaskExecutorRoutingBlock {
+            status: "deferred_task_worktree_required".to_string(),
+            reason: format!(
+                "agentic task {} routed to {} requires an exclusive task-scoped Git worktree before dispatch; bind a distinct worktree to workflow {} task {}",
+                task.id, executor, workflow_id, task.id
+            ),
+            blocking_refs: vec![task.id.clone(), "task_scoped_worktree".to_string()],
+        }),
+    }
+}
+
+fn task_worktree_resolution_block(
+    workflow_id: &str,
+    task: &AtomicTask,
+    executor: &str,
+    error: &anyhow::Error,
+) -> TaskExecutorRoutingBlock {
+    TaskExecutorRoutingBlock {
+        status: "deferred_task_worktree_required".to_string(),
+        reason: format!(
+            "agentic task {} routed to {} could not resolve its required task-scoped worktree for workflow {}: {error:#}",
+            task.id,
+            canonical_executor_id(executor),
+            workflow_id
+        ),
+        blocking_refs: vec![task.id.clone(), "task_scoped_worktree".to_string()],
+    }
+}
+
+fn stale_task_worktree_lease_block(
+    workflow_id: &str,
+    task: &AtomicTask,
+    lease: &TaskLease,
+) -> TaskExecutorRoutingBlock {
+    TaskExecutorRoutingBlock {
+        status: "deferred_task_worktree_required".to_string(),
+        reason: format!(
+            "active lease {} for agentic task {} does not match the current task-scoped worktree binding in workflow {}; release it and acquire a fresh handoff",
+            lease.lease_id, task.id, workflow_id
+        ),
+        blocking_refs: vec![lease.lease_id.clone(), "task_scoped_worktree".to_string()],
+    }
+}
+
+fn resolve_task_dispatch_executor(
+    task: &AtomicTask,
+    requested_executor: &str,
+    executor_states: &BTreeMap<String, ExecutorState>,
+) -> std::result::Result<TaskExecutorSelection, TaskExecutorRoutingBlock> {
+    let routing = &task.node_brain_routing;
+    let allowed_brains = routing
+        .allowed_brains
+        .iter()
+        .map(|brain| brain.trim())
+        .filter(|brain| !brain.is_empty())
+        .map(canonical_executor_id)
+        .collect::<BTreeSet<_>>();
+    let slot_brains = routing
+        .agent_slots
+        .iter()
+        .filter_map(|slot| slot.brain_id.as_deref())
+        .map(str::trim)
+        .filter(|brain| !brain.is_empty())
+        .map(canonical_executor_id)
+        .collect::<BTreeSet<_>>();
+    if slot_brains.len() > 1 {
+        return Err(TaskExecutorRoutingBlock {
+            status: "deferred_ambiguous_executor_slots".to_string(),
+            reason: format!(
+                "task {} binds multiple executor brains ({}) but request waves lease once per task; split the slots into independent tasks before dispatch",
+                task.id,
+                slot_brains.iter().cloned().collect::<Vec<_>>().join(",")
+            ),
+            blocking_refs: routing
+                .agent_slots
+                .iter()
+                .map(|slot| slot.slot_id.clone())
+                .collect(),
+        });
+    }
+    let slot_brain = slot_brains.first().map(String::as_str);
+    let default_brain = routing
+        .default_brain
+        .as_deref()
+        .map(str::trim)
+        .filter(|brain| !brain.is_empty())
+        .map(canonical_executor_id);
+    if slot_brain.is_some() && default_brain.is_some() && slot_brain != default_brain.as_deref() {
+        return Err(TaskExecutorRoutingBlock {
+            status: "deferred_inconsistent_executor_routing".to_string(),
+            reason: format!(
+                "task {} has conflicting node routing: slot brain {} differs from default brain {}",
+                task.id,
+                slot_brain.unwrap_or_default(),
+                default_brain.as_deref().unwrap_or_default()
+            ),
+            blocking_refs: routing
+                .agent_slots
+                .iter()
+                .map(|slot| slot.slot_id.clone())
+                .collect(),
+        });
+    }
+    let (routed_executor, source) = if let Some(brain) = slot_brain {
+        (Some(brain), "node_agent_slot")
+    } else if let Some(brain) = default_brain.as_deref() {
+        (Some(brain), "node_default_brain")
+    } else {
+        (None, "request_executor")
+    };
+    let requested_executor = canonical_executor_id(requested_executor);
+    let effective_executor = routed_executor
+        .map(str::to_string)
+        .unwrap_or_else(|| requested_executor.clone());
+    if effective_executor.is_empty() {
+        return Err(TaskExecutorRoutingBlock {
+            status: "deferred_missing_executor_routing".to_string(),
+            reason: format!("task {} resolved an empty executor", task.id),
+            blocking_refs: vec![task.id.clone()],
+        });
+    }
+    if routed_executor.is_some()
+        && requested_executor != "auto"
+        && requested_executor != effective_executor
+    {
+        return Err(TaskExecutorRoutingBlock {
+            status: "deferred_executor_routing_conflict".to_string(),
+            reason: format!(
+                "requested executor {} is incompatible with task {} routed executor {}; mutate node_brain_routing explicitly instead of overriding the slot",
+                requested_executor, task.id, effective_executor
+            ),
+            blocking_refs: vec![effective_executor.to_string()],
+        });
+    }
+    if effective_executor != "auto"
+        && !allowed_brains.is_empty()
+        && !allowed_brains.contains(&effective_executor)
+    {
+        return Err(TaskExecutorRoutingBlock {
+            status: "deferred_executor_not_allowed_by_node".to_string(),
+            reason: format!(
+                "task {} node policy does not allow executor {}",
+                task.id, effective_executor
+            ),
+            blocking_refs: allowed_brains.iter().cloned().collect(),
+        });
+    }
+
+    let requires_policy_state = routed_executor.is_some();
+    if effective_executor != "auto" {
+        match executor_states.get(&effective_executor) {
+            Some(state)
+                if state.allowed
+                    && state.installed
+                    && state.configured
+                    && state.non_interactive_ready => {}
+            Some(state) => {
+                return Err(TaskExecutorRoutingBlock {
+                    status: "deferred_executor_policy".to_string(),
+                    reason: format!(
+                        "task {} executor {} is not runtime-authorized: allowed={} installed={} configured={} non_interactive_ready={}",
+                        task.id,
+                        effective_executor,
+                        state.allowed,
+                        state.installed,
+                        state.configured,
+                        state.non_interactive_ready
+                    ),
+                    blocking_refs: vec![effective_executor.clone()],
+                });
+            }
+            None if requires_policy_state => {
+                return Err(TaskExecutorRoutingBlock {
+                    status: "deferred_executor_policy".to_string(),
+                    reason: format!(
+                        "task {} routed executor {} has no synchronized local executor policy",
+                        task.id, effective_executor
+                    ),
+                    blocking_refs: vec![effective_executor.clone()],
+                });
+            }
+            None => {}
+        }
+    }
+
+    Ok(TaskExecutorSelection {
+        executor: effective_executor,
+        source: if routed_executor.is_some() {
+            source.to_string()
+        } else if requested_executor == "auto" {
+            "auto_model_policy".to_string()
+        } else {
+            source.to_string()
+        },
+        requires_fresh_quota: routed_executor.is_some(),
+    })
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct HostResourceSnapshot {
+    cpu_count: Option<usize>,
+    load_one: Option<f64>,
+    memory_available_bytes: Option<u64>,
+    swap_free_bytes: Option<u64>,
+    disk_free_bytes: Option<u64>,
+    disk_total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FilesystemCapacity {
+    free_bytes: u64,
+    total_bytes: u64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_dispatch_frontier(
+    store: &ForgeStore,
+    workflow: &Workflow,
+    ready_tasks: &[RequestDriveTask],
+    handoff_tasks: &[ContextHandoffTask],
+    project_roots: &BTreeMap<String, PathBuf>,
+    selected_executor: &str,
+    ttl_seconds: u64,
+    context_budget_override: Option<usize>,
+) -> Result<DispatchFrontier> {
+    build_dispatch_frontier_with_snapshot(
+        store,
+        workflow,
+        ready_tasks,
+        handoff_tasks,
+        project_roots,
+        selected_executor,
+        ttl_seconds,
+        context_budget_override,
+        read_host_resource_snapshot(store),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_dispatch_frontier_with_snapshot(
+    store: &ForgeStore,
+    workflow: &Workflow,
+    ready_tasks: &[RequestDriveTask],
+    handoff_tasks: &[ContextHandoffTask],
+    project_roots: &BTreeMap<String, PathBuf>,
+    selected_executor: &str,
+    ttl_seconds: u64,
+    context_budget_override: Option<usize>,
+    snapshot: HostResourceSnapshot,
+) -> Result<DispatchFrontier> {
+    let configured_limit = workflow_parallel_task_limit(workflow);
+    let now = Utc::now();
+    let fan_in_blocks = ready_tasks
+        .iter()
+        .filter_map(|ready| {
+            let task = workflow
+                .tasks
+                .iter()
+                .find(|candidate| candidate.id == ready.task_id)?;
+            task_git_fan_in_routing_block(store, &workflow.id, task)
+                .map(|block| (ready.task_id.clone(), block))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut existing_leases = BTreeMap::new();
+    let mut existing_lease_blocks = BTreeMap::new();
+    let mut active_leases_by_executor = BTreeMap::<String, usize>::new();
+    for task in ready_tasks {
+        let Some(value) = store.load_task_lease(&workflow.id, &task.task_id)? else {
+            continue;
+        };
+        let lease = serde_json::from_value::<TaskLease>(value).with_context(|| {
+            format!(
+                "task lease for workflow {} task {} is invalid",
+                workflow.id, task.task_id
+            )
+        })?;
+        if lease.expires_at > now {
+            *active_leases_by_executor
+                .entry(canonical_executor_id(&lease.executor))
+                .or_default() += 1;
+            if let Some(block) = fan_in_blocks.get(&task.task_id) {
+                existing_lease_blocks.insert(task.task_id.clone(), block.clone());
+                continue;
+            }
+            let Some(task_definition) = workflow
+                .tasks
+                .iter()
+                .find(|candidate| candidate.id == task.task_id)
+            else {
+                continue;
+            };
+            let worktree_block =
+                if task_requires_task_scoped_worktree(task_definition, &lease.executor) {
+                    task_worktree_requirement_block(
+                        &workflow.id,
+                        task_definition,
+                        &lease.executor,
+                        lease.workspace_claim.as_ref(),
+                    )
+                    .or_else(|| {
+                        match bound_worktree_mutation_claim(store, &workflow.id, &task.task_id) {
+                            Ok(current_claim)
+                                if current_claim.as_ref() == lease.workspace_claim.as_ref() =>
+                            {
+                                None
+                            }
+                            Ok(_) => Some(stale_task_worktree_lease_block(
+                                &workflow.id,
+                                task_definition,
+                                &lease,
+                            )),
+                            Err(error) => Some(task_worktree_resolution_block(
+                                &workflow.id,
+                                task_definition,
+                                &lease.executor,
+                                &error,
+                            )),
+                        }
+                    })
+                } else {
+                    None
+                };
+            if let Some(block) = worktree_block {
+                existing_lease_blocks.insert(task.task_id.clone(), block);
+            } else {
+                existing_leases.insert(task.task_id.clone(), lease);
+            }
+        }
+    }
+    // A blocked legacy/stale lease is not assignable, but it still consumes host capacity until
+    // release or expiry because Forge cannot prove that no process is using it.
+    let existing_active_leases = existing_leases.len() + existing_lease_blocks.len();
+    let effective_frontier_limit = configured_limit
+        .max(existing_active_leases)
+        .min(REQUEST_CONTEXT_FRONTIER_HARD_LIMIT);
+    let requested_parallel_tasks = effective_frontier_limit.min(ready_tasks.len());
+    let requested_new_handoffs = requested_parallel_tasks.saturating_sub(existing_active_leases);
+    let (resource_total_limit, resource_status, resource_reason) =
+        resource_parallel_limit(&snapshot, requested_parallel_tasks);
+    let resource_new_handoffs = resource_total_limit
+        .max(existing_active_leases)
+        .saturating_sub(existing_active_leases)
+        .min(requested_new_handoffs);
+    let executor_states = load_executors(store)?
+        .executors
+        .into_iter()
+        .map(|state| (state.id.clone(), state))
+        .collect::<BTreeMap<_, _>>();
+    let mut selections = BTreeMap::new();
+    let mut routing_blocks = BTreeMap::new();
+    let mut quota_requests = BTreeMap::<String, (usize, bool)>::new();
+    for ready in ready_tasks {
+        if existing_leases.contains_key(&ready.task_id)
+            || existing_lease_blocks.contains_key(&ready.task_id)
+        {
+            continue;
+        }
+        if let Some(block) = fan_in_blocks.get(&ready.task_id) {
+            routing_blocks.insert(ready.task_id.clone(), block.clone());
+            continue;
+        }
+        let Some(task) = workflow.tasks.iter().find(|task| task.id == ready.task_id) else {
+            continue;
+        };
+        match resolve_task_dispatch_executor(task, selected_executor, &executor_states) {
+            Ok(selection) => {
+                if task_requires_task_scoped_worktree(task, &selection.executor) {
+                    let claim =
+                        match bound_worktree_mutation_claim(store, &workflow.id, &ready.task_id) {
+                            Ok(claim) => claim,
+                            Err(error) => {
+                                routing_blocks.insert(
+                                    ready.task_id.clone(),
+                                    task_worktree_resolution_block(
+                                        &workflow.id,
+                                        task,
+                                        &selection.executor,
+                                        &error,
+                                    ),
+                                );
+                                continue;
+                            }
+                        };
+                    if let Some(block) = task_worktree_requirement_block(
+                        &workflow.id,
+                        task,
+                        &selection.executor,
+                        claim.as_ref(),
+                    ) {
+                        routing_blocks.insert(ready.task_id.clone(), block);
+                        continue;
+                    }
+                }
+                let request = quota_requests
+                    .entry(selection.executor.clone())
+                    .or_insert((0, false));
+                request.0 += 1;
+                request.1 |= selection.requires_fresh_quota;
+                selections.insert(ready.task_id.clone(), selection);
+            }
+            Err(block) => {
+                routing_blocks.insert(ready.task_id.clone(), block);
+            }
+        }
+    }
+    let mut quota_limits = BTreeMap::new();
+    let mut executor_quota_statuses = BTreeMap::new();
+    let mut quota_reasons = Vec::new();
+    for (executor, (requested, requires_fresh)) in &quota_requests {
+        let existing = active_leases_by_executor
+            .get(executor)
+            .copied()
+            .unwrap_or_default();
+        let requested_total = requested.saturating_add(existing);
+        let (mut limit, status, mut reason) =
+            quota_parallel_limit(store, executor, requested_total)?;
+        if *requires_fresh && status != "fresh" {
+            limit = 0;
+            reason = format!(
+                "task-local executor {executor} requires fresh quota authorization; {reason}"
+            );
+        } else if existing > 0 {
+            reason = format!(
+                "{reason}; {existing} existing active lease(s) count toward the executor total"
+            );
+        }
+        executor_quota_statuses.insert(executor.clone(), status.clone());
+        quota_reasons.push(format!("{executor}: {reason}"));
+        quota_limits.insert(executor.clone(), (limit, existing, reason));
+    }
+    let quota_status = if executor_quota_statuses.is_empty() {
+        "not_required".to_string()
+    } else if executor_quota_statuses.len() == 1 {
+        executor_quota_statuses
+            .values()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "not_required".to_string())
+    } else if executor_quota_statuses
+        .values()
+        .all(|status| status == "fresh")
+    {
+        "fresh".to_string()
+    } else {
+        "mixed".to_string()
+    };
+
+    let mut assignments = Vec::new();
+    let mut deferred = Vec::new();
+    let mut admitted_new_assignments = 0usize;
+    for task in ready_tasks {
+        if let Some(block) = existing_lease_blocks.get(&task.task_id) {
+            deferred.push(DeferredDispatchTask {
+                task_id: task.task_id.clone(),
+                title: task.title.clone(),
+                priority: task.priority.clone(),
+                status: block.status.clone(),
+                reason: block.reason.clone(),
+                blocking_refs: block.blocking_refs.clone(),
+            });
+            continue;
+        }
+        if let Some(lease) = existing_leases.get(&task.task_id) {
+            let budget = context_budget_override
+                .unwrap_or_else(|| handoff_context_budget_for_task(workflow, &task.task_id));
+            let latest_checkpoint =
+                load_latest_task_checkpoint(store, &workflow.id, &task.task_id)?;
+            let bound_worktree = bound_worktree_context(store, &workflow.id, Some(&task.task_id))?;
+            let current_context = if bound_worktree.is_some() {
+                build_context_package_with_checkpoint_project_and_worktree(
+                    workflow,
+                    &task.task_id,
+                    budget,
+                    latest_checkpoint,
+                    project_roots.get(&task.task_id).map(PathBuf::as_path),
+                    bound_worktree,
+                )?
+            } else {
+                build_context_package_with_checkpoint_and_project(
+                    workflow,
+                    &task.task_id,
+                    budget,
+                    latest_checkpoint,
+                    project_roots.get(&task.task_id).map(PathBuf::as_path),
+                )?
+            };
+            if !current_context.handoff_ready {
+                return Err(anyhow!(
+                    "active lease {} for workflow {} task {} no longer has handoff-ready context: {}",
+                    lease.lease_id,
+                    workflow.id,
+                    task.task_id,
+                    current_context.handoff_status
+                ));
+            }
+            let task_version = workflow
+                .tasks
+                .iter()
+                .find(|candidate| candidate.id == task.task_id)
+                .map(|candidate| candidate.version)
+                .unwrap_or_default();
+            assignments.push(DispatchAssignment {
+                task_id: task.task_id.clone(),
+                title: task.title.clone(),
+                priority: task.priority.clone(),
+                selected_executor: lease.executor.clone(),
+                executor_routing_source: "existing_active_lease".to_string(),
+                task_version,
+                handoff_status: "handoff_reused_existing_lease".to_string(),
+                context_sha256: current_context.context_sha256,
+                lease_id: lease.lease_id.clone(),
+                lease_expires_at: lease.expires_at,
+                lease_state: "reused_active".to_string(),
+                workspace_claim: lease.workspace_claim.clone(),
+                execution_started: false,
+            });
+            continue;
+        }
+        if let Some(block) = routing_blocks.get(&task.task_id) {
+            deferred.push(DeferredDispatchTask {
+                task_id: task.task_id.clone(),
+                title: task.title.clone(),
+                priority: task.priority.clone(),
+                status: block.status.clone(),
+                reason: block.reason.clone(),
+                blocking_refs: block.blocking_refs.clone(),
+            });
+            continue;
+        }
+        let Some(selection) = selections.get(&task.task_id) else {
+            continue;
+        };
+        if admitted_new_assignments >= resource_new_handoffs {
+            deferred.push(DeferredDispatchTask {
+                task_id: task.task_id.clone(),
+                title: task.title.clone(),
+                priority: task.priority.clone(),
+                status: "deferred_resource_limit".to_string(),
+                reason: resource_reason.clone(),
+                blocking_refs: Vec::new(),
+            });
+            continue;
+        }
+        let quota = quota_limits
+            .get_mut(&selection.executor)
+            .expect("quota admission exists for every resolved executor");
+        if quota.1 >= quota.0 {
+            deferred.push(DeferredDispatchTask {
+                task_id: task.task_id.clone(),
+                title: task.title.clone(),
+                priority: task.priority.clone(),
+                status: "deferred_executor_quota".to_string(),
+                reason: quota.2.clone(),
+                blocking_refs: vec![selection.executor.clone()],
+            });
+            continue;
+        }
+
+        let budget = context_budget_override
+            .unwrap_or_else(|| handoff_context_budget_for_task(workflow, &task.task_id));
+        match build_task_handoff_with_project(
+            store,
+            &workflow.id,
+            &task.task_id,
+            &selection.executor,
+            budget,
+            ttl_seconds,
+            project_roots.get(&task.task_id).map(PathBuf::as_path),
+        ) {
+            Ok(report) => {
+                let lease_state = if report.lease.is_some() {
+                    "acquired"
+                } else {
+                    "reused_active"
+                };
+                let lease = report.lease.clone().or_else(|| {
+                    report.current_lease.clone().filter(|lease| {
+                        lease.executor == report.selected_executor && lease.expires_at > Utc::now()
+                    })
+                });
+                if let Some(lease) = lease {
+                    let task_definition = workflow
+                        .tasks
+                        .iter()
+                        .find(|candidate| candidate.id == task.task_id)
+                        .expect("ready dispatch task exists in workflow");
+                    if let Some(block) = task_worktree_requirement_block(
+                        &workflow.id,
+                        task_definition,
+                        &report.selected_executor,
+                        lease.workspace_claim.as_ref(),
+                    ) {
+                        if report
+                            .lease
+                            .as_ref()
+                            .is_some_and(|acquired| acquired.lease_id == lease.lease_id)
+                        {
+                            let release = release_task_lease(
+                                store,
+                                &workflow.id,
+                                &task.task_id,
+                                &lease.lease_id,
+                                &lease.executor,
+                            )?;
+                            if !release.released {
+                                return Err(anyhow!(
+                                    "failed to compensate invalid task worktree lease {} for workflow {} task {}",
+                                    lease.lease_id,
+                                    workflow.id,
+                                    task.task_id
+                                ));
+                            }
+                        }
+                        deferred.push(DeferredDispatchTask {
+                            task_id: task.task_id.clone(),
+                            title: task.title.clone(),
+                            priority: task.priority.clone(),
+                            status: block.status,
+                            reason: block.reason,
+                            blocking_refs: block.blocking_refs,
+                        });
+                        continue;
+                    }
+                    admitted_new_assignments += 1;
+                    quota.1 += 1;
+                    let task_version = workflow
+                        .tasks
+                        .iter()
+                        .find(|candidate| candidate.id == task.task_id)
+                        .map(|candidate| candidate.version)
+                        .unwrap_or_default();
+                    assignments.push(DispatchAssignment {
+                        task_id: task.task_id.clone(),
+                        title: task.title.clone(),
+                        priority: task.priority.clone(),
+                        selected_executor: report.selected_executor,
+                        executor_routing_source: selection.source.clone(),
+                        task_version,
+                        handoff_status: if report.allowed {
+                            report.status
+                        } else {
+                            "handoff_reused_existing_lease".to_string()
+                        },
+                        context_sha256: report.context.context_sha256,
+                        lease_id: lease.lease_id,
+                        lease_expires_at: lease.expires_at,
+                        lease_state: lease_state.to_string(),
+                        workspace_claim: lease.workspace_claim,
+                        execution_started: false,
+                    });
+                } else {
+                    deferred.push(DeferredDispatchTask {
+                        task_id: task.task_id.clone(),
+                        title: task.title.clone(),
+                        priority: task.priority.clone(),
+                        status: report.status,
+                        reason: report.reason.unwrap_or_else(|| {
+                            "handoff gate did not grant a correlated task lease".to_string()
+                        }),
+                        blocking_refs: report
+                            .context
+                            .handoff_blockers
+                            .iter()
+                            .flat_map(|blocker| blocker.refs.iter().cloned())
+                            .collect(),
+                    });
+                }
+            }
+            Err(error) => deferred.push(DeferredDispatchTask {
+                task_id: task.task_id.clone(),
+                title: task.title.clone(),
+                priority: task.priority.clone(),
+                status: "deferred_handoff_error".to_string(),
+                reason: format!("handoff failed closed: {error:#}"),
+                blocking_refs: Vec::new(),
+            }),
+        }
+    }
+
+    let admission_status = if assignments.len() == requested_parallel_tasks {
+        "admitted".to_string()
+    } else if assignments.is_empty() {
+        "blocked".to_string()
+    } else {
+        "degraded".to_string()
+    };
+    let admission = DispatchResourceAdmission {
+        status: admission_status,
+        requested_parallel_tasks,
+        admitted_parallel_tasks: assignments.len(),
+        existing_active_leases,
+        requested_new_handoffs,
+        admitted_new_handoffs: admitted_new_assignments,
+        cpu_count: snapshot.cpu_count,
+        load_one: snapshot.load_one,
+        memory_available_bytes: snapshot.memory_available_bytes,
+        swap_free_bytes: snapshot.swap_free_bytes,
+        disk_free_bytes: snapshot.disk_free_bytes,
+        disk_total_bytes: snapshot.disk_total_bytes,
+        disk_free_ratio: filesystem_free_ratio(snapshot.disk_free_bytes, snapshot.disk_total_bytes),
+        quota_status,
+        executor_quota_statuses,
+        resource_status,
+        reason: format!("{resource_reason}; {}", quota_reasons.join("; ")),
+    };
+
+    let ready_task_ids = ready_tasks
+        .iter()
+        .map(|task| task.task_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for handoff in handoff_tasks
+        .iter()
+        .filter(|handoff| !ready_task_ids.contains(handoff.task_id.as_str()))
+    {
+        let priority = workflow
+            .tasks
+            .iter()
+            .find(|task| task.id.as_str() == handoff.task_id)
+            .map(|task| task.work_item.priority.clone())
+            .unwrap_or_else(|| "medium".to_string());
+        let reason = if handoff.handoff_blockers.is_empty() {
+            format!("handoff gate reported {}", handoff.handoff_status)
+        } else {
+            handoff
+                .handoff_blockers
+                .iter()
+                .map(|blocker| blocker.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        deferred.push(DeferredDispatchTask {
+            task_id: handoff.task_id.clone(),
+            title: handoff.title.clone(),
+            priority,
+            status: handoff.handoff_status.clone(),
+            reason,
+            blocking_refs: handoff.blocking_refs.clone(),
+        });
+    }
+
+    let represented_task_ids = handoff_tasks
+        .iter()
+        .map(|task| task.task_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for task in dependency_ready_pending_tasks(workflow)
+        .into_iter()
+        .filter(|task| !represented_task_ids.contains(task.id.as_str()))
+    {
+        deferred.push(DeferredDispatchTask {
+            task_id: task.id.clone(),
+            title: task.title.clone(),
+            priority: task.work_item.priority.clone(),
+            status: "deferred_parallel_limit".to_string(),
+            reason: format!(
+                "task remains outside current bounded frontier of {} task(s)",
+                configured_limit
+            ),
+            blocking_refs: Vec::new(),
+        });
+    }
+
+    let wave = ExecutionWave {
+        schema_version: "forge.execution_wave.v1".to_string(),
+        wave_id: format!("wave_{}", Uuid::new_v4().simple()),
+        workflow_id: workflow.id.clone(),
+        workflow_revision: workflow_revision(workflow),
+        assignments,
+        deferred,
+        execution_started: false,
+        created_at: Utc::now(),
+    };
+    let status = if wave.assignments.is_empty() {
+        "dispatch_blocked"
+    } else if wave.assignments.len() > 1 {
+        "parallel_handoffs_acquired"
+    } else {
+        "single_handoff_acquired"
+    };
+    Ok(DispatchFrontier {
+        schema_version: "forge.dispatch_frontier.v1".to_string(),
+        status: status.to_string(),
+        max_parallel_tasks: configured_limit,
+        admission,
+        wave,
+    })
+}
+
+fn dependency_ready_pending_tasks(workflow: &Workflow) -> Vec<&AtomicTask> {
+    let mut tasks = workflow
+        .tasks
+        .iter()
+        .filter(|task| {
+            task.status == TaskStatus::Pending
+                && task.dependencies.iter().all(|dependency_id| {
+                    workflow
+                        .tasks
+                        .iter()
+                        .find(|candidate| candidate.id == *dependency_id)
+                        .is_some_and(|dependency| dependency.status == TaskStatus::Completed)
+                })
+        })
+        .collect::<Vec<_>>();
+    tasks.sort_by(|left, right| {
+        task_priority_rank(&left.work_item.priority)
+            .cmp(&task_priority_rank(&right.work_item.priority))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    tasks
+}
+
+fn workflow_revision(workflow: &Workflow) -> u64 {
+    workflow
+        .revisions
+        .last()
+        .map(|revision| revision.revision)
+        .unwrap_or(0)
+}
+
+fn load_dispatch_acquisition(
+    store: &ForgeStore,
+    workflow_id: &str,
+    task_id: &str,
+    lease_id: &str,
+) -> Result<Option<(u64, DispatchAssignment)>> {
+    for event in store.load_workflow_events(workflow_id)?.into_iter().rev() {
+        if event.kind != "request_dispatch_wave_created" {
+            continue;
+        }
+        let Some(wave_value) = event.data.get("wave") else {
+            continue;
+        };
+        let Ok(wave) = serde_json::from_value::<ExecutionWave>(wave_value.clone()) else {
+            continue;
+        };
+        let revision = wave.workflow_revision;
+        if let Some(assignment) = wave.assignments.into_iter().find(|assignment| {
+            assignment.task_id == task_id
+                && assignment.lease_id == lease_id
+                && assignment.lease_state == "acquired"
+        }) {
+            return Ok(Some((revision, assignment)));
+        }
+    }
+    Ok(None)
+}
+
+fn quota_parallel_limit(
+    store: &ForgeStore,
+    selected_executor: &str,
+    requested: usize,
+) -> Result<(usize, String, String)> {
+    if requested == 0 {
+        return Ok((0, "not_required".to_string(), "no ready task".to_string()));
+    }
+    if selected_executor == "auto" {
+        return Ok((
+            1,
+            "unknown_executor".to_string(),
+            "automatic executor selection has no pre-reserved aggregate quota; fail closed to one handoff"
+                .to_string(),
+        ));
+    }
+    let observations = store
+        .load_executor_quotas()?
+        .into_iter()
+        .filter_map(|value| serde_json::from_value::<ExecutorQuotaObservation>(value).ok())
+        .collect::<Vec<_>>();
+    let Some(observation) = observations
+        .iter()
+        .find(|observation| observation.executor == selected_executor)
+    else {
+        return Ok((
+            1,
+            "missing".to_string(),
+            format!("no quota observation for {selected_executor}; fail closed to one handoff"),
+        ));
+    };
+    let observed_at = DateTime::parse_from_rfc3339(&observation.observed_at)
+        .ok()
+        .map(|value| value.with_timezone(&Utc));
+    if observed_at.is_none_or(|observed_at| {
+        Utc::now().signed_duration_since(observed_at).num_seconds()
+            > PARALLEL_QUOTA_OBSERVATION_MAX_AGE_SECONDS
+    }) {
+        return Ok((
+            1,
+            "stale".to_string(),
+            format!(
+                "quota observation for {selected_executor} is invalid or older than {} seconds; fail closed to one handoff",
+                PARALLEL_QUOTA_OBSERVATION_MAX_AGE_SECONDS
+            ),
+        ));
+    }
+    if quota_text_blocks(&observation.remaining_quota, &observation.rate_limit_risk) {
+        return Ok((
+            0,
+            "blocked".to_string(),
+            format!(
+                "quota observation blocks {selected_executor}: remaining={} risk={}",
+                observation.remaining_quota, observation.rate_limit_risk
+            ),
+        ));
+    }
+    Ok((
+        requested,
+        "fresh".to_string(),
+        format!(
+            "fresh non-blocking quota observation admits up to {requested} handoff(s) for {selected_executor}"
+        ),
+    ))
+}
+
+fn quota_text_blocks(remaining_quota: &str, rate_limit_risk: &str) -> bool {
+    let remaining = remaining_quota.to_ascii_lowercase();
+    let risk = rate_limit_risk.to_ascii_lowercase();
+    [
+        "exhausted",
+        "depleted",
+        "no_remaining",
+        "zero_remaining",
+        "unavailable",
+    ]
+    .iter()
+    .any(|needle| remaining.contains(needle))
+        || ["blocked", "rate_limited", "quota_exhausted"]
+            .iter()
+            .any(|needle| risk.contains(needle))
+}
+
+fn read_host_resource_snapshot(store: &ForgeStore) -> HostResourceSnapshot {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("FORGE_TEST_HOST_RESOURCE_SNAPSHOT_JSON") {
+        if let Ok(snapshot) = serde_json::from_str::<HostResourceSnapshot>(&value) {
+            return snapshot;
+        }
+    }
+
+    let cpu_count = std::thread::available_parallelism().ok().map(usize::from);
+    let load_one = fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|value| value.split_whitespace().next()?.parse::<f64>().ok());
+    let meminfo = fs::read_to_string("/proc/meminfo").ok();
+    let memory_available_bytes = meminfo
+        .as_deref()
+        .and_then(|value| meminfo_kib(value, "MemAvailable"))
+        .map(|value| value.saturating_mul(1024));
+    let swap_free_bytes = meminfo
+        .as_deref()
+        .and_then(|value| meminfo_kib(value, "SwapFree"))
+        .map(|value| value.saturating_mul(1024));
+    let disk_capacity = filesystem_capacity(store.path().parent().unwrap_or(store.path()));
+    HostResourceSnapshot {
+        cpu_count,
+        load_one,
+        memory_available_bytes,
+        swap_free_bytes,
+        disk_free_bytes: disk_capacity.map(|capacity| capacity.free_bytes),
+        disk_total_bytes: disk_capacity.map(|capacity| capacity.total_bytes),
+    }
+}
+
+fn meminfo_kib(meminfo: &str, key: &str) -> Option<u64> {
+    meminfo.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name != key {
+            return None;
+        }
+        value.split_whitespace().next()?.parse::<u64>().ok()
+    })
+}
+
+fn resource_parallel_limit(
+    snapshot: &HostResourceSnapshot,
+    requested: usize,
+) -> (usize, String, String) {
+    if requested == 0 {
+        return (0, "not_required".to_string(), "no ready task".to_string());
+    }
+    let (
+        Some(cpu_count),
+        Some(load_one),
+        Some(memory_available_bytes),
+        Some(swap_free_bytes),
+        Some(disk_free_bytes),
+        Some(disk_total_bytes),
+    ) = (
+        snapshot.cpu_count,
+        snapshot.load_one,
+        snapshot.memory_available_bytes,
+        snapshot.swap_free_bytes,
+        snapshot.disk_free_bytes,
+        snapshot.disk_total_bytes,
+    )
+    else {
+        return (
+            1,
+            "unknown".to_string(),
+            "host CPU, load, memory, swap, or disk capacity evidence unavailable; fail closed to one handoff".to_string(),
+        );
+    };
+    let Some(disk_free_ratio) =
+        filesystem_free_ratio(Some(disk_free_bytes), Some(disk_total_bytes))
+    else {
+        return (
+            1,
+            "unknown".to_string(),
+            "host disk capacity is zero or invalid; fail closed to one handoff".to_string(),
+        );
+    };
+    if memory_available_bytes < PARALLEL_MIN_MEMORY_PER_TASK_BYTES
+        || disk_free_bytes < PARALLEL_MIN_DISK_FREE_BYTES
+    {
+        return (
+            0,
+            "blocked".to_string(),
+            format!(
+                "host below minimum admission floor: memory_available={memory_available_bytes} swap_free={swap_free_bytes} disk_free={disk_free_bytes} disk_total={disk_total_bytes} disk_free_ratio={disk_free_ratio:.4}"
+            ),
+        );
+    }
+
+    let cpu_slots = (cpu_count as f64 - load_one.ceil()).max(1.0) as usize;
+    let memory_slots =
+        (memory_available_bytes / PARALLEL_MIN_MEMORY_PER_TASK_BYTES).max(1) as usize;
+    let mut admitted = requested.min(cpu_slots).min(memory_slots);
+    if swap_free_bytes == 0 || disk_free_ratio < PARALLEL_LOW_DISK_FREE_RATIO {
+        admitted = admitted.min(1);
+    }
+    let status = if admitted == requested {
+        "healthy"
+    } else {
+        "constrained"
+    };
+    (
+        admitted,
+        status.to_string(),
+        format!(
+            "host admits {admitted}/{requested} handoff(s): cpu_count={cpu_count} load_one={load_one:.2} memory_available={memory_available_bytes} swap_free={swap_free_bytes} disk_free={disk_free_bytes} disk_total={disk_total_bytes} disk_free_ratio={disk_free_ratio:.4}"
+        ),
+    )
+}
+
+fn filesystem_free_ratio(free_bytes: Option<u64>, total_bytes: Option<u64>) -> Option<f64> {
+    let free_bytes = free_bytes?;
+    let total_bytes = total_bytes?;
+    if total_bytes == 0 {
+        return None;
+    }
+    Some(free_bytes as f64 / total_bytes as f64)
+}
+
+#[cfg(unix)]
+fn filesystem_capacity(path: &Path) -> Option<FilesystemCapacity> {
+    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is a valid NUL-terminated string and `stat` points to writable memory.
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: successful `statvfs` initialized the output structure.
+    let stat = unsafe { stat.assume_init() };
+    Some(FilesystemCapacity {
+        free_bytes: stat.f_bavail.saturating_mul(stat.f_frsize),
+        total_bytes: stat.f_blocks.saturating_mul(stat.f_frsize),
+    })
+}
+
+#[cfg(not(unix))]
+fn filesystem_capacity(_path: &Path) -> Option<FilesystemCapacity> {
+    None
 }
 
 fn build_request_context_frontier(
@@ -3743,7 +5732,10 @@ fn build_request_context_frontier(
     budget: usize,
     checkpoints: &[TaskCheckpoint],
 ) -> Result<(ContextHandoffSummary, BTreeMap<String, PathBuf>)> {
-    let candidate_task_ids = request_context_frontier_task_ids(workflow);
+    let candidate_task_ids = request_context_frontier_task_ids(store, workflow)?;
+    let frontier_limit = workflow_parallel_task_limit(workflow)
+        .max(active_task_lease_ids(store, workflow)?.len())
+        .min(REQUEST_CONTEXT_FRONTIER_HARD_LIMIT);
     let mut retained_tasks = Vec::new();
     let mut retained_project_roots = BTreeMap::new();
     let mut ready_count = 0usize;
@@ -3766,7 +5758,7 @@ fn build_request_context_frontier(
         let retain = if handoff_task.handoff_ready {
             ready_count += 1;
             true
-        } else if blocked_count < REQUEST_CONTEXT_FRONTIER_LIMIT {
+        } else if blocked_count < frontier_limit {
             blocked_count += 1;
             true
         } else {
@@ -3776,7 +5768,7 @@ fn build_request_context_frontier(
             retained_project_roots.extend(project_roots);
             retained_tasks.push(handoff_task);
         }
-        if ready_count == REQUEST_CONTEXT_FRONTIER_LIMIT {
+        if ready_count == frontier_limit {
             break;
         }
     }
@@ -3897,7 +5889,7 @@ fn drive_blocked_tasks(
                     candidate.id == task.task_id && candidate.status == TaskStatus::Pending
                 })
         })
-        .take(REQUEST_CONTEXT_FRONTIER_LIMIT)
+        .take(workflow_parallel_task_limit(workflow))
         .map(|task| {
             let predecessor_frontier = unresolved_predecessor_frontier(workflow, &task.task_id);
             let predecessor_tasks_total = predecessor_frontier.len();
@@ -4577,20 +6569,28 @@ fn ensure_final_completion_audit_task(
     block_reason: &str,
 ) -> Result<Option<Workflow>> {
     let expected_dependency_ids = final_completion_audit_dependency_ids(workflow);
+    let required_task_version =
+        final_completion_audit_required_version(workflow, &expected_dependency_ids);
     if let Some(existing_audit_task_index) = workflow
         .tasks
         .iter()
         .position(is_final_completion_audit_task)
     {
-        let existing_dependencies = &workflow.tasks[existing_audit_task_index].dependencies;
-        if existing_dependencies == &expected_dependency_ids {
+        let existing_task = &workflow.tasks[existing_audit_task_index];
+        let dependencies_match = existing_task.dependencies == expected_dependency_ids;
+        let version_is_current = existing_task.version >= required_task_version;
+        if dependencies_match && version_is_current {
             return Ok(None);
         }
 
         let mut updated = workflow.clone();
         let task_id = updated.tasks[existing_audit_task_index].id.clone();
         let previous_dependency_count = updated.tasks[existing_audit_task_index].dependencies.len();
+        let previous_version = updated.tasks[existing_audit_task_index].version;
         updated.tasks[existing_audit_task_index].dependencies = expected_dependency_ids.clone();
+        updated.tasks[existing_audit_task_index].version =
+            previous_version.max(required_task_version);
+        let new_version = updated.tasks[existing_audit_task_index].version;
         let revision = updated
             .revisions
             .last()
@@ -4601,8 +6601,8 @@ fn ensure_final_completion_audit_task(
             origin: origin.to_string(),
             change_type: "completion_audit_dependencies_repaired".to_string(),
             summary: format!(
-                "repaired {task_id} dependencies from {previous_dependency_count} to {} outcome evidence prerequisite(s)",
-                expected_dependency_ids.len()
+                "repaired {task_id} dependencies from {previous_dependency_count} to {} outcome evidence prerequisite(s) and version from {previous_version} to {new_version}",
+                expected_dependency_ids.len(),
             ),
             created_at: Utc::now(),
         });
@@ -4612,6 +6612,9 @@ fn ensure_final_completion_audit_task(
             "previous_dependency_count": previous_dependency_count,
             "dependency_count": expected_dependency_ids.len(),
             "dependencies": expected_dependency_ids,
+            "previous_version": previous_version,
+            "required_version": required_task_version,
+            "new_version": new_version,
             "reason": block_reason,
             "revision": revision,
         });
@@ -4666,6 +6669,7 @@ fn ensure_final_completion_audit_task(
     audit_task.goal = format!(
         "Audit the explicit final criteria before completion. {block_reason} Inspect Forge artifacts and the target repositories. If any final criterion lacks evidence, return needs_retry with exact missing work; only attach `{FINAL_COMPLETION_AUDIT_KIND}` when every criterion is proven."
     );
+    audit_task.version = required_task_version;
     updated.tasks.push(audit_task);
     updated.status = "running".to_string();
     let revision = updated
@@ -4700,6 +6704,21 @@ fn ensure_final_completion_audit_task(
         &event_data,
     )?;
     Ok(Some(updated))
+}
+
+fn final_completion_audit_required_version(workflow: &Workflow, dependency_ids: &[String]) -> u64 {
+    dependency_ids
+        .iter()
+        .filter_map(|dependency_id| {
+            workflow
+                .tasks
+                .iter()
+                .find(|task| task.id == *dependency_id)
+                .map(|task| task.version)
+        })
+        .max()
+        .unwrap_or(1)
+        .max(1)
 }
 
 fn final_completion_audit_task_id(workflow: &Workflow) -> Option<String> {
@@ -5423,6 +7442,611 @@ fn summarize_validation_commands(
 #[cfg(test)]
 mod status_fence_tests {
     use super::*;
+    use crate::lease::acquire_task_lease;
+    use crate::worktree::{bind_worktree, create_worktree, WorktreeCreateOptions};
+    use std::process::Command as ProcessCommand;
+
+    fn git(repository: &Path, args: &[&str]) {
+        let output = ProcessCommand::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn initialize_repository(repository: &Path) {
+        fs::create_dir_all(repository).unwrap();
+        let output = ProcessCommand::new("git")
+            .arg("init")
+            .arg("--initial-branch=main")
+            .arg(repository)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        git(
+            repository,
+            &[
+                "config",
+                "user.email",
+                "forge-request-tests@example.invalid",
+            ],
+        );
+        git(repository, &["config", "user.name", "Forge Request Tests"]);
+        fs::write(repository.join("README.md"), "request worktree fixture\n").unwrap();
+        git(repository, &["add", "README.md"]);
+        git(
+            repository,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "fixture",
+            ],
+        );
+    }
+
+    fn bind_distinct_task_worktree(
+        store: &ForgeStore,
+        repository: &Path,
+        worktree_root: &Path,
+        branch: &str,
+        workflow_id: &str,
+        task_id: &str,
+    ) -> WorktreeMutationClaim {
+        let created = create_worktree(
+            store,
+            WorktreeCreateOptions {
+                repository: repository.to_path_buf(),
+                path: worktree_root.to_path_buf(),
+                branch: branch.to_string(),
+                start_point: Some("HEAD".to_string()),
+                allow_repository_mutation: true,
+                origin: "request-dispatch-test".to_string(),
+            },
+        )
+        .unwrap();
+        bind_worktree(
+            store,
+            &created.worktree.id,
+            workflow_id,
+            Some(task_id),
+            "request-dispatch-test",
+        )
+        .unwrap();
+        bound_worktree_mutation_claim(store, workflow_id, task_id)
+            .unwrap()
+            .unwrap()
+    }
+
+    fn healthy_host_snapshot() -> HostResourceSnapshot {
+        HostResourceSnapshot {
+            cpu_count: Some(32),
+            load_one: Some(0.5),
+            memory_available_bytes: Some(32 * 1024 * 1024 * 1024),
+            swap_free_bytes: Some(4 * 1024 * 1024 * 1024),
+            disk_free_bytes: Some(200 * 1024 * 1024 * 1024),
+            disk_total_bytes: Some(400 * 1024 * 1024 * 1024),
+        }
+    }
+
+    #[test]
+    fn observed_runtime_worktree_claim_allows_only_the_receipted_head_advance() {
+        let leased = WorktreeMutationClaim {
+            schema_version: "forge.worktree.mutation_claim.v1".to_string(),
+            mode: "exclusive_mutation".to_string(),
+            worktree_id: "task-worktree".to_string(),
+            worktree_identity_sha256: "identity".to_string(),
+            repository_root: "/repository".to_string(),
+            worktree_root: "/repository-task".to_string(),
+            binding_scope: "task".to_string(),
+            binding_workflow_revision: 7,
+            head: "base-head".to_string(),
+            config_sha256: "config".to_string(),
+        };
+        let mut advanced = leased.clone();
+        advanced.head = "receipt-head".to_string();
+        assert!(worktree_claim_identity_unchanged(&leased, &advanced));
+
+        let mut changed_config = advanced.clone();
+        changed_config.config_sha256 = "different-config".to_string();
+        assert!(!worktree_claim_identity_unchanged(&leased, &changed_config));
+
+        let mut changed_binding = advanced.clone();
+        changed_binding.binding_workflow_revision += 1;
+        assert!(!worktree_claim_identity_unchanged(
+            &leased,
+            &changed_binding
+        ));
+
+        let mut changed_identity = advanced;
+        changed_identity.worktree_identity_sha256 = "different-identity".to_string();
+        assert!(!worktree_claim_identity_unchanged(
+            &leased,
+            &changed_identity
+        ));
+    }
+
+    fn save_ready_executor(store: &ForgeStore, id: &str) {
+        store
+            .save_executor_state(
+                id,
+                &serde_json::json!({
+                    "id": id,
+                    "display_name": id,
+                    "command": id,
+                    "installed": true,
+                    "configured": true,
+                    "command_path": format!("/test/{id}"),
+                    "config_evidence": ["test"],
+                    "non_interactive_ready": true,
+                    "probe_evidence": ["test"],
+                    "forge_first_ready": false,
+                    "forge_first_entrypoint": null,
+                    "harness_status": null,
+                    "allowed": true,
+                    "decision_source": "test",
+                    "synced_at": Utc::now().to_rfc3339()
+                }),
+            )
+            .unwrap();
+        store
+            .save_executor_quota(
+                id,
+                id,
+                "test",
+                &serde_json::json!({
+                    "executor": id,
+                    "provider": id,
+                    "model": "test",
+                    "local_vs_non_local": "non_local",
+                    "free_vs_paid_if_known": "unknown",
+                    "remaining_quota": "available",
+                    "rate_limit_risk": "low",
+                    "monetary_or_token_cost": "unknown",
+                    "latency": "test",
+                    "expected_quality": "test",
+                    "suitability": "test",
+                    "source": "parallel_task_local_test",
+                    "observed_at": Utc::now().to_rfc3339()
+                }),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn fresh_quota_counts_an_existing_lease_before_admitting_remaining_capacity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        save_ready_executor(&store, "external-worker");
+        let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
+            "Count active executor leases against fresh parallel quota",
+        ));
+        workflow.core_orchestration.max_parallel_tasks = 2;
+        workflow.tasks = vec![
+            crate::graph::task(
+                "task-leased",
+                "Continue existing work",
+                &[],
+                &[],
+                vec![],
+                "existing receipt",
+                (ExecutorKind::Command, 0.0),
+            ),
+            crate::graph::task(
+                "task-new",
+                "Use remaining capacity",
+                &[],
+                &[],
+                vec![],
+                "new receipt",
+                (ExecutorKind::Command, 0.0),
+            ),
+        ];
+        store.save_workflow(&workflow).unwrap();
+        let existing =
+            acquire_task_lease(&store, &workflow.id, "task-leased", "external-worker", 300)
+                .unwrap()
+                .lease
+                .unwrap();
+        let (handoff, roots) =
+            build_request_context_frontier(&store, &workflow, DEFAULT_CONTEXT_BUDGET, &[]).unwrap();
+        let ready = ready_handoff_tasks(&store, &workflow, &handoff.tasks).unwrap();
+        let frontier = build_dispatch_frontier_with_snapshot(
+            &store,
+            &workflow,
+            &ready,
+            &handoff.tasks,
+            &roots,
+            "external-worker",
+            300,
+            None,
+            healthy_host_snapshot(),
+        )
+        .unwrap();
+
+        assert_eq!(frontier.admission.quota_status, "fresh");
+        assert_eq!(frontier.admission.existing_active_leases, 1);
+        assert_eq!(frontier.admission.requested_new_handoffs, 1);
+        assert_eq!(frontier.admission.admitted_new_handoffs, 1);
+        assert_eq!(frontier.wave.assignments.len(), 2);
+        assert!(frontier.wave.assignments.iter().any(|assignment| {
+            assignment.task_id == "task-leased"
+                && assignment.lease_id == existing.lease_id
+                && assignment.lease_state == "reused_active"
+        }));
+        assert!(frontier.wave.assignments.iter().any(|assignment| {
+            assignment.task_id == "task-new" && assignment.lease_state == "acquired"
+        }));
+    }
+
+    fn routed_parallel_task(id: &str, brain: &str) -> AtomicTask {
+        let mut task = crate::graph::task(
+            id,
+            id,
+            &[],
+            &[],
+            vec![],
+            "validated branch output",
+            (ExecutorKind::Ai, 0.0),
+        );
+        task.node_brain_routing.default_brain = Some(brain.to_string());
+        task.node_brain_routing.allowed_brains = vec![brain.to_string()];
+        task.node_brain_routing.agent_slots = vec![crate::graph::NodeBrainAgentSlotSpec {
+            slot_id: format!("slot-{id}"),
+            brain_id: Some(brain.to_string()),
+            role: format!("{brain}-worker"),
+            parallel_group: "healthy-eight-way-wave".to_string(),
+            state_owner: "forge".to_string(),
+        }];
+        task.node_brain_routing.max_parallel_agents = 1;
+        task
+    }
+
+    #[test]
+    fn task_local_wave_assigns_three_agy_and_five_codex_tasks_independently() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        initialize_repository(&repository);
+        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        save_ready_executor(&store, "agy");
+        save_ready_executor(&store, "codex");
+        let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
+            "Run three frontend Agy branches and five backend Codex branches in one wave",
+        ));
+        workflow.core_orchestration.max_parallel_tasks = 8;
+        workflow.tasks = (0..3)
+            .map(|index| routed_parallel_task(&format!("agy-{index}"), "agy"))
+            .chain((0..5).map(|index| routed_parallel_task(&format!("codex-{index}"), "codex")))
+            .collect();
+        store.save_workflow(&workflow).unwrap();
+        for task in &workflow.tasks {
+            let worktree_root = temporary.path().join(format!("worktree-{}", task.id));
+            let claim = bind_distinct_task_worktree(
+                &store,
+                &repository,
+                &worktree_root,
+                &format!("dispatch-{}", task.id),
+                &workflow.id,
+                &task.id,
+            );
+            assert_eq!(claim.binding_scope, "task");
+        }
+        let (handoff, roots) =
+            build_request_context_frontier(&store, &workflow, DEFAULT_CONTEXT_BUDGET, &[]).unwrap();
+        let ready = ready_handoff_tasks(&store, &workflow, &handoff.tasks).unwrap();
+        let frontier = build_dispatch_frontier_with_snapshot(
+            &store,
+            &workflow,
+            &ready,
+            &handoff.tasks,
+            &roots,
+            "auto",
+            300,
+            None,
+            healthy_host_snapshot(),
+        )
+        .unwrap();
+
+        assert_eq!(frontier.wave.assignments.len(), 8);
+        assert_eq!(
+            frontier
+                .wave
+                .assignments
+                .iter()
+                .filter(|assignment| assignment.selected_executor == "agy")
+                .count(),
+            3
+        );
+        assert_eq!(
+            frontier
+                .wave
+                .assignments
+                .iter()
+                .filter(|assignment| assignment.selected_executor == "codex")
+                .count(),
+            5
+        );
+        assert!(frontier.wave.deferred.is_empty());
+        assert!(!frontier.wave.execution_started);
+        assert!(frontier
+            .wave
+            .assignments
+            .iter()
+            .all(|assignment| assignment.lease_state == "acquired"
+                && !assignment.execution_started
+                && assignment.executor_routing_source == "node_agent_slot"
+                && assignment
+                    .workspace_claim
+                    .as_ref()
+                    .is_some_and(|claim| claim.binding_scope == "task")));
+        assert_eq!(
+            frontier
+                .wave
+                .assignments
+                .iter()
+                .map(|assignment| assignment.task_id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            8
+        );
+        assert_eq!(
+            frontier
+                .wave
+                .assignments
+                .iter()
+                .filter_map(|assignment| assignment.workspace_claim.as_ref())
+                .map(|claim| claim.worktree_id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            8
+        );
+        assert_eq!(
+            frontier
+                .wave
+                .assignments
+                .iter()
+                .map(|assignment| assignment.lease_id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            8
+        );
+
+        let mut policy = store
+            .load_executor_states()
+            .unwrap()
+            .into_iter()
+            .map(|value| serde_json::from_value::<ExecutorState>(value).unwrap())
+            .map(|state| (state.id.clone(), state))
+            .collect::<BTreeMap<_, _>>();
+        policy.get_mut("agy").unwrap().non_interactive_ready = false;
+        let agy_task = routed_parallel_task("agy-policy-blocked", "agy");
+        let codex_task = routed_parallel_task("codex-policy-ready", "codex");
+        let agy_block = resolve_task_dispatch_executor(&agy_task, "auto", &policy).unwrap_err();
+        assert_eq!(agy_block.status, "deferred_executor_policy");
+        assert!(agy_block.reason.contains("non_interactive_ready=false"));
+        assert_eq!(
+            resolve_task_dispatch_executor(&codex_task, "auto", &policy)
+                .unwrap()
+                .executor,
+            "codex"
+        );
+        let antigravity_alias = routed_parallel_task("agy-alias", "antigravity");
+        assert_eq!(
+            resolve_task_dispatch_executor(&antigravity_alias, "auto", &policy)
+                .unwrap_err()
+                .status,
+            "deferred_executor_policy"
+        );
+        policy.get_mut("agy").unwrap().non_interactive_ready = true;
+        assert_eq!(
+            resolve_task_dispatch_executor(&antigravity_alias, "auto", &policy)
+                .unwrap()
+                .executor,
+            "agy"
+        );
+        let explicit_conflict =
+            resolve_task_dispatch_executor(&agy_task, "codex", &policy).unwrap_err();
+        assert_eq!(
+            explicit_conflict.status,
+            "deferred_executor_routing_conflict"
+        );
+    }
+
+    #[test]
+    fn agentic_tasks_without_task_worktrees_are_deferred_without_new_leases() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        save_ready_executor(&store, "agy");
+        save_ready_executor(&store, "codex");
+        let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
+            "Block unisolated agentic dispatch",
+        ));
+        workflow.core_orchestration.max_parallel_tasks = 3;
+        let mut agentic_command = routed_parallel_task("command-with-agentic-routing", "codex");
+        agentic_command.executor = ExecutorKind::Command;
+        workflow.tasks = vec![
+            routed_parallel_task("agy-without-worktree", "agy"),
+            routed_parallel_task("codex-legacy-lease", "codex"),
+            agentic_command,
+        ];
+        store.save_workflow(&workflow).unwrap();
+        let legacy = acquire_task_lease(&store, &workflow.id, "codex-legacy-lease", "codex", 300)
+            .unwrap()
+            .lease
+            .unwrap();
+        assert!(legacy.workspace_claim.is_none());
+
+        let (handoff, roots) =
+            build_request_context_frontier(&store, &workflow, DEFAULT_CONTEXT_BUDGET, &[]).unwrap();
+        let ready = ready_handoff_tasks(&store, &workflow, &handoff.tasks).unwrap();
+        let frontier = build_dispatch_frontier_with_snapshot(
+            &store,
+            &workflow,
+            &ready,
+            &handoff.tasks,
+            &roots,
+            "auto",
+            300,
+            None,
+            healthy_host_snapshot(),
+        )
+        .unwrap();
+
+        assert!(frontier.wave.assignments.is_empty());
+        assert_eq!(frontier.wave.deferred.len(), 3);
+        assert!(frontier.wave.deferred.iter().all(|task| {
+            task.status == "deferred_task_worktree_required"
+                && task
+                    .blocking_refs
+                    .iter()
+                    .any(|item| item == "task_scoped_worktree")
+        }));
+        assert!(store
+            .load_task_lease(&workflow.id, "agy-without-worktree")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .load_task_lease(&workflow.id, "command-with-agentic-routing")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .load_task_lease(&workflow.id, "codex-legacy-lease")
+                .unwrap()
+                .unwrap()["lease_id"],
+            legacy.lease_id
+        );
+    }
+
+    #[test]
+    fn workflow_scoped_shared_worktree_is_deferred_before_any_agentic_lease() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        initialize_repository(&repository);
+        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        save_ready_executor(&store, "agy");
+        save_ready_executor(&store, "codex");
+        let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
+            "Block shared checkout mutation",
+        ));
+        workflow.core_orchestration.max_parallel_tasks = 2;
+        workflow.tasks = vec![
+            routed_parallel_task("shared-agy", "agy"),
+            routed_parallel_task("shared-codex", "codex"),
+        ];
+        store.save_workflow(&workflow).unwrap();
+        let shared = create_worktree(
+            &store,
+            WorktreeCreateOptions {
+                repository,
+                path: temporary.path().join("shared-worktree"),
+                branch: "shared-dispatch".to_string(),
+                start_point: Some("HEAD".to_string()),
+                allow_repository_mutation: true,
+                origin: "request-dispatch-test".to_string(),
+            },
+        )
+        .unwrap();
+        bind_worktree(
+            &store,
+            &shared.worktree.id,
+            &workflow.id,
+            None,
+            "request-dispatch-test",
+        )
+        .unwrap();
+        assert!(workflow.tasks.iter().all(|task| {
+            bound_worktree_mutation_claim(&store, &workflow.id, &task.id)
+                .unwrap()
+                .is_some_and(|claim| claim.binding_scope == "workflow")
+        }));
+
+        let (handoff, roots) =
+            build_request_context_frontier(&store, &workflow, DEFAULT_CONTEXT_BUDGET, &[]).unwrap();
+        let ready = ready_handoff_tasks(&store, &workflow, &handoff.tasks).unwrap();
+        let frontier = build_dispatch_frontier_with_snapshot(
+            &store,
+            &workflow,
+            &ready,
+            &handoff.tasks,
+            &roots,
+            "auto",
+            300,
+            None,
+            healthy_host_snapshot(),
+        )
+        .unwrap();
+
+        assert!(frontier.wave.assignments.is_empty());
+        assert_eq!(frontier.wave.deferred.len(), 2);
+        assert!(frontier.wave.deferred.iter().all(|task| {
+            task.status == "deferred_task_worktree_required"
+                && task.reason.contains("binding_scope=workflow")
+        }));
+        for task in &workflow.tasks {
+            assert!(store
+                .load_task_lease(&workflow.id, &task.id)
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn deterministic_command_dispatch_does_not_require_an_agent_worktree() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        save_ready_executor(&store, "codex");
+        let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
+            "Preserve deterministic dispatch",
+        ));
+        let task = crate::graph::task(
+            "deterministic-command",
+            "Run deterministic command",
+            &[],
+            &[],
+            vec![],
+            "deterministic output",
+            (ExecutorKind::Command, 0.0),
+        );
+        assert_eq!(task.node_brain_routing.scope, "non_agentic_node");
+        assert!(task.node_brain_routing.default_brain.is_none());
+        assert!(task.node_brain_routing.agent_slots.is_empty());
+        workflow.tasks = vec![task];
+        store.save_workflow(&workflow).unwrap();
+
+        let (handoff, roots) =
+            build_request_context_frontier(&store, &workflow, DEFAULT_CONTEXT_BUDGET, &[]).unwrap();
+        let ready = ready_handoff_tasks(&store, &workflow, &handoff.tasks).unwrap();
+        let frontier = build_dispatch_frontier_with_snapshot(
+            &store,
+            &workflow,
+            &ready,
+            &handoff.tasks,
+            &roots,
+            "codex",
+            300,
+            None,
+            healthy_host_snapshot(),
+        )
+        .unwrap();
+
+        assert_eq!(frontier.wave.assignments.len(), 1);
+        assert!(frontier.wave.deferred.is_empty());
+        assert!(frontier.wave.assignments[0].workspace_claim.is_none());
+    }
 
     #[test]
     fn atomic_run_and_workflow_status_update_rejects_live_lease_without_mutation() {

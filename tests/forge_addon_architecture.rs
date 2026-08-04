@@ -823,6 +823,16 @@ fn addons_catalog_exposes_core_kernel_and_first_party_addons() {
         .iter()
         .find(|addon| addon["id"] == "forge.core.kernel")
         .unwrap();
+    assert!(core["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "dynamic_workflow"));
+    assert!(core["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "parallel_teamwork"));
     assert!(core["context_providers"]
         .as_array()
         .unwrap()

@@ -1,61 +1,57 @@
 ---
 name: forge-core-agent
-description: Forge Core agent configuration, registering brain/soul profiles, executor policies, and adapter credentials.
+description: Forge Core executor discovery, explicit authorization, readiness and adapter diagnostics.
 license: MIT
 compatibility: codex, opencode, agy, claude
 ---
 
 ## Agent and Executor Contract
 
-Forge controls agent execution through bounded executor adapters, brain/soul profiles, and authorization policies. No agent may execute tasks without valid profile registration and policy checks.
+Forge owns workflow state, policy, leases, validation and promotion. Codex, Agy
+and other CLIs are bounded execution engines. A CLI being present on disk does
+not authorize Forge to use it.
 
-## Configuring and Registering Brain/Soul Profiles
+An executor is usable only when all four gates are true:
 
-A Brain/Soul profile defines the cognitive model configuration, temperature, system instructions, and capabilities of an executor.
+1. `installed`: Forge found the executable;
+2. `configured`: Forge found provider/CLI configuration evidence;
+3. `allowed`: a human explicitly authorized the canonical executor;
+4. `non_interactive_ready`: the bounded readiness probe succeeded.
 
-To configure and register a profile:
-1. Define a JSON configuration file representing the profile (e.g., `soul_profile.json`):
-   ```json
-   {
-     "profile_id": "agy-coder",
-     "model_provider": "antigravity",
-     "model_name": "agy-default",
-     "temperature": 0.2,
-     "max_tokens": 8192,
-     "system_instruction": "You are a professional Rust developer adhering to strict safety and performance constraints."
-   }
-   ```
-2. Register the profile via `forge`:
-   ```bash
-   forge executor register-profile --profile-path ./soul_profile.json --output json
-   ```
+`antigravity`, `antigravity-cli` and `agy-cli` are compatibility names for the
+single canonical executor `agy`. They must not create independent policy,
+quota, brain or lease state.
 
-## Configuring Executor Options
+## Discover And Authorize Executors
 
-Executor options specify execution policies such as concurrency, timeouts, and local directory structures:
+Use the operator's real home when probing configuration:
 
-- **Local executor policy**: Mark local CLI tools (e.g. `agy`) as allowed or disallowed.
-- **Async run substrates**: Detect and execute in Docker, Kubernetes, or Knative. Remember that these are async run substrates, not cognitive executors. Do not mutate or install Knative/Kubernetes without explicit user authorization.
-
-CLI commands:
 ```bash
-forge executor policy --list --output json
-forge executor policy --allow "agy" --output json
+forge sync executors --home "$HOME" --allow agy --allow codex --no-prompt --output json
+forge executors --output json
+forge brains --output json
 ```
+
+`--allow` is the explicit human authorization persisted by Forge. `--no-prompt`
+only disables the interactive question; it does not authorize an executor by
+itself. Use `--deny <executor>` to persist an explicit denial.
+
+Do not use a temporary smoke-test home to establish production readiness. The
+executor report records the probed home so operators can distinguish the two.
 
 ## Adapter Credentials and Quotas
 
-Executor adapters require secure credential binding (API keys, workspace tokens, API endpoints) and strictly follow quota limits.
-
-### Credential Binding
-Credentials are bound using the environment or the SQLite state store. Do not write credentials in plaintext in files.
 ```bash
-forge executor credentials set --adapter "agy" --key "ANTIGRAVITY_API_KEY" --value "secret_value" --output json
+forge harness doctor --executor agy --shim-dir "$HOME/.forge/bin" --project-root <project-root> --output json
+forge harness doctor --executor codex --shim-dir "$HOME/.forge/bin" --project-root <project-root> --output json
+forge executor-quota ai-limits --ai-limits-cmd ai-limits --output json
 ```
 
-### Quotas and Limits (`ai-limits`)
-Forge monitors usage metrics (tokens, costs, execution duration) against the configured policies.
-```bash
-forge executor limits --profile "agy-coder" --token-limit 500000 --cost-limit-usd 2.50 --output json
-```
-If an executor hits a limit, Forge throws an execution exception and triggers the fallback executor routing flow.
+Provider credentials remain in the provider's supported environment or config
+store. Never place secret values in Forge skills, reports, command history or
+human-readable workflow artifacts.
+
+Before handoff, confirm the canonical executor is present in `usable`. Explicit
+handoff fails closed and does not acquire a lease when any readiness or policy
+gate is false. Quota evidence may independently stop the handoff or recommend a
+fallback before capacity is spent.

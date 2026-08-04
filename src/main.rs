@@ -2,15 +2,15 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use forge_core::adapter::validate_executor_response_file;
 use forge_core::addon::{
-    addon_observability_report, authorize_addon_permission, claim_addon_runtime_contract_dispatch,
-    complete_addon_runtime_contract_dispatch, create_addon_migration_workflow,
-    create_addon_package_lock, default_addon_dirs, disable_addon, downgrade_addon, enable_addon,
-    enqueue_addon_planner_dispatch, enqueue_addon_runtime_contract_dispatch,
-    evaluate_addon_runtime_contract_policy, execute_addon_executor, execute_addon_handoff,
-    execute_addon_planning_strategy, execute_addon_runtime_contract_dispatch,
-    execute_addon_validator, fetch_addon_package, install_addon, install_addon_package,
-    list_addon_capability_index, list_addon_event_adapters, list_addon_marketplace,
-    list_addon_permission_authorizations, list_addon_planner_registry,
+    addon_observability_report, apply_addon_validator_outcome, authorize_addon_permission,
+    claim_addon_runtime_contract_dispatch, complete_addon_runtime_contract_dispatch,
+    create_addon_migration_workflow, create_addon_package_lock, default_addon_dirs, disable_addon,
+    downgrade_addon, enable_addon, enqueue_addon_planner_dispatch,
+    enqueue_addon_runtime_contract_dispatch, evaluate_addon_runtime_contract_policy,
+    execute_addon_executor, execute_addon_handoff, execute_addon_planning_strategy,
+    execute_addon_runtime_contract_dispatch, execute_addon_validator, fetch_addon_package,
+    install_addon, install_addon_package, list_addon_capability_index, list_addon_event_adapters,
+    list_addon_marketplace, list_addon_permission_authorizations, list_addon_planner_registry,
     list_addon_runtime_contract_dispatches, list_addon_runtime_contracts,
     list_addon_runtime_workers, list_addon_trust_store, list_addon_views, list_installed_addons,
     load_addon_catalog_from_store, package_addon, plan_addon_lifecycle, publish_addon_package,
@@ -22,7 +22,7 @@ use forge_core::addon::{
     AddonHandoffDispatchInput, AddonHandoffExecutionInput, AddonPackageInput,
     AddonPlannerDispatchInput, AddonPlanningStrategyInput, AddonRuntimeContractCompletionInput,
     AddonRuntimeWorkerRegistrationInput, AddonTrustKeyInput, AddonValidatorDispatchInput,
-    AddonValidatorExecutionInput, CapabilityRegistrySyncInput,
+    AddonValidatorExecutionInput, AddonValidatorOutcomeApplyInput, CapabilityRegistrySyncInput,
 };
 use forge_core::artifact::list_workflow_artifacts_with_tags;
 use forge_core::aws_ops::{
@@ -85,7 +85,8 @@ use forge_core::executor::{
     BrainSessionLifecycleOptions, BrainSessionsReportOptions, ExecutorModelDecisionOptions,
     ExecutorQuotaObservation, ExecutorSyncOptions, ShellLaunchPlanOptions,
 };
-use forge_core::graph::create_workflow;
+use forge_core::executor_runtime::{execute_request_executor_wave, RequestExecutorWaveOptions};
+use forge_core::graph::{create_workflow, CoreParallelTeamSpec};
 use forge_core::handoff::{
     build_predecessor_handoff_plans, build_task_handoff_response_with_project, TaskHandoffView,
 };
@@ -209,9 +210,10 @@ use forge_core::registry::{
 use forge_core::request::{
     cancel_request, complete_ready_task, create_final_delivery_package, drive_request,
     ensure_final_audit, heartbeat_request, list_requests, load_request_status,
-    recover_stale_request, resume_async_request, start_async_request_with_idempotency,
-    start_async_request_with_project_and_idempotency, step_request, switch_request_executor,
-    RequestExecutorSwitchInput, RequestTaskCompletionInput,
+    recover_stale_request, resume_async_request,
+    start_async_request_with_idempotency_and_parallel_team,
+    start_async_request_with_project_idempotency_and_parallel_team, step_request,
+    switch_request_executor, RequestExecutorSwitchInput, RequestTaskCompletionInput,
 };
 use forge_core::request_supervisor::{
     supervise_request_once, supervise_requests_once, RequestSupervisorOptions,
@@ -235,12 +237,17 @@ use forge_core::storage::ForgeStore;
 use forge_core::store_admin::{backup_store, check_store, restore_store};
 use forge_core::validation::validate_workflow;
 use forge_core::workflow::{
-    attach_creative_artifact, attach_workflow_artifact_with_tags, get_workflow_token_collection,
-    inspect_creative_artifact, inspect_creative_collaboration, list_creative_artifacts,
-    parse_node_brain_agent_slot, patch_workflow_token, record_creative_collaboration_event,
-    resolve_workflow_tokens, set_workflow_token_collection, update_workflow_goal,
-    update_workflow_node_brain_routing, validate_child_subflow_binding,
+    add_workflow_task, add_workflow_task_dependency, attach_creative_artifact,
+    attach_workflow_artifact_with_tags, clear_workflow_task_impediment,
+    get_workflow_token_collection, inspect_creative_artifact, inspect_creative_collaboration,
+    list_creative_artifacts, parse_node_brain_agent_slot, patch_workflow_token,
+    record_creative_collaboration_event, remove_workflow_task_dependency, resolve_workflow_tokens,
+    set_workflow_task_impediment, set_workflow_task_priority, set_workflow_token_collection,
+    update_workflow_goal_with_expected_revision, update_workflow_node_brain_routing,
+    update_workflow_task_with_expected_revision, validate_child_subflow_binding,
     CreativeCollaborationEventRequest, ProductDecisionInput, WorkflowNodeBrainRoutingUpdateInput,
+    WorkflowTaskAddInput, WorkflowTaskDependencyInput, WorkflowTaskImpedimentClearInput,
+    WorkflowTaskImpedimentInput, WorkflowTaskPriorityInput, WorkflowTaskUpdateInput,
 };
 use forge_core::worktree::{
     approve_worktree_config, bind_worktree, bound_worktree_context, create_worktree,
@@ -275,6 +282,18 @@ enum Commands {
         goal: String,
         #[arg(long)]
         worktree: Option<String>,
+        #[arg(
+            long = "lane",
+            value_name = "ID=EXECUTOR:COUNT",
+            help = "Declare an independent parallel lane; repeat for multiple frontend/backend teams"
+        )]
+        lanes: Vec<String>,
+        #[arg(
+            long = "max-parallel-agents",
+            requires = "lanes",
+            help = "Bound total concurrent agents across the declared lanes"
+        )]
+        max_parallel_agents: Option<usize>,
         #[arg(long = "addon-dir")]
         addon_dirs: Vec<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -531,6 +550,36 @@ enum Commands {
     Teamwork {
         #[arg(long)]
         goal: String,
+        #[arg(
+            long = "lane",
+            value_name = "ID=BRAIN:COUNT",
+            help = "Repeatable independent teamwork lane, for example frontend=agy:3"
+        )]
+        lanes: Vec<String>,
+        #[arg(
+            long = "max-parallel-agents",
+            help = "Optional admission ceiling; defaults to the sum of configured lane agents"
+        )]
+        max_parallel_agents: Option<usize>,
+        #[arg(
+            long,
+            requires = "worktree_root",
+            help = "Git repository used to prepare one task-scoped worktree per external agent task"
+        )]
+        repository: Option<PathBuf>,
+        #[arg(
+            long = "worktree-root",
+            requires = "repository",
+            help = "Dedicated parent directory for the prepared teamwork worktrees"
+        )]
+        worktree_root: Option<PathBuf>,
+        #[arg(long = "branch-prefix", default_value = "forge/teamwork")]
+        branch_prefix: String,
+        #[arg(
+            long = "allow-repository-mutation",
+            help = "Explicitly authorize creation and task-scoped binding of the planned Git worktrees"
+        )]
+        allow_repository_mutation: bool,
         #[arg(short = 'd', long = "detached")]
         detached: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -1508,6 +1557,10 @@ enum AddonCommands {
         worker: String,
         #[arg(long)]
         subject: String,
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long = "task")]
+        task_id: Option<String>,
         #[arg(long, default_value = "{}")]
         input: String,
         #[arg(long, default_value = "{}")]
@@ -1520,6 +1573,20 @@ enum AddonCommands {
         dry_run: bool,
         #[arg(long = "addon-dir")]
         addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ApplyValidatorOutcome {
+        #[arg(long = "dispatch")]
+        dispatch_id: String,
+        #[arg(long = "workflow")]
+        workflow_id: String,
+        #[arg(long = "task")]
+        task_id: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: u64,
+        #[arg(long, default_value = "cli")]
+        origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -2876,6 +2943,38 @@ enum WorktreeCommands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+    PrepareTeamwork {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        repository: PathBuf,
+        #[arg(long = "worktree-root")]
+        worktree_root: PathBuf,
+        #[arg(long = "branch-prefix", default_value = "forge/teamwork")]
+        branch_prefix: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long = "allow-repository-mutation", default_value_t = false)]
+        allow_repository_mutation: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    IntegrateDependencies {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "allow-repository-mutation", default_value_t = false)]
+        allow_repository_mutation: bool,
+        #[arg(long = "approved-by")]
+        approved_by: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
     Sandbox {
         #[command(subcommand)]
         command: WorktreeSandboxCommands,
@@ -3323,8 +3422,119 @@ enum WorkflowCommands {
         workflow: String,
         #[arg(long)]
         goal: String,
-        #[arg(long)]
+        #[arg(long, default_value = "forge_cli")]
         origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    AddTask {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        description: String,
+        #[arg(long, default_value = "medium")]
+        priority: String,
+        #[arg(long = "task-id")]
+        task_id: Option<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    UpdateTask {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        goal: Option<String>,
+        #[arg(long = "expected-output")]
+        expected_output: Option<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    SetPriority {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        priority: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    AddDependency {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "depends-on")]
+        depends_on: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    RemoveDependency {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "depends-on")]
+        depends_on: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    SetImpediment {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value = "manual")]
+        kind: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ClearImpediment {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(
+            long = "impediment",
+            help = "Impediment id to clear; omit to clear manual impediments only"
+        )]
+        impediment_id: Option<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -3577,6 +3787,18 @@ enum RequestCommands {
         goal: String,
         #[arg(long)]
         worktree: Option<String>,
+        #[arg(
+            long = "lane",
+            value_name = "ID=EXECUTOR:COUNT",
+            help = "Declare an independent parallel lane; repeat for multiple frontend/backend teams"
+        )]
+        lanes: Vec<String>,
+        #[arg(
+            long = "max-parallel-agents",
+            requires = "lanes",
+            help = "Bound total concurrent agents across the declared lanes"
+        )]
+        max_parallel_agents: Option<usize>,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
         #[arg(long = "idempotency-key")]
@@ -3616,6 +3838,39 @@ enum RequestCommands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+    ExecuteWave {
+        #[arg(long = "run")]
+        run_id: String,
+        #[arg(long, default_value = "auto")]
+        executor: String,
+        #[arg(long = "ttl-seconds", default_value_t = 300)]
+        ttl_seconds: u64,
+        #[arg(long = "timeout-seconds", default_value_t = 1800)]
+        timeout_seconds: u64,
+        #[arg(long = "context-budget", default_value_t = DEFAULT_CONTEXT_BUDGET)]
+        context_budget: usize,
+        #[arg(
+            long = "max-parallel",
+            help = "Optional execution ceiling; the worker count is capped by admitted assignments"
+        )]
+        max_parallel: Option<usize>,
+        #[arg(
+            long = "allow-exec",
+            help = "Explicitly authorize Forge to start the admitted Codex/Agy processes"
+        )]
+        allow_exec: bool,
+        #[arg(long = "approved-by")]
+        approved_by: String,
+        #[arg(
+            long,
+            default_value = "execute the dependency-ready, task-worktree-bound dispatch wave"
+        )]
+        reason: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
     CompleteTask {
         #[arg(long = "run")]
         run_id: String,
@@ -3629,6 +3884,8 @@ enum RequestCommands {
         artifacts: Vec<PathBuf>,
         #[arg(long = "evidence-command")]
         evidence_command: Option<String>,
+        #[arg(long = "evidence-exit-code")]
+        evidence_exit_code: Option<i32>,
         #[arg(long = "evidence-summary")]
         evidence_summary: Option<String>,
         #[arg(long = "estimated-usd", default_value_t = 0.0)]
@@ -4966,6 +5223,63 @@ fn classify_cli_error(error: &anyhow::Error) -> CliErrorEnvelope {
     }
 }
 
+fn parse_teamwork_lane_spec(value: &str) -> Result<forge_core::teamwork::TeamworkLaneConfig> {
+    let value = value.trim();
+    let (lane_id, routing) = value.split_once('=').with_context(|| {
+        format!("teamwork lane `{value}` must use ID=BRAIN:COUNT, for example frontend=agy:3")
+    })?;
+    let (brain, agent_count) = routing.rsplit_once(':').with_context(|| {
+        format!("teamwork lane `{value}` must include a positive agent count after ':'")
+    })?;
+    let lane_id = lane_id.trim();
+    let brain = brain.trim();
+    if lane_id.is_empty() || brain.is_empty() {
+        bail!("teamwork lane `{value}` requires non-empty lane and brain ids");
+    }
+    let agent_count = agent_count
+        .trim()
+        .parse::<usize>()
+        .with_context(|| format!("teamwork lane `{value}` has an invalid agent count"))?;
+    if agent_count == 0 {
+        bail!("teamwork lane `{value}` requires at least one agent");
+    }
+    Ok(forge_core::teamwork::TeamworkLaneConfig {
+        id: lane_id.to_string(),
+        brain: brain.to_string(),
+        agent_count,
+        parallel_group: "implementation-wave-001".to_string(),
+        responsibility: format!("Deliver independent bounded work for the {lane_id} lane."),
+    })
+}
+
+fn explicit_parallel_team_from_lane_specs(
+    lane_specs: &[String],
+    max_parallel_agents: Option<usize>,
+    source: &str,
+) -> Result<Option<CoreParallelTeamSpec>> {
+    if lane_specs.is_empty() {
+        if max_parallel_agents.is_some() {
+            bail!("--max-parallel-agents requires at least one --lane ID=EXECUTOR:COUNT");
+        }
+        return Ok(None);
+    }
+
+    let lanes = lane_specs
+        .iter()
+        .map(|lane| parse_teamwork_lane_spec(lane))
+        .collect::<Result<Vec<_>>>()?;
+    let derived_parallelism = lanes.iter().try_fold(0usize, |total, lane| {
+        total
+            .checked_add(lane.agent_count)
+            .context("parallel team lane agent count overflow")
+    })?;
+    let config = forge_core::teamwork::TeamworkParallelConfig {
+        lanes,
+        max_parallel_agents: max_parallel_agents.unwrap_or(derived_parallelism),
+    };
+    forge_core::teamwork::core_parallel_team_from_teamwork(&config, source).map(Some)
+}
+
 fn run() -> Result<i32> {
     let cli = Cli::try_parse()?;
     if forge_production_mode_enabled() && !cli.store.is_absolute() {
@@ -5252,18 +5566,62 @@ fn run() -> Result<i32> {
         }
         Commands::Teamwork {
             goal,
+            lanes,
+            max_parallel_agents,
+            repository,
+            worktree_root,
+            branch_prefix,
+            allow_repository_mutation,
             detached,
             output,
             bypass_cache,
         } => {
             let store_path = cli.store.clone();
             let store = ForgeStore::open(store_path.clone())?;
-            let response = forge_core::teamwork::plan_teamwork_workflow(
-                &store,
-                &goal,
-                detached,
-                bypass_cache,
-            )?;
+            let response = if lanes.is_empty() {
+                forge_core::teamwork::plan_teamwork_workflow(&store, &goal, detached, bypass_cache)?
+            } else {
+                let lanes = lanes
+                    .iter()
+                    .map(|lane| parse_teamwork_lane_spec(lane))
+                    .collect::<Result<Vec<_>>>()?;
+                let derived_parallelism = lanes.iter().try_fold(0usize, |total, lane| {
+                    total
+                        .checked_add(lane.agent_count)
+                        .context("teamwork lane agent count overflow")
+                })?;
+                forge_core::teamwork::plan_teamwork_workflow_with_config(
+                    &store,
+                    &goal,
+                    detached,
+                    bypass_cache,
+                    forge_core::teamwork::TeamworkParallelConfig {
+                        lanes,
+                        max_parallel_agents: max_parallel_agents.unwrap_or(derived_parallelism),
+                    },
+                )?
+            };
+            if allow_repository_mutation && repository.is_none() {
+                bail!(
+                    "teamwork --allow-repository-mutation requires --repository and --worktree-root"
+                );
+            }
+            let worktree_preparation = repository
+                .zip(worktree_root)
+                .map(|(repository, worktree_root)| {
+                    forge_core::teamwork::prepare_teamwork_worktrees(
+                        &store,
+                        forge_core::teamwork::TeamworkWorktreePrepareOptions {
+                            workflow_id: response.workflow_id.clone(),
+                            repository,
+                            worktree_root,
+                            branch_prefix: branch_prefix.clone(),
+                            origin: "forge_teamwork".to_string(),
+                            allow_repository_mutation,
+                        },
+                    )
+                })
+                .transpose()?;
             if matches!(output, OutputFormat::Human) {
                 println!("FORGE TEAMWORK EXECUTION PLAN");
                 println!("Goal: {}", response.goal);
@@ -5275,8 +5633,30 @@ fn run() -> Result<i32> {
                 println!("\nTASK GRAPH");
                 println!("\nEXECUTION STATUS");
                 println!("Status: {}", response.status);
+                if let Some(preparation) = &worktree_preparation {
+                    println!("Worktree preparation: {}", preparation.status);
+                    println!(
+                        "Parallel branch worktrees: {}",
+                        preparation.parallel_branch_worktrees
+                    );
+                    println!(
+                        "Supporting agent worktrees: {}",
+                        preparation.supporting_agent_worktrees
+                    );
+                }
             } else {
-                print_response(output, &response)?;
+                if let Some(preparation) = &worktree_preparation {
+                    print_response(
+                        output,
+                        &serde_json::json!({
+                            "schema_version": "forge.teamwork.prepared_plan.v1",
+                            "teamwork": &response,
+                            "worktree_preparation": preparation,
+                        }),
+                    )?;
+                } else {
+                    print_response(output, &response)?;
+                }
             }
             if detached {
                 if let Some(ref r_id) = response.run_id {
@@ -5298,6 +5678,8 @@ fn run() -> Result<i32> {
         Commands::Plan {
             goal,
             worktree,
+            lanes,
+            max_parallel_agents,
             addon_dirs,
             output,
             detached,
@@ -5324,16 +5706,35 @@ fn run() -> Result<i32> {
             let intent =
                 parse_intent_with_catalog_and_context(&goal, &addon_catalog, operating_context);
             let mut workflow = create_workflow(intent);
+            if let Some(parallel_team) = explicit_parallel_team_from_lane_specs(
+                &lanes,
+                max_parallel_agents,
+                "forge.plan.cli",
+            )? {
+                forge_core::teamwork::materialize_explicit_parallel_team(
+                    &mut workflow,
+                    parallel_team,
+                )?;
+            }
             let _ = sanitize_workflow_secrets_for_storage(&store, &mut workflow, "forge_plan")?;
             let reuse_candidates = find_reuse_candidates(&store, &workflow)?;
             let attached_subflows =
                 attach_reuse_candidates_as_child_subflows(&mut workflow, &reuse_candidates);
-            store.save_workflow(&workflow)?;
-            store.record_event(
-                &workflow.id,
-                "workflow_planned",
-                &serde_json::to_value(&workflow)?,
-            )?;
+            let planned_run = detached.then(|| {
+                forge_core::request::create_run_record(&workflow, "forge_cli", "accepted")
+            });
+            store.with_transaction(|| {
+                store.save_workflow(&workflow)?;
+                store.record_event(
+                    &workflow.id,
+                    "workflow_planned",
+                    &serde_json::to_value(&workflow)?,
+                )?;
+                if let Some(run) = planned_run.as_ref() {
+                    forge_core::request::save_run_record(&store, run)?;
+                }
+                Ok(())
+            })?;
             let worktree_report = if let Some(selector) = worktree {
                 if PathBuf::from(&selector).exists() {
                     Some(register_worktree(
@@ -5360,18 +5761,13 @@ fn run() -> Result<i32> {
                 None
             };
             let workflow = store.load_workflow(&workflow.id)?;
-            let mut run_id = None;
-            if detached {
-                let run =
-                    forge_core::request::create_run_record(&workflow, "forge_cli", "accepted");
-                forge_core::request::save_run_record(&store, &run)?;
-                run_id = Some(run.run_id.clone());
-            }
+            let run_id = planned_run.as_ref().map(|run| run.run_id.clone());
             let response = serde_json::json!({
                 "status": "planned",
                 "workflow_id": workflow.id,
                 "goal": workflow.goal,
                 "runtime": workflow.runtime,
+                "core_orchestration": workflow.core_orchestration,
                 "tasks": workflow.tasks,
                 "intent": workflow.intent,
                 "reuse_candidates": reuse_candidates,
@@ -6983,6 +7379,8 @@ fn run() -> Result<i32> {
                 contract,
                 worker,
                 subject,
+                workflow_id,
+                task_id,
                 input,
                 context,
                 lease_seconds,
@@ -7004,6 +7402,8 @@ fn run() -> Result<i32> {
                             addon_id: addon.as_deref(),
                             contract_id: &contract,
                             subject: &subject,
+                            workflow_id: workflow_id.as_deref(),
+                            task_id: task_id.as_deref(),
                             input: input_value,
                             context: context_value,
                             source: &source,
@@ -7021,6 +7421,28 @@ fn run() -> Result<i32> {
                 );
                 print_response(output, &report)?;
                 Ok(if should_fail { 1 } else { 0 })
+            }
+            AddonCommands::ApplyValidatorOutcome {
+                dispatch_id,
+                workflow_id,
+                task_id,
+                expected_revision,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = apply_addon_validator_outcome(
+                    &store,
+                    AddonValidatorOutcomeApplyInput {
+                        dispatch_id: &dispatch_id,
+                        workflow_id: &workflow_id,
+                        task_id: &task_id,
+                        expected_revision,
+                        origin: &origin,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
             }
             AddonCommands::ExecuteExecutor {
                 addon,
@@ -8873,6 +9295,55 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
+            WorktreeCommands::PrepareTeamwork {
+                workflow,
+                repository,
+                worktree_root,
+                branch_prefix,
+                origin,
+                allow_repository_mutation,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = forge_core::teamwork::prepare_teamwork_worktrees(
+                    &store,
+                    forge_core::teamwork::TeamworkWorktreePrepareOptions {
+                        workflow_id: workflow,
+                        repository,
+                        worktree_root,
+                        branch_prefix,
+                        origin,
+                        allow_repository_mutation,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorktreeCommands::IntegrateDependencies {
+                workflow,
+                task,
+                allow_repository_mutation,
+                approved_by,
+                reason,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = forge_core::teamwork_fan_in::integrate_worktree_dependencies(
+                    &store,
+                    &forge_core::teamwork_fan_in::IntegrateDependenciesOptions {
+                        workflow_id: &workflow,
+                        task_id: &task,
+                        allow_repository_mutation,
+                        approved_by: approved_by.as_deref().unwrap_or_default(),
+                        reason: reason.as_deref().unwrap_or_default(),
+                        origin: &origin,
+                    },
+                )?;
+                let exit_code = i32::from(!report.success);
+                print_response(output, &report)?;
+                Ok(exit_code)
+            }
             WorktreeCommands::Sandbox { command } => match command {
                 WorktreeSandboxCommands::Plan {
                     worktree,
@@ -9348,10 +9819,179 @@ fn run() -> Result<i32> {
                 workflow,
                 goal,
                 origin,
+                expected_revision,
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = update_workflow_goal(&store, &workflow, &goal, &origin)?;
+                let report = update_workflow_goal_with_expected_revision(
+                    &store,
+                    &workflow,
+                    &goal,
+                    &origin,
+                    expected_revision,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::AddTask {
+                workflow,
+                description,
+                priority,
+                task_id,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = add_workflow_task(
+                    &store,
+                    &workflow,
+                    WorkflowTaskAddInput {
+                        task_id,
+                        description,
+                        priority,
+                        origin,
+                        expected_revision,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::UpdateTask {
+                workflow,
+                task,
+                title,
+                goal,
+                expected_output,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = update_workflow_task_with_expected_revision(
+                    &store,
+                    &workflow,
+                    WorkflowTaskUpdateInput {
+                        task_id: &task,
+                        title: title.as_deref(),
+                        goal: goal.as_deref(),
+                        expected_output: expected_output.as_deref(),
+                        origin: &origin,
+                    },
+                    expected_revision,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::SetPriority {
+                workflow,
+                task,
+                priority,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = set_workflow_task_priority(
+                    &store,
+                    &workflow,
+                    WorkflowTaskPriorityInput {
+                        task_id: task,
+                        priority,
+                        origin,
+                        expected_revision,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::AddDependency {
+                workflow,
+                task,
+                depends_on,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = add_workflow_task_dependency(
+                    &store,
+                    &workflow,
+                    WorkflowTaskDependencyInput {
+                        task_id: task,
+                        dependency_task_id: depends_on,
+                        origin,
+                        expected_revision,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::RemoveDependency {
+                workflow,
+                task,
+                depends_on,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = remove_workflow_task_dependency(
+                    &store,
+                    &workflow,
+                    WorkflowTaskDependencyInput {
+                        task_id: task,
+                        dependency_task_id: depends_on,
+                        origin,
+                        expected_revision,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::SetImpediment {
+                workflow,
+                task,
+                reason,
+                kind,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = set_workflow_task_impediment(
+                    &store,
+                    &workflow,
+                    WorkflowTaskImpedimentInput {
+                        task_id: task,
+                        reason,
+                        kind,
+                        origin,
+                        expected_revision,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::ClearImpediment {
+                workflow,
+                task,
+                impediment_id,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = clear_workflow_task_impediment(
+                    &store,
+                    &workflow,
+                    WorkflowTaskImpedimentClearInput {
+                        task_id: task,
+                        impediment_id,
+                        origin,
+                        expected_revision,
+                    },
+                )?;
                 print_response(output, &report)?;
                 Ok(0)
             }
@@ -9756,6 +10396,8 @@ fn run() -> Result<i32> {
             RequestCommands::Start {
                 goal,
                 worktree,
+                lanes,
+                max_parallel_agents,
                 origin,
                 idempotency_key,
                 output,
@@ -9767,20 +10409,27 @@ fn run() -> Result<i32> {
                     .as_deref()
                     .map(|selector| resolve_worktree_selector_root(&store, selector))
                     .transpose()?;
+                let parallel_team = explicit_parallel_team_from_lane_specs(
+                    &lanes,
+                    max_parallel_agents,
+                    "forge.request.start.cli",
+                )?;
                 let mut report = if let Some(project_root) = selected_project_root.as_deref() {
-                    start_async_request_with_project_and_idempotency(
+                    start_async_request_with_project_idempotency_and_parallel_team(
                         &store,
                         &goal,
                         &origin,
                         project_root,
                         idempotency_key.as_deref(),
+                        parallel_team.clone(),
                     )?
                 } else {
-                    start_async_request_with_idempotency(
+                    start_async_request_with_idempotency_and_parallel_team(
                         &store,
                         &goal,
                         &origin,
                         idempotency_key.as_deref(),
+                        parallel_team,
                     )?
                 };
                 if let Some(selector) = worktree {
@@ -9862,6 +10511,43 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(exit_code)
             }
+            RequestCommands::ExecuteWave {
+                run_id,
+                executor,
+                ttl_seconds,
+                timeout_seconds,
+                context_budget,
+                max_parallel,
+                allow_exec,
+                approved_by,
+                reason,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = execute_request_executor_wave(
+                    &store,
+                    &RequestExecutorWaveOptions {
+                        run_id: &run_id,
+                        requested_executor: &executor,
+                        ttl_seconds,
+                        timeout_seconds,
+                        context_budget,
+                        max_parallel,
+                        allow_exec,
+                        approved_by: &approved_by,
+                        reason: &reason,
+                        origin: &origin,
+                    },
+                )?;
+                let exit_code = if !report.success && report.status != "execution_not_started" {
+                    1
+                } else {
+                    0
+                };
+                print_response(output, &report)?;
+                Ok(exit_code)
+            }
             RequestCommands::CompleteTask {
                 run_id,
                 task,
@@ -9869,6 +10555,7 @@ fn run() -> Result<i32> {
                 summary,
                 artifacts,
                 evidence_command,
+                evidence_exit_code,
                 evidence_summary,
                 estimated_usd,
                 tokens_in,
@@ -9888,6 +10575,7 @@ fn run() -> Result<i32> {
                         summary: &summary,
                         artifact_paths: &artifacts,
                         evidence_command: evidence_command.as_deref(),
+                        evidence_exit_code,
                         evidence_summary: evidence_summary.as_deref(),
                         estimated_usd,
                         tokens_in,
@@ -10871,6 +11559,7 @@ fn run() -> Result<i32> {
                         choices: &choices,
                         timeout_seconds,
                         origin: &origin,
+                        expected_revision: None,
                     },
                 )?;
                 print_response(output, &report)?;

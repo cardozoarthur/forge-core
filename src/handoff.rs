@@ -11,8 +11,9 @@ use crate::context::{
     COMPACT_PREDECESSOR_VALIDATION_RULE_LIMIT, COMPACT_VALIDATION_COMMAND_BYTE_LIMIT,
 };
 use crate::executor::{
-    decide_executor_model_for_task, ExecutorModelDecisionOptions, ExecutorModelDecisionReport,
-    ExecutorQuotaObservation, ExecutorState,
+    canonical_executor_id, decide_executor_model_for_task, load_executors,
+    ExecutorModelDecisionOptions, ExecutorModelDecisionReport, ExecutorQuotaObservation,
+    ExecutorState,
 };
 use crate::graph::{
     AtomicTask, ExecutionPolicySpec, ExecutorKind, NodeBrainRoutingSpec, PersonaRoutingSpec,
@@ -534,6 +535,7 @@ pub fn build_task_handoff_with_project(
     if selected_executor.trim().is_empty() {
         bail!("executor cannot be empty");
     }
+    let selected_executor = canonical_executor_id(selected_executor);
 
     ensure_workflow_policy(store, workflow_id, "task handoff")?;
     let workflow = store.load_workflow(workflow_id)?;
@@ -567,10 +569,10 @@ pub fn build_task_handoff_with_project(
     let task_executor = executor_kind(&task.executor).to_string();
     if task.status != TaskStatus::Pending {
         let executor_capacity_decision =
-            build_executor_capacity_decision(store, selected_executor, &task_executor)?;
+            build_executor_capacity_decision(store, &selected_executor, &task_executor)?;
         let packet = ExecutorHandoffPacket::from_parts(PacketParts {
             context: &context,
-            selected_executor,
+            selected_executor: &selected_executor,
             task_executor: &task_executor,
             node_brain_routing: task.node_brain_routing.clone(),
             lease_status: "not_requested",
@@ -589,8 +591,8 @@ pub fn build_task_handoff_with_project(
             allowed: false,
             workflow_id: workflow_id.to_string(),
             task_id: task_id.to_string(),
-            selected_executor: selected_executor.to_string(),
-            selected_brain: selected_executor.to_string(),
+            selected_executor: selected_executor.clone(),
+            selected_brain: selected_executor.clone(),
             orchestrator_brain: packet.orchestrator_brain.clone(),
             task_executor,
             lease: None,
@@ -610,18 +612,20 @@ pub fn build_task_handoff_with_project(
     } else {
         None
     };
-    let effective_selected_executor = model_decision
-        .as_ref()
-        .and_then(|decision| decision.selected.as_ref())
-        .map(|candidate| candidate.executor.as_str())
-        .unwrap_or(selected_executor);
+    let effective_selected_executor = canonical_executor_id(
+        model_decision
+            .as_ref()
+            .and_then(|decision| decision.selected.as_ref())
+            .map(|candidate| candidate.executor.as_str())
+            .unwrap_or(&selected_executor),
+    );
     let executor_capacity_decision =
-        build_executor_capacity_decision(store, effective_selected_executor, &task_executor)?;
+        build_executor_capacity_decision(store, &effective_selected_executor, &task_executor)?;
 
     if !context.handoff_ready {
         let packet = ExecutorHandoffPacket::from_parts(PacketParts {
             context: &context,
-            selected_executor: effective_selected_executor,
+            selected_executor: &effective_selected_executor,
             task_executor: &task_executor,
             node_brain_routing: task.node_brain_routing.clone(),
             lease_status: "not_requested",
@@ -640,8 +644,8 @@ pub fn build_task_handoff_with_project(
             allowed: false,
             workflow_id: workflow_id.to_string(),
             task_id: task_id.to_string(),
-            selected_executor: effective_selected_executor.to_string(),
-            selected_brain: effective_selected_executor.to_string(),
+            selected_executor: effective_selected_executor.clone(),
+            selected_brain: effective_selected_executor.clone(),
             orchestrator_brain: packet.orchestrator_brain.clone(),
             task_executor,
             lease: None,
@@ -656,7 +660,7 @@ pub fn build_task_handoff_with_project(
     if executor_capacity_decision.decision != "use" {
         let packet = ExecutorHandoffPacket::from_parts(PacketParts {
             context: &context,
-            selected_executor: effective_selected_executor,
+            selected_executor: &effective_selected_executor,
             task_executor: &task_executor,
             node_brain_routing: task.node_brain_routing.clone(),
             lease_status: "not_requested",
@@ -671,12 +675,17 @@ pub fn build_task_handoff_with_project(
             executor_capacity_decision,
         });
         return Ok(TaskHandoffReport {
-            status: "handoff_blocked_executor_capacity".to_string(),
+            status: if packet.executor_capacity_decision.capacity_source == "executor_policy" {
+                "handoff_blocked_executor_policy"
+            } else {
+                "handoff_blocked_executor_capacity"
+            }
+            .to_string(),
             allowed: false,
             workflow_id: workflow_id.to_string(),
             task_id: task_id.to_string(),
-            selected_executor: effective_selected_executor.to_string(),
-            selected_brain: effective_selected_executor.to_string(),
+            selected_executor: effective_selected_executor.clone(),
+            selected_brain: effective_selected_executor.clone(),
             orchestrator_brain: packet.orchestrator_brain.clone(),
             task_executor,
             lease: None,
@@ -692,12 +701,12 @@ pub fn build_task_handoff_with_project(
         store,
         workflow_id,
         task_id,
-        effective_selected_executor,
+        &effective_selected_executor,
         ttl_seconds,
     )?;
     let packet = ExecutorHandoffPacket::from_parts(PacketParts {
         context: &context,
-        selected_executor: effective_selected_executor,
+        selected_executor: &effective_selected_executor,
         task_executor: &task_executor,
         node_brain_routing: task.node_brain_routing.clone(),
         lease_status: &lease_report.status,
@@ -721,8 +730,8 @@ pub fn build_task_handoff_with_project(
         allowed,
         workflow_id: workflow_id.to_string(),
         task_id: task_id.to_string(),
-        selected_executor: effective_selected_executor.to_string(),
-        selected_brain: effective_selected_executor.to_string(),
+        selected_executor: effective_selected_executor.clone(),
+        selected_brain: effective_selected_executor,
         orchestrator_brain: packet.orchestrator_brain.clone(),
         task_executor,
         lease: lease_report.lease,
@@ -868,15 +877,47 @@ fn build_executor_capacity_decision(
     selected_executor: &str,
     task_executor: &str,
 ) -> Result<ExecutorCapacityDecision> {
+    let selected_executor = canonical_executor_id(selected_executor);
     let observations = store
         .load_executor_quotas()?
         .into_iter()
         .filter_map(|value| serde_json::from_value::<ExecutorQuotaObservation>(value).ok())
         .collect::<Vec<_>>();
+    let executor_states = load_executors(store)?.executors;
     let matching_observation = observations
         .iter()
-        .find(|observation| observation.executor == selected_executor);
-    let fallback_executors = eligible_fallback_executors(store, selected_executor, &observations)?;
+        .find(|observation| canonical_executor_id(&observation.executor) == selected_executor);
+    let fallback_executors =
+        eligible_fallback_executors(&executor_states, &selected_executor, &observations);
+
+    let selected_state = executor_states
+        .iter()
+        .find(|state| state.id == selected_executor);
+    let policy_failures =
+        if selected_state.is_some() || executor_is_managed_cognitive_adapter(&selected_executor) {
+            executor_policy_failures(selected_state)
+        } else {
+            Vec::new()
+        };
+    if !policy_failures.is_empty() {
+        return Ok(ExecutorCapacityDecision {
+            schema_version: "forge.executor_capacity_decision.v1".to_string(),
+            selected_executor,
+            task_executor: task_executor.to_string(),
+            decision: "stop".to_string(),
+            capacity_source: "executor_policy".to_string(),
+            provider: None,
+            model: None,
+            remaining_quota: "unknown".to_string(),
+            rate_limit_risk: "unknown".to_string(),
+            fallback_executors,
+            stop_execution: true,
+            reason: format!(
+                "executor policy blocks handoff: {}; run `forge sync executors` and explicitly authorize the canonical executor before acquiring a lease",
+                policy_failures.join(", ")
+            ),
+        });
+    }
 
     if let Some(observation) = matching_observation.filter(|observation| {
         quota_blocks_handoff(&observation.remaining_quota, &observation.rate_limit_risk)
@@ -884,7 +925,7 @@ fn build_executor_capacity_decision(
         let has_fallback = !fallback_executors.is_empty();
         return Ok(ExecutorCapacityDecision {
             schema_version: "forge.executor_capacity_decision.v1".to_string(),
-            selected_executor: selected_executor.to_string(),
+            selected_executor: selected_executor.clone(),
             task_executor: task_executor.to_string(),
             decision: if has_fallback { "fallback" } else { "stop" }.to_string(),
             capacity_source: observation.source.clone(),
@@ -910,7 +951,7 @@ fn build_executor_capacity_decision(
 
     Ok(ExecutorCapacityDecision {
         schema_version: "forge.executor_capacity_decision.v1".to_string(),
-        selected_executor: selected_executor.to_string(),
+        selected_executor,
         task_executor: task_executor.to_string(),
         decision: "use".to_string(),
         capacity_source: matching_observation
@@ -930,34 +971,63 @@ fn build_executor_capacity_decision(
     })
 }
 
+fn executor_is_managed_cognitive_adapter(executor: &str) -> bool {
+    matches!(
+        canonical_executor_id(executor).as_str(),
+        "agy" | "claude" | "codex" | "gemini" | "ollama" | "opencode"
+    )
+}
+
+fn executor_policy_failures(state: Option<&ExecutorState>) -> Vec<String> {
+    let Some(state) = state else {
+        return vec!["executor state is missing".to_string()];
+    };
+    let mut failures = Vec::new();
+    if !state.installed {
+        failures.push("installed=false".to_string());
+    }
+    if !state.configured {
+        failures.push("configured=false".to_string());
+    }
+    if !state.allowed {
+        failures.push("allowed=false".to_string());
+    }
+    if !state.non_interactive_ready {
+        failures.push("non_interactive_ready=false".to_string());
+    }
+    failures
+}
+
 fn eligible_fallback_executors(
-    store: &ForgeStore,
+    states: &[ExecutorState],
     selected_executor: &str,
     observations: &[ExecutorQuotaObservation],
-) -> Result<Vec<String>> {
-    let states = store
-        .load_executor_states()?
-        .into_iter()
-        .filter_map(|value| serde_json::from_value::<ExecutorState>(value).ok())
+) -> Vec<String> {
+    let selected_executor = canonical_executor_id(selected_executor);
+    let mut executors = states
+        .iter()
         .filter(|state| {
-            state.id != selected_executor
+            canonical_executor_id(&state.id) != selected_executor
                 && state.allowed
                 && state.installed
                 && state.configured
                 && state.non_interactive_ready
                 && !executor_has_blocking_observation(&state.id, observations)
         })
-        .map(|state| state.id)
+        .map(|state| canonical_executor_id(&state.id))
         .collect::<Vec<_>>();
-    Ok(states)
+    executors.sort();
+    executors.dedup();
+    executors
 }
 
 fn executor_has_blocking_observation(
     executor: &str,
     observations: &[ExecutorQuotaObservation],
 ) -> bool {
+    let executor = canonical_executor_id(executor);
     observations.iter().any(|observation| {
-        observation.executor == executor
+        canonical_executor_id(&observation.executor) == executor
             && quota_blocks_handoff(&observation.remaining_quota, &observation.rate_limit_risk)
     })
 }

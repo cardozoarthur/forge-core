@@ -1,5 +1,5 @@
 use crate::artifact::{hex_sha256, write_json_artifact};
-use crate::context::sanitize_compact_human_text;
+use crate::context::{compact_text, sanitize_compact_human_text};
 use crate::credential_vault::resolve_credential_vault_bin;
 use crate::graph::{
     create_workflow, task as workflow_task, ArtifactRecord, AtomicTask, ExecutorKind,
@@ -7,6 +7,9 @@ use crate::graph::{
 };
 use crate::identity::ensure_workflow_policy;
 use crate::intent::{parse_intent, parse_intent_with_catalog};
+use crate::interaction::{
+    create_choice_interaction, CreateChoiceInteractionRequest, HumanInteractionReport,
+};
 use crate::multimodal::{
     build_multimodal_runtime_benchmark, resolve_multimodal_feature_flag,
     MultimodalRuntimeBenchmarkOptions,
@@ -17,6 +20,9 @@ use crate::storage::{
     StoredAddonCapabilityWrite, StoredAddonMarketplacePackageRecord,
     StoredAddonPermissionAuthorizationRecord, StoredAddonRecord, StoredAddonTrustKeyRecord,
     StoredGlobalEventRecord, StoredRuntimeContractDispatchRecord, StoredRuntimeWorkerRecord,
+};
+use crate::workflow::{
+    set_workflow_task_impediment, WorkflowMutationReport, WorkflowTaskImpedimentInput,
 };
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -40,6 +46,8 @@ pub const ADDON_CATALOG_SCHEMA_VERSION: &str = "forge.addon_catalog.v1";
 pub const CAPABILITY_RESOLUTION_SCHEMA_VERSION: &str = "forge.capability_resolution.v1";
 pub const CAPABILITY_DISCOVERY_PLAN_SCHEMA_VERSION: &str = "forge.capability_discovery_plan.v1";
 pub const ADDON_VALIDATION_SCHEMA_VERSION: &str = "forge.addon_validation.v1";
+pub const ADDON_VALIDATOR_OUTCOME_APPLICATION_SCHEMA_VERSION: &str =
+    "forge.addon_validator_outcome_application.v1";
 pub const INSTALLED_ADDONS_SCHEMA_VERSION: &str = "forge.installed_addons.v1";
 pub const ADDON_LIFECYCLE_SCHEMA_VERSION: &str = "forge.addon_lifecycle.v1";
 pub const ADDON_LIFECYCLE_OPERATION_PLAN_SCHEMA_VERSION: &str =
@@ -79,10 +87,20 @@ pub struct AddonValidatorDispatchInput<'a> {
     pub addon_id: Option<&'a str>,
     pub contract_id: &'a str,
     pub subject: &'a str,
+    pub workflow_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
     pub input: serde_json::Value,
     pub context: serde_json::Value,
     pub source: &'a str,
     pub dry_run: bool,
+}
+
+pub struct AddonValidatorOutcomeApplyInput<'a> {
+    pub dispatch_id: &'a str,
+    pub workflow_id: &'a str,
+    pub task_id: &'a str,
+    pub expected_revision: u64,
+    pub origin: &'a str,
 }
 
 pub struct AddonExecutorDispatchInput<'a> {
@@ -303,6 +321,7 @@ pub const ADDON_PERMISSION_AUTHORIZATIONS_SCHEMA_VERSION: &str =
 
 pub const CAP_WORKFLOW_RUNTIME: &str = "workflow_runtime";
 pub const CAP_DYNAMIC_WORKFLOW: &str = "dynamic_workflow";
+pub const CAP_PARALLEL_TEAMWORK: &str = "parallel_teamwork";
 pub const CAP_EVENT_ENGINE: &str = "event_engine";
 pub const CAP_CONTEXT_ROUTING: &str = "context_routing";
 pub const CAP_MEMORY_GOVERNANCE: &str = "memory_governance";
@@ -672,6 +691,31 @@ pub struct AddonValidatorExecutionReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validator_result: Option<serde_json::Value>,
     pub validation: AddonValidatorResultValidation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddonValidatorOutcomeApplicationReport {
+    pub schema_version: String,
+    pub status: String,
+    pub dispatch_id: String,
+    pub addon_id: String,
+    pub contract_id: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub subject: String,
+    pub decision: String,
+    pub result_sha256: String,
+    pub action: String,
+    pub application_changed: bool,
+    pub workflow_changed: bool,
+    pub previous_revision: u64,
+    pub workflow_revision: u64,
+    pub feedback: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impediment_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interaction_id: Option<String>,
+    pub next_action: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2941,6 +2985,21 @@ pub fn enqueue_addon_validator_dispatch(
     catalog: &AddonCatalog,
     input: AddonValidatorDispatchInput<'_>,
 ) -> Result<AddonRuntimeContractDispatchReport> {
+    let workflow_binding = match (input.workflow_id, input.task_id) {
+        (Some(workflow_id), Some(task_id)) => {
+            ensure_workflow_policy(store, workflow_id, "bind Addon validator dispatch")?;
+            let workflow = store.load_workflow(workflow_id)?;
+            if !workflow.tasks.iter().any(|task| task.id == task_id) {
+                bail!("task {task_id} not found in workflow {workflow_id}");
+            }
+            serde_json::json!({
+                "workflow_id": workflow_id,
+                "task_id": task_id,
+            })
+        }
+        (None, None) => serde_json::Value::Null,
+        _ => bail!("validator workflow binding requires both workflow_id and task_id, or neither"),
+    };
     let policy = evaluate_addon_runtime_contract_policy(
         catalog,
         input.addon_id,
@@ -2973,6 +3032,7 @@ pub fn enqueue_addon_validator_dispatch(
     let dispatch_payload = serde_json::json!({
         "schema_version": ADDON_VALIDATOR_DISPATCH_INPUT_SCHEMA_VERSION,
         "subject": input.subject,
+        "workflow_binding": workflow_binding,
         "input": input.input,
         "validator": {
             "addon_id": policy_entry.addon_id,
@@ -3246,6 +3306,8 @@ pub fn execute_addon_validator(
             addon_id: input.dispatch.addon_id,
             contract_id: input.dispatch.contract_id,
             subject: input.dispatch.subject,
+            workflow_id: input.dispatch.workflow_id,
+            task_id: input.dispatch.task_id,
             input: input.dispatch.input.clone(),
             context: input.dispatch.context.clone(),
             source: input.dispatch.source,
@@ -3325,6 +3387,450 @@ pub fn execute_addon_validator(
             validation,
         },
     ))
+}
+
+pub fn apply_addon_validator_outcome(
+    store: &ForgeStore,
+    input: AddonValidatorOutcomeApplyInput<'_>,
+) -> Result<AddonValidatorOutcomeApplicationReport> {
+    let dispatch_id = required_validator_outcome_text(input.dispatch_id, "dispatch id")?;
+    let workflow_id = required_validator_outcome_text(input.workflow_id, "workflow id")?;
+    let task_id = required_validator_outcome_text(input.task_id, "task id")?;
+    let origin = required_validator_outcome_text(input.origin, "origin")?;
+    let dispatch = store
+        .load_runtime_contract_dispatch(&dispatch_id)?
+        .with_context(|| format!("runtime contract dispatch not found: {dispatch_id}"))?;
+    if dispatch.contract_type != "validator" {
+        bail!(
+            "runtime contract dispatch {dispatch_id} is not a validator: {}",
+            dispatch.contract_type
+        );
+    }
+    if dispatch.status != "completed" {
+        bail!(
+            "validator dispatch {dispatch_id} is not completed: {}",
+            dispatch.status
+        );
+    }
+
+    let bound_workflow_id = dispatch
+        .input
+        .pointer("/workflow_binding/workflow_id")
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| {
+            format!(
+                "validator dispatch {dispatch_id} has no workflow binding; execute it with both workflow_id and task_id before applying its outcome"
+            )
+        })?;
+    let bound_task_id = dispatch
+        .input
+        .pointer("/workflow_binding/task_id")
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| {
+            format!(
+                "validator dispatch {dispatch_id} has no task binding; execute it with both workflow_id and task_id before applying its outcome"
+            )
+        })?;
+    if bound_workflow_id != workflow_id || bound_task_id != task_id {
+        bail!(
+            "validator dispatch {dispatch_id} is bound to workflow {bound_workflow_id} task {bound_task_id}, not workflow {workflow_id} task {task_id}"
+        );
+    }
+
+    let subject = dispatch
+        .input
+        .get("subject")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("validator subject")
+        .to_string();
+    let validator_result = dispatch
+        .data
+        .pointer("/runtime_processing/outcome/result")
+        .with_context(|| format!("validator dispatch {dispatch_id} has no result payload"))?;
+    let validation = validate_addon_validator_result(Some(validator_result))?;
+    if validation.status != "valid" {
+        bail!(
+            "validator dispatch {dispatch_id} result is invalid: {}",
+            validation.schema_issues.join("; ")
+        );
+    }
+    if !matches!(
+        validation.decision.as_str(),
+        "passed" | "failed" | "review_required"
+    ) {
+        bail!(
+            "validator dispatch {dispatch_id} decision cannot be applied: {}",
+            validation.decision
+        );
+    }
+    let result_sha256 = validation
+        .result_sha256
+        .clone()
+        .context("validated Addon validator result is missing its content hash")?;
+
+    ensure_workflow_policy(store, &workflow_id, "apply Addon validator outcome")?;
+    if let Some(mut report) =
+        existing_validator_outcome_application(store, &workflow_id, &dispatch_id, &task_id)?
+    {
+        report.status = "addon_validator_outcome_already_applied".to_string();
+        report.application_changed = false;
+        return Ok(report);
+    }
+
+    let correlation_origin = format!("{origin}:addon_validator_outcome:{dispatch_id}");
+    let workflow = store.load_workflow(&workflow_id)?;
+    if !workflow.tasks.iter().any(|task| task.id == task_id) {
+        bail!("task {task_id} not found in workflow {workflow_id}");
+    }
+    let current_revision = addon_workflow_revision(&workflow);
+
+    let recovered_effect = recover_validator_outcome_effect(
+        &workflow,
+        &task_id,
+        &validation.decision,
+        &correlation_origin,
+    );
+    if recovered_effect.is_none() && current_revision != input.expected_revision {
+        bail!(
+            "stale workflow revision for {workflow_id}: expected {}, current {}; reload workflow state and retry",
+            input.expected_revision,
+            current_revision
+        );
+    }
+
+    let feedback = validation.reported_issues.clone();
+    let effect = if let Some(effect) = recovered_effect {
+        effect
+    } else {
+        apply_validator_outcome_effect(
+            store,
+            &dispatch_id,
+            &dispatch.contract_id,
+            &subject,
+            &workflow_id,
+            &task_id,
+            &validation.decision,
+            &feedback,
+            input.expected_revision,
+            &correlation_origin,
+        )?
+    };
+    let (status, action, next_action) = match validation.decision.as_str() {
+        "passed" => (
+            "addon_validator_outcome_evidence_recorded",
+            "record_evidence",
+            "continue normal Forge validation; this evidence does not auto-promote the task",
+        ),
+        "failed" => (
+            "addon_validator_outcome_rework_required",
+            "require_rework",
+            "resolve the recorded validator feedback and clear the correlated impediment before retrying",
+        ),
+        "review_required" => (
+            "addon_validator_outcome_human_review_required",
+            "request_human_review",
+            "answer the pending human interaction before the workflow can resume",
+        ),
+        _ => unreachable!("validator decision was checked above"),
+    };
+    let report = AddonValidatorOutcomeApplicationReport {
+        schema_version: ADDON_VALIDATOR_OUTCOME_APPLICATION_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        dispatch_id: dispatch_id.clone(),
+        addon_id: dispatch.addon_id,
+        contract_id: dispatch.contract_id,
+        workflow_id: workflow_id.clone(),
+        task_id: task_id.clone(),
+        subject,
+        decision: validation.decision,
+        result_sha256,
+        action: action.to_string(),
+        application_changed: true,
+        workflow_changed: effect.workflow_changed,
+        previous_revision: effect.previous_revision,
+        workflow_revision: effect.workflow_revision,
+        feedback,
+        impediment_id: effect.impediment_id,
+        interaction_id: effect.interaction_id,
+        next_action: next_action.to_string(),
+    };
+    store.record_event(
+        &workflow_id,
+        "addon_validator_outcome_applied",
+        &serde_json::to_value(&report)?,
+    )?;
+    Ok(report)
+}
+
+#[derive(Debug)]
+struct AddonValidatorOutcomeEffect {
+    workflow_changed: bool,
+    previous_revision: u64,
+    workflow_revision: u64,
+    impediment_id: Option<String>,
+    interaction_id: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_validator_outcome_effect(
+    store: &ForgeStore,
+    dispatch_id: &str,
+    contract_id: &str,
+    subject: &str,
+    workflow_id: &str,
+    task_id: &str,
+    decision: &str,
+    feedback: &[String],
+    expected_revision: u64,
+    correlation_origin: &str,
+) -> Result<AddonValidatorOutcomeEffect> {
+    match decision {
+        "passed" => record_validator_passed_evidence(
+            store,
+            dispatch_id,
+            contract_id,
+            workflow_id,
+            task_id,
+            expected_revision,
+            correlation_origin,
+        ),
+        "failed" => {
+            let reason = compact_validator_feedback(
+                &format!(
+                    "Addon validator {contract_id} rejected {subject}: {}",
+                    feedback.join("; ")
+                ),
+                "Addon validator rejected the subject and requires rework",
+            );
+            let mutation: WorkflowMutationReport = set_workflow_task_impediment(
+                store,
+                workflow_id,
+                WorkflowTaskImpedimentInput {
+                    task_id: task_id.to_string(),
+                    reason,
+                    kind: "policy".to_string(),
+                    origin: correlation_origin.to_string(),
+                    expected_revision: Some(expected_revision),
+                },
+            )?;
+            Ok(AddonValidatorOutcomeEffect {
+                workflow_changed: mutation.changed,
+                previous_revision: expected_revision,
+                workflow_revision: mutation.revision,
+                impediment_id: mutation.impediment.map(|impediment| impediment.id),
+                interaction_id: None,
+            })
+        }
+        "review_required" => {
+            let workflow = store.load_workflow(workflow_id)?;
+            let task = workflow
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .with_context(|| format!("task {task_id} not found in workflow {workflow_id}"))?;
+            if task.status != crate::graph::TaskStatus::Pending {
+                bail!(
+                    "cannot request validator human review for task {task_id} while status is {}",
+                    format!("{:?}", task.status).to_ascii_lowercase()
+                );
+            }
+            if store.load_task_lease(workflow_id, task_id)?.is_some() {
+                bail!(
+                    "task {task_id} in workflow {workflow_id} has an active execution lease; release or cancel the handoff before requesting human review"
+                );
+            }
+            let feedback_summary = if feedback.is_empty() {
+                "the validator did not report a specific issue".to_string()
+            } else {
+                feedback.join("; ")
+            };
+            let prompt = compact_validator_feedback(
+                &format!(
+                    "Addon validator {contract_id} requested human review for {subject}. Feedback: {feedback_summary}"
+                ),
+                "An Addon validator requested human review",
+            );
+            let choices = vec![
+                "approve=Approve and continue|Accept the reviewed validator outcome|resume the task without auto-promotion".to_string(),
+                "rework=Return to work|Use the validator feedback to revise the task|resume the task in rework mode".to_string(),
+                "reject=Reject the outcome|Do not accept this validator result|resume only after recording the human rationale".to_string(),
+            ];
+            let interaction: HumanInteractionReport = create_choice_interaction(
+                store,
+                CreateChoiceInteractionRequest {
+                    workflow_id,
+                    task_id,
+                    kind: "approve_reject_refine_combine",
+                    prompt: &prompt,
+                    choices: &choices,
+                    timeout_seconds: None,
+                    origin: correlation_origin,
+                    expected_revision: Some(expected_revision),
+                },
+            )?;
+            Ok(AddonValidatorOutcomeEffect {
+                workflow_changed: true,
+                previous_revision: expected_revision,
+                workflow_revision: interaction.workflow_revision,
+                impediment_id: None,
+                interaction_id: Some(interaction.interaction.interaction_id),
+            })
+        }
+        _ => bail!("unsupported validator outcome decision: {decision}"),
+    }
+}
+
+fn record_validator_passed_evidence(
+    store: &ForgeStore,
+    dispatch_id: &str,
+    contract_id: &str,
+    workflow_id: &str,
+    task_id: &str,
+    expected_revision: u64,
+    correlation_origin: &str,
+) -> Result<AddonValidatorOutcomeEffect> {
+    store.with_transaction(|| {
+        ensure_workflow_policy(store, workflow_id, "record Addon validator evidence")?;
+        let mut workflow = store.load_workflow(workflow_id)?;
+        if !workflow.tasks.iter().any(|task| task.id == task_id) {
+            bail!("task {task_id} not found in workflow {workflow_id}");
+        }
+        let previous_revision = addon_workflow_revision(&workflow);
+        if previous_revision != expected_revision {
+            bail!(
+                "stale workflow revision for {workflow_id}: expected {expected_revision}, current {previous_revision}; reload workflow state and retry"
+            );
+        }
+        let workflow_revision = previous_revision.saturating_add(1);
+        workflow.revisions.push(WorkflowRevision {
+            revision: workflow_revision,
+            origin: correlation_origin.to_string(),
+            change_type: "addon_validator_evidence_recorded".to_string(),
+            summary: format!(
+                "recorded passed validator {contract_id} dispatch {dispatch_id} as evidence for task {task_id} without promotion"
+            ),
+            created_at: Utc::now(),
+        });
+        store.save_workflow(&workflow)?;
+        Ok(AddonValidatorOutcomeEffect {
+            workflow_changed: false,
+            previous_revision,
+            workflow_revision,
+            impediment_id: None,
+            interaction_id: None,
+        })
+    })
+}
+
+fn recover_validator_outcome_effect(
+    workflow: &Workflow,
+    task_id: &str,
+    decision: &str,
+    correlation_origin: &str,
+) -> Option<AddonValidatorOutcomeEffect> {
+    let workflow_revision = addon_workflow_revision(workflow);
+    let previous_revision = workflow_revision.saturating_sub(1);
+    if decision == "passed"
+        && workflow.revisions.iter().any(|revision| {
+            revision.origin == correlation_origin
+                && revision.change_type == "addon_validator_evidence_recorded"
+        })
+    {
+        return Some(AddonValidatorOutcomeEffect {
+            workflow_changed: false,
+            previous_revision,
+            workflow_revision,
+            impediment_id: None,
+            interaction_id: None,
+        });
+    }
+    let task = workflow.tasks.iter().find(|task| task.id == task_id)?;
+    if decision == "failed" {
+        let impediment = task
+            .active_impediments
+            .iter()
+            .find(|impediment| impediment.origin == correlation_origin)?;
+        return Some(AddonValidatorOutcomeEffect {
+            workflow_changed: true,
+            previous_revision,
+            workflow_revision,
+            impediment_id: Some(impediment.id.clone()),
+            interaction_id: None,
+        });
+    }
+    if decision == "review_required" {
+        let interaction = task
+            .human_interaction
+            .as_ref()
+            .filter(|interaction| interaction.origin == correlation_origin)?;
+        return Some(AddonValidatorOutcomeEffect {
+            workflow_changed: true,
+            previous_revision,
+            workflow_revision,
+            impediment_id: None,
+            interaction_id: Some(interaction.interaction_id.clone()),
+        });
+    }
+    None
+}
+
+fn existing_validator_outcome_application(
+    store: &ForgeStore,
+    workflow_id: &str,
+    dispatch_id: &str,
+    task_id: &str,
+) -> Result<Option<AddonValidatorOutcomeApplicationReport>> {
+    for event in store.load_workflow_events(workflow_id)?.into_iter().rev() {
+        if event.kind != "addon_validator_outcome_applied"
+            || event
+                .data
+                .get("dispatch_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(dispatch_id)
+            || event
+                .data
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(task_id)
+        {
+            continue;
+        }
+        let report = serde_json::from_value(event.data).with_context(|| {
+            format!(
+                "stored validator outcome application event is invalid: {}",
+                event.id
+            )
+        })?;
+        return Ok(Some(report));
+    }
+    Ok(None)
+}
+
+fn required_validator_outcome_text(value: &str, label: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("{label} is required");
+    }
+    Ok(value.to_string())
+}
+
+fn addon_workflow_revision(workflow: &Workflow) -> u64 {
+    workflow
+        .revisions
+        .last()
+        .map(|revision| revision.revision)
+        .unwrap_or(0)
+}
+
+fn compact_validator_feedback(value: &str, fallback: &str) -> String {
+    let mut secret_redaction_count = 0;
+    let sanitized = sanitize_compact_human_text(value, &mut secret_redaction_count);
+    let sanitized = sanitized.trim();
+    if sanitized.is_empty() {
+        fallback.to_string()
+    } else {
+        compact_text(sanitized, 2048)
+    }
 }
 
 pub fn execute_addon_executor(
@@ -6643,6 +7149,7 @@ pub fn resolve_goal_capabilities(goal: &str, catalog: &AddonCatalog) -> Capabili
     for capability_id in [
         CAP_WORKFLOW_RUNTIME,
         CAP_DYNAMIC_WORKFLOW,
+        CAP_PARALLEL_TEAMWORK,
         CAP_EVENT_ENGINE,
         CAP_CONTEXT_ROUTING,
         CAP_MEMORY_GOVERNANCE,
@@ -12819,6 +13326,15 @@ fn core_kernel_addon() -> AddonManifest {
                     "replanejar",
                     "subworkflow",
                     "subworkflows",
+                ],
+                &["core"],
+            ),
+            capability(
+                CAP_PARALLEL_TEAMWORK,
+                "Parallel teamwork",
+                &[
+                    "equipe", "equipes", "team", "teamwork", "paralelo", "paralela", "parallel",
+                    "fan-out", "fan-in",
                 ],
                 &["core"],
             ),

@@ -7,16 +7,28 @@ compatibility: codex, opencode, agy, claude
 
 ## Workflow Contract
 
-Workflows in Forge are mutable at runtime but must remain fully auditable and revision-controlled. Every workflow mutation must be tracked in the Forge state store.
+Runtime workflow mutations must be revisioned, auditable, and tracked in the Forge state store.
 
 ## Creating Workflows
 
-Create a workflow using a strategic goal description. This decomposes the goal into tasks and initializes the workflow graph:
+Plan a strategic goal into its task graph:
 ```bash
 forge plan --goal "Design and build a Rust operational runtime" --output json
 ```
 
-This returns a workflow ID and a list of structured tasks.
+It returns the workflow ID and tasks.
+
+Declare an independent N:N team in the plan:
+
+```bash
+forge plan --goal "Deliver frontend and backend" \
+  --lane frontend=agy:3 --lane backend=codex:5 \
+  --max-parallel-agents 8 --output json
+```
+
+`core_orchestration.parallel_team` records it. No `--lane` keeps the serial DAG.
+Never infer lanes from prose or assign `auto`; agents start only through
+explicitly selected detached execution.
 
 ## Updating Context
 
@@ -40,15 +52,19 @@ Tags must be used to indicate artifact type, account/customer context, and searc
 
 You can dynamically add tasks or subtasks to an active workflow:
 ```bash
-forge workflow add-task --workflow <workflow-id> --description "Implement schema validation" --priority high --output json
+forge workflow add-task --workflow <workflow-id> --description "Implement schema validation" --priority high --expected-revision <revision> --origin codex --output json
+forge workflow update-task --workflow <workflow-id> --task <task-id> --goal "Reach the revised task goal" --expected-revision <revision> --origin codex --output json
 ```
+
+Use the current workflow revision when several operators or agents may mutate
+the same graph. A stale `--expected-revision` fails without changing state.
 
 ## Prioritizing Tasks and Subtasks
 
 Task scheduling follows priority rules (`high`, `medium`, `low`) and explicit graph dependencies.
 Use the CLI to adjust priority:
 ```bash
-forge workflow set-priority --workflow <workflow-id> --task <task-id> --priority high --output json
+forge workflow set-priority --workflow <workflow-id> --task <task-id> --priority high --expected-revision <revision> --origin codex --output json
 ```
 
 ## Managing Dependencies and Impediments
@@ -57,15 +73,18 @@ forge workflow set-priority --workflow <workflow-id> --task <task-id> --priority
 A task cannot begin execution until all of its parent dependencies are marked `DONE`.
 Add dependency links:
 ```bash
-forge workflow add-dependency --workflow <workflow-id> --task <task-id> --depends-on <parent-task-id> --output json
+forge workflow add-dependency --workflow <workflow-id> --task <task-id> --depends-on <parent-task-id> --expected-revision <revision> --origin codex --output json
+forge workflow remove-dependency --workflow <workflow-id> --task <task-id> --depends-on <parent-task-id> --expected-revision <revision> --origin codex --output json
 ```
 
 ### Impediments
 If a task is blocked (e.g. requires human authorization or resource configuration), mark it with an impediment:
 ```bash
-forge workflow set-impediment --workflow <workflow-id> --task <task-id> --reason "Awaiting Docker policy allowance" --output json
+forge workflow set-impediment --workflow <workflow-id> --task <task-id> --reason "Awaiting Docker policy allowance" --expected-revision <revision> --origin codex --output json
 ```
-Removing the impediment clears the block, making the task ready for execution.
+Without `--impediment`, clearing removes only `manual` impediments. Resource,
+authorization and policy impediments require their explicit id so an operator
+cannot accidentally bypass a runtime or governance gate.
 ```bash
-forge workflow clear-impediment --workflow <workflow-id> --task <task-id> --output json
+forge workflow clear-impediment --workflow <workflow-id> --task <task-id> --expected-revision <revision> --origin codex --output json
 ```

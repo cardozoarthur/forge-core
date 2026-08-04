@@ -2450,6 +2450,7 @@ pub fn build_production_mission_lifecycle_evidence(
         action: "handoff_consumed".to_string(),
         mission_id: mission.id.clone(),
         revision: resume_snapshot.revision,
+        assignments: Vec::new(),
         assignment: None,
         handoff_id: Some(handoff.id.clone()),
         mission: resume_snapshot,

@@ -31,6 +31,59 @@ forge --store "$STORE" worktree sandbox run --worktree "$WT" --purpose test --wo
 forge --store "$STORE" worktree inspect --worktree "$WT" --output json
 ```
 
+Primary `forge plan` and `forge request start` flows can materialize the same
+graph with `--lane frontend=agy:3`, `--lane backend=codex:5` and
+`--max-parallel-agents 8`; the normalized contract is persisted at
+`core_orchestration.parallel_team`. Without lanes the generic graph remains
+serial, and ambiguous or `auto` lane routing must fail closed.
+
+For an elastic teamwork graph, prepare all external-agent worktrees as an
+explicit, reviewable repository mutation:
+
+```bash
+forge --store "$STORE" teamwork \
+  --goal "Deliver frontend and backend independently" \
+  --lane frontend=agy:3 --lane backend=codex:5 \
+  --max-parallel-agents 8 --detached --output json
+
+forge --store "$STORE" worktree prepare-teamwork --workflow "$WF" \
+  --repository <repository-root> --worktree-root <dedicated-sibling-root> \
+  --branch-prefix forge/teamwork --output json
+# Review the dry-run report, then apply it to the same workflow:
+forge --store "$STORE" worktree prepare-teamwork --workflow "$WF" \
+  --repository <repository-root> --worktree-root <dedicated-sibling-root> \
+  --branch-prefix forge/teamwork --allow-repository-mutation --output json
+```
+
+The preparation subcommand neither creates a new workflow nor a new run. It is
+idempotent and binds one Git worktree directly to each
+pending external-agent task. One implementation branch is reported per declared
+worker (eight in this example), separately from later integrator/auditor
+worktrees. Worktree creation never
+implies executor authorization; process launch still uses the explicit
+`request execute-wave --allow-exec` gate.
+
+After each join's dependencies have completed, converge their frozen branches
+through a separate review/apply boundary:
+
+```bash
+forge --store "$STORE" worktree integrate-dependencies \
+  --workflow "$WF" --task <join-task-id> --output json
+# Review the dry-run plan, then apply it with explicit provenance:
+forge --store "$STORE" worktree integrate-dependencies \
+  --workflow "$WF" --task <join-task-id> \
+  --allow-repository-mutation --approved-by <operator-id> \
+  --reason "integrate validated dependency branches" --output json
+```
+
+Repeat this for both lane joins and the final auditor. Forge keeps those tasks
+blocked on `git_dependency_fan_in` until a successful, current receipt matches
+the clean destination, every frozen source HEAD and the task-scoped bindings.
+Conflicts roll the Forge-owned destination back and require rework; they are not
+accepted as a partial merge. Concurrent fan-in attempts for the same destination
+fail before mutation; retry only after the active attempt finishes and review the
+new dry-run.
+
 Review `.forge/worktree.toml`; any edit invalidates its approved SHA-256. Paths must be relative, contained and symlink-free; protected scopes override modifiable scopes. Config, path, branch, command, binding, runtime and network decisions must all pass. `forge --store "$STORE" request start --goal "<goal>" --worktree "$WT" --origin codex --output json` is the asynchronous alternative to `plan`.
 
 ## Isolation And Blocking Rules

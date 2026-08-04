@@ -4881,6 +4881,7 @@ pub fn build_operational_tui_smoke(
                 choices: &choices,
                 timeout_seconds: Some(3600),
                 origin,
+                expected_revision: None,
             },
         )?;
         create_modifier_proposal(

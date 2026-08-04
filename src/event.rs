@@ -32,8 +32,13 @@ use crate::storage::{
     StoredEventObservabilityRecord, StoredEventServiceRecord, StoredGlobalEventRecord,
 };
 use crate::workflow::{
-    attach_workflow_artifact, complete_workflow, pause_workflow, resume_workflow,
-    update_workflow_goal, ArtifactAttachReport,
+    add_workflow_task, add_workflow_task_dependency, attach_workflow_artifact,
+    clear_workflow_task_impediment, complete_workflow, pause_workflow,
+    remove_workflow_task_dependency, resume_workflow, set_workflow_task_impediment,
+    set_workflow_task_priority, update_workflow_goal_with_expected_revision,
+    update_workflow_task_with_expected_revision, ArtifactAttachReport, WorkflowTaskAddInput,
+    WorkflowTaskDependencyInput, WorkflowTaskImpedimentClearInput, WorkflowTaskImpedimentInput,
+    WorkflowTaskPriorityInput, WorkflowTaskUpdateInput,
 };
 use anyhow::{bail, Context, Result};
 use chrono::{
@@ -8879,12 +8884,21 @@ fn route_modify_workflow(
 ) -> Result<InboundEventRouteReport> {
     let workflow_id = extract_workflow_id(&event.data)
         .with_context(|| format!("inbound event {} does not include a workflow_id", event.id))?;
-    let new_goal = extract_goal(&event.data)
-        .with_context(|| format!("inbound event {} does not include a new goal", event.id))?;
     let origin = format!("event_inbox:{}", event.origin);
-    let update = update_workflow_goal(store, &workflow_id, &new_goal, &origin)?;
+    let expected_revision = extract_u64(&event.data, &["expected_revision"])?;
+    let mutation = extract_string(&event.data, &["mutation"])
+        .map(|value| normalize_workflow_mutation(&value))
+        .unwrap_or_else(|| "update_goal".to_string());
+    let revision = execute_workflow_mutation(
+        store,
+        &event,
+        &workflow_id,
+        &origin,
+        &mutation,
+        expected_revision,
+    )?;
     let workflow = store.load_workflow(&workflow_id)?;
-    let route_decision = format!("modify_workflow revision {}", update.revision);
+    let route_decision = format!("modify_workflow revision {revision} mutation {mutation}");
     record_inbound_event_routed(store, &workflow, &event, &adapter_policy, &route_decision)?;
     let routed_data = enrich_event_data(
         event.data.clone(),
@@ -8907,9 +8921,233 @@ fn route_modify_workflow(
         workflow_id: Some(workflow.id.clone()),
         workflow_goal: Some(workflow.goal.clone()),
         created_workflow: Some(workflow),
-        route_result: Some(serde_json::to_value(&update)?),
+        route_result: Some(json!({
+            "mutation": mutation,
+            "revision": revision,
+        })),
         event: inbound_event_view(store, routed_event),
     })
+}
+
+fn execute_workflow_mutation(
+    store: &ForgeStore,
+    event: &InboundEventRecord,
+    workflow_id: &str,
+    origin: &str,
+    mutation: &str,
+    expected_revision: Option<u64>,
+) -> Result<u64> {
+    match mutation {
+        "update_goal" => {
+            let new_goal = extract_goal(&event.data).with_context(|| {
+                format!("inbound event {} does not include a new goal", event.id)
+            })?;
+            Ok(update_workflow_goal_with_expected_revision(
+                store,
+                workflow_id,
+                &new_goal,
+                origin,
+                expected_revision,
+            )?
+            .revision)
+        }
+        "add_task" => {
+            let description = extract_string(&event.data, &["description", "task_description"])
+                .with_context(|| {
+                    format!(
+                        "inbound event {} add_task does not include description",
+                        event.id
+                    )
+                })?;
+            Ok(add_workflow_task(
+                store,
+                workflow_id,
+                WorkflowTaskAddInput {
+                    task_id: extract_string(&event.data, &["task_id"]),
+                    description,
+                    priority: extract_string(&event.data, &["priority"])
+                        .unwrap_or_else(|| "medium".to_string()),
+                    origin: origin.to_string(),
+                    expected_revision,
+                },
+            )?
+            .revision)
+        }
+        "update_task" => {
+            let task_id = required_modify_workflow_task_id(event)?;
+            let title = extract_string(&event.data, &["title"]);
+            let goal = extract_string(&event.data, &["task_goal", "goal"]);
+            let expected_output = extract_string(&event.data, &["expected_output"]);
+            Ok(update_workflow_task_with_expected_revision(
+                store,
+                workflow_id,
+                WorkflowTaskUpdateInput {
+                    task_id: &task_id,
+                    title: title.as_deref(),
+                    goal: goal.as_deref(),
+                    expected_output: expected_output.as_deref(),
+                    origin,
+                },
+                expected_revision,
+            )?
+            .revision)
+        }
+        "set_priority" => {
+            let task_id = required_modify_workflow_task_id(event)?;
+            let priority = extract_string(&event.data, &["priority"]).with_context(|| {
+                format!(
+                    "inbound event {} set_priority does not include priority",
+                    event.id
+                )
+            })?;
+            Ok(set_workflow_task_priority(
+                store,
+                workflow_id,
+                WorkflowTaskPriorityInput {
+                    task_id,
+                    priority,
+                    origin: origin.to_string(),
+                    expected_revision,
+                },
+            )?
+            .revision)
+        }
+        "add_dependency" | "remove_dependency" => {
+            let task_id = required_modify_workflow_task_id(event)?;
+            let dependency_task_id =
+                extract_string(&event.data, &["depends_on", "dependency_task_id"]).with_context(
+                    || {
+                        format!(
+                            "inbound event {} {mutation} does not include depends_on",
+                            event.id
+                        )
+                    },
+                )?;
+            let input = WorkflowTaskDependencyInput {
+                task_id,
+                dependency_task_id,
+                origin: origin.to_string(),
+                expected_revision,
+            };
+            if mutation == "add_dependency" {
+                Ok(add_workflow_task_dependency(store, workflow_id, input)?.revision)
+            } else {
+                Ok(remove_workflow_task_dependency(store, workflow_id, input)?.revision)
+            }
+        }
+        "set_impediment" => {
+            let task_id = required_modify_workflow_task_id(event)?;
+            let reason = extract_string(&event.data, &["reason"]).with_context(|| {
+                format!(
+                    "inbound event {} set_impediment does not include reason",
+                    event.id
+                )
+            })?;
+            Ok(set_workflow_task_impediment(
+                store,
+                workflow_id,
+                WorkflowTaskImpedimentInput {
+                    task_id,
+                    reason,
+                    kind: extract_string(&event.data, &["kind"])
+                        .unwrap_or_else(|| "manual".to_string()),
+                    origin: origin.to_string(),
+                    expected_revision,
+                },
+            )?
+            .revision)
+        }
+        "clear_impediment" => {
+            let task_id = required_modify_workflow_task_id(event)?;
+            Ok(clear_workflow_task_impediment(
+                store,
+                workflow_id,
+                WorkflowTaskImpedimentClearInput {
+                    task_id,
+                    impediment_id: extract_string(&event.data, &["impediment_id", "impediment"]),
+                    origin: origin.to_string(),
+                    expected_revision,
+                },
+            )?
+            .revision)
+        }
+        _ => bail!(
+            "inbound event {} uses unsupported workflow mutation `{mutation}`",
+            event.id
+        ),
+    }
+}
+
+fn required_modify_workflow_task_id(event: &InboundEventRecord) -> Result<String> {
+    extract_string(&event.data, &["task_id"]).with_context(|| {
+        format!(
+            "inbound event {} workflow mutation does not include task_id",
+            event.id
+        )
+    })
+}
+
+fn normalize_workflow_mutation(value: &str) -> String {
+    match value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_")
+        .as_str()
+    {
+        "goal" | "change_goal" | "workflow_goal" => "update_goal".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn extract_u64(data: &Value, keys: &[&str]) -> Result<Option<u64>> {
+    for candidate in value_candidates(data) {
+        for key in keys {
+            let Some(value) = candidate.get(*key) else {
+                continue;
+            };
+            if value.is_null() {
+                continue;
+            }
+            if let Some(number) = value.as_u64() {
+                return Ok(Some(number));
+            }
+            if let Some(number) = value
+                .as_str()
+                .map(str::trim)
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                return Ok(Some(number));
+            }
+            bail!("field `{key}` must be a non-negative integer");
+        }
+    }
+    Ok(None)
+}
+
+fn extract_i32(data: &Value, keys: &[&str]) -> Result<Option<i32>> {
+    for candidate in value_candidates(data) {
+        for key in keys {
+            let Some(value) = candidate.get(*key) else {
+                continue;
+            };
+            if value.is_null() {
+                continue;
+            }
+            let number = value
+                .as_i64()
+                .or_else(|| {
+                    value
+                        .as_str()
+                        .map(str::trim)
+                        .and_then(|value| value.parse::<i64>().ok())
+                })
+                .with_context(|| format!("field `{key}` must be an integer"))?;
+            return i32::try_from(number)
+                .map(Some)
+                .with_context(|| format!("field `{key}` is outside the i32 range"));
+        }
+    }
+    Ok(None)
 }
 
 fn route_continue_workflow(
@@ -9100,6 +9338,7 @@ fn continue_complete_task(store: &ForgeStore, data: &Value, origin: &str) -> Res
         .map(PathBuf::from)
         .collect::<Vec<_>>();
     let evidence_command = extract_string(data, &["evidence_command"]);
+    let evidence_exit_code = extract_i32(data, &["evidence_exit_code"])?;
     let evidence_summary = extract_string(data, &["evidence_summary"]);
     serde_json::to_value(complete_ready_task(
         store,
@@ -9110,6 +9349,7 @@ fn continue_complete_task(store: &ForgeStore, data: &Value, origin: &str) -> Res
             summary: &summary,
             artifact_paths: &artifacts,
             evidence_command: evidence_command.as_deref(),
+            evidence_exit_code,
             evidence_summary: evidence_summary.as_deref(),
             estimated_usd: data
                 .get("estimated_usd")

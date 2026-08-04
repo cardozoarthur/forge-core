@@ -2,7 +2,7 @@ use crate::artifact::hex_sha256;
 use crate::checkpoint::TaskCheckpoint;
 use crate::graph::{
     ArtifactRecord, AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind,
-    PersonaRoutingSpec, TaskStatus, Workflow,
+    NodeBrainRoutingSpec, PersonaRoutingSpec, TaskStatus, Workflow,
 };
 use crate::improve::suggested_handoff_executor;
 use crate::intent::OperatingContextSpec;
@@ -975,6 +975,7 @@ pub struct ContextHandoffSummary {
     pub total: usize,
     pub ready: usize,
     pub blocked: usize,
+    pub blocked_impediments: usize,
     pub blocked_missing_context: usize,
     pub blocked_dependencies: usize,
     pub blocked_missing_context_and_dependencies: usize,
@@ -987,6 +988,7 @@ pub struct ContextHandoffTask {
     pub task_id: String,
     pub title: String,
     pub executor: String,
+    pub node_brain_routing: NodeBrainRoutingSpec,
     pub context_ready: bool,
     pub dependency_ready: bool,
     pub handoff_ready: bool,
@@ -2294,14 +2296,18 @@ pub fn build_context_handoff_summary_for_task_ids_with_task_projects(
             unknown_task_ids.into_iter().collect::<Vec<_>>().join(", ")
         );
     }
-    let selected_task_ids = task_ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let mut tasks = Vec::new();
+    let mut seen_task_ids = BTreeSet::new();
 
-    for task in workflow
-        .tasks
-        .iter()
-        .filter(|task| selected_task_ids.contains(task.id.as_str()))
-    {
+    for task_id in task_ids {
+        if !seen_task_ids.insert(task_id.as_str()) {
+            continue;
+        }
+        let task = workflow
+            .tasks
+            .iter()
+            .find(|task| task.id.as_str() == task_id)
+            .expect("task ids were validated before context handoff construction");
         let latest_checkpoint = checkpoints
             .iter()
             .rev()
@@ -2326,6 +2332,7 @@ pub fn build_context_handoff_summary_for_task_ids_with_task_projects(
             task_id: task.id.clone(),
             title: task.title.clone(),
             executor: executor_kind(&task.executor).to_string(),
+            node_brain_routing: task.node_brain_routing.clone(),
             context_ready: package.context_ready,
             dependency_ready: package.dependency_summary.ready,
             handoff_ready: package.handoff_ready,
@@ -2345,6 +2352,10 @@ pub fn build_context_handoff_summary_for_task_ids_with_task_projects(
 
 pub fn summarize_context_handoff_tasks(tasks: Vec<ContextHandoffTask>) -> ContextHandoffSummary {
     let ready = tasks.iter().filter(|task| task.handoff_ready).count();
+    let blocked_impediments = tasks
+        .iter()
+        .filter(|task| task.handoff_status == "blocked_impediments")
+        .count();
     let blocked_missing_context = tasks
         .iter()
         .filter(|task| task.handoff_status == "blocked_missing_context")
@@ -2365,6 +2376,7 @@ pub fn summarize_context_handoff_tasks(tasks: Vec<ContextHandoffTask>) -> Contex
         total,
         ready,
         blocked: total.saturating_sub(ready),
+        blocked_impediments,
         blocked_missing_context,
         blocked_dependencies,
         blocked_missing_context_and_dependencies,
@@ -3798,6 +3810,24 @@ fn build_context_next_action(input: ContextNextActionInput<'_>) -> ContextNextAc
 
     if handoff_blockers
         .iter()
+        .any(|blocker| blocker.kind == "active_impediment")
+    {
+        return ContextNextAction {
+            schema_version: CONTEXT_NEXT_ACTION_SCHEMA_VERSION.to_string(),
+            action: "wait_for_impediments_clear".to_string(),
+            ready_for_handoff: false,
+            partial_retry_recommended: false,
+            checkpoint_id: None,
+            checkpoint_context_sha256: None,
+            checkpoint_context_routing_cache_key: None,
+            current_context_routing_cache_key: current_route.to_string(),
+            reason: "active task impediments must be cleared before executor handoff".to_string(),
+            blocking_refs,
+        };
+    }
+
+    if handoff_blockers
+        .iter()
         .any(|blocker| blocker.kind == "executor_profile_budget_cap")
     {
         return ContextNextAction {
@@ -4650,6 +4680,18 @@ fn build_handoff_blockers(
         });
     }
 
+    if !task.active_impediments.is_empty() {
+        blockers.push(ContextHandoffBlocker {
+            kind: "active_impediment".to_string(),
+            message: "active task impediments must be cleared before executor handoff".to_string(),
+            refs: task
+                .active_impediments
+                .iter()
+                .map(|impediment| impediment.id.clone())
+                .collect(),
+        });
+    }
+
     if profile
         .max_context_bytes
         .is_some_and(|maximum| required_minimum_bytes > maximum)
@@ -4697,6 +4739,12 @@ fn derive_handoff_status(blockers: &[ContextHandoffBlocker]) -> &'static str {
         .any(|blocker| blocker.kind == "executor_profile_budget_cap")
     {
         return "blocked_executor_profile_budget";
+    }
+    if blockers
+        .iter()
+        .any(|blocker| blocker.kind == "active_impediment")
+    {
+        return "blocked_impediments";
     }
     let missing_context = blockers
         .iter()

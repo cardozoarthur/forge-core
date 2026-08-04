@@ -2524,6 +2524,10 @@ fn route_parsed_ops_http_request(
                 .map(String::as_str)
                 .unwrap_or("ops-web");
             let evidence_command = parsed.params.get("evidence_command").map(String::as_str);
+            let evidence_exit_code = parsed
+                .required("evidence_exit_code")?
+                .parse::<i32>()
+                .context("evidence_exit_code must be a signed integer")?;
             let report = complete_ready_task(
                 store,
                 run_id,
@@ -2533,6 +2537,7 @@ fn route_parsed_ops_http_request(
                     summary,
                     artifact_paths: &[],
                     evidence_command,
+                    evidence_exit_code: Some(evidence_exit_code),
                     evidence_summary: Some(summary),
                     estimated_usd: 0.0,
                     tokens_in: 0,
@@ -3521,6 +3526,7 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
     <input name="executor" value="ops-web">
     <textarea name="summary" placeholder="Resumo/evidência do executor"></textarea>
     <input name="evidence_command" placeholder="comando ou gate de evidência">
+    <input name="evidence_exit_code" type="number" value="0" aria-label="Código de saída observado">
     <button type="submit">Completar task com evidência</button>
   </form>
   <h2>Atualizar objetivo em tempo real</h2>

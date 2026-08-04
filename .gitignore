@@ -3,6 +3,7 @@
 /.serena/
 /artifacts/
 /dist/
+/output/
 /chat_*.json
 *.sqlite-secret.key
 *.sqlite.secret.key

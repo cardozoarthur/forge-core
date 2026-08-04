@@ -496,6 +496,10 @@ fn repair_stays_non_promotable_until_every_mission_gate_passes() {
     let store = ForgeStore::open(&fixture.store).unwrap();
     let workflow = store.load_workflow(workflow_id).unwrap();
     assert_eq!(workflow.tasks[1].status, TaskStatus::Completed);
+    assert_eq!(
+        workflow.tasks[1].work_item.backlog_state,
+        "validation_pending"
+    );
     assert!(
         !workflow.tasks[1]
             .work_item
