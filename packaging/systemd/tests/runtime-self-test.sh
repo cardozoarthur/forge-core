@@ -10,12 +10,16 @@ tests_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 systemd_dir="$(cd -- "$tests_dir/.." && pwd)"
 runtime_unit="$systemd_dir/forge-runtime.service"
 request_supervisor_unit="$systemd_dir/forge-request-supervisor.service"
+backup_unit="$systemd_dir/forge-backup.service"
+admin_wrapper="$systemd_dir/forge-admin"
 installer="$systemd_dir/install-service.sh"
 directory_offhost_self_test="$tests_dir/directory-offhost-self-test.sh"
 
 [[ -f "$runtime_unit" ]] || fail "missing forge-runtime.service"
 [[ -f "$request_supervisor_unit" ]] ||
   fail "missing forge-request-supervisor.service"
+[[ -f "$backup_unit" ]] || fail "missing forge-backup.service"
+[[ -f "$admin_wrapper" ]] || fail "missing forge-admin"
 [[ -f "$installer" ]] || fail "missing install-service.sh"
 [[ -x "$directory_offhost_self_test" ]] ||
   fail "missing executable directory-offhost-self-test.sh"
@@ -46,6 +50,16 @@ request_supervisor_exec_start="$(grep -F 'ExecStart=' "$request_supervisor_unit"
   fail "request supervisor service must run the unbounded supervised loop"
 [[ "$request_supervisor_exec_start" != *' request drive-loop '* ]] ||
   fail "request supervisor must not launch an unclaimed per-run drive loop"
+
+backup_read_write_paths="$(grep -F 'ReadWritePaths=' "$backup_unit")"
+[[ "$backup_read_write_paths" == 'ReadWritePaths=/var/backups/forge' ]] ||
+  fail "backup service must grant writes only to the local backup directory"
+grep -Fxq 'ReadOnlyPaths=/var/lib/forge' "$backup_unit" ||
+  fail "backup service must keep the complete live state directory read-only"
+
+grep -Fxq '  --property="ReadWritePaths=/var/lib/forge -/var/backups/forge" \' \
+  "$admin_wrapper" ||
+  fail "admin wrapper must tolerate a deliberately absent local backup directory"
 
 for installer_contract in \
   '/etc/systemd/system/forge-runtime.service' \

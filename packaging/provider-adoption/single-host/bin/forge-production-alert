@@ -288,16 +288,31 @@ check_disk_space() {
 
 marker_is_valid() {
   local marker="$1"
+  local marker_schema=""
+  local marker_backup_sha256=""
+  local marker_destination_sha256=""
+  local marker_generation=""
+  local marker_uploader_sha256=""
+  local marker_extra=""
   local -a marker_lines=()
 
   [[ -f "$marker" && ! -L "$marker" ]] || return 1
   mapfile -t marker_lines <"$marker" || return 1
-  [[ ${#marker_lines[@]} -eq 5 ]] || return 1
-  [[ "${marker_lines[0]}" == "forge-offhost-v2" ]] || return 1
-  [[ "${marker_lines[1]}" =~ ^[0-9a-f]{64}$ ]] || return 1
-  [[ "${marker_lines[2]}" =~ ^[0-9a-f]{64}$ ]] || return 1
-  [[ "${marker_lines[3]}" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || return 1
-  [[ "${marker_lines[4]}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ ${#marker_lines[@]} -eq 1 ]] || return 1
+  read -r \
+    marker_schema \
+    marker_backup_sha256 \
+    marker_destination_sha256 \
+    marker_generation \
+    marker_uploader_sha256 \
+    marker_extra \
+    <<<"${marker_lines[0]}" || return 1
+  [[ "$marker_schema" == "forge-offhost-v2" ]] || return 1
+  [[ "$marker_backup_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "$marker_destination_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "$marker_generation" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || return 1
+  [[ "$marker_uploader_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ -z "$marker_extra" ]] || return 1
 }
 
 current_epoch() {

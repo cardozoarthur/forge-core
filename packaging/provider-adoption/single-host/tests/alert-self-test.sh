@@ -81,7 +81,7 @@ printf '%s\n%s\n' "$fake_token" "$fake_chat_id" \
   >"${credentials_dir}/forge-telegram-alert"
 chmod 0600 -- "${credentials_dir}/forge-telegram-alert"
 printf 'offline-store-fixture\n' >"$store_path"
-printf '%s\n%s\n%s\n%s\n%s\n' \
+printf '%s %s %s %s %s\n' \
   'forge-offhost-v2' \
   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
   'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \

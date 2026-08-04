@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use rusqlite::backup::Backup;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, Error as RusqliteError, ErrorCode, OpenFlags};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -74,9 +74,7 @@ pub fn check_store(path: impl AsRef<Path>) -> Result<StoreCheckReport> {
     let sqlite_user_version = pragma_i64(&connection, "user_version")?;
     let page_count = pragma_i64(&connection, "page_count")?;
     let freelist_count = pragma_i64(&connection, "freelist_count")?;
-    let journal_mode = connection
-        .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
-        .context("failed to read SQLite journal mode")?;
+    let journal_mode = journal_mode(&connection, path)?;
 
     Ok(StoreCheckReport {
         schema_version: STORE_CHECK_SCHEMA,
@@ -253,7 +251,137 @@ fn open_read_only(path: &Path) -> Result<Connection> {
     )
     .with_context(|| format!("failed to open SQLite store {}", path.display()))?;
     connection.busy_timeout(Duration::from_secs(30))?;
+    match initialize_read_only_connection(&connection) {
+        Ok(()) => Ok(connection),
+        Err(error) if is_read_only_wal_initialization_error(&error) => {
+            drop(connection);
+            if let Some(sidecar) = first_existing_sqlite_sidecar(path)? {
+                return Err(error).with_context(|| {
+                    format!(
+                        "refusing immutable SQLite fallback because sidecar exists: {}",
+                        sidecar.display()
+                    )
+                });
+            }
+            open_immutable_read_only(path)
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to initialize SQLite store {}", path.display())),
+    }
+}
+
+fn initialize_read_only_connection(connection: &Connection) -> rusqlite::Result<()> {
+    connection
+        .pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0))
+        .map(|_| ())
+}
+
+fn is_read_only_wal_initialization_error(error: &RusqliteError) -> bool {
+    matches!(
+        error,
+        RusqliteError::SqliteFailure(details, _)
+            if details.code == ErrorCode::CannotOpen
+                || details.extended_code == rusqlite::ffi::SQLITE_READONLY_CANTINIT
+    )
+}
+
+fn first_existing_sqlite_sidecar(path: &Path) -> Result<Option<PathBuf>> {
+    let absolute = absolute_candidate(path)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut candidate = absolute.as_os_str().to_os_string();
+        candidate.push(suffix);
+        let candidate = PathBuf::from(candidate);
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => return Ok(Some(candidate)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to inspect SQLite sidecar {}", candidate.display())
+                });
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn open_immutable_read_only(path: &Path) -> Result<Connection> {
+    let uri = immutable_sqlite_uri(path)?;
+    let connection = Connection::open_with_flags(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .with_context(|| format!("failed to open immutable SQLite store {}", path.display()))?;
+    connection.busy_timeout(Duration::from_secs(30))?;
+    initialize_read_only_connection(&connection).with_context(|| {
+        format!(
+            "failed to initialize immutable SQLite store {}",
+            path.display()
+        )
+    })?;
+    if let Some(sidecar) = first_existing_sqlite_sidecar(path)? {
+        bail!(
+            "SQLite sidecar appeared during immutable fallback: {}",
+            sidecar.display()
+        );
+    }
     Ok(connection)
+}
+
+fn immutable_sqlite_uri(path: &Path) -> Result<String> {
+    let absolute = absolute_candidate(path)?;
+    let raw = absolute
+        .to_str()
+        .context("SQLite immutable fallback requires a UTF-8 path")?;
+    let normalized = raw.replace('\\', "/");
+    let normalized = if cfg!(windows)
+        && normalized.as_bytes().get(1) == Some(&b':')
+        && !normalized.starts_with('/')
+    {
+        format!("/{normalized}")
+    } else {
+        normalized
+    };
+
+    let mut uri = String::with_capacity(normalized.len() + 32);
+    uri.push_str("file:");
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in normalized.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'-' | b'.' | b'_' | b'~') {
+            uri.push(char::from(byte));
+        } else {
+            uri.push('%');
+            uri.push(char::from(HEX[usize::from(byte >> 4)]));
+            uri.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    uri.push_str("?mode=ro&immutable=1");
+    Ok(uri)
+}
+
+fn journal_mode(connection: &Connection, path: &Path) -> Result<String> {
+    let effective_mode = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+        .context("failed to read SQLite journal mode")?;
+    if sqlite_header_uses_wal(path)? {
+        Ok("wal".to_string())
+    } else {
+        Ok(effective_mode)
+    }
+}
+
+fn sqlite_header_uses_wal(path: &Path) -> Result<bool> {
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to inspect SQLite header {}", path.display()))?;
+    let mut header = [0_u8; 20];
+    match file.read_exact(&mut header) {
+        Ok(()) => Ok(&header[..16] == b"SQLite format 3\0" && header[18] == 2 && header[19] == 2),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to read SQLite header {}", path.display()))
+        }
+    }
 }
 
 fn quick_check(connection: &Connection) -> Result<Vec<String>> {

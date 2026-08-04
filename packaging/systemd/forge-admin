@@ -26,7 +26,7 @@ exec systemd-run \
   --property=PrivateTmp=yes \
   --property=ProtectHome=yes \
   --property=ProtectSystem=strict \
-  --property="ReadWritePaths=/var/lib/forge /var/backups/forge" \
+  --property="ReadWritePaths=/var/lib/forge -/var/backups/forge" \
   --setenv=FORGE_PRODUCTION_MODE=1 \
   /bin/sh -c '
     export FORGE_SECRET_VAULT_KEY_FILE="$CREDENTIALS_DIRECTORY/forge-secret-key"

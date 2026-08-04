@@ -190,9 +190,13 @@ state directory, no Linux capabilities, restricted kernel surfaces and address
 families, and automatic restart on failure. The backup unit is stricter:
 `/var/lib/forge` is read-only and `/var/backups/forge` plus an explicitly
 validated `file://` destination are the only writable paths, so an uploader
-cannot corrupt the live store. A non-file provider receives no additional
-filesystem write path. Keep Ops bound to loopback. Use an SSH tunnel or a
-separately managed authenticated TLS reverse proxy for remote operator access.
+cannot corrupt the live store. The store administration path uses normal
+read-only WAL access when sidecars exist. After a clean checkpoint with no WAL,
+SHM or rollback journal, it may use SQLite's immutable read-only mode; any
+existing sidecar blocks that fallback so uncheckpointed transactions are never
+silently ignored. A non-file provider receives no additional filesystem write
+path. Keep Ops bound to loopback. Use an SSH tunnel or a separately managed
+authenticated TLS reverse proxy for remote operator access.
 
 `forge-backup.service` is a bounded oneshot with
 `TimeoutStartSec=30min`. A hung uploader, verification, download, or restore
