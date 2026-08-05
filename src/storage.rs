@@ -8012,6 +8012,7 @@ mod tests {
         RUNTIME_SECRET_ENVELOPE_PREFIX, RUNTIME_SECRET_KEY_FILE_PREFIX, STORE_SCHEMA_VERSION,
     };
     use rusqlite::{params, Connection};
+    #[cfg(unix)]
     use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Arc, Barrier};
     use std::thread;

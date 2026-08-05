@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use assert_cmd::Command;
 use foundry_core::executor::ExecutorState;
 use foundry_core::mission::{

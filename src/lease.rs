@@ -260,7 +260,13 @@ pub fn validate_task_lease_for_execution(
                 format!("failed to canonicalize execution cwd {}", cwd.display())
             })?;
             let claimed_root = Path::new(&frozen.worktree_root);
-            if canonical_cwd != claimed_root {
+            let canonical_claimed_root = fs::canonicalize(claimed_root).with_context(|| {
+                format!(
+                    "failed to canonicalize leased worktree {}",
+                    claimed_root.display()
+                )
+            })?;
+            if canonical_cwd != canonical_claimed_root {
                 bail!(
                     "execution cwd {} conflicts with leased worktree {}",
                     canonical_cwd.display(),

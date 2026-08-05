@@ -13,12 +13,15 @@ use sha2::{Digest, Sha256};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::{symlink, PermissionsExt};
+#[cfg(unix)]
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Command as ProcessCommand;
-use tempfile::{tempdir, TempDir};
+use tempfile::tempdir;
+#[cfg(unix)]
+use tempfile::TempDir;
 
 fn foundry() -> Command {
     Command::cargo_bin("foundry").expect("foundry binary should build")

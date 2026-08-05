@@ -486,6 +486,7 @@ dependencies = [
  "thiserror",
  "toml",
  "uuid",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

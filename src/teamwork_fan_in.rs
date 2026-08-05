@@ -1019,10 +1019,16 @@ fn load_task_worktree(
         );
     }
     if record.dirty {
+        let status = git_text(
+            Path::new(&record.worktree_root),
+            &["status", "--porcelain=v1", "--untracked-files=normal"],
+        )
+        .unwrap_or_else(|error| format!("status unavailable: {error:#}"));
         bail!(
-            "task {} worktree {} must be clean before dependency fan-in",
+            "task {} worktree {} must be clean before dependency fan-in: {}",
             task_id,
-            record.id
+            record.id,
+            status
         );
     }
     if record.detached {

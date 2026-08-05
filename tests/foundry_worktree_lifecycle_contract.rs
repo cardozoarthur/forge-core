@@ -4,12 +4,17 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Output};
+#[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 use tempfile::{tempdir, TempDir};
 
+#[cfg(unix)]
 const LIFECYCLE_SCHEMA_VERSION: &str = "foundry.worktree.sandbox_lifecycle.v1";
+#[cfg(unix)]
 const SANDBOX_ID_FIELD: &str = "sandbox_id";
+#[cfg(unix)]
 const SANDBOX_SELECTOR_FLAG: &str = "--sandbox";
 
 fn foundry() -> Command {
@@ -294,6 +299,7 @@ impl LifecycleFixture {
         foundry
     }
 
+    #[cfg(unix)]
     fn sandbox_plan(&self, command: &[&str]) -> Command {
         let mut foundry = foundry();
         foundry
@@ -319,6 +325,7 @@ impl LifecycleFixture {
         foundry
     }
 
+    #[cfg(unix)]
     fn sandbox_start(&self, allow_exec: bool, command: &[&str]) -> Command {
         let mut foundry = foundry();
         foundry.arg("--store").arg(&self.store).args([
@@ -359,12 +366,14 @@ impl LifecycleFixture {
     }
 }
 
+#[cfg(unix)]
 struct PreviewCleanup {
     store: PathBuf,
     sandbox_id: String,
     armed: bool,
 }
 
+#[cfg(unix)]
 impl PreviewCleanup {
     fn new(store: &Path, sandbox_id: &str) -> Self {
         Self {
@@ -379,6 +388,7 @@ impl PreviewCleanup {
     }
 }
 
+#[cfg(unix)]
 impl Drop for PreviewCleanup {
     fn drop(&mut self) {
         if !self.armed {
@@ -401,10 +411,12 @@ impl Drop for PreviewCleanup {
     }
 }
 
+#[cfg(unix)]
 fn process_exists(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
+#[cfg(unix)]
 fn wait_for_file(path: &Path) -> String {
     for _ in 0..100 {
         if let Ok(value) = fs::read_to_string(path) {
@@ -417,6 +429,7 @@ fn wait_for_file(path: &Path) -> String {
     panic!("timed out waiting for {}", path.display());
 }
 
+#[cfg(unix)]
 fn assert_process_stopped(pid: u32) {
     for _ in 0..100 {
         if !process_exists(pid) {
@@ -427,6 +440,7 @@ fn assert_process_stopped(pid: u32) {
     panic!("sandbox descendant process {pid} is still alive");
 }
 
+#[cfg(unix)]
 fn recorded_pids(path: &Path) -> Vec<u32> {
     wait_for_file(path)
         .split_whitespace()
@@ -434,6 +448,7 @@ fn recorded_pids(path: &Path) -> Vec<u32> {
         .collect()
 }
 
+#[cfg(unix)]
 fn sandbox_status(fixture: &LifecycleFixture, sandbox_id: &str) -> Value {
     success_json(foundry().arg("--store").arg(&fixture.store).args([
         "worktree",
@@ -446,6 +461,7 @@ fn sandbox_status(fixture: &LifecycleFixture, sandbox_id: &str) -> Value {
     ]))
 }
 
+#[cfg(unix)]
 fn wait_for_sandbox_status(
     fixture: &LifecycleFixture,
     sandbox_id: &str,
@@ -538,6 +554,7 @@ fn rebind_after_a_new_commit_refreshes_the_head_fingerprint_and_clears_drift() {
 }
 
 #[test]
+#[cfg(unix)]
 fn timeout_covers_pipe_holding_descendants_and_kills_the_process_group() {
     let fixture = LifecycleFixture::new();
     fixture.allow_command_and_timeout("sh", 1);
@@ -710,6 +727,7 @@ fn inherited_environment_blocks_a_secret_even_when_the_variable_name_is_neutral(
 }
 
 #[test]
+#[cfg(unix)]
 fn preview_start_status_stop_is_persistent_authorized_and_kills_the_group() {
     let fixture = LifecycleFixture::new();
     fixture.allow_command_and_timeout("sh", 5);
@@ -930,6 +948,7 @@ fn status_reconciles_a_sigkilled_supervisor_and_kills_payload_descendants() {
 }
 
 #[test]
+#[cfg(unix)]
 fn mcp_sandbox_plan_run_start_status_and_stop_match_the_cli_contracts() {
     let fixture = LifecycleFixture::new();
     fixture.allow_command_and_timeout("sh", 5);

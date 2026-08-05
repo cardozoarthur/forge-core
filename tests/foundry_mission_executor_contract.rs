@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use foundry_core::executor::ExecutorState;
 use foundry_core::mission::{
     load_mission, simulate_mission, submit_mission, MissionMode, MissionRecord, MissionStatus,

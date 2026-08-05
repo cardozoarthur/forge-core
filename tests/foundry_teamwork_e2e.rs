@@ -121,6 +121,7 @@ fn initialize_repository(repository: &Path) {
         repository,
         &["config", "user.name", "Foundry Teamwork E2E Tests"],
     );
+    git(repository, &["config", "core.autocrlf", "false"]);
     fs::write(repository.join("README.md"), "teamwork e2e fixture\n").unwrap();
     git(repository, &["add", "README.md"]);
     git(

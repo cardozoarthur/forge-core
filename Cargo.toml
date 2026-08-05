@@ -62,6 +62,13 @@ toml = "0.8"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 zeroize = "1.8"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"

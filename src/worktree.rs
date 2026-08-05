@@ -14,6 +14,11 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use std::{
+    ffi::OsString,
+    os::windows::ffi::{OsStrExt, OsStringExt},
+};
 
 pub const WORKTREE_CONFIG_SCHEMA_VERSION: &str = "foundry.worktree.config.v1";
 pub const WORKTREE_RECORD_SCHEMA_VERSION: &str = "foundry.worktree.record.v1";
@@ -1356,18 +1361,20 @@ pub fn bound_worktree_mutation_claim(
             record.id
         )
     })?;
-    let repository_root = fs::canonicalize(&record.repository_root).with_context(|| {
-        format!(
-            "failed to canonicalize repository root {} for worktree mutation claim",
-            record.repository_root
-        )
-    })?;
-    let worktree_root = fs::canonicalize(&record.worktree_root).with_context(|| {
-        format!(
-            "failed to canonicalize worktree root {} for worktree mutation claim",
-            record.worktree_root
-        )
-    })?;
+    let repository_root =
+        process_compatible_path(&fs::canonicalize(&record.repository_root).with_context(|| {
+            format!(
+                "failed to canonicalize repository root {} for worktree mutation claim",
+                record.repository_root
+            )
+        })?);
+    let worktree_root =
+        process_compatible_path(&fs::canonicalize(&record.worktree_root).with_context(|| {
+            format!(
+                "failed to canonicalize worktree root {} for worktree mutation claim",
+                record.worktree_root
+            )
+        })?);
     Ok(Some(WorktreeMutationClaim {
         schema_version: WORKTREE_MUTATION_CLAIM_SCHEMA_VERSION.to_string(),
         mode: "exclusive_mutation".to_string(),
@@ -2629,8 +2636,10 @@ fn initial_worktree_config() -> WorktreeConfig {
 fn inspect_git_worktree(path: &Path) -> Result<GitWorktreeState> {
     let path = absolute_path(path)?;
     let worktree_root = PathBuf::from(git_output(&path, &["rev-parse", "--show-toplevel"])?);
-    let worktree_root = fs::canonicalize(&worktree_root)
-        .with_context(|| format!("failed to resolve {}", worktree_root.display()))?;
+    let worktree_root = process_compatible_path(
+        &fs::canonicalize(&worktree_root)
+            .with_context(|| format!("failed to resolve {}", worktree_root.display()))?,
+    );
     let git_common_raw = git_output(&worktree_root, &["rev-parse", "--git-common-dir"])?;
     let git_common_dir = resolve_git_path(&worktree_root, &git_common_raw)?;
     let git_dir_raw = git_output(&worktree_root, &["rev-parse", "--git-dir"])?;
@@ -2815,7 +2824,10 @@ fn resolve_git_path(root: &Path, value: &str) -> Result<PathBuf> {
     } else {
         root.join(path)
     };
-    fs::canonicalize(&path).with_context(|| format!("failed to resolve {}", path.display()))
+    Ok(process_compatible_path(
+        &fs::canonicalize(&path)
+            .with_context(|| format!("failed to resolve {}", path.display()))?,
+    ))
 }
 
 fn ensure_valid_branch_name(repository: &Path, branch: &str) -> Result<()> {
@@ -4104,9 +4116,41 @@ fn wildcard_matches(pattern: &str, value: &str) -> bool {
 }
 
 fn paths_equal(left: &Path, right: &Path) -> bool {
-    let left = fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
-    let right = fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    let left =
+        process_compatible_path(&fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf()));
+    let right =
+        process_compatible_path(&fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf()));
     left == right
+}
+
+#[cfg(windows)]
+fn process_compatible_path(path: &Path) -> PathBuf {
+    const VERBATIM_PREFIX: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    const VERBATIM_UNC_PREFIX: &[u16] = &[
+        b'\\' as u16,
+        b'\\' as u16,
+        b'?' as u16,
+        b'\\' as u16,
+        b'U' as u16,
+        b'N' as u16,
+        b'C' as u16,
+        b'\\' as u16,
+    ];
+    let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if let Some(rest) = wide.strip_prefix(VERBATIM_UNC_PREFIX) {
+        let mut normalized = vec![b'\\' as u16, b'\\' as u16];
+        normalized.extend_from_slice(rest);
+        return PathBuf::from(OsString::from_wide(&normalized));
+    }
+    if let Some(rest) = wide.strip_prefix(VERBATIM_PREFIX) {
+        return PathBuf::from(OsString::from_wide(rest));
+    }
+    path.to_path_buf()
+}
+
+#[cfg(not(windows))]
+fn process_compatible_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 fn worktree_config_schema_version() -> String {
@@ -4227,7 +4271,9 @@ mod tests {
         let root = temp.path();
         assert_eq!(
             resolve_relative_inside(root, ".foundry/sandboxes/internal").unwrap(),
-            root.join(".foundry/sandboxes/internal")
+            fs::canonicalize(root)
+                .unwrap()
+                .join(".foundry/sandboxes/internal")
         );
         assert!(resolve_relative_inside(root, "../outside").is_err());
         assert!(resolve_relative_inside(root, "/outside").is_err());
@@ -4315,6 +4361,7 @@ mod tests {
         ]));
     }
 
+    #[cfg(unix)]
     #[test]
     fn bubblewrap_remaps_only_a_canonical_worktree_executable_to_guest_root() {
         let temp = tempfile::tempdir().unwrap();

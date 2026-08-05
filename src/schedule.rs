@@ -13,7 +13,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::Serialize;
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -2727,11 +2729,17 @@ fn write_artifact_file(
     write_result
 }
 
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .with_context(|| format!("failed to open artifact directory {}", path.display()))?
         .sync_all()
         .with_context(|| format!("failed to sync artifact directory {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn daily_goal_markdown_report_bytes(workflow_id: &str, goal: &str) -> Vec<u8> {

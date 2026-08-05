@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use foundry_core::executor::{sync_executors, ExecutorSyncOptions};
 use foundry_core::mcp::{call_mcp_tool, mcp_tools_manifest};
 use foundry_core::storage::FoundryStore;

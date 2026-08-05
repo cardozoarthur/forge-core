@@ -4279,6 +4279,7 @@ fn action(
 #[cfg(test)]
 mod security_tests {
     use super::*;
+    #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
