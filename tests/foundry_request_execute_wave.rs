@@ -264,7 +264,17 @@ fn execute_wave_progresses_three_agy_five_codex_then_joins_and_auditor() {
     )
     .unwrap();
     let preview_frontier = preview.dispatch_frontier.as_ref().unwrap();
-    assert_eq!(preview_frontier.wave.assignments.len(), 8);
+    assert_eq!(preview_frontier.admission.requested_parallel_tasks, 8);
+    assert_eq!(
+        preview_frontier.wave.assignments.len(),
+        preview_frontier.admission.admitted_parallel_tasks
+    );
+    assert!(!preview_frontier.wave.assignments.is_empty());
+    assert_eq!(
+        preview_frontier.wave.assignments.len() + preview_frontier.wave.deferred.len(),
+        8
+    );
+    let preview_assignment_count = preview_frontier.wave.assignments.len();
     assert!(preview_frontier
         .wave
         .assignments
@@ -291,11 +301,22 @@ fn execute_wave_progresses_three_agy_five_codex_then_joins_and_auditor() {
     assert_eq!(report["executor_wave"]["unique_request_count"], 8);
     assert_eq!(report["executor_wave"]["worker_count"], 8);
     assert_eq!(report["executor_wave"]["max_parallel"], 8);
-    assert!(report["dispatch_frontier"]["wave"]["assignments"]
+    let reported_assignments = report["dispatch_frontier"]["wave"]["assignments"]
         .as_array()
-        .unwrap()
-        .iter()
-        .all(|assignment| assignment["lease_state"] == "reused_active"));
+        .unwrap();
+    assert_eq!(
+        reported_assignments
+            .iter()
+            .filter(|assignment| assignment["lease_state"] == "reused_active")
+            .count(),
+        preview_assignment_count
+    );
+    assert!(reported_assignments.iter().all(|assignment| {
+        matches!(
+            assignment["lease_state"].as_str(),
+            Some("reused_active" | "acquired")
+        )
+    }));
 
     let receipts = report["executor_wave"]["receipts"].as_array().unwrap();
     assert_eq!(receipts.len(), 8);
