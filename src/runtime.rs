@@ -1,4 +1,4 @@
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -99,7 +99,10 @@ const RUNTIMES: &[RuntimeDefinition] = &[
     },
 ];
 
-pub fn sync_runtimes(store: &ForgeStore, options: RuntimeSyncOptions) -> Result<RuntimeSyncReport> {
+pub fn sync_runtimes(
+    store: &FoundryStore,
+    options: RuntimeSyncOptions,
+) -> Result<RuntimeSyncReport> {
     let previous = load_previous_states(store)?;
     let allow = normalize_set(&options.allow);
     let deny = normalize_set(&options.deny);
@@ -121,7 +124,7 @@ pub fn sync_runtimes(store: &ForgeStore, options: RuntimeSyncOptions) -> Result<
     Ok(report)
 }
 
-pub fn load_runtimes(store: &ForgeStore) -> Result<RuntimeSyncReport> {
+pub fn load_runtimes(store: &FoundryStore) -> Result<RuntimeSyncReport> {
     let states = store
         .load_runtime_states()?
         .into_iter()
@@ -131,7 +134,7 @@ pub fn load_runtimes(store: &ForgeStore) -> Result<RuntimeSyncReport> {
 }
 
 pub fn guard_runtime_scope(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: RuntimeGuardRequest,
 ) -> Result<RuntimeGuardReport> {
     let report = evaluate_runtime_guard(request);
@@ -148,11 +151,12 @@ fn evaluate_runtime_guard(request: RuntimeGuardRequest) -> RuntimeGuardReport {
         request.action.as_str(),
         "create" | "update" | "delete" | "patch" | "apply"
     );
-    let forge_owned = request.owner == "forge";
-    let external = !forge_owned;
+    let owner = crate::brand::canonical_authority(&request.owner).into_owned();
+    let foundry_owned = owner == "foundry";
+    let external = !foundry_owned;
 
-    let (allowed, requires_human_approval, decision) = if forge_owned {
-        (true, false, "forge_owned_resource".to_string())
+    let (allowed, requires_human_approval, decision) = if foundry_owned {
+        (true, false, "foundry_owned_resource".to_string())
     } else if mutating && request.allow_external {
         (true, false, "human_allow_external_resource".to_string())
     } else if mutating && external {
@@ -169,9 +173,9 @@ fn evaluate_runtime_guard(request: RuntimeGuardRequest) -> RuntimeGuardReport {
         resource: request.resource,
         namespace: request.namespace,
         action: request.action,
-        owner: request.owner,
+        owner,
         scope_rule:
-            "Forge may mutate resources it created; external resources require explicit human authorization"
+            "Foundry may mutate resources it created; external resources require explicit human authorization"
                 .to_string(),
     }
 }
@@ -221,7 +225,7 @@ fn probe_runtime(
         allowed: false,
         decision_source: "unavailable".to_string(),
         async_capable: true,
-        ownership_policy: "forge_owned_resources_only_unless_human_authorizes_external_mutation"
+        ownership_policy: "foundry_owned_resources_only_unless_human_authorizes_external_mutation"
             .to_string(),
         synced_at: Utc::now().to_rfc3339(),
     }
@@ -281,7 +285,7 @@ fn apply_decision(
 
 fn prompt_for_runtime(state: &RuntimeState) -> Result<bool> {
     print!(
-        "Allow Forge to use {} ({}) as an async workflow runtime on this machine? [y/N] ",
+        "Allow Foundry to use {} ({}) as an async workflow runtime on this machine? [y/N] ",
         state.display_name, state.command
     );
     io::stdout().flush()?;
@@ -291,7 +295,7 @@ fn prompt_for_runtime(state: &RuntimeState) -> Result<bool> {
     Ok(matches!(normalized.as_str(), "y" | "yes" | "s" | "sim"))
 }
 
-fn load_previous_states(store: &ForgeStore) -> Result<BTreeMap<String, RuntimeState>> {
+fn load_previous_states(store: &FoundryStore) -> Result<BTreeMap<String, RuntimeState>> {
     let mut previous = BTreeMap::new();
     for value in store.load_runtime_states()? {
         let state: RuntimeState = serde_json::from_value(value)?;
@@ -313,7 +317,7 @@ fn find_executable(command: &str, runtime_paths: &[PathBuf]) -> Option<PathBuf> 
 
 fn candidate_dirs(runtime_paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs = runtime_paths.to_vec();
-    if let Some(paths) = env::var_os("PATH") {
+    if let Some(paths) = crate::brand::env_var_os("PATH") {
         dirs.extend(env::split_paths(&paths));
     }
     dirs
@@ -352,7 +356,7 @@ fn config_evidence(id: &str, home: &Path, installed: bool) -> Vec<String> {
                     evidence.push(path.display().to_string());
                 }
             }
-            if env::var_os("KUBECONFIG").is_some() {
+            if crate::brand::env_var_os("KUBECONFIG").is_some() {
                 evidence.push("env:KUBECONFIG".to_string());
             }
         }
@@ -379,13 +383,13 @@ fn build_install_suggestions(runtimes: &[RuntimeState]) -> Vec<RuntimeInstallSug
             id: "knative".to_string(),
             display_name: "Knative".to_string(),
             reason:
-                "Docker and Kubernetes are available; Knative can provide async service nodes for Forge workflows"
+                "Docker and Kubernetes are available; Knative can provide async service nodes for Foundry workflows"
                     .to_string(),
             requires_human_approval: true,
             suggested_commands: vec![
                 "install kn CLI".to_string(),
                 "install Knative Serving into the selected Kubernetes cluster".to_string(),
-                "label Forge-owned Knative resources with app.kubernetes.io/managed-by=forge-core"
+                "label Foundry-owned Knative resources with app.kubernetes.io/managed-by=foundry-core"
                     .to_string(),
             ],
         }];
@@ -400,4 +404,26 @@ fn runtime_ready(runtimes: &[RuntimeState], id: &str) -> bool {
         .find(|runtime| runtime.id == id)
         .map(|runtime| runtime.installed && runtime.configured && runtime.allowed)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_foundry_owner_keeps_managed_resource_authority() {
+        let report = evaluate_runtime_guard(RuntimeGuardRequest {
+            substrate: "kubernetes".to_string(),
+            resource: "deployment/example".to_string(),
+            namespace: "default".to_string(),
+            action: "update".to_string(),
+            owner: "forge".to_string(), // foundry-brand-allow: legacy-compat
+            allow_external: false,
+        });
+
+        assert!(report.allowed);
+        assert!(!report.requires_human_approval);
+        assert_eq!(report.owner, "foundry");
+        assert_eq!(report.decision, "foundry_owned_resource");
+    }
 }

@@ -42,7 +42,7 @@ use crate::cli_integration::{
     build_harness_adoption_plan, build_harness_bootstrap_report, build_harness_doctor_report,
     build_harness_headroom_plan, build_harness_mode_report, build_headroom_stats_report,
     inspect_cli_harness_shim_status, install_cli_harness_shim, install_cli_provider_adapter,
-    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
+    persist_token_headroom_report, resolve_harness_foundry_first_source_for_project,
     resolve_harness_runtime_policy, retrieve_headroom_blob, run_cli_harness_exec,
     CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
     HarnessActivationProfileOptions, HarnessAdoptionPlanOptions, HarnessBootstrapOptions,
@@ -186,7 +186,7 @@ use crate::schedule::{
 use crate::security::{
     sanitize_prompt_secrets_with_vault, SecretSanitizationOptions, SecretVaultPersistOptions,
 };
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use crate::teamwork::{
     plan_teamwork_workflow, plan_teamwork_workflow_with_config, TeamworkLaneConfig,
     TeamworkParallelConfig,
@@ -220,10 +220,10 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-const MCP_TOOLS_SCHEMA_VERSION: &str = "forge.mcp.tools.v1";
-const MCP_CALL_SCHEMA_VERSION: &str = "forge.mcp.call.v1";
-const MCP_VALIDATION_STATUS_SCHEMA_VERSION: &str = "forge.mcp.validation_status.v1";
-const MCP_ARTIFACT_FETCH_SCHEMA_VERSION: &str = "forge.mcp.artifact_fetch.v1";
+const MCP_TOOLS_SCHEMA_VERSION: &str = "foundry.mcp.tools.v1";
+const MCP_CALL_SCHEMA_VERSION: &str = "foundry.mcp.call.v1";
+const MCP_VALIDATION_STATUS_SCHEMA_VERSION: &str = "foundry.mcp.validation_status.v1";
+const MCP_ARTIFACT_FETCH_SCHEMA_VERSION: &str = "foundry.mcp.artifact_fetch.v1";
 const MAX_ARTIFACT_FETCH_BYTES: usize = 65_536;
 
 #[derive(Debug, Clone, Serialize)]
@@ -241,7 +241,7 @@ pub struct McpToolSpec {
     pub description: String,
     pub input_schema: Value,
     pub output_schema: String,
-    pub forge_command: Vec<String>,
+    pub foundry_command: Vec<String>,
     pub async_safe: bool,
     pub mutates_workflow: bool,
 }
@@ -261,7 +261,7 @@ impl Serialize for McpToolSpec {
         state.serialize_field("description", &self.description)?;
         state.serialize_field("input_schema", &self.input_schema)?;
         state.serialize_field("output_schema", &self.output_schema)?;
-        state.serialize_field("forge_command", &self.forge_command)?;
+        state.serialize_field("foundry_command", &self.foundry_command)?;
         state.serialize_field("async_safe", &self.async_safe)?;
         state.serialize_field("mutates_workflow", &self.mutates_workflow)?;
         if let Some(selector) = output_schema_selector {
@@ -717,7 +717,8 @@ struct HarnessHeadroomStatsInput {
 
 #[derive(Debug, Deserialize)]
 struct HarnessModeInput {
-    forge_first: Option<bool>,
+    #[serde(alias = "forge_first")] // foundry-brand-allow: legacy-compat
+    foundry_first: Option<bool>,
     observe_only: Option<bool>,
     project_root: Option<String>,
 }
@@ -726,7 +727,8 @@ struct HarnessModeInput {
 struct HarnessDoctorInput {
     shim_dir: String,
     executor: String,
-    forge_first: Option<bool>,
+    #[serde(alias = "forge_first")] // foundry-brand-allow: legacy-compat
+    foundry_first: Option<bool>,
     observe_only: Option<bool>,
     project_root: Option<String>,
     workflow: Option<String>,
@@ -744,7 +746,8 @@ struct HarnessHeadroomPlanInput {
     executor: String,
     command: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
-    forge_first: Option<bool>,
+    #[serde(alias = "forge_first")] // foundry-brand-allow: legacy-compat
+    foundry_first: Option<bool>,
     observe_only: Option<bool>,
     project_root: Option<String>,
     workflow: Option<String>,
@@ -761,7 +764,8 @@ struct HarnessHeadroomPlanInput {
 struct HarnessAdoptionPlanInput {
     shim_dir: String,
     executor: String,
-    forge_first: Option<bool>,
+    #[serde(alias = "forge_first")] // foundry-brand-allow: legacy-compat
+    foundry_first: Option<bool>,
     observe_only: Option<bool>,
     project_root: Option<String>,
     workflow: Option<String>,
@@ -790,7 +794,8 @@ struct HarnessActivationProfileInput {
 struct InteractiveHarnessInput {
     executor: Option<String>,
     shim_dir: Option<String>,
-    forge_first: Option<bool>,
+    #[serde(alias = "forge_first")] // foundry-brand-allow: legacy-compat
+    foundry_first: Option<bool>,
     observe_only: Option<bool>,
     project_root: Option<String>,
     workflow: Option<String>,
@@ -853,7 +858,8 @@ struct HarnessWrapPlanInput {
     executor: String,
     command: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
-    forge_first: Option<bool>,
+    #[serde(alias = "forge_first")] // foundry-brand-allow: legacy-compat
+    foundry_first: Option<bool>,
     project_root: Option<String>,
     workflow: Option<String>,
     workflow_id: Option<String>,
@@ -883,7 +889,8 @@ struct HarnessInstallShimsInput {
     executor: String,
     real_cmd: Option<String>,
     real_command: Option<String>,
-    forge_first: Option<bool>,
+    #[serde(alias = "forge_first")] // foundry-brand-allow: legacy-compat
+    foundry_first: Option<bool>,
     project_root: Option<String>,
     workflow: Option<String>,
     workflow_id: Option<String>,
@@ -918,7 +925,8 @@ struct HarnessExecInput {
     executor: String,
     command: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
-    forge_first: Option<bool>,
+    #[serde(alias = "forge_first")] // foundry-brand-allow: legacy-compat
+    foundry_first: Option<bool>,
     workflow: Option<String>,
     workflow_id: Option<String>,
     task: Option<String>,
@@ -2542,7 +2550,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
         protocol: "model_context_protocol".to_string(),
         tools: vec![
             tool(
-                "forge.mission.start",
+                "foundry.mission.start",
                 "Start Operational Mission",
                 "Persist an operational mission, restricted orchestrator, task graph and real worktree binding.",
                 object_schema(
@@ -2554,54 +2562,54 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["goal", "worktree"],
                 ),
-                "forge.mission.start.v1",
-                &["forge", "mission", "start", "--output", "json"],
+                "foundry.mission.start.v1",
+                &["foundry", "mission", "start", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.mission.drive",
+                "foundry.mission.drive",
                 "Drive Operational Mission",
                 "Consume one pending inbox handoff or create one bounded task assignment and harness.",
                 object_schema(
                     &[("mission_id", "string", "mission id")],
                     &["mission_id"],
                 ),
-                "forge.mission.drive.v1",
-                &["forge", "mission", "drive", "<mission-id>", "--output", "json"],
+                "foundry.mission.drive.v1",
+                &["foundry", "mission", "drive", "<mission-id>", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.mission.execute",
+                "foundry.mission.execute",
                 "Execute Mission Assignment",
                 "Execute an assigned command through the mission's pinned worktree sandbox with structured approval provenance and an idempotent receipt. The dry-run branch is read-only; tool metadata remains mutating because the execution branch can launch a process.",
                 mission_execute_input_schema(),
-                "forge.mission.execution_receipt.v3",
-                &["forge", "mission", "execute", "<mission-id>", "--output", "json"],
+                "foundry.mission.execution_receipt.v3",
+                &["foundry", "mission", "execute", "<mission-id>", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.mission.submit",
+                "foundry.mission.submit",
                 "Submit Mission Execution Receipt",
                 "Queue a typed task delivery backed by a persisted execution receipt; caller-supplied validation claims are not accepted.",
                 mission_submit_input_schema(),
-                "forge.mission.submit.v1",
-                &["forge", "mission", "submit", "<mission-id>", "--output", "json"],
+                "foundry.mission.submit.v1",
+                &["foundry", "mission", "submit", "<mission-id>", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.mission.resume",
+                "foundry.mission.resume",
                 "Resume Operational Mission",
                 "Lease and consume one persisted mission inbox item after reopening durable state.",
                 object_schema(
                     &[("mission_id", "string", "mission id")],
                     &["mission_id"],
                 ),
-                "forge.mission.drive.v1",
-                &["forge", "mission", "resume", "<mission-id>", "--output", "json"],
+                "foundry.mission.drive.v1",
+                &["foundry", "mission", "resume", "<mission-id>", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.mission.execution.list",
+                "foundry.mission.execution.list",
                 "List Mission Execution Receipts",
                 "List durable execution receipts, optionally filtered by mission.",
                 object_schema(
@@ -2611,30 +2619,30 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.mission.execution_receipt_list.v1",
-                &["forge", "mission", "execution", "list", "--output", "json"],
+                "foundry.mission.execution_receipt_list.v1",
+                &["foundry", "mission", "execution", "list", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.mission.execution.inspect",
+                "foundry.mission.execution.inspect",
                 "Inspect Mission Execution Receipt",
                 "Inspect one durable mission execution receipt by receipt id.",
                 object_schema(
                     &[("receipt_id", "string", "execution receipt id")],
                     &["receipt_id"],
                 ),
-                "forge.mission.execution_receipt.v3",
-                &["forge", "mission", "execution", "inspect", "<receipt-id>", "--output", "json"],
+                "foundry.mission.execution_receipt.v3",
+                &["foundry", "mission", "execution", "inspect", "<receipt-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.mission.execution.reconcile",
+                "foundry.mission.execution.reconcile",
                 "Reconcile Mission Execution",
                 "Record an explicitly approved no-effect outcome for an indeterminate, failed or timed-out execution before allowing a new idempotency key.",
                 mission_execution_reconcile_input_schema(),
-                "forge.mission.execution_reconciliation.v1",
+                "foundry.mission.execution_reconciliation.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "mission",
                     "execution",
                     "reconcile",
@@ -2645,35 +2653,35 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.workflow.list",
-                "List Forge Workflows",
+                "foundry.workflow.list",
+                "List Foundry Workflows",
                 "List workflows with lifecycle, context-action and quality-action filters.",
                 object_schema(&[
                     ("lifecycle", "string", "all|running|non-running"),
                     ("context_action", "string", "optional registry context action filter"),
                     ("quality_action", "string", "optional registry quality action filter"),
                 ], &[]),
-                "forge.registry.workflow_list.v1",
-                &["forge", "list", "--output", "json"],
+                "foundry.registry.workflow_list.v1",
+                &["foundry", "list", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.workflow.inspect",
-                "Inspect Forge Workflow",
+                "foundry.workflow.inspect",
+                "Inspect Foundry Workflow",
                 "Inspect a workflow graph, terminal DAG nodes, subflows and context routes.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                     ("task_id", "string", "optional focused task id"),
                     ("verbose", "boolean", "include subtasks and validation rules"),
                 ], &["workflow_id"]),
-                "forge.inspection.v1",
-                &["forge", "inspect", "<workflow-id>", "--output", "json"],
+                "foundry.inspection.v1",
+                &["foundry", "inspect", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.events.list",
+                "foundry.events.list",
                 "List Workflow Events",
-                "Return Forge's tenant-aware typed event stream projection for a workflow, including event severity, category, origin and correlation ids.",
+                "Return Foundry's tenant-aware typed event stream projection for a workflow, including event severity, category, origin and correlation ids.",
                 object_schema(
                     &[
                         ("workflow_id", "string", "workflow id"),
@@ -2681,9 +2689,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["workflow_id"],
                 ),
-                "forge.event_stream.v1",
+                "foundry.event_stream.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "list",
                     "--workflow",
@@ -2694,9 +2702,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.events.timeline",
+                "foundry.events.timeline",
                 "List Global Event Timeline",
-                "Return a tenant-filterable global timeline of workflow events using Forge's typed event envelope.",
+                "Return a tenant-filterable global timeline of workflow events using Foundry's typed event envelope.",
                 object_schema(
                     &[
                         ("workflow_id", "string", "optional workflow id filter"),
@@ -2717,12 +2725,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.event_timeline.v1",
-                &["forge", "events", "timeline", "--output", "json"],
+                "foundry.event_timeline.v1",
+                &["foundry", "events", "timeline", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.ops.snapshot",
+                "foundry.ops.snapshot",
                 "Read Ops Snapshot",
                 "Read the operational assisted-operations snapshot, including workflows, improvement candidates, Addon views and optional project memory/context governance.",
                 object_schema(
@@ -2730,18 +2738,18 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "project_root",
                             "string",
-                            "optional project root containing .forge/memory-governance.json",
+                            "optional project root containing .foundry/memory-governance.json",
                         ),
                         ("addon_dirs", "array", "optional Addon manifest directories"),
                     ],
                     &[],
                 ),
-                "forge.ops.snapshot.v1",
-                &["forge", "ops", "snapshot", "--output", "json"],
+                "foundry.ops.snapshot.v1",
+                &["foundry", "ops", "snapshot", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.ops.addon_renderer_event",
+                "foundry.ops.addon_renderer_event",
                 "Record Addon Renderer Event",
                 "Record a safe client-side interaction for an Addon renderer after validating the renderer's allowed_client_events contract.",
                 object_schema(
@@ -2756,9 +2764,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["workflow_id", "view_id", "event_kind"],
                 ),
-                "forge.ops.addon_renderer_client_event.v1",
+                "foundry.ops.addon_renderer_client_event.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "ops",
                     "renderer-event",
                     "--workflow",
@@ -2775,7 +2783,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.events.observability",
+                "foundry.events.observability",
                 "List Event Observability Index",
                 "Return a normalized event observability index grouped by tenant, workflow, node and Addon, with duration, retry, wait, context-pressure and memory metrics.",
                 object_schema(
@@ -2800,12 +2808,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.event_observability_index.v1",
-                &["forge", "events", "observability", "--output", "json"],
+                "foundry.event_observability_index.v1",
+                &["foundry", "events", "observability", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.events.observability_history",
+                "foundry.events.observability_history",
                 "List Event Observability History",
                 "Return time-bucketed event observability rollups for operators and policy loops, grouped by tenant, workflow, node, Addon or all events.",
                 object_schema(
@@ -2836,9 +2844,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.event_observability_history.v1",
+                "foundry.event_observability_history.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "observability-history",
                     "--output",
@@ -2847,7 +2855,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.events.improvement_policy",
+                "foundry.events.improvement_policy",
                 "Recommend Event Improvement Policy",
                 "Return read-only improvement recommendations derived from normalized event observability signals such as repeated execution, duration, retries, waits and context pressure.",
                 object_schema(
@@ -2881,9 +2889,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.event_improvement_policy.v1",
+                "foundry.event_improvement_policy.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "improvement-policy",
                     "--output",
@@ -2892,9 +2900,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.events.ingest",
+                "foundry.events.ingest",
                 "Ingest Inbound Event",
-                "Write an origin-agnostic inbound event to Forge's global event inbox without requiring an existing workflow.",
+                "Write an origin-agnostic inbound event to Foundry's global event inbox without requiring an existing workflow.",
                 object_schema(
                     &[
                         ("origin", "string", "event origin, for example telegram|api|cron"),
@@ -2904,9 +2912,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["origin", "action"],
                 ),
-                "forge.event_ingest.v1",
+                "foundry.event_ingest.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "ingest",
                     "--origin",
@@ -2921,9 +2929,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.events.inbox",
+                "foundry.events.inbox",
                 "List Inbound Event Inbox",
-                "List pending or routed inbound events from Forge's global event inbox.",
+                "List pending or routed inbound events from Foundry's global event inbox.",
                 object_schema(
                     &[
                         ("status", "string", "optional status filter"),
@@ -2932,14 +2940,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.event_inbox.v1",
-                &["forge", "events", "inbox", "--output", "json"],
+                "foundry.event_inbox.v1",
+                &["foundry", "events", "inbox", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.events.scan",
+                "foundry.events.scan",
                 "Scan Inbound Event Inbox",
-                "Route a bounded batch of pending inbound events through Forge's event engine, marking failed events with worker error evidence.",
+                "Route a bounded batch of pending inbound events through Foundry's event engine, marking failed events with worker error evidence.",
                 object_schema(
                     &[
                         ("status", "string", "event status to scan; defaults to pending"),
@@ -2949,9 +2957,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.event_worker.v1",
+                "foundry.event_worker.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "scan",
                     "--project-root",
@@ -2962,9 +2970,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.events.worker",
+                "foundry.events.worker",
                 "Run Inbound Event Worker Loop",
-                "Run a bounded configurable event worker loop over Forge's inbound inbox, using the same routing and failure evidence as events scan.",
+                "Run a bounded configurable event worker loop over Foundry's inbound inbox, using the same routing and failure evidence as events scan.",
                 object_schema(
                     &[
                         ("status", "string", "event status to scan; defaults to pending"),
@@ -2978,9 +2986,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.event_worker_loop.v1",
+                "foundry.event_worker_loop.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "worker",
                     "--project-root",
@@ -2993,7 +3001,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.events.service_plan",
+                "foundry.events.service_plan",
                 "Plan Managed Event Service",
                 "Create a plan-only managed service contract for an event worker or webhook ingress, including command, lease, backoff, health and shutdown policy with global timeline audit.",
                 object_schema(
@@ -3020,9 +3028,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["kind"],
                 ),
-                "forge.event_service_plan.v1",
+                "foundry.event_service_plan.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "service-plan",
                     "--kind",
@@ -3033,7 +3041,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.events.service_run",
+                "foundry.events.service_run",
                 "Run Managed Event Service",
                 "Acquire a persistent event-service lease, execute a bounded worker or webhook ingress service, persist service health and write a global timeline audit.",
                 object_schema(
@@ -3064,9 +3072,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.event_service_run.v1",
+                "foundry.event_service_run.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "service-run",
                     "--kind",
@@ -3077,7 +3085,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.events.service_supervise",
+                "foundry.events.service_supervise",
                 "Supervise Managed Event Service",
                 "Run a bounded supervisor loop over managed event service runs, applying executable backoff, cooperative stop-file shutdown, aggregate health and global timeline audit.",
                 object_schema(
@@ -3115,9 +3123,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.event_service_supervisor.v1",
+                "foundry.event_service_supervisor.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "service-supervise",
                     "--kind",
@@ -3130,9 +3138,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.events.runtime_reconcile",
+                "foundry.events.runtime_reconcile",
                 "Reconcile Event Runtime",
-                "Inspect Forge's workflow runtime registry, inbound inbox and event service leases, then recommend or optionally execute a bounded event worker supervisor.",
+                "Inspect Foundry's workflow runtime registry, inbound inbox and event service leases, then recommend or optionally execute a bounded event worker supervisor.",
                 object_schema(
                     &[
                         ("project_root", "string", "project root for context/addons"),
@@ -3155,9 +3163,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.event_runtime_reconcile.v1",
+                "foundry.event_runtime_reconcile.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "runtime-reconcile",
                     "--project-root",
@@ -3168,7 +3176,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.events.runtime_daemon",
+                "foundry.events.runtime_daemon",
                 "Run Event Runtime Daemon",
                 "Run a bounded runtime reconciliation daemon with its own event_services lease, heartbeat, cooperative stop-file shutdown and global timeline audit.",
                 object_schema(
@@ -3199,9 +3207,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.event_runtime_daemon.v1",
+                "foundry.event_runtime_daemon.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "runtime-daemon",
                     "--project-root",
@@ -3212,7 +3220,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.events.services",
+                "foundry.events.services",
                 "List Event Services",
                 "List persisted event service records with status, lease, heartbeat, health and latest data.",
                 object_schema(
@@ -3224,9 +3232,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.event_services.v1",
+                "foundry.event_services.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "services",
                     "--project-root",
@@ -3237,7 +3245,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.events.services_recover",
+                "foundry.events.services_recover",
                 "Recover Stale Event Services",
                 "Mark running event service records with expired leases as stale while preserving their latest health and recovery evidence.",
                 object_schema(
@@ -3249,9 +3257,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.event_services_recovery.v1",
+                "foundry.event_services_recovery.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "services-recover",
                     "--output",
@@ -3260,7 +3268,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.events.adapters",
+                "foundry.events.adapters",
                 "List Event Adapters",
                 "Return declarative Addon event adapters plus Event Extension triggers, listeners and channels by Addon, transport or direction so agents can discover ingress/egress contracts without channel-specific code.",
                 object_schema(
@@ -3271,14 +3279,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &[],
                 ),
-                "forge.addon_event_adapters.v1",
+                "foundry.addon_event_adapters.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "adapters",
                     "--transport",
@@ -3289,7 +3297,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.events.emit",
+                "foundry.events.emit",
                 "Emit Egress Event",
                 "Send a typed outbound event through a declared Addon egress adapter after direction, action, event_type, permission and endpoint allowlist checks.",
                 object_schema(
@@ -3298,7 +3306,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("adapter_id", "string", "event adapter id"),
                         ("event_type", "string", "declared event type to emit"),
                         ("action", "string", "declared outbound action"),
-                        ("origin", "string", "optional origin; defaults to forge"),
+                        ("origin", "string", "optional origin; defaults to foundry"),
                         ("payload", "object", "event payload object"),
                         ("dry_run", "boolean", "validate and build the request without sending"),
                         (
@@ -3309,14 +3317,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &["adapter_id", "event_type", "action"],
                 ),
-                "forge.event_egress_emit.v1",
+                "foundry.event_egress_emit.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "emit",
                     "--adapter",
@@ -3331,9 +3339,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.events.route",
+                "foundry.events.route",
                 "Route Inbound Event",
-                "Route a pending inbound event through Forge's event engine with declared Addon adapter policy checks for origin, action, schema and permission gate before start/continue/modify/pause/resume/complete.",
+                "Route a pending inbound event through Foundry's event engine with declared Addon adapter policy checks for origin, action, schema and permission gate before start/continue/modify/pause/resume/complete.",
                 object_schema(
                     &[
                         ("event_id", "string", "inbound event id"),
@@ -3341,9 +3349,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["event_id"],
                 ),
-                "forge.event_route.v1",
+                "foundry.event_route.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "route",
                     "--event",
@@ -3354,9 +3362,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.events.dispatch_activations",
+                "foundry.events.dispatch_activations",
                 "Dispatch Inbound Event Activations",
-                "Route an inbound event if needed, then enqueue dispatch-ready Addon Event Extension workflow activations into Forge's runtime contract dispatch ledger without executing handlers inline.",
+                "Route an inbound event if needed, then enqueue dispatch-ready Addon Event Extension workflow activations into Foundry's runtime contract dispatch ledger without executing handlers inline.",
                 object_schema(
                     &[
                         ("event_id", "string", "inbound event id"),
@@ -3365,9 +3373,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["event_id"],
                 ),
-                "forge.event_activation_dispatch.v1",
+                "foundry.event_activation_dispatch.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "events",
                     "dispatch-activations",
                     "--event",
@@ -3378,7 +3386,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.cost.ledger",
+                "foundry.cost.ledger",
                 "Inspect Cost Ledger",
                 "Return estimated task cost and observed event cost grouped by workflow, node, tenant and detected Addon source.",
                 object_schema(
@@ -3395,12 +3403,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.cost_ledger.v1",
-                &["forge", "cost", "ledger", "--output", "json"],
+                "foundry.cost_ledger.v1",
+                &["foundry", "cost", "ledger", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.cost.materialize",
+                "foundry.cost.materialize",
                 "Materialize Cost Ledger Index",
                 "Write a normalized cost ledger index from planned task costs and observed event costs, then return the persisted rows.",
                 object_schema(
@@ -3420,12 +3428,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.cost_ledger_index.v1",
-                &["forge", "cost", "materialize", "--output", "json"],
+                "foundry.cost_ledger_index.v1",
+                &["foundry", "cost", "materialize", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.cost.incremental",
+                "foundry.cost.incremental",
                 "Incremental Cost Ledger Materialization",
                 "Scan global events after a cursor, deduplicate affected workflows and materialize cost rows only for those workflows.",
                 object_schema(
@@ -3445,12 +3453,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.cost_ledger_incremental.v1",
-                &["forge", "cost", "incremental", "--output", "json"],
+                "foundry.cost_ledger_incremental.v1",
+                &["foundry", "cost", "incremental", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.cost.history",
+                "foundry.cost.history",
                 "List Cost Ledger History",
                 "Read time-bucketed cost rollups from the normalized cost ledger index.",
                 object_schema(
@@ -3472,12 +3480,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.cost_ledger_history.v1",
-                &["forge", "cost", "history", "--output", "json"],
+                "foundry.cost_ledger_history.v1",
+                &["foundry", "cost", "history", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.cost.maintain",
+                "foundry.cost.maintain",
                 "Maintain Cost Ledger",
                 "Materialize the normalized cost ledger index and immediately return a time-bucketed rollup plus plan-only retention policy for scheduled Cost OS backfill.",
                 object_schema(
@@ -3500,12 +3508,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.cost_ledger_maintenance.v1",
-                &["forge", "cost", "maintain", "--output", "json"],
+                "foundry.cost_ledger_maintenance.v1",
+                &["foundry", "cost", "maintain", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.cost.daemon",
+                "foundry.cost.daemon",
                 "Run Cost Ledger Daemon",
                 "Run bounded dedicated Cost OS maintenance cycles, recording each cycle in the global event timeline for operational observability.",
                 object_schema(
@@ -3532,12 +3540,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.cost_ledger_daemon.v1",
-                &["forge", "cost", "daemon", "--output", "json"],
+                "foundry.cost_ledger_daemon.v1",
+                &["foundry", "cost", "daemon", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.cost.retention",
+                "foundry.cost.retention",
                 "Apply Cost Ledger Retention",
                 "Plan or execute approval-gated physical deletion of stale normalized cost ledger rows after a retention window.",
                 object_schema(
@@ -3563,12 +3571,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.cost_ledger_retention.v1",
-                &["forge", "cost", "retention", "--output", "json"],
+                "foundry.cost_ledger_retention.v1",
+                &["foundry", "cost", "retention", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.improve.candidates",
+                "foundry.improve.candidates",
                 "Rank Improvement Candidates",
                 "Rank live or degraded workflows using runs, heartbeats, workflow events, outcome evidence, parallelization opportunities and avoidable AI-cost signals.",
                 object_schema(
@@ -3583,12 +3591,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.orchestrator_improvement_candidates.v1",
-                &["forge", "improve", "candidates", "--output", "json"],
+                "foundry.orchestrator_improvement_candidates.v1",
+                &["foundry", "improve", "candidates", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.improve.apply_event_policy",
+                "foundry.improve.apply_event_policy",
                 "Apply Event Improvement Policy",
                 "Plan or apply a selected event-improvement recommendation through a governed workflow revision with rollback details, equivalence gate and no autopromotion.",
                 object_schema(
@@ -3602,9 +3610,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["workflow_id"],
                 ),
-                "forge.improve.event_policy_application.v1",
+                "foundry.improve.event_policy_application.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "improve",
                     "apply-event-policy",
                     "--workflow",
@@ -3615,7 +3623,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.improve.benchmark_event_policy",
+                "foundry.improve.benchmark_event_policy",
                 "Benchmark Event Improvement Policy",
                 "Validate the latest applied event-improvement policy against current workflow state, rollback readiness and validation evidence without auto-promoting.",
                 object_schema(
@@ -3627,9 +3635,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["workflow_id"],
                 ),
-                "forge.improve.event_policy_benchmark.v1",
+                "foundry.improve.event_policy_benchmark.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "improve",
                     "benchmark-event-policy",
                     "--workflow",
@@ -3640,7 +3648,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, false),
             ),
             tool(
-                "forge.improve.promote_event_policy",
+                "foundry.improve.promote_event_policy",
                 "Promote Event Improvement Policy",
                 "Accept a validated event-policy benchmark through explicit human approval, recording a workflow revision and idempotent promotion event.",
                 object_schema(
@@ -3653,9 +3661,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["workflow_id", "approved_by"],
                 ),
-                "forge.improve.event_policy_promotion.v1",
+                "foundry.improve.event_policy_promotion.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "improve",
                     "promote-event-policy",
                     "--workflow",
@@ -3668,9 +3676,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.cli.create",
+                "foundry.cli.create",
                 "Create Workflow-backed CLI",
-                "Create a Forge-owned workflow for generating an agent-native CLI, MCP server, skill and Addon runtime contract from one workflow-backed command model.",
+                "Create a Foundry-owned workflow for generating an agent-native CLI, MCP server, skill and Addon runtime contract from one workflow-backed command model.",
                 object_schema(
                     &[
                         ("name", "string", "required CLI/app slug such as hubspot or stripe"),
@@ -3681,9 +3689,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["name"],
                 ),
-                "forge.cli_factory.creation_plan.v1",
+                "foundry.cli_factory.creation_plan.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "cli",
                     "create",
                     "--name",
@@ -3696,15 +3704,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.interactive.home",
+                "foundry.interactive.home",
                 "Inspect Interactive Home",
-                "Return the Forge interactive home dashboard for agent-visible runtime state without launching a TTY; project_root lets agents inspect project-scoped panels without relying on cwd.",
+                "Return the Foundry interactive home dashboard for agent-visible runtime state without launching a TTY; project_root lets agents inspect project-scoped panels without relying on cwd.",
                 object_schema(&[
                     ("project_root", "string", "optional project root for project-scoped dashboard panels"),
                 ], &[]),
-                "forge.interactive.home.v1",
+                "foundry.interactive.home.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "interactive",
                     "home",
                     "--project-root",
@@ -3715,13 +3723,13 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.guided_cockpit",
+                "foundry.interactive.guided_cockpit",
                 "Inspect Guided Cockpit",
-                "Return the Forge 0.5 guided cockpit that opens by default from `forge`, including panes, eight operator steps, previews, confirmations and rollback hints without mutating state.",
+                "Return the Foundry 0.5 guided cockpit that opens by default from `foundry`, including panes, eight operator steps, previews, confirmations and rollback hints without mutating state.",
                 object_schema(&[], &[]),
-                "forge.interactive.guided_cockpit.v1",
+                "foundry.interactive.guided_cockpit.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "interactive",
                     "guided-cockpit",
                     "--output",
@@ -3730,15 +3738,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.ui_composition",
+                "foundry.interactive.ui_composition",
                 "Inspect UI Composition",
-                "Return the dedicated Forge UI composition contract with ordered regions, Core widgets, Addon widgets, renderer families and commands for TUI, web and agent dashboards without loading the full home dashboard.",
+                "Return the dedicated Foundry UI composition contract with ordered regions, Core widgets, Addon widgets, renderer families and commands for TUI, web and agent dashboards without loading the full home dashboard.",
                 object_schema(&[
                     ("project_root", "string", "optional project root for project-scoped dashboard panels"),
                 ], &[]),
-                "forge.interactive.ui_composition.v1",
+                "foundry.interactive.ui_composition.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "interactive",
                     "ui-composition",
                     "--project-root",
@@ -3749,22 +3757,22 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.readiness",
+                "foundry.interactive.readiness",
                 "Inspect Interactive Readiness",
-                "Return Forge interactive readiness for executors, brains, shells, Forge-controlled surfaces and harness diagnostics without loading the full home dashboard.",
+                "Return Foundry interactive readiness for executors, brains, shells, Foundry-controlled surfaces and harness diagnostics without loading the full home dashboard.",
                 object_schema(&[], &[]),
-                "forge.interactive.readiness.v1",
-                &["forge", "interactive", "readiness", "--output", "json"],
+                "foundry.interactive.readiness.v1",
+                &["foundry", "interactive", "readiness", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.operational_cockpit",
+                "foundry.interactive.operational_cockpit",
                 "Inspect Interactive Operational Cockpit",
-                "Return the dedicated Forge operational cockpit for attention, handoffs, human waits, brain readiness, cost and observability without loading the full home dashboard.",
+                "Return the dedicated Foundry operational cockpit for attention, handoffs, human waits, brain readiness, cost and observability without loading the full home dashboard.",
                 object_schema(&[], &[]),
-                "forge.interactive.operational_cockpit.v1",
+                "foundry.interactive.operational_cockpit.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "interactive",
                     "operational-cockpit",
                     "--output",
@@ -3773,13 +3781,13 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.improvement_loop",
+                "foundry.interactive.improvement_loop",
                 "Inspect Interactive Improvement Loop",
-                "Return the Forge improvement loop panel with self-improvement candidates, log, cost, validation, context quality and outcome evidence before governed mutations.",
+                "Return the Foundry improvement loop panel with self-improvement candidates, log, cost, validation, context quality and outcome evidence before governed mutations.",
                 object_schema(&[], &[]),
-                "forge.interactive.improvement_loop.v1",
+                "foundry.interactive.improvement_loop.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "interactive",
                     "improvement-loop",
                     "--output",
@@ -3788,15 +3796,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.architecture",
+                "foundry.interactive.architecture",
                 "Inspect Interactive Architecture Compass",
-                "Return the Forge architecture compass with source-of-truth tracks, project operating context, implementation evidence, open gaps, dependencies, reuse opportunities and benchmark boundaries.",
+                "Return the Foundry architecture compass with source-of-truth tracks, project operating context, implementation evidence, open gaps, dependencies, reuse opportunities and benchmark boundaries.",
                 object_schema(&[
-                    ("project_root", "string", "optional project root whose .forge operating context should guide the architecture compass"),
+                    ("project_root", "string", "optional project root whose .foundry operating context should guide the architecture compass"),
                 ], &[]),
-                "forge.interactive.architecture_compass.v1",
+                "foundry.interactive.architecture_compass.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "interactive",
                     "architecture",
                     "--project-root",
@@ -3807,16 +3815,16 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.release_gates",
+                "foundry.interactive.release_gates",
                 "Inspect Interactive Release Gates",
-                "Return the Forge interactive release-gates panel for one milestone, including promotion decision, blocked capabilities, required evidence, current evidence, missing project manifests, secret-free manifest templates and next commands without mutating state.",
+                "Return the Foundry interactive release-gates panel for one milestone, including promotion decision, blocked capabilities, required evidence, current evidence, missing project manifests, secret-free manifest templates and next commands without mutating state.",
                 object_schema(&[
                     ("version", "string", "milestone version, currently 0.5"),
-                    ("project_root", "string", "optional project root whose .forge manifests should be inspected for evidence planning"),
+                    ("project_root", "string", "optional project root whose .foundry manifests should be inspected for evidence planning"),
                 ], &[]),
-                "forge.interactive.release_gates.v1",
+                "foundry.interactive.release_gates.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "interactive",
                     "release-gates",
                     "--version",
@@ -3829,64 +3837,64 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.harness",
+                "foundry.interactive.harness",
                 "Inspect Interactive Harness Center",
-                "Return the Forge interactive harness center for one brain CLI, combining mode, doctor, shim status, wrap-plan, headroom plan, session lifecycle plan and token-headroom preview without installing shims or launching child processes.",
+                "Return the Foundry interactive harness center for one brain CLI, combining mode, doctor, shim status, wrap-plan, headroom plan, session lifecycle plan and token-headroom preview without installing shims or launching child processes.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
-                    ("shim_dir", "string", "directory where Forge-owned shims should live"),
-                    ("forge_first", "boolean", "simulate an explicit Forge-first CLI flag"),
+                    ("shim_dir", "string", "directory where Foundry-owned shims should live"),
+                    ("foundry_first", "boolean", "simulate an explicit Foundry-first CLI flag"),
                     ("observe_only", "boolean", "simulate an observe-only CLI override"),
-                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("project_root", "string", "optional project root containing .foundry/harness.json"),
                     ("workflow_id", "string", "optional workflow lineage"),
                     ("task_id", "string", "optional task/node lineage"),
                     ("run_id", "string", "optional async run lineage"),
                     ("context_budget", "integer", "context byte budget"),
                     ("token_headroom", "boolean", "enable token-headroom readiness"),
                 ], &[]),
-                "forge.interactive.harness.v1",
-                &["forge", "interactive", "harness", "--output", "json"],
+                "foundry.interactive.harness.v1",
+                &["foundry", "interactive", "harness", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.sessions",
+                "foundry.interactive.sessions",
                 "Inspect Interactive Session Center",
-                "Return the Forge interactive session center with provider/session readiness, lifecycle state, operation plans, shell history commands and next lifecycle controls without opening or attaching shells.",
+                "Return the Foundry interactive session center with provider/session readiness, lifecycle state, operation plans, shell history commands and next lifecycle controls without opening or attaching shells.",
                 object_schema(&[
                     ("provider_id", "string", "optional provider filter such as codex, opencode, gemini or claude"),
                     ("lifecycle_state", "string", "optional lifecycle filter such as opened, attached, closed, failed or abandoned"),
                     ("readiness", "string", "optional readiness filter such as ready, native_cli_available or needs_sync_or_authorization"),
                 ], &[]),
-                "forge.interactive.sessions.v1",
-                &["forge", "interactive", "sessions", "--output", "json"],
+                "foundry.interactive.sessions.v1",
+                &["foundry", "interactive", "sessions", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.command_palette",
+                "foundry.interactive.command_palette",
                 "Inspect Interactive Command Palette",
-                "Return contextual Forge operator commands grouped by panel, including workflow, patch, Addon, permission, harness and observability actions without mutating state.",
+                "Return contextual Foundry operator commands grouped by panel, including workflow, patch, Addon, permission, harness and observability actions without mutating state.",
                 object_schema(&[
                     ("query", "string", "optional search query used to filter non-workflow command entries"),
-                    ("project_root", "string", "optional project root used to load project-scoped .forge/addons and addons directories"),
+                    ("project_root", "string", "optional project root used to load project-scoped .foundry/addons and addons directories"),
                 ], &[]),
-                "forge.interactive.command_palette.v1",
-                &["forge", "interactive", "command-palette", "--output", "json"],
+                "foundry.interactive.command_palette.v1",
+                &["foundry", "interactive", "command-palette", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.action_registry",
+                "foundry.interactive.action_registry",
                 "Inspect Interactive Action Registry",
                 "Return a read-only action registry derived from the command palette for TUI, web and agent clients, including readiness counts, Addon lineage and operation plans without mutating state.",
                 object_schema(&[
                     ("query", "string", "optional search query used to filter non-workflow actions"),
-                    ("project_root", "string", "optional project root used to load project-scoped .forge/addons and addons directories"),
+                    ("project_root", "string", "optional project root used to load project-scoped .foundry/addons and addons directories"),
                 ], &[]),
-                "forge.interactive.action_registry.v1",
-                &["forge", "interactive", "action-registry", "--output", "json"],
+                "foundry.interactive.action_registry.v1",
+                &["foundry", "interactive", "action-registry", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.action_invocation",
+                "foundry.interactive.action_invocation",
                 "Plan Interactive Action Invocation",
                 "Resolve one action id from the interactive action registry into a ready command or diagnostic-only operation plan without executing it.",
                 object_schema(&[
@@ -3894,14 +3902,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("action", "string", "alias for action_id"),
                     ("project_root", "string", "optional project root used to resolve project-scoped Addon actions"),
                 ], &[]),
-                "forge.interactive.action_invocation.v1",
-                &["forge", "interactive", "action-invocation", "--action", "<action-id>", "--output", "json"],
+                "foundry.interactive.action_invocation.v1",
+                &["foundry", "interactive", "action-invocation", "--action", "<action-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.action_dispatch",
+                "foundry.interactive.action_dispatch",
                 "Dispatch Interactive Action Hooks",
-                "Resolve one action id from the interactive action registry, start Forge workflow hooks through the runtime and route CLI brain hooks through Forge harness plans without executing external CLIs directly.",
+                "Resolve one action id from the interactive action registry, start Foundry workflow hooks through the runtime and route CLI brain hooks through Foundry harness plans without executing external CLIs directly.",
                 object_schema(&[
                     ("action_id", "string", "action id to dispatch, such as crm.lead.add_tag"),
                     ("action", "string", "alias for action_id"),
@@ -3909,83 +3917,83 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("origin", "string", "dispatch origin; defaults to mcp"),
                     ("payload", "object", "structured hook payload; payload.goal becomes the workflow goal when present; requested_hook_id/requested_hook_ids and requested_hook_tag/requested_hook_tags narrow dispatch to matching hooks"),
                 ], &[]),
-                "forge.interactive.action_dispatch.v1",
-                &["forge", "interactive", "action-dispatch", "--action", "<action-id>", "--payload", "<json>", "--output", "json"],
+                "foundry.interactive.action_dispatch.v1",
+                &["foundry", "interactive", "action-dispatch", "--action", "<action-id>", "--payload", "<json>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.interactive.autocomplete",
+                "foundry.interactive.autocomplete",
                 "Inspect Interactive Autocomplete",
                 "Return read-only slash-command and command-palette suggestions for a partial operator input without launching a TTY.",
                 object_schema(&[
                     ("input", "string", "partial operator input such as /patch r or patch"),
                     ("project_root", "string", "optional project root used to suggest project-scoped Addon actions"),
                 ], &["input"]),
-                "forge.interactive.autocomplete.v1",
-                &["forge", "interactive", "autocomplete", "--input", "<input>", "--output", "json"],
+                "foundry.interactive.autocomplete.v1",
+                &["foundry", "interactive", "autocomplete", "--input", "<input>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.patch_workbench",
+                "foundry.interactive.patch_workbench",
                 "Inspect Interactive Patch Workbench",
-                "Return the Forge interactive file-editing and diff-review workbench with Git status, inline diff preview, multi-file review queue, per-file action hints, edit intake required inputs, an ordered operation plan, diff checks, approval-flow gates and permission-gated patch lifecycle commands without mutating files.",
+                "Return the Foundry interactive file-editing and diff-review workbench with Git status, inline diff preview, multi-file review queue, per-file action hints, edit intake required inputs, an ordered operation plan, diff checks, approval-flow gates and permission-gated patch lifecycle commands without mutating files.",
                 object_schema(&[], &[]),
-                "forge.interactive.patch_workbench.v1",
-                &["forge", "interactive", "patch-workbench", "--output", "json"],
+                "foundry.interactive.patch_workbench.v1",
+                &["foundry", "interactive", "patch-workbench", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.permissions",
+                "foundry.interactive.permissions",
                 "Inspect Interactive Permissions",
-                "Return the Forge interactive permission center with tenant memberships, Addon permission authorizations and pending human approvals without mutating state.",
+                "Return the Foundry interactive permission center with tenant memberships, Addon permission authorizations and pending human approvals without mutating state.",
                 object_schema(&[], &[]),
-                "forge.interactive.permissions.v1",
-                &["forge", "interactive", "permissions", "--output", "json"],
+                "foundry.interactive.permissions.v1",
+                &["foundry", "interactive", "permissions", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.addon_capabilities",
+                "foundry.interactive.addon_capabilities",
                 "Inspect Interactive Addon Capabilities",
-                "Return the Forge interactive Addon capabilities surface with Addon lifecycle counts, capability registry totals, permission gates, runtime contracts, TUI views and dispatch state without mutating state.",
+                "Return the Foundry interactive Addon capabilities surface with Addon lifecycle counts, capability registry totals, permission gates, runtime contracts, TUI views and dispatch state without mutating state.",
                 object_schema(&[
-                    ("project_root", "string", "optional project root used to load project-scoped .forge/addons"),
+                    ("project_root", "string", "optional project root used to load project-scoped .foundry/addons"),
                 ], &[]),
-                "forge.interactive.addon_capability.v1",
-                &["forge", "interactive", "addon-capabilities", "--output", "json"],
+                "foundry.interactive.addon_capability.v1",
+                &["foundry", "interactive", "addon-capabilities", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.core_boundary",
+                "foundry.interactive.core_boundary",
                 "Inspect Core Boundary",
-                "Return the Forge Core boundary audit proving universal Core responsibilities, Addon-owned domain capabilities, compatibility executors and goal3 acceptance gates without mutating state.",
+                "Return the Foundry Core boundary audit proving universal Core responsibilities, Addon-owned domain capabilities, compatibility executors and goal3 acceptance gates without mutating state.",
                 object_schema(&[
-                    ("project_root", "string", "optional project root used to load project-scoped .forge/addons"),
+                    ("project_root", "string", "optional project root used to load project-scoped .foundry/addons"),
                 ], &[]),
-                "forge.interactive.core_boundary.v1",
-                &["forge", "interactive", "core-boundary", "--output", "json"],
+                "foundry.interactive.core_boundary.v1",
+                &["foundry", "interactive", "core-boundary", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.identity",
+                "foundry.interactive.identity",
                 "Inspect Interactive Identity",
-                "Return the Forge interactive identity center with operating context, registry records, channel aliases, memberships and tenant audit without mutating state.",
+                "Return the Foundry interactive identity center with operating context, registry records, channel aliases, memberships and tenant audit without mutating state.",
                 object_schema(&[
-                    ("project_root", "string", "optional project root used to load .forge/operating-context"),
+                    ("project_root", "string", "optional project root used to load .foundry/operating-context"),
                 ], &[]),
-                "forge.interactive.identity.v1",
-                &["forge", "interactive", "identity", "--output", "json"],
+                "foundry.interactive.identity.v1",
+                &["foundry", "interactive", "identity", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.operating_context",
+                "foundry.interactive.operating_context",
                 "Inspect Interactive Operating Context",
-                "Return the unified Forge operating-context panel with tenant identity, memory policy, personality routing, brand/design context, prompt-packet gates, company-work checklist and handoff readiness without mutating state.",
+                "Return the unified Foundry operating-context panel with tenant identity, memory policy, personality routing, brand/design context, prompt-packet gates, company-work checklist and handoff readiness without mutating state.",
                 object_schema(&[
-                    ("project_root", "string", "optional project root used to load .forge/operating-context and memory governance"),
+                    ("project_root", "string", "optional project root used to load .foundry/operating-context and memory governance"),
                 ], &[]),
-                "forge.interactive.operating_context.v1",
+                "foundry.interactive.operating_context.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "interactive",
                     "operating-context",
                     "--project-root",
@@ -3996,22 +4004,22 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.task_board",
+                "foundry.interactive.task_board",
                 "Inspect Interactive Task Board",
-                "Return the Forge interactive task-board lanes with ready handoffs, checkpoint resume candidates, pending human waits, artifacts and next actions without launching a TTY.",
+                "Return the Foundry interactive task-board lanes with ready handoffs, checkpoint resume candidates, pending human waits, artifacts and next actions without launching a TTY.",
                 object_schema(&[], &[]),
-                "forge.interactive.task_board.v1",
-                &["forge", "interactive", "task-board", "--output", "json"],
+                "foundry.interactive.task_board.v1",
+                &["foundry", "interactive", "task-board", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.workflow_mutation",
+                "foundry.interactive.workflow_mutation",
                 "Inspect Interactive Workflow Mutation Planner",
-                "Return the Forge workflow mutation and replanning surface with DAG, task-board, modifier lane, handoffs, costs, proposals and safe mutation commands without applying mutations.",
+                "Return the Foundry workflow mutation and replanning surface with DAG, task-board, modifier lane, handoffs, costs, proposals and safe mutation commands without applying mutations.",
                 object_schema(&[], &[]),
-                "forge.interactive.workflow_mutation.v1",
+                "foundry.interactive.workflow_mutation.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "interactive",
                     "workflow-mutation",
                     "--output",
@@ -4020,15 +4028,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.replacement_cli",
+                "foundry.interactive.replacement_cli",
                 "Inspect Replacement CLI Readiness",
-                "Return the Forge replacement-grade CLI readiness panel across TUI home, workflow operations, patch UX, action discovery, harness/session controls, observability, approvals and milestone evidence without launching a TTY or mutating state; project_root lets agents inspect project-scoped harness and release-gate state without relying on cwd.",
+                "Return the Foundry replacement-grade CLI readiness panel across TUI home, workflow operations, patch UX, action discovery, harness/session controls, observability, approvals and milestone evidence without launching a TTY or mutating state; project_root lets agents inspect project-scoped harness and release-gate state without relying on cwd.",
                 object_schema(&[
                     ("project_root", "string", "optional project root for project-scoped replacement CLI panels"),
                 ], &[]),
-                "forge.interactive.replacement_cli.v1",
+                "foundry.interactive.replacement_cli.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "interactive",
                     "replacement-cli",
                     "--project-root",
@@ -4039,16 +4047,16 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.multimodal_runtime",
+                "foundry.interactive.multimodal_runtime",
                 "Inspect Multimodal Runtime Readiness",
                 "Return the Addon-owned multimodal runtime readiness panel with feature-flag state, guard result, benchmark templates, demo plans and production evidence blockers without installing models, executing models, accessing devices or mutating workflows.",
                 object_schema(&[
-                    ("project_root", "string", "optional project root used to inspect .forge/multimodal.json and .forge/multimodal-runtimes.json"),
+                    ("project_root", "string", "optional project root used to inspect .foundry/multimodal.json and .foundry/multimodal-runtimes.json"),
                     ("enable_experimental", "boolean", "optional explicit experimental feature flag for inspection only"),
                 ], &[]),
-                "forge.interactive.multimodal_runtime.v1",
+                "foundry.interactive.multimodal_runtime.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "interactive",
                     "multimodal-runtime",
                     "--project-root",
@@ -4059,60 +4067,60 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.workflow_sidebar",
+                "foundry.interactive.workflow_sidebar",
                 "Inspect Interactive Workflow Sidebar",
-                "Return the Forge interactive workflow sidebar with grouped workflow navigation, selected workflow state, runtime/schedule summaries and drill-down commands without launching a TTY.",
+                "Return the Foundry interactive workflow sidebar with grouped workflow navigation, selected workflow state, runtime/schedule summaries and drill-down commands without launching a TTY.",
                 object_schema(&[], &[]),
-                "forge.interactive.workflow_sidebar.v1",
-                &["forge", "interactive", "workflow-sidebar", "--output", "json"],
+                "foundry.interactive.workflow_sidebar.v1",
+                &["foundry", "interactive", "workflow-sidebar", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.artifacts",
+                "foundry.interactive.artifacts",
                 "Inspect Interactive Artifacts",
-                "Return the Forge interactive artifact evidence panel with artifact-bearing workflows, persistent paths, checksums, byte counts, lineage summaries and drill-down commands without launching a TTY.",
+                "Return the Foundry interactive artifact evidence panel with artifact-bearing workflows, persistent paths, checksums, byte counts, lineage summaries and drill-down commands without launching a TTY.",
                 object_schema(&[], &[]),
-                "forge.interactive.artifacts.v1",
-                &["forge", "interactive", "artifacts", "--output", "json"],
+                "foundry.interactive.artifacts.v1",
+                &["foundry", "interactive", "artifacts", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.token_usage",
+                "foundry.interactive.token_usage",
                 "Inspect Interactive Token Usage",
-                "Return the Forge interactive token/headroom usage panel with persisted headroom receipts, saved-token totals, context-compression buckets, retrieval commands and harness drill-downs without launching a TTY.",
+                "Return the Foundry interactive token/headroom usage panel with persisted headroom receipts, saved-token totals, context-compression buckets, retrieval commands and harness drill-downs without launching a TTY.",
                 object_schema(&[], &[]),
-                "forge.interactive.token_usage.v1",
-                &["forge", "interactive", "token-usage", "--output", "json"],
+                "foundry.interactive.token_usage.v1",
+                &["foundry", "interactive", "token-usage", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.workflow_dag",
+                "foundry.interactive.workflow_dag",
                 "Inspect Interactive Workflow DAG",
-                "Return the Forge interactive workflow DAG with dependency nodes, edges, readiness, human waits and drill-down commands without launching a TTY.",
+                "Return the Foundry interactive workflow DAG with dependency nodes, edges, readiness, human waits and drill-down commands without launching a TTY.",
                 object_schema(&[], &[]),
-                "forge.interactive.workflow_dag.v1",
-                &["forge", "interactive", "workflow-dag", "--output", "json"],
+                "foundry.interactive.workflow_dag.v1",
+                &["foundry", "interactive", "workflow-dag", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.schedules",
+                "foundry.interactive.schedules",
                 "Inspect Interactive Schedules",
-                "Return Forge interactive schedules with due workflows, scheduler worker capacity, deterministic assignment queues, sleep/backpressure/cancellation state and observed scheduled workflow rows without mutating state.",
+                "Return Foundry interactive schedules with due workflows, scheduler worker capacity, deterministic assignment queues, sleep/backpressure/cancellation state and observed scheduled workflow rows without mutating state.",
                 object_schema(&[], &[]),
-                "forge.interactive.schedules.v1",
-                &["forge", "interactive", "schedules", "--output", "json"],
+                "foundry.interactive.schedules.v1",
+                &["foundry", "interactive", "schedules", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.context_memory",
+                "foundry.interactive.context_memory",
                 "Inspect Interactive Context Memory",
-                "Return Forge interactive context and memory governance with handoff readiness, context routing quality, project memory policy, governed memory/context commands and next actions without mutating state.",
+                "Return Foundry interactive context and memory governance with handoff readiness, context routing quality, project memory policy, governed memory/context commands and next actions without mutating state.",
                 object_schema(&[
-                    ("project_root", "string", "optional project root containing .forge/memory-governance.json"),
+                    ("project_root", "string", "optional project root containing .foundry/memory-governance.json"),
                 ], &[]),
-                "forge.interactive.context_memory.v1",
+                "foundry.interactive.context_memory.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "interactive",
                     "context-memory",
                     "--project-root",
@@ -4123,55 +4131,55 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.structured_logs",
+                "foundry.interactive.structured_logs",
                 "Inspect Interactive Structured Logs",
-                "Return recent Forge structured event logs with sequence, workflow, category, severity, origin, correlation, observability and payload preview without launching a TTY.",
+                "Return recent Foundry structured event logs with sequence, workflow, category, severity, origin, correlation, observability and payload preview without launching a TTY.",
                 object_schema(&[], &[]),
-                "forge.interactive.structured_logs.v1",
-                &["forge", "interactive", "structured-logs", "--output", "json"],
+                "foundry.interactive.structured_logs.v1",
+                &["foundry", "interactive", "structured-logs", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.brain_router",
+                "foundry.brain_router",
                 "Inspect Brain Router",
-                "Return Forge-owned execution-brain routing boundaries so agents know Codex/OpenCode/Gemini/Claude are replaceable execution brains, while Forge controls memory, skills, MCP routing, context, shells, permissions and validation.",
+                "Return Foundry-owned execution-brain routing boundaries so agents know Codex/OpenCode/Gemini/Claude are replaceable execution brains, while Foundry controls memory, skills, MCP routing, context, shells, permissions and validation.",
                 object_schema(&[], &[]),
-                "forge.brain_router.v1",
-                &["forge", "brains", "--output", "json"],
+                "foundry.brain_router.v1",
+                &["foundry", "brains", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.sessions",
+                "foundry.sessions",
                 "Inspect Brain Sessions",
-                "Return Forge-owned provider/session management state for execution brains, shell specs, operation plans and recorded shell launch events without starting child processes, optionally filtered by provider, lifecycle state or readiness.",
+                "Return Foundry-owned provider/session management state for execution brains, shell specs, operation plans and recorded shell launch events without starting child processes, optionally filtered by provider, lifecycle state or readiness.",
                 object_schema(
                     &[
-                        ("provider_id", "string", "optional provider id such as codex, opencode, gemini, claude or forge"),
+                        ("provider_id", "string", "optional provider id such as codex, opencode, gemini, claude or foundry"),
                         ("lifecycle_state", "string", "optional lifecycle state filter such as untracked, opened, attached, detached, closed, failed or abandoned"),
                         ("readiness", "string", "optional readiness filter such as ready, native_cli_available or needs_sync_or_authorization"),
                     ],
                     &[],
                 ),
-                "forge.brain_sessions.v1",
-                &["forge", "sessions", "--output", "json"],
+                "foundry.brain_sessions.v1",
+                &["foundry", "sessions", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.session.history",
+                "foundry.session.history",
                 "Inspect Brain Session History",
-                "Return the Forge-owned chronological audit history for one brain shell session, including planned shell events, lifecycle transitions, current lifecycle policy and next commands without starting child processes.",
+                "Return the Foundry-owned chronological audit history for one brain shell session, including planned shell events, lifecycle transitions, current lifecycle policy and next commands without starting child processes.",
                 object_schema(
                     &[("session_id", "string", "required shell session id such as codex-shell")],
                     &["session_id"],
                 ),
-                "forge.brain_session_history.v1",
-                &["forge", "sessions", "history", "--session", "<session-id>", "--output", "json"],
+                "foundry.brain_session_history.v1",
+                &["foundry", "sessions", "history", "--session", "<session-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.session.lifecycle",
+                "foundry.session.lifecycle",
                 "Record Brain Session Lifecycle",
-                "Record an auditable Forge-owned lifecycle state for a known brain shell session without starting child processes, enforcing ordered transition policy and returning previous state, sequence and next lifecycle commands.",
+                "Record an auditable Foundry-owned lifecycle state for a known brain shell session without starting child processes, enforcing ordered transition policy and returning previous state, sequence and next lifecycle commands.",
                 object_schema(
                     &[
                         ("session_id", "string", "required shell session id such as codex-shell"),
@@ -4184,14 +4192,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["session_id", "state"],
                 ),
-                "forge.brain_session_lifecycle.v1",
-                &["forge", "sessions", "lifecycle", "--session", "<session-id>", "--state", "opened", "--output", "json"],
+                "foundry.brain_session_lifecycle.v1",
+                &["foundry", "sessions", "lifecycle", "--session", "<session-id>", "--state", "opened", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.shell.launch_plan",
+                "foundry.shell.launch_plan",
                 "Plan Brain Shell Launch",
-                "Return a plan-only Forge-controlled shell launch report for one execution brain or all shell sessions, including preflight checks and handoff safety gates without starting a child process.",
+                "Return a plan-only Foundry-controlled shell launch report for one execution brain or all shell sessions, including preflight checks and handoff safety gates without starting a child process.",
                 object_schema(
                     &[
                         ("executor", "string", "optional execution brain id such as codex|opencode|gemini|claude"),
@@ -4204,14 +4212,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.shell_launch_plan.v1",
-                &["forge", "shells", "--executor", "<executor>", "--output", "json"],
+                "foundry.shell_launch_plan.v1",
+                &["foundry", "shells", "--executor", "<executor>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.shell.record_plan",
+                "foundry.shell.record_plan",
                 "Record Brain Shell Launch Plan",
-                "Record a Forge-controlled shell launch plan in the global event ledger without starting a child process.",
+                "Record a Foundry-controlled shell launch plan in the global event ledger without starting a child process.",
                 object_schema(
                     &[
                         ("executor", "string", "optional execution brain id such as codex|opencode|gemini|claude"),
@@ -4225,21 +4233,21 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.shell_session_receipt.v1",
-                &["forge", "shells", "--record-session", "--executor", "<executor>", "--output", "json"],
+                "foundry.shell_session_receipt.v1",
+                &["foundry", "shells", "--record-session", "--executor", "<executor>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.addons.installed",
+                "foundry.addons.installed",
                 "List Installed Addons",
-                "List Addons persisted in Forge's SQLite Addon lifecycle registry.",
+                "List Addons persisted in Foundry's SQLite Addon lifecycle registry.",
                 object_schema(&[], &[]),
-                "forge.installed_addons.v1",
-                &["forge", "addons", "installed", "--output", "json"],
+                "foundry.installed_addons.v1",
+                &["foundry", "addons", "installed", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.capabilities",
+                "foundry.addons.capabilities",
                 "Inspect Addon Capability Index",
                 "Return the SQLite-materialized capability index for installed Addons, with optional addon, capability and lifecycle filters.",
                 object_schema(
@@ -4250,12 +4258,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.addon_capability_index.v1",
-                &["forge", "addons", "capabilities", "--output", "json"],
+                "foundry.addon_capability_index.v1",
+                &["foundry", "addons", "capabilities", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.observability",
+                "foundry.addons.observability",
                 "Inspect Addon Observability",
                 "Return a consolidated operational view of Addons, capabilities, dependencies, resource permissions, event flows, UI/views, runtime contracts and dispatch usage.",
                 object_schema(
@@ -4269,7 +4277,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                         (
                             "dispatch_limit",
@@ -4279,12 +4287,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.addon_observability.v1",
-                &["forge", "addons", "observability", "--output", "json"],
+                "foundry.addon_observability.v1",
+                &["foundry", "addons", "observability", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.permissions",
+                "foundry.addons.permissions",
                 "List Addon Permission Authorizations",
                 "List human approval records for Addon permissions that gate installed Addon enablement and capability exposure.",
                 object_schema(
@@ -4295,12 +4303,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.addon_permission_authorizations.v1",
-                &["forge", "addons", "permissions", "--output", "json"],
+                "foundry.addon_permission_authorizations.v1",
+                &["foundry", "addons", "permissions", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.authorize_permission",
+                "foundry.addons.authorize_permission",
                 "Authorize Addon Permission",
                 "Persist a human approval for an Addon permission before enabling high-risk or externally mutating Addons.",
                 object_schema(
@@ -4313,9 +4321,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["addon_id", "permission_id"],
                 ),
-                "forge.addon_permission_authorizations.v1",
+                "foundry.addon_permission_authorizations.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "authorize-permission",
                     "--addon",
@@ -4328,7 +4336,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.revoke_permission",
+                "foundry.addons.revoke_permission",
                 "Revoke Addon Permission",
                 "Revoke a previously approved Addon permission and remove its capabilities from the enabled capability index on the next sync.",
                 object_schema(
@@ -4340,9 +4348,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["addon_id", "permission_id"],
                 ),
-                "forge.addon_permission_authorizations.v1",
+                "foundry.addon_permission_authorizations.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "revoke-permission",
                     "--addon",
@@ -4355,32 +4363,32 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.catalog",
+                "foundry.addons.catalog",
                 "Inspect Addon Catalog",
-                "Return the Forge Core + Addons catalog, including universal core capabilities, project manifests and SQLite-installed addon manifests.",
+                "Return the Foundry Core + Addons catalog, including universal core capabilities, project manifests and SQLite-installed addon manifests.",
                 object_schema(
                     &[(
                         "addon_dirs",
                         "array",
-                        "optional addon manifest directories; defaults to .forge/addons",
+                        "optional addon manifest directories; defaults to .foundry/addons",
                     )],
                     &[],
                 ),
-                "forge.addon_catalog.v1",
-                &["forge", "addons", "catalog", "--output", "json"],
+                "foundry.addon_catalog.v1",
+                &["foundry", "addons", "catalog", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.resolve",
+                "foundry.addons.resolve",
                 "Resolve Goal Capabilities",
-                "Resolve a goal into required Forge capabilities, active Addons, workflow extensions and missing capability dependencies before planning.",
+                "Resolve a goal into required Foundry capabilities, active Addons, workflow extensions and missing capability dependencies before planning.",
                 object_schema(
                     &[
                         ("goal", "string", "goal text to resolve"),
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                         (
                             "registry_source",
@@ -4421,9 +4429,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["goal"],
                 ),
-                "forge.capability_resolution.v1",
+                "foundry.capability_resolution.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "resolve",
                     "--goal",
@@ -4436,7 +4444,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.contracts",
+                "foundry.addons.contracts",
                 "List Addon Runtime Contracts",
                 "Return declarative planning, replanning, validator, executor and handoff contracts registered by Addons.",
                 object_schema(
@@ -4452,14 +4460,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &[],
                 ),
-                "forge.addon_runtime_contracts.v1",
+                "foundry.addon_runtime_contracts.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "contracts",
                     "--type",
@@ -4470,7 +4478,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.planners",
+                "foundry.addons.planners",
                 "List Addon Planner Registrations",
                 "Return planning and replanning strategy registrations declared by Addons, including first-party builders and external runtime contracts.",
                 object_schema(
@@ -4486,17 +4494,17 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &[],
                 ),
-                "forge.addon_planner_registry.v1",
-                &["forge", "addons", "planners", "--output", "json"],
+                "foundry.addon_planner_registry.v1",
+                &["foundry", "addons", "planners", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.contract_policy",
+                "foundry.addons.contract_policy",
                 "Evaluate Addon Runtime Contract Policy",
                 "Evaluate whether Addon runtime contracts are ready for safe dispatch, including lifecycle, runtime, entrypoint and permission gate checks.",
                 object_schema(
@@ -4513,14 +4521,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &[],
                 ),
-                "forge.addon_runtime_contract_policy.v1",
+                "foundry.addon_runtime_contract_policy.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "contract-policy",
                     "--contract",
@@ -4531,7 +4539,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.dispatch_contract",
+                "foundry.addons.dispatch_contract",
                 "Queue Addon Runtime Contract Dispatch",
                 "Validate an Addon runtime contract policy and enqueue an auditable dispatch request for an external runtime worker.",
                 object_schema(
@@ -4544,14 +4552,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &["contract_id"],
                 ),
-                "forge.addon_runtime_contract_dispatch.v1",
+                "foundry.addon_runtime_contract_dispatch.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "dispatch-contract",
                     "--contract",
@@ -4562,7 +4570,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.dispatch_planner",
+                "foundry.addons.dispatch_planner",
                 "Queue Addon Planner Dispatch",
                 "Validate a planning_strategy or replanning_strategy contract and enqueue a standardized planner request for an external runtime worker.",
                 object_schema(
@@ -4579,14 +4587,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &["contract_id", "goal"],
                 ),
-                "forge.addon_runtime_contract_dispatch.v1",
+                "foundry.addon_runtime_contract_dispatch.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "dispatch-planner",
                     "--contract",
@@ -4599,9 +4607,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.execute_planner",
+                "foundry.addons.execute_planner",
                 "Execute Addon Planner With Equivalence Audit",
-                "Dispatch a planning_strategy or replanning_strategy to a registered worker, validate the returned task graph and compare it with Forge Core's reference plan before any promotion.",
+                "Dispatch a planning_strategy or replanning_strategy to a registered worker, validate the returned task graph and compare it with Foundry Core's reference plan before any promotion.",
                 object_schema(
                     &[
                         ("addon_id", "string", "optional Addon id filter"),
@@ -4618,14 +4626,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &["contract_id", "worker_id", "goal"],
                 ),
-                "forge.addon_planning_strategy_execution.v1",
+                "foundry.addon_planning_strategy_execution.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "execute-planner",
                     "--contract",
@@ -4640,7 +4648,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.execute_validator",
+                "foundry.addons.execute_validator",
                 "Execute Addon Validator With Result Audit",
                 "Dispatch a validator runtime contract to a registered worker, validate the returned decision envelope and record the normal dispatch/claim/completion audit. Supply workflow_id and task_id together to bind the result for later explicit application.",
                 object_schema(
@@ -4659,14 +4667,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &["contract_id", "worker_id", "subject"],
                 ),
-                "forge.addon_validator_execution.v1",
+                "foundry.addon_validator_execution.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "execute-validator",
                     "--contract",
@@ -4681,7 +4689,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.apply_validator_outcome",
+                "foundry.addons.apply_validator_outcome",
                 "Apply Addon Validator Outcome",
                 "Explicitly apply one completed, workflow-bound validator result. Passed records revisioned evidence without promotion; failed creates correlated rework feedback; review_required creates a blocking human interaction. Replays are idempotent.",
                 object_schema(
@@ -4703,9 +4711,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         "expected_revision",
                     ],
                 ),
-                "forge.addon_validator_outcome_application.v1",
+                "foundry.addon_validator_outcome_application.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "apply-validator-outcome",
                     "--dispatch",
@@ -4722,7 +4730,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.execute_executor",
+                "foundry.addons.execute_executor",
                 "Execute Addon Executor With Result Audit",
                 "Dispatch an executor runtime contract to a registered worker, validate the returned generic execution result and record the normal dispatch/claim/completion audit.",
                 object_schema(
@@ -4744,14 +4752,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &["contract_id", "worker_id", "task_ref"],
                 ),
-                "forge.addon_executor_execution.v1",
+                "foundry.addon_executor_execution.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "execute-executor",
                     "--contract",
@@ -4768,7 +4776,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.execute_handoff",
+                "foundry.addons.execute_handoff",
                 "Execute Addon Handoff With Result Audit",
                 "Dispatch a handoff runtime contract to a registered worker, validate the returned target, receipt, artifacts and events, and record the normal dispatch/claim/completion audit.",
                 object_schema(
@@ -4785,14 +4793,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &["contract_id", "worker_id", "handoff_ref"],
                 ),
-                "forge.addon_handoff_execution.v1",
+                "foundry.addon_handoff_execution.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "execute-handoff",
                     "--contract",
@@ -4807,7 +4815,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.dispatches",
+                "foundry.addons.dispatches",
                 "List Addon Runtime Contract Dispatches",
                 "List queued or blocked Addon runtime contract dispatch requests from the persistent dispatch ledger.",
                 object_schema(
@@ -4819,9 +4827,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.addon_runtime_contract_dispatch.v1",
+                "foundry.addon_runtime_contract_dispatch.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "dispatches",
                     "--output",
@@ -4830,9 +4838,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.run_dispatch",
+                "foundry.addons.run_dispatch",
                 "Run Addon Runtime Contract Dispatch",
-                "Process one queued Addon runtime dispatch with policy recheck; Forge Core only runs safe built-in runtimes and marks external runtimes for specialized workers.",
+                "Process one queued Addon runtime dispatch with policy recheck; Foundry Core only runs safe built-in runtimes and marks external runtimes for specialized workers.",
                 object_schema(
                     &[
                         ("dispatch_id", "string", "runtime dispatch id"),
@@ -4841,14 +4849,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &["dispatch_id"],
                 ),
-                "forge.addon_runtime_contract_dispatch.v1",
+                "foundry.addon_runtime_contract_dispatch.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "run-dispatch",
                     "--dispatch",
@@ -4859,7 +4867,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.dispatch_worker",
+                "foundry.addons.dispatch_worker",
                 "Run Addon Dispatch Worker",
                 "Process a bounded batch of queued Addon runtime dispatches with the same policy recheck and runtime boundaries as run_dispatch.",
                 object_schema(
@@ -4872,14 +4880,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &[],
                 ),
-                "forge.addon_runtime_contract_dispatch.v1",
+                "foundry.addon_runtime_contract_dispatch.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "dispatch-worker",
                     "--output",
@@ -4888,7 +4896,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.execute_dispatch",
+                "foundry.addons.execute_dispatch",
                 "Execute Addon Dispatch With Worker",
                 "Run a registered local_process or external_api worker for one Addon runtime dispatch, using the claim/completion ledger and the same policy and signature gates as external workers.",
                 object_schema(
@@ -4900,14 +4908,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &["dispatch_id", "worker_id"],
                 ),
-                "forge.addon_runtime_contract_dispatch.v1",
+                "foundry.addon_runtime_contract_dispatch.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "execute-dispatch",
                     "--dispatch",
@@ -4920,9 +4928,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.claim_dispatch",
+                "foundry.addons.claim_dispatch",
                 "Claim Addon Runtime Dispatch",
-                "Let a registered external runtime worker claim a dispatch that Forge Core marked as needing an external worker, after rechecking current runtime policy.",
+                "Let a registered external runtime worker claim a dispatch that Foundry Core marked as needing an external worker, after rechecking current runtime policy.",
                 object_schema(
                     &[
                         ("dispatch_id", "string", "runtime dispatch id"),
@@ -4932,14 +4940,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &["dispatch_id", "worker_id"],
                 ),
-                "forge.addon_runtime_contract_dispatch.v1",
+                "foundry.addon_runtime_contract_dispatch.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "claim-dispatch",
                     "--dispatch",
@@ -4952,7 +4960,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.complete_dispatch",
+                "foundry.addons.complete_dispatch",
                 "Complete Addon Runtime Dispatch",
                 "Record a claimed external runtime dispatch result with worker ownership, current policy recheck, result hash and signature/attestation evidence.",
                 object_schema(
@@ -4967,14 +4975,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &["dispatch_id", "worker_id"],
                 ),
-                "forge.addon_runtime_contract_dispatch.v1",
+                "foundry.addon_runtime_contract_dispatch.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "complete-dispatch",
                     "--dispatch",
@@ -4987,7 +4995,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.register_worker",
+                "foundry.addons.register_worker",
                 "Register Addon Runtime Worker",
                 "Register or update an external runtime worker that can consume Addon runtime dispatches for a declared runtime such as wasm or external_api.",
                 object_schema(
@@ -5011,9 +5019,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["worker_id", "runtime"],
                 ),
-                "forge.addon_runtime_workers.v1",
+                "foundry.addon_runtime_workers.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "register-worker",
                     "--worker",
@@ -5026,7 +5034,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.workers",
+                "foundry.addons.workers",
                 "List Addon Runtime Workers",
                 "List registered external runtime workers by runtime, status or trust level.",
                 object_schema(
@@ -5038,9 +5046,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.addon_runtime_workers.v1",
+                "foundry.addon_runtime_workers.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "workers",
                     "--runtime",
@@ -5051,7 +5059,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.views",
+                "foundry.addons.views",
                 "List Addon Views",
                 "Return UI/TUI/ops-console views declared by Addons for dynamic interface composition.",
                 object_schema(
@@ -5062,14 +5070,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         (
                             "addon_dirs",
                             "array",
-                            "optional addon manifest directories; defaults to .forge/addons",
+                            "optional addon manifest directories; defaults to .foundry/addons",
                         ),
                     ],
                     &[],
                 ),
-                "forge.addon_views.v1",
+                "foundry.addon_views.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "views",
                     "--surface",
@@ -5080,23 +5088,23 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.validate",
+                "foundry.addons.validate",
                 "Validate Addon Catalog",
                 "Validate addon ids, capability ids, required addon dependencies, required capabilities and high-risk permission gates.",
                 object_schema(
                     &[(
                         "addon_dirs",
                         "array",
-                        "optional addon manifest directories; defaults to .forge/addons",
+                        "optional addon manifest directories; defaults to .foundry/addons",
                     )],
                     &[],
                 ),
-                "forge.addon_validation.v1",
-                &["forge", "addons", "validate", "--output", "json"],
+                "foundry.addon_validation.v1",
+                &["foundry", "addons", "validate", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.lifecycle_plan",
+                "foundry.addons.lifecycle_plan",
                 "Preview Addon Lifecycle Operation",
                 "Dry-run an Addon lifecycle operation before applying it, returning validation, impact, rollback, approval gates and exact apply command without mutating the installed registry.",
                 object_schema(
@@ -5115,9 +5123,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["action"],
                 ),
-                "forge.addon_lifecycle_plan.v1",
+                "foundry.addon_lifecycle_plan.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "lifecycle-plan",
                     "--action",
@@ -5130,9 +5138,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.install",
+                "foundry.addons.install",
                 "Install Addon",
-                "Install or update an Addon manifest into Forge's persistent SQLite lifecycle registry after catalog validation.",
+                "Install or update an Addon manifest into Foundry's persistent SQLite lifecycle registry after catalog validation.",
                 object_schema(
                     &[
                         ("manifest", "string", "path to addon manifest"),
@@ -5144,9 +5152,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["manifest"],
                 ),
-                "forge.addon_lifecycle.v1",
+                "foundry.addon_lifecycle.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "install",
                     "--manifest",
@@ -5157,7 +5165,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.package",
+                "foundry.addons.package",
                 "Package Addon",
                 "Create a deterministic Addon package report for marketplace distribution, including manifest hash, capability catalog, dependency summary and detached signature metadata.",
                 object_schema(
@@ -5176,9 +5184,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["manifest"],
                 ),
-                "forge.addon_package.v1",
+                "foundry.addon_package.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "package",
                     "--manifest",
@@ -5189,7 +5197,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.trust_key",
+                "foundry.addons.trust_key",
                 "Trust Addon Package Key",
                 "Add or refresh a trusted Ed25519 package signing key for one Addon repository and release channel.",
                 object_schema(
@@ -5204,9 +5212,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["repository", "public_key"],
                 ),
-                "forge.addon_trust_store.v1",
+                "foundry.addon_trust_store.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "trust-key",
                     "--repository",
@@ -5219,7 +5227,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.trust_store",
+                "foundry.addons.trust_store",
                 "List Addon Trust Store",
                 "List trusted package signing keys by repository, channel, public key or status.",
                 object_schema(
@@ -5232,14 +5240,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.addon_trust_store.v1",
-                &["forge", "addons", "trust-store", "--output", "json"],
+                "foundry.addon_trust_store.v1",
+                &["foundry", "addons", "trust-store", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.publish_package",
+                "foundry.addons.publish_package",
                 "Publish Addon Package",
-                "Index a local Addon package JSON into Forge's marketplace registry with current trust policy evidence.",
+                "Index a local Addon package JSON into Foundry's marketplace registry with current trust policy evidence.",
                 object_schema(
                     &[
                         ("package", "string", "path to Addon package JSON"),
@@ -5248,9 +5256,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.addon_marketplace.v1",
+                "foundry.addon_marketplace.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "publish-package",
                     "--package",
@@ -5261,9 +5269,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.fetch_package",
+                "foundry.addons.fetch_package",
                 "Fetch Addon Package",
-                "Fetch or copy an Addon package into Forge's local package cache, validate optional SHA-256, and index it through the marketplace trust policy.",
+                "Fetch or copy an Addon package into Foundry's local package cache, validate optional SHA-256, and index it through the marketplace trust policy.",
                 object_schema(
                     &[
                         ("source", "string", "local path, file:// URI, or HTTP(S) URL"),
@@ -5276,9 +5284,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["source"],
                 ),
-                "forge.addon_package_fetch.v1",
+                "foundry.addon_package_fetch.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "fetch-package",
                     "--source",
@@ -5291,9 +5299,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.sync_registry",
+                "foundry.addons.sync_registry",
                 "Sync Addon Registry",
-                "Read a package registry index, fetch listed packages into Forge's local cache, and index trusted packages through the marketplace policy.",
+                "Read a package registry index, fetch listed packages into Foundry's local cache, and index trusted packages through the marketplace policy.",
                 object_schema(
                     &[
                         ("source", "string", "local path, file:// URI, or HTTP(S) registry index URL"),
@@ -5306,9 +5314,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["source"],
                 ),
-                "forge.addon_registry_sync.v1",
+                "foundry.addon_registry_sync.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "sync-registry",
                     "--source",
@@ -5321,7 +5329,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.package_lock",
+                "foundry.addons.package_lock",
                 "Create Addon Package Lock",
                 "Create a reproducible lock snapshot of indexed Addon packages with repository, channel, package hashes, manifest hashes and current trust-policy status.",
                 object_schema(
@@ -5337,12 +5345,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.addon_package_lock.v1",
-                &["forge", "addons", "package-lock", "--output", "json"],
+                "foundry.addon_package_lock.v1",
+                &["foundry", "addons", "package-lock", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.marketplace",
+                "foundry.addons.marketplace",
                 "List Addon Marketplace",
                 "List indexed Addon marketplace packages with current signature and trust-policy status.",
                 object_schema(
@@ -5356,12 +5364,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.addon_marketplace.v1",
-                &["forge", "addons", "marketplace", "--output", "json"],
+                "foundry.addon_marketplace.v1",
+                &["foundry", "addons", "marketplace", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.addons.install_package",
+                "foundry.addons.install_package",
                 "Install Trusted Addon Package",
                 "Install an Addon package only after manifest hash, detached Ed25519 signature and trust-store policy are verified.",
                 object_schema(
@@ -5378,9 +5386,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.addon_package_install.v1",
+                "foundry.addon_package_install.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "install-package",
                     "--package",
@@ -5393,9 +5401,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.migration_workflow",
+                "foundry.addons.migration_workflow",
                 "Create Addon Migration Workflow",
-                "Create and persist an auditable Forge workflow for an Addon migration or rollback path using the candidate manifest compatibility.migrations contract.",
+                "Create and persist an auditable Foundry workflow for an Addon migration or rollback path using the candidate manifest compatibility.migrations contract.",
                 object_schema(
                     &[
                         ("from_manifest", "string", "path to currently installed or source Addon manifest"),
@@ -5405,9 +5413,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["from_manifest", "to_manifest"],
                 ),
-                "forge.addon_migration_workflow.v1",
+                "foundry.addon_migration_workflow.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "migration-workflow",
                     "--from-manifest",
@@ -5420,7 +5428,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.upgrade",
+                "foundry.addons.upgrade",
                 "Upgrade Addon",
                 "Replace an installed Addon manifest with a higher version after catalog compatibility validation, preserving the existing lifecycle state.",
                 object_schema(
@@ -5434,9 +5442,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["manifest"],
                 ),
-                "forge.addon_lifecycle.v1",
+                "foundry.addon_lifecycle.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "upgrade",
                     "--manifest",
@@ -5447,7 +5455,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.downgrade",
+                "foundry.addons.downgrade",
                 "Downgrade Addon",
                 "Replace an installed Addon manifest with a lower version after catalog compatibility validation, preserving the existing lifecycle state.",
                 object_schema(
@@ -5461,9 +5469,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["manifest"],
                 ),
-                "forge.addon_lifecycle.v1",
+                "foundry.addon_lifecycle.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "downgrade",
                     "--manifest",
@@ -5474,7 +5482,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.enable",
+                "foundry.addons.enable",
                 "Enable Addon",
                 "Enable a SQLite-installed Addon and expose its capabilities to planning.",
                 object_schema(
@@ -5484,12 +5492,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["id"],
                 ),
-                "forge.addon_lifecycle.v1",
-                &["forge", "addons", "enable", "<addon-id>", "--output", "json"],
+                "foundry.addon_lifecycle.v1",
+                &["foundry", "addons", "enable", "<addon-id>", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.disable",
+                "foundry.addons.disable",
                 "Disable Addon",
                 "Disable a SQLite-installed Addon without removing its manifest from the registry.",
                 object_schema(
@@ -5499,9 +5507,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["id"],
                 ),
-                "forge.addon_lifecycle.v1",
+                "foundry.addon_lifecycle.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "disable",
                     "<addon-id>",
@@ -5511,9 +5519,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.addons.uninstall",
+                "foundry.addons.uninstall",
                 "Uninstall Addon",
-                "Remove a SQLite-installed Addon from Forge's persistent lifecycle registry.",
+                "Remove a SQLite-installed Addon from Foundry's persistent lifecycle registry.",
                 object_schema(
                     &[
                         ("id", "string", "addon id"),
@@ -5521,9 +5529,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["id"],
                 ),
-                "forge.addon_lifecycle.v1",
+                "foundry.addon_lifecycle.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "addons",
                     "uninstall",
                     "<addon-id>",
@@ -5533,7 +5541,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.identity.context",
+                "foundry.identity.context",
                 "Inspect Operating Context",
                 "Return the project operating context used for organization, brand, product, user, channel, memory scope and personality scope.",
                 object_schema(
@@ -5544,9 +5552,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     )],
                     &[],
                 ),
-                "forge.operating_context_load.v1",
+                "foundry.operating_context_load.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "identity",
                     "context",
                     "--project-root",
@@ -5557,9 +5565,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.identity.registry",
+                "foundry.identity.registry",
                 "List Identity Registry",
-                "List Forge's persisted organization, brand, product, user and channel identity registry.",
+                "List Foundry's persisted organization, brand, product, user and channel identity registry.",
                 object_schema(
                     &[
                         ("scope", "string", "optional scope filter"),
@@ -5567,14 +5575,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.identity_registry.v1",
-                &["forge", "identity", "registry", "--output", "json"],
+                "foundry.identity_registry.v1",
+                &["foundry", "identity", "registry", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.identity.memberships",
+                "foundry.identity.memberships",
                 "List Identity Memberships",
-                "List persisted user-to-organization/brand/product memberships used by Forge's multi-tenant policy gate.",
+                "List persisted user-to-organization/brand/product memberships used by Foundry's multi-tenant policy gate.",
                 object_schema(
                     &[
                         ("subject_scope", "string", "optional subject scope filter, usually user"),
@@ -5586,12 +5594,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.identity_memberships.v1",
-                &["forge", "identity", "memberships", "--output", "json"],
+                "foundry.identity_memberships.v1",
+                &["foundry", "identity", "memberships", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.identity.membership_update",
+                "foundry.identity.membership_update",
                 "Update Identity Membership",
                 "Update a tenant membership role/status, custom grants/denies and validity window without editing raw data_json.",
                 object_schema(
@@ -5615,9 +5623,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["subject_id", "organization_id", "brand_id", "product_id"],
                 ),
-                "forge.identity_membership_update.v1",
+                "foundry.identity_membership_update.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "identity",
                     "membership-update",
                     "--subject",
@@ -5634,9 +5642,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.identity.link",
+                "foundry.identity.link",
                 "Link Cross-Channel Identities",
-                "Persist an active equivalence link between two identity records so Forge can resolve Telegram, Discord, Web or other channel ids to the same subject.",
+                "Persist an active equivalence link between two identity records so Foundry can resolve Telegram, Discord, Web or other channel ids to the same subject.",
                 object_schema(
                     &[
                         ("left_scope", "string", "left identity scope, for example telegram"),
@@ -5649,9 +5657,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["left_scope", "left_id", "right_scope", "right_id"],
                 ),
-                "forge.identity_link.v1",
+                "foundry.identity_link.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "identity",
                     "link",
                     "--left-scope",
@@ -5668,7 +5676,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.identity.unlink",
+                "foundry.identity.unlink",
                 "Unlink Cross-Channel Identities",
                 "Mark a persisted identity equivalence link as unlinked without deleting the audit trail.",
                 object_schema(
@@ -5683,9 +5691,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["left_scope", "left_id", "right_scope", "right_id"],
                 ),
-                "forge.identity_link.v1",
+                "foundry.identity_link.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "identity",
                     "unlink",
                     "--left-scope",
@@ -5702,7 +5710,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.identity.links",
+                "foundry.identity.links",
                 "List Identity Links",
                 "List persisted cross-channel identity links with optional identity and status filters.",
                 object_schema(
@@ -5713,12 +5721,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.identity_links.v1",
-                &["forge", "identity", "links", "--output", "json"],
+                "foundry.identity_links.v1",
+                &["foundry", "identity", "links", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.identity.resolve",
+                "foundry.identity.resolve",
                 "Resolve Unified Identity",
                 "Resolve a cross-channel identity into its connected aliases and canonical subject.",
                 object_schema(
@@ -5728,9 +5736,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["scope", "id"],
                 ),
-                "forge.identity_resolve.v1",
+                "foundry.identity_resolve.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "identity",
                     "resolve",
                     "--scope",
@@ -5743,9 +5751,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.identity.tenant_index",
+                "foundry.identity.tenant_index",
                 "List Tenant Resource Index",
-                "List Forge's physical tenant index for workflows, runs, artifacts and events with organization, brand, product and workflow filters.",
+                "List Foundry's physical tenant index for workflows, runs, artifacts and events with organization, brand, product and workflow filters.",
                 object_schema(
                     &[
                         ("resource_type", "string", "optional resource type filter: workflow|run|artifact|event"),
@@ -5756,21 +5764,21 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.tenant_index.v1",
-                &["forge", "identity", "tenant-index", "--output", "json"],
+                "foundry.tenant_index.v1",
+                &["foundry", "identity", "tenant-index", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.identity.tenant_audit",
+                "foundry.identity.tenant_audit",
                 "Audit Tenant Resource Index",
                 "Audit whether workflows, runs, artifacts and events have corresponding physical tenant-index rows before multi-tenant enforcement is enabled.",
                 object_schema(&[], &[]),
-                "forge.tenant_audit.v1",
-                &["forge", "identity", "tenant-audit", "--output", "json"],
+                "foundry.tenant_audit.v1",
+                &["foundry", "identity", "tenant-audit", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.identity.tenant_policy",
+                "foundry.identity.tenant_policy",
                 "Evaluate Tenant Policy",
                 "Evaluate whether a workflow has explicit operating context, active membership and tenant-index coverage before multi-tenant enforcement.",
                 object_schema(
@@ -5781,9 +5789,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["workflow_id"],
                 ),
-                "forge.tenant_policy.v1",
+                "foundry.tenant_policy.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "identity",
                     "tenant-policy",
                     "--workflow",
@@ -5794,9 +5802,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.identity.sync",
+                "foundry.identity.sync",
                 "Sync Project Identity Context",
-                "Materialize the project operating context into Forge's persisted identity registry.",
+                "Materialize the project operating context into Foundry's persisted identity registry.",
                 object_schema(
                     &[(
                         "project_root",
@@ -5805,9 +5813,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     )],
                     &[],
                 ),
-                "forge.identity_sync.v1",
+                "foundry.identity_sync.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "identity",
                     "sync",
                     "--project-root",
@@ -5818,28 +5826,28 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.memory.policy",
+                "foundry.memory.policy",
                 "Inspect Memory Policy",
-                "Return Forge's file-first memory governance model: global, organization, project and processing scopes; public, internal and private visibility; manager-shared customer suggestions; and company-level request handling.",
+                "Return Foundry's file-first memory governance model: global, organization, project and processing scopes; public, internal and private visibility; manager-shared customer suggestions; and company-level request handling.",
                 object_schema(
                     &[(
                         "project_root",
                         "string",
-                        "optional project root used to resolve .forge/memory-governance.json",
+                        "optional project root used to resolve .foundry/memory-governance.json",
                     )],
                     &[],
                 ),
-                "forge.memory_policy.v1",
-                &["forge", "memory", "policy", "--output", "json"],
+                "foundry.memory_policy.v1",
+                &["foundry", "memory", "policy", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.memory.configure",
+                "foundry.memory.configure",
                 "Configure Project Memory Governance",
-                "Write the project's .forge/memory-governance.json file with memory level, default scopes, default audience, privacy mode, retention mode and explicit approval.",
+                "Write the project's .foundry/memory-governance.json file with memory level, default scopes, default audience, privacy mode, retention mode and explicit approval.",
                 object_schema(
                     &[
-                        ("project_root", "string", "project root containing the .forge directory"),
+                        ("project_root", "string", "project root containing the .foundry directory"),
                         ("memory_level", "string", "MEMORY_NONE|MEMORY_SESSION|MEMORY_SHORT_TERM|MEMORY_STANDARD|MEMORY_FULL|MEMORY_ADMIN"),
                         ("default_scopes", "array", "default memory scopes allowed by the selected memory level"),
                         ("default_audience", "string", "public|internal|manager|operator|private"),
@@ -5858,9 +5866,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         "reason",
                     ],
                 ),
-                "forge.memory_governance_config.v1",
+                "foundry.memory_governance_config.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "memory",
                     "configure",
                     "--project-root",
@@ -5871,7 +5879,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.memory.search",
+                "foundry.memory.search",
                 "Search File Memory",
                 "Search Markdown memory snippets across global, organization, project and processing scopes with visibility/shareability filtering, project governance defaults and line-range results.",
                 object_schema(
@@ -5892,12 +5900,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &["query"],
                 ),
-                "forge.memory_search.v1",
-                &["forge", "memory", "search", "--query", "<query>", "--output", "json"],
+                "foundry.memory_search.v1",
+                &["foundry", "memory", "search", "--query", "<query>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.memory.promote",
+                "foundry.memory.promote",
                 "Promote Curated Memory",
                 "Promote a curated summary from processing/project/organization memory into project, organization or global memory with approval, classification and source lineage. Raw source content is not copied.",
                 object_schema(
@@ -5928,9 +5936,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         "reason",
                     ],
                 ),
-                "forge.memory_promotion.v1",
+                "foundry.memory_promotion.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "memory",
                     "promote",
                     "--from-scope",
@@ -5951,7 +5959,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.memory.promotions",
+                "foundry.memory.promotions",
                 "List Memory Promotions",
                 "List the SQLite-backed memory promotion index with filters by source scope, target scope and approver.",
                 object_schema(
@@ -5963,9 +5971,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.memory_promotion_index.v1",
+                "foundry.memory_promotion_index.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "memory",
                     "promotions",
                     "--output",
@@ -5974,7 +5982,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.memory.retention",
+                "foundry.memory.retention",
                 "Evaluate Memory Retention",
                 "Evaluate memory retention/expiration posture across configured roots without deleting files.",
                 object_schema(
@@ -5990,12 +5998,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.memory_retention.v1",
-                &["forge", "memory", "retention", "--output", "json"],
+                "foundry.memory_retention.v1",
+                &["foundry", "memory", "retention", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.memory.cleanup",
+                "foundry.memory.cleanup",
                 "Cleanup Processing Memory",
                 "Archive or delete processing memory that retention classified as delete_after_final_packaging. Non-dry-run execution requires approval, reason and confirm.",
                 object_schema(
@@ -6017,18 +6025,18 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ],
                     &[],
                 ),
-                "forge.memory_cleanup.v1",
-                &["forge", "memory", "cleanup", "--dry-run", "--output", "json"],
+                "foundry.memory_cleanup.v1",
+                &["foundry", "memory", "cleanup", "--dry-run", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.interactive.slash_commands",
+                "foundry.interactive.slash_commands",
                 "List Interactive Slash Commands",
-                "Return slash-command metadata so agents can map interactive operations to scriptable Forge commands.",
+                "Return slash-command metadata so agents can map interactive operations to scriptable Foundry commands.",
                 object_schema(&[], &[]),
-                "forge.interactive.slash_commands.v1",
+                "foundry.interactive.slash_commands.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "interactive",
                     "slash-commands",
                     "--output",
@@ -6037,16 +6045,16 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.interactive.route",
+                "foundry.interactive.route",
                 "Route Interactive Input",
-                "Classify a chat or slash-command input through Forge's interactive routing model. Complex chat input may create a durable workflow/run with retention policy evidence.",
+                "Classify a chat or slash-command input through Foundry's interactive routing model. Complex chat input may create a durable workflow/run with retention policy evidence.",
                 object_schema(&[
                     ("input", "string", "chat text or slash command"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["input"]),
-                "forge.interactive.route.v1",
+                "foundry.interactive.route.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "interactive",
                     "route",
                     "--input",
@@ -6057,9 +6065,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
         tool(
-            "forge.security.secret_scan",
+            "foundry.security.secret_scan",
             "Sanitize Secret Values",
-            "Detect and replace secret values with Forge Secret Vault references before prompt construction. The result never serializes raw secret values.",
+            "Detect and replace secret values with Foundry Secret Vault references before prompt construction. The result never serializes raw secret values.",
             object_schema(
                 &[
                     ("input", "string", "text to scan and sanitize"),
@@ -6080,9 +6088,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ],
                 &["input"],
             ),
-            "forge.runtime.secret_guardrail.v1",
+            "foundry.runtime.secret_guardrail.v1",
             &[
-                "forge",
+                "foundry",
                 "security",
                 "secret-scan",
                 "--input",
@@ -6093,7 +6101,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             ToolFlags::new(true, false),
         ),
         tool(
-            "forge.credential_vault.describe",
+            "foundry.credential_vault.describe",
                 "Describe Credential Vault Contract",
                 "Inspect credential-vault contract metadata without resolving or printing secret values.",
                 object_schema(
@@ -6106,7 +6114,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ),
                 CREDENTIAL_VAULT_COMMAND_SCHEMA,
                 &[
-                    "forge",
+                    "foundry",
                     "credential-vault",
                     "describe",
                     "--contract",
@@ -6119,7 +6127,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.credential_vault.records",
+                "foundry.credential_vault.records",
                 "List Credential Vault Records",
                 "List credential-vault records and fields with secret markers, without resolving secret values.",
                 object_schema(
@@ -6132,7 +6140,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ),
                 CREDENTIAL_VAULT_COMMAND_SCHEMA,
                 &[
-                    "forge",
+                    "foundry",
                     "credential-vault",
                     "records",
                     "--contract",
@@ -6145,7 +6153,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.aws.check",
+                "foundry.aws.check",
                 "Check AWS Identity",
                 "Validate the configured AWS Ops vault by running aws sts get-caller-identity through the guarded aws-ops wrapper without printing secrets.",
                 object_schema(
@@ -6157,11 +6165,11 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     &[],
                 ),
                 AWS_OPS_COMMAND_SCHEMA,
-                &["forge", "aws", "check", "--output", "json"],
+                &["foundry", "aws", "check", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.aws.inventory",
+                "foundry.aws.inventory",
                 "Inventory AWS Account",
                 "Run a read-only inventory for common AWS services through aws-ops and the AWS credential vault.",
                 object_schema(
@@ -6176,11 +6184,11 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     &[],
                 ),
                 AWS_OPS_COMMAND_SCHEMA,
-                &["forge", "aws", "inventory", "--regions", "<regions>", "--output", "json"],
+                &["foundry", "aws", "inventory", "--regions", "<regions>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.aws.raw",
+                "foundry.aws.raw",
                 "Run Guarded AWS Command",
                 "Run a direct AWS CLI command through aws-ops. Read-only commands are allowed; non-read-only commands require allow_mutation=true and a concrete reason.",
                 object_schema(
@@ -6195,27 +6203,27 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     &["aws_args"],
                 ),
                 AWS_OPS_COMMAND_SCHEMA,
-                &["forge", "aws", "raw", "--", "<aws-args>"],
+                &["foundry", "aws", "raw", "--", "<aws-args>"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.schedule.create_daily_goal_research",
+                "foundry.schedule.create_daily_goal_research",
                 "Create Daily Goal Research Schedule",
-                "Create a native Forge scheduled/looping daily Goal research workflow with per-Goal report subflows.",
+                "Create a native Foundry scheduled/looping daily Goal research workflow with per-Goal report subflows.",
                 object_schema(&[
                     ("goals", "array", "configured Goal names, for example hackathon"),
                     ("timezone", "string", "IANA timezone"),
                     ("cron", "string", "five-field cron expression"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["goals"]),
-                "forge.daily_goal_research_plan.v1",
-                &["forge", "schedule", "create-daily-goal-research", "--goal", "<goal>", "--output", "json"],
+                "foundry.daily_goal_research_plan.v1",
+                &["foundry", "schedule", "create-daily-goal-research", "--goal", "<goal>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.schedule.update",
+                "foundry.schedule.update",
                 "Update Schedule Node",
-                "Mutate a Forge-owned scheduled node with revision tracking.",
+                "Mutate a Foundry-owned scheduled node with revision tracking.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                     ("task_id", "string", "scheduled task id"),
@@ -6225,48 +6233,48 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("next_run_at", "string", "optional RFC3339 next due timestamp"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "task_id"]),
-                "forge.schedule_update.v1",
-                &["forge", "schedule", "update", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                "foundry.schedule_update.v1",
+                &["foundry", "schedule", "update", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.schedule.list",
+                "foundry.schedule.list",
                 "List Scheduled Workflows",
                 "List workflows with schedule and loop summaries for async scheduled work visibility.",
                 object_schema(&[("lifecycle", "string", "all|running|non-running")], &[]),
-                "forge.registry.workflow_list.v1",
-                &["forge", "schedule", "list", "--output", "json"],
+                "foundry.registry.workflow_list.v1",
+                &["foundry", "schedule", "list", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.schedule.summary",
+                "foundry.schedule.summary",
                 "Summarize Scheduled Workflows",
-                "Aggregate cron, wait_until and delay schedule state across all Forge-owned workflows for agent runtime visibility.",
+                "Aggregate cron, wait_until and delay schedule state across all Foundry-owned workflows for agent runtime visibility.",
                 object_schema(&[], &[]),
-                "forge.schedule.aggregate_summary.v1",
-                &["forge", "schedule", "summary", "--output", "json"],
+                "foundry.schedule.aggregate_summary.v1",
+                &["foundry", "schedule", "summary", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.schedule.loop_summary",
+                "foundry.schedule.loop_summary",
                 "Summarize Loop Nodes",
-                "Aggregate explicit loop node state across all Forge-owned workflows for agent runtime visibility.",
+                "Aggregate explicit loop node state across all Foundry-owned workflows for agent runtime visibility.",
                 object_schema(&[], &[]),
-                "forge.schedule.aggregate_summary.v1",
-                &["forge", "schedule", "loop-summary", "--output", "json"],
+                "foundry.schedule.aggregate_summary.v1",
+                &["foundry", "schedule", "loop-summary", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.loop.inspect",
+                "foundry.loop.inspect",
                 "Inspect Loop Nodes",
                 "Inspect loop primitives and the workflow nodes they trigger.",
                 object_schema(&[("workflow_id", "string", "workflow id")], &["workflow_id"]),
-                "forge.inspection.v1",
-                &["forge", "schedule", "inspect", "--workflow", "<workflow-id>", "--output", "json"],
+                "foundry.inspection.v1",
+                &["foundry", "schedule", "inspect", "--workflow", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.schedule.pause",
+                "foundry.schedule.pause",
                 "Pause Loop Node",
                 "Pause a loop node in a scheduled workflow. Loop iterations will not advance while paused.",
                 object_schema(&[
@@ -6274,12 +6282,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("task_id", "string", "loop task id"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "task_id"]),
-                "forge.loop_state_update.v1",
-                &["forge", "schedule", "pause", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                "foundry.loop_state_update.v1",
+                &["foundry", "schedule", "pause", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.schedule.resume",
+                "foundry.schedule.resume",
                 "Resume Loop Node",
                 "Resume a paused loop node in a scheduled workflow.",
                 object_schema(&[
@@ -6287,12 +6295,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("task_id", "string", "loop task id"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "task_id"]),
-                "forge.loop_state_update.v1",
-                &["forge", "schedule", "resume", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                "foundry.loop_state_update.v1",
+                &["foundry", "schedule", "resume", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.schedule.stop",
+                "foundry.schedule.stop",
                 "Stop Loop Node",
                 "Stop a loop node permanently. The loop will not execute again.",
                 object_schema(&[
@@ -6300,64 +6308,64 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("task_id", "string", "loop task id"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "task_id"]),
-                "forge.loop_state_update.v1",
-                &["forge", "schedule", "stop", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                "foundry.loop_state_update.v1",
+                &["foundry", "schedule", "stop", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.schedule.run_due",
+                "foundry.schedule.run_due",
                 "Run Due Schedule",
                 "Execute a scheduled workflow that has due cron or one-shot wait nodes (next_run_at <= now).",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                 ], &["workflow_id"]),
-                "forge.schedule_run_due.v1",
-                &["forge", "schedule", "run-due", "--workflow", "<workflow-id>", "--output", "json"],
+                "foundry.schedule_run_due.v1",
+                &["foundry", "schedule", "run-due", "--workflow", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.schedule.scan_due",
+                "foundry.schedule.scan_due",
                 "Scan Due Schedules",
-                "Scan Forge-owned cron/wait scheduled workflows, lease due schedule nodes locally, run due work and report idle scale-to-zero decisions. Supports bounded parallel dispatch with max_workers and returns WorkerPool evidence when parallel.",
+                "Scan Foundry-owned cron/wait scheduled workflows, lease due schedule nodes locally, run due work and report idle scale-to-zero decisions. Supports bounded parallel dispatch with max_workers and returns WorkerPool evidence when parallel.",
                 object_schema(&[
                     ("executor", "string", "scheduler executor id for local leases"),
                     ("max_workers", "integer", "bounded concurrent worker count (1=sequential, >1=parallel WorkerPool dispatch)"),
                     ("ttl_seconds", "integer", "local schedule-task lease TTL"),
                 ], &[]),
-                "forge.schedule.scan_due.v1",
-                &["forge", "schedule", "scan-due", "--output", "json"],
+                "foundry.schedule.scan_due.v1",
+                &["foundry", "schedule", "scan-due", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.schedule.worker_status",
+                "foundry.schedule.worker_status",
                 "Inspect Scheduler Worker Status",
-                "Inspect Forge-owned scheduler worker readiness, next wakeup, bounded worker-pool capacity, cancellation safe points and backpressure without executing due work.",
+                "Inspect Foundry-owned scheduler worker readiness, next wakeup, bounded worker-pool capacity, cancellation safe points and backpressure without executing due work.",
                 object_schema(&[
                     ("executor", "string", "scheduler executor id for local leases"),
                     ("max_workers", "integer", "bounded local worker-pool size"),
                     ("ttl_seconds", "integer", "local schedule-task lease TTL"),
                 ], &[]),
-                "forge.schedule.worker_status.v1",
-                &["forge", "schedule", "worker-status", "--output", "json"],
+                "foundry.schedule.worker_status.v1",
+                &["foundry", "schedule", "worker-status", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.schedule.scan_due_parallel",
+                "foundry.schedule.scan_due_parallel",
                 "Scan Due Schedules (Parallel)",
-                "Scan Forge-owned scheduled workflows with bounded concurrent WorkerPool dispatch. Idle workflows are reconciled into scale-to-zero state, while each due workflow acquires its own lease, runs due work, and releases the lease in a worker thread.",
+                "Scan Foundry-owned scheduled workflows with bounded concurrent WorkerPool dispatch. Idle workflows are reconciled into scale-to-zero state, while each due workflow acquires its own lease, runs due work, and releases the lease in a worker thread.",
                 object_schema(&[
                     ("executor", "string", "scheduler executor id for local leases"),
                     ("max_workers", "integer", "bounded concurrent worker count"),
                     ("ttl_seconds", "integer", "local schedule-task lease TTL"),
                 ], &[]),
-                "forge.schedule.scan_due.v1",
-                &["forge", "schedule", "scan-due", "--max-workers", "<n>", "--output", "json"],
+                "foundry.schedule.scan_due.v1",
+                &["foundry", "schedule", "scan-due", "--max-workers", "<n>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.run.start",
-                "Start Async Forge Run",
-                "Start an async workflow request, return a run_id quickly and preserve Forge as source of truth.",
+                "foundry.run.start",
+                "Start Async Foundry Run",
+                "Start an async workflow request, return a run_id quickly and preserve Foundry as source of truth.",
             object_schema(&[
                 ("goal", "string", "human objective"),
                 ("origin", "string", "codex|opencode|skill|mcp"),
@@ -6377,25 +6385,25 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                             "optional admission ceiling across all declared lane agents",
                         ),
             ], &["goal"]),
-                "forge.request_start.v1",
-                &["forge", "request", "start", "--goal", "<goal>", "--output", "json"],
+                "foundry.request_start.v1",
+                &["foundry", "request", "start", "--goal", "<goal>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.run.resume",
-                "Resume Async Forge Run",
+                "foundry.run.resume",
+                "Resume Async Foundry Run",
                 "Mark an async run as resumed and return the latest status and handoff summary.",
                 object_schema(&[
                     ("run_id", "string", "run id"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["run_id"]),
-                "forge.request_resume.v1",
-                &["forge", "request", "resume", "--run", "<run-id>", "--output", "json"],
+                "foundry.request_resume.v1",
+                &["foundry", "request", "resume", "--run", "<run-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.run.heartbeat",
-                "Heartbeat Async Forge Run",
+                "foundry.run.heartbeat",
+                "Heartbeat Async Foundry Run",
                 "Mark an async run as running, refresh its executor heartbeat TTL and keep active handoffs visible in request status, list and inspect.",
                 object_schema(&[
                     ("run_id", "string", "run id"),
@@ -6405,13 +6413,13 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("pid", "integer", "optional executor process id"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["run_id"]),
-                "forge.request_heartbeat.v1",
-                &["forge", "request", "heartbeat", "--run", "<run-id>", "--output", "json"],
+                "foundry.request_heartbeat.v1",
+                &["foundry", "request", "heartbeat", "--run", "<run-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.run.drive",
-                "Drive Async Forge Run",
+                "foundry.run.drive",
+                "Drive Async Foundry Run",
                 "Refresh the run heartbeat and return the next safe executor action, prioritizing accepted needs_retry responses before blind handoff.",
                 object_schema(&[
                     ("run_id", "string", "run id"),
@@ -6419,28 +6427,28 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("ttl_seconds", "integer", "heartbeat freshness TTL"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["run_id"]),
-                "forge.request_drive.v1",
-                &["forge", "request", "drive", "--run", "<run-id>", "--executor", "<executor>", "--output", "json"],
+                "foundry.request_drive.v1",
+                &["foundry", "request", "drive", "--run", "<run-id>", "--executor", "<executor>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.run.step",
+                "foundry.run.step",
                 "Step Ready Deterministic Task",
-                "Drive a run and auto-promote one ready deterministic task through Forge's normal executor-response validation path; AI and external-command tasks still return handoff_required.",
+                "Drive a run and auto-promote one ready deterministic task through Foundry's normal executor-response validation path; AI and external-command tasks still return handoff_required.",
                 object_schema(&[
                     ("run_id", "string", "run id"),
                     ("executor", "string", "codex|opencode|skill|mcp|custom executor id"),
                     ("ttl_seconds", "integer", "heartbeat freshness TTL"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["run_id"]),
-                "forge.request_step.v1",
-                &["forge", "request", "step", "--run", "<run-id>", "--executor", "<executor>", "--output", "json"],
+                "foundry.request_step.v1",
+                &["foundry", "request", "step", "--run", "<run-id>", "--executor", "<executor>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.run.execute_wave",
+                "foundry.run.execute_wave",
                 "Execute Admitted Executor Wave",
-                "Drive a run, admit a bounded dependency-ready frontier and execute its task-worktree-bound Codex/Agy processes in parallel. Requires explicit allow_exec, approved_by and reason authorization. Process receipts never complete or promote Forge tasks; reviewed validation must still use forge.run.complete_task.",
+                "Drive a run, admit a bounded dependency-ready frontier and execute its task-worktree-bound Codex/Agy processes in parallel. Requires explicit allow_exec, approved_by and reason authorization. Process receipts never complete or promote Foundry tasks; reviewed validation must still use foundry.run.complete_task.",
                 object_schema(&[
                     ("run_id", "string", "run id"),
                     ("executor", "string", "executor router id; defaults to auto"),
@@ -6453,12 +6461,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("reason", "string", "non-empty process execution authorization reason"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["run_id", "allow_exec", "approved_by", "reason"]),
-                "forge.request_executor_wave.v1",
-                &["forge", "request", "execute-wave", "--run", "<run-id>", "--allow-exec", "--approved-by", "<operator>", "--reason", "<reason>", "--output", "json"],
+                "foundry.request_executor_wave.v1",
+                &["foundry", "request", "execute-wave", "--run", "<run-id>", "--allow-exec", "--approved-by", "<operator>", "--reason", "<reason>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.run.complete_task",
+                "foundry.run.complete_task",
                 "Complete Ready Task With Evidence",
                 "Record executor evidence for the current ready handoff task, generate a replayable execution trace, validate the executor response, promote the task and drive the next action.",
                 object_schema(&[
@@ -6477,24 +6485,24 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("context_budget", "integer", "context budget used when re-driving the ready handoff before completion"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["run_id", "task_id", "summary", "evidence_command", "evidence_exit_code"]),
-                "forge.request_task_completion.v1",
-                &["forge", "request", "complete-task", "--run", "<run-id>", "--task", "<task-id>", "--summary", "<summary>", "--evidence-command", "<passing-gate>", "--evidence-exit-code", "<observed-exit-code>", "--budget", "<bytes>", "--output", "json"],
+                "foundry.request_task_completion.v1",
+                &["foundry", "request", "complete-task", "--run", "<run-id>", "--task", "<task-id>", "--summary", "<summary>", "--evidence-command", "<passing-gate>", "--evidence-exit-code", "<observed-exit-code>", "--budget", "<bytes>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.run.final_package",
+                "foundry.run.final_package",
                 "Create Final Delivery Package",
                 "Create a user-facing final delivery package for a run, attaching Markdown and JSON artifacts that summarize readiness, deliverables, evidence, tasks and remaining gaps.",
                 object_schema(&[
                     ("run_id", "string", "run id"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["run_id"]),
-                "forge.request_final_delivery_package.v1",
-                &["forge", "request", "final-package", "--run", "<run-id>", "--output", "json"],
+                "foundry.request_final_delivery_package.v1",
+                &["foundry", "request", "final-package", "--run", "<run-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.workflow.ensure_final_audit",
+                "foundry.workflow.ensure_final_audit",
                 "Ensure Final Completion Audit",
                 "Create or surface the final completion audit task for a workflow so user-facing deliverables cannot be mistaken for complete without audited evidence.",
                 object_schema(&[
@@ -6502,12 +6510,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("executor", "string", "codex|opencode|skill|mcp|custom executor id"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id"]),
-                "forge.request_final_audit.v1",
-                &["forge", "request", "ensure-final-audit", "--workflow", "<workflow-id>", "--output", "json"],
+                "foundry.request_final_audit.v1",
+                &["foundry", "request", "ensure-final-audit", "--workflow", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.run.switch_executor",
+                "foundry.run.switch_executor",
                 "Switch Async Run Executor",
                 "Hot-swap the active executor for an async run without cancelling the run, changing workflow id, dropping checkpoints or weakening explicit user directives.",
                 object_schema(&[
@@ -6520,58 +6528,58 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("reason", "string", "why the executor is being switched"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["run_id", "executor"]),
-                "forge.request_executor_switch.v1",
-                &["forge", "request", "switch-executor", "--run", "<run-id>", "--executor", "<executor>", "--fallback-executor", "<fallback-executor>", "--output", "json"],
+                "foundry.request_executor_switch.v1",
+                &["foundry", "request", "switch-executor", "--run", "<run-id>", "--executor", "<executor>", "--fallback-executor", "<fallback-executor>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.run.recover_stale",
+                "foundry.run.recover_stale",
                 "Recover Stale Async Run",
                 "Transition a stale running async handoff to needs_attention so humans or executors can resume, cancel or inspect without losing lineage.",
                 object_schema(&[
                     ("run_id", "string", "run id"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["run_id"]),
-                "forge.request_stale_recovery.v1",
-                &["forge", "request", "recover-stale", "--run", "<run-id>", "--output", "json"],
+                "foundry.request_stale_recovery.v1",
+                &["foundry", "request", "recover-stale", "--run", "<run-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.run.status",
-                "Poll Async Forge Run",
+                "foundry.run.status",
+                "Poll Async Foundry Run",
                 "Poll async run status, workflow revision, task summary, validation evidence and artifacts later.",
                 object_schema(&[("run_id", "string", "run id")], &["run_id"]),
-                "forge.request_status.v1",
-                &["forge", "request", "status", "--run", "<run-id>", "--output", "json"],
+                "foundry.request_status.v1",
+                &["foundry", "request", "status", "--run", "<run-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.request.list",
-                "List Async Forge Requests",
+                "foundry.request.list",
+                "List Async Foundry Requests",
                 "List all async requests with optional status filter (accepted|resumed|cancelled).",
                 object_schema(&[
                     ("status", "string", "optional filter: accepted|resumed|cancelled"),
                 ], &[]),
-                "forge.request_list.v1",
-                &["forge", "request", "list", "--output", "json"],
+                "foundry.request_list.v1",
+                &["foundry", "request", "list", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.request.cancel",
-                "Cancel Async Forge Request",
+                "foundry.request.cancel",
+                "Cancel Async Foundry Request",
                 "Mark an async request as cancelled and record the event with origin trace.",
                 object_schema(&[
                     ("run_id", "string", "run id"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["run_id"]),
-                "forge.request_cancel.v1",
-                &["forge", "request", "cancel", "--run", "<run-id>", "--output", "json"],
+                "foundry.request_cancel.v1",
+                &["foundry", "request", "cancel", "--run", "<run-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.workflow.update_goal",
+                "foundry.workflow.update_goal",
                 "Update Workflow Goal",
-                "Mutate the workflow goal through Forge with revision tracking and origin trace.",
+                "Mutate the workflow goal through Foundry with revision tracking and origin trace.",
             object_schema(&[
                 ("workflow_id", "string", "workflow id"),
                 ("goal", "string", "new goal"),
@@ -6582,14 +6590,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "optional optimistic concurrency revision",
                 ),
             ], &["workflow_id", "goal", "origin"]),
-                "forge.workflow_goal_update.v1",
-            &["forge", "workflow", "update-goal", "--workflow", "<workflow-id>", "--output", "json"],
+                "foundry.workflow_goal_update.v1",
+            &["foundry", "workflow", "update-goal", "--workflow", "<workflow-id>", "--output", "json"],
             ToolFlags::new(true, true),
         ),
         tool(
-            "forge.workflow.add_task",
+            "foundry.workflow.add_task",
             "Add Workflow Task",
-            "Add a task to a live Forge workflow with an atomic revisioned graph mutation.",
+            "Add a task to a live Foundry workflow with an atomic revisioned graph mutation.",
             object_schema(&[
                 ("workflow_id", "string", "workflow id"),
                 ("task_id", "string", "optional explicit task id"),
@@ -6602,12 +6610,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "optional optimistic concurrency revision",
                 ),
             ], &["workflow_id", "description", "priority", "origin"]),
-            "forge.workflow_mutation.v1",
-            &["forge", "workflow", "add-task", "--workflow", "<workflow-id>", "--description", "<description>", "--output", "json"],
+            "foundry.workflow_mutation.v1",
+            &["foundry", "workflow", "add-task", "--workflow", "<workflow-id>", "--description", "<description>", "--output", "json"],
             ToolFlags::new(true, true),
         ),
         tool(
-            "forge.workflow.update_task",
+            "foundry.workflow.update_task",
             "Update Workflow Task",
             "Update a mutable task's title, goal or expected output with revision tracking.",
             object_schema(&[
@@ -6623,14 +6631,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "optional optimistic concurrency revision",
                 ),
             ], &["workflow_id", "task_id", "origin"]),
-            "forge.workflow_task_update.v1",
-            &["forge", "workflow", "update-task", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+            "foundry.workflow_task_update.v1",
+            &["foundry", "workflow", "update-task", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
             ToolFlags::new(true, true),
         ),
         tool(
-            "forge.workflow.set_priority",
+            "foundry.workflow.set_priority",
             "Set Workflow Task Priority",
-            "Set a task priority through an atomic revisioned Forge graph mutation.",
+            "Set a task priority through an atomic revisioned Foundry graph mutation.",
             object_schema(&[
                 ("workflow_id", "string", "workflow id"),
                 ("task_id", "string", "task id"),
@@ -6642,12 +6650,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "optional optimistic concurrency revision",
                 ),
             ], &["workflow_id", "task_id", "priority", "origin"]),
-            "forge.workflow_mutation.v1",
-            &["forge", "workflow", "set-priority", "--workflow", "<workflow-id>", "--task", "<task-id>", "--priority", "<priority>", "--output", "json"],
+            "foundry.workflow_mutation.v1",
+            &["foundry", "workflow", "set-priority", "--workflow", "<workflow-id>", "--task", "<task-id>", "--priority", "<priority>", "--output", "json"],
             ToolFlags::new(true, true),
         ),
         tool(
-            "forge.workflow.add_dependency",
+            "foundry.workflow.add_dependency",
             "Add Workflow Task Dependency",
             "Add a dependency edge after validating that the live workflow graph remains acyclic.",
             object_schema(&[
@@ -6661,14 +6669,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "optional optimistic concurrency revision",
                 ),
             ], &["workflow_id", "task_id", "depends_on", "origin"]),
-            "forge.workflow_mutation.v1",
-            &["forge", "workflow", "add-dependency", "--workflow", "<workflow-id>", "--task", "<task-id>", "--depends-on", "<predecessor-task-id>", "--output", "json"],
+            "foundry.workflow_mutation.v1",
+            &["foundry", "workflow", "add-dependency", "--workflow", "<workflow-id>", "--task", "<task-id>", "--depends-on", "<predecessor-task-id>", "--output", "json"],
             ToolFlags::new(true, true),
         ),
         tool(
-            "forge.workflow.remove_dependency",
+            "foundry.workflow.remove_dependency",
             "Remove Workflow Task Dependency",
-            "Remove a dependency edge through an atomic revisioned Forge graph mutation.",
+            "Remove a dependency edge through an atomic revisioned Foundry graph mutation.",
             object_schema(&[
                 ("workflow_id", "string", "workflow id"),
                 ("task_id", "string", "task id"),
@@ -6680,12 +6688,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "optional optimistic concurrency revision",
                 ),
             ], &["workflow_id", "task_id", "depends_on", "origin"]),
-            "forge.workflow_mutation.v1",
-            &["forge", "workflow", "remove-dependency", "--workflow", "<workflow-id>", "--task", "<task-id>", "--depends-on", "<predecessor-task-id>", "--output", "json"],
+            "foundry.workflow_mutation.v1",
+            &["foundry", "workflow", "remove-dependency", "--workflow", "<workflow-id>", "--task", "<task-id>", "--depends-on", "<predecessor-task-id>", "--output", "json"],
             ToolFlags::new(true, true),
         ),
         tool(
-            "forge.workflow.set_impediment",
+            "foundry.workflow.set_impediment",
             "Set Workflow Task Impediment",
             "Block a task with a structured active impediment and revisioned audit event.",
             object_schema(&[
@@ -6700,12 +6708,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "optional optimistic concurrency revision",
                 ),
             ], &["workflow_id", "task_id", "reason", "origin"]),
-            "forge.workflow_mutation.v1",
-            &["forge", "workflow", "set-impediment", "--workflow", "<workflow-id>", "--task", "<task-id>", "--reason", "<reason>", "--output", "json"],
+            "foundry.workflow_mutation.v1",
+            &["foundry", "workflow", "set-impediment", "--workflow", "<workflow-id>", "--task", "<task-id>", "--reason", "<reason>", "--output", "json"],
             ToolFlags::new(true, true),
         ),
         tool(
-            "forge.workflow.clear_impediment",
+            "foundry.workflow.clear_impediment",
             "Clear Workflow Task Impediment",
             "Clear one impediment by id, or clear only manual impediments when no id is provided.",
             object_schema(&[
@@ -6719,12 +6727,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "optional optimistic concurrency revision",
                 ),
             ], &["workflow_id", "task_id", "origin"]),
-            "forge.workflow_mutation.v1",
-            &["forge", "workflow", "clear-impediment", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+            "foundry.workflow_mutation.v1",
+            &["foundry", "workflow", "clear-impediment", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
             ToolFlags::new(true, true),
         ),
             tool(
-                "forge.teamwork.plan",
+                "foundry.teamwork.plan",
                 "Plan Elastic Teamwork",
                 "Create an auditable fan-out/fan-in workflow with one or more independent lanes. Each lane chooses its executor brain and agent count, such as three Agy frontend agents and five Codex backend agents.",
                 object_schema(&[
@@ -6745,14 +6753,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         "optionally bypass advisory benchmark cache",
                     ),
                 ], &["goal"]),
-                "forge.teamwork.plan.v1",
-                &["forge", "teamwork", "--goal", "<goal>", "--lane", "frontend=agy:3", "--lane", "backend=codex:5", "--output", "json"],
+                "foundry.teamwork.plan.v1",
+                &["foundry", "teamwork", "--goal", "<goal>", "--lane", "frontend=agy:3", "--lane", "backend=codex:5", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.workflow.update_node_brain",
+                "foundry.workflow.update_node_brain",
                 "Update Node Brain Routing",
-                "Mutate one AI or mixed workflow node's Forge-owned brain routing without stopping the workflow run. Supports default brain, allowed brains, multiple agent slots and parallel-agent limits.",
+                "Mutate one AI or mixed workflow node's Foundry-owned brain routing without stopping the workflow run. Supports default brain, allowed brains, multiple agent slots and parallel-agent limits.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                     ("task_id", "string", "task/node id"),
@@ -6762,14 +6770,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("max_parallel_agents", "integer", "optional node-level parallel agent limit"),
                     ("origin", "string", "codex|opencode|gemini|claude|skill|mcp"),
                 ], &["workflow_id", "task_id"]),
-                "forge.workflow_node_brain_routing_update.v1",
-                &["forge", "workflow", "update-node-brain", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                "foundry.workflow_node_brain_routing_update.v1",
+                &["foundry", "workflow", "update-node-brain", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.workflow.attach_artifact",
+                "foundry.workflow.attach_artifact",
                 "Attach Workflow Artifact",
-                "Attach an artifact through Forge so the path, hash, origin and revision are persisted.",
+                "Attach an artifact through Foundry so the path, hash, origin and revision are persisted.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                     ("path", "string", "local artifact path"),
@@ -6777,14 +6785,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("tags", "array", "optional artifact search tags"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "path", "kind", "origin"]),
-                "forge.artifact_attach.v1",
-                &["forge", "workflow", "attach-artifact", "--workflow", "<workflow-id>", "--output", "json"],
+                "foundry.artifact_attach.v1",
+                &["foundry", "workflow", "attach-artifact", "--workflow", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.interaction.create_choice",
+                "foundry.interaction.create_choice",
                 "Create Human Choice Interaction",
-                "Pause a workflow task on a Forge-owned human choice gate that can be answered from CLI, web or agent surfaces.",
+                "Pause a workflow task on a Foundry-owned human choice gate that can be answered from CLI, web or agent surfaces.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                     ("task_id", "string", "task id"),
@@ -6794,14 +6802,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("timeout_seconds", "integer", "optional timeout in seconds"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "task_id", "prompt", "choices"]),
-                "forge.human_interaction.v1",
-                &["forge", "interaction", "create-choice", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                "foundry.human_interaction.v1",
+                &["foundry", "interaction", "create-choice", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.interaction.create_form",
+                "foundry.interaction.create_form",
                 "Create Human Form Interaction",
-                "Pause a workflow task on a Forge-owned structured form with validation and durable decision state.",
+                "Pause a workflow task on a Foundry-owned structured form with validation and durable decision state.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                     ("task_id", "string", "task id"),
@@ -6810,14 +6818,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("timeout_seconds", "integer", "optional timeout in seconds"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "task_id", "prompt", "fields"]),
-                "forge.human_interaction.v1",
-                &["forge", "interaction", "create-form", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                "foundry.human_interaction.v1",
+                &["foundry", "interaction", "create-form", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.interaction.answer",
+                "foundry.interaction.answer",
                 "Answer Human Interaction",
-                "Record a human decision or form answer and resume the blocked workflow task through Forge state.",
+                "Record a human decision or form answer and resume the blocked workflow task through Foundry state.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                     ("task_id", "string", "task id"),
@@ -6826,12 +6834,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("rationale", "string", "optional human rationale"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "task_id"]),
-                "forge.human_interaction.v1",
-                &["forge", "interaction", "answer", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                "foundry.human_interaction.v1",
+                &["foundry", "interaction", "answer", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.interaction.expire",
+                "foundry.interaction.expire",
                 "Expire Human Interaction",
                 "Mark a timed-out human interaction blocked without letting the workflow skip the decision.",
                 object_schema(&[
@@ -6839,27 +6847,27 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("task_id", "string", "task id"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "task_id"]),
-                "forge.human_interaction.v1",
-                &["forge", "interaction", "expire", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                "foundry.human_interaction.v1",
+                &["foundry", "interaction", "expire", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.interaction.list",
+                "foundry.interaction.list",
                 "List Human Interactions",
-                "List pending, answered and timed-out human interactions across Forge workflows for agent approval bridges.",
+                "List pending, answered and timed-out human interactions across Foundry workflows for agent approval bridges.",
                 object_schema(&[], &[]),
-                "forge.human_interaction.list.v1",
-                &["forge", "interaction", "list", "--output", "json"],
+                "foundry.human_interaction.list.v1",
+                &["foundry", "interaction", "list", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.context.request",
+                "foundry.context.request",
                 "Request Bounded Context",
                 "Build the minimum correct task-local context package before executor handoff, optionally resolving project memory governance.",
                 context_request_input_schema(),
             CONTEXT_COMPACT_VIEW_SCHEMA_VERSION,
             &[
-                "forge",
+                "foundry",
                 "context",
                 "--workflow",
                 "<workflow-id>",
@@ -6873,7 +6881,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.worktree.guard.check",
+                "foundry.worktree.guard.check",
                 "Check Worktree Modification Guard",
                 "Evaluate file and directory modification scopes for a registered worktree and return a fail-closed agent action when a protected path needs a predecessor task.",
                 object_schema(&[
@@ -6884,12 +6892,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("workflow_id", "string", "optional workflow binding"),
                     ("task_id", "string", "optional current task binding"),
                 ], &["worktree", "paths", "reason"]),
-                "forge.worktree.modification_guard.v1",
-                &["forge", "worktree", "guard", "check", "--worktree", "<worktree-id>", "--path", "<path>", "--reason", "<reason>", "--output", "json"],
+                "foundry.worktree.modification_guard.v1",
+                &["foundry", "worktree", "guard", "check", "--worktree", "<worktree-id>", "--path", "<path>", "--reason", "<reason>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.worktree.guard.create_predecessor",
+                "foundry.worktree.guard.create_predecessor",
                 "Create Worktree Guard Predecessor",
                 "With explicit workflow-mutation approval, create a path-specific predecessor task and block the current task through a revisioned DAG dependency.",
                 object_schema(&[
@@ -6902,12 +6910,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("approved_by", "string", "approver identity"),
                     ("origin", "string", "mutation origin"),
                 ], &["worktree", "workflow_id", "task_id", "paths", "goal", "allow_workflow_mutation", "approved_by"]),
-                "forge.worktree.predecessor_task.v1",
-                &["forge", "worktree", "guard", "create-predecessor", "--worktree", "<worktree-id>", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>", "--goal", "<goal>", "--allow-workflow-mutation", "--approved-by", "<approver>", "--output", "json"],
+                "foundry.worktree.predecessor_task.v1",
+                &["foundry", "worktree", "guard", "create-predecessor", "--worktree", "<worktree-id>", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>", "--goal", "<goal>", "--allow-workflow-mutation", "--approved-by", "<approver>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.worktree.sandbox.plan",
+                "foundry.worktree.sandbox.plan",
                 "Plan Worktree Sandbox",
                 "Evaluate the approved worktree, binding, command, runtime, filesystem and network guardrails without executing the preview or test payload.",
                 object_schema(&[
@@ -6917,12 +6925,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("task_id", "string", "optional task binding; requires workflow_id"),
                     ("command", "array", "optional command argv override"),
                 ], &["worktree", "purpose"]),
-                "forge.worktree.sandbox_plan.v1",
-                &["forge", "worktree", "sandbox", "plan", "--worktree", "<worktree-id>", "--purpose", "<preview|test>", "--output", "json", "--", "<command>"],
+                "foundry.worktree.sandbox_plan.v1",
+                &["foundry", "worktree", "sandbox", "plan", "--worktree", "<worktree-id>", "--purpose", "<preview|test>", "--output", "json", "--", "<command>"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.worktree.sandbox.run",
+                "foundry.worktree.sandbox.run",
                 "Run Worktree Sandbox",
                 "Run one bounded preview or test command after explicit execution authorization and persist a structured, redacted receipt.",
                 object_schema(&[
@@ -6933,14 +6941,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("command", "array", "optional command argv override"),
                     ("allow_exec", "boolean", "explicit payload execution authorization"),
                 ], &["worktree", "purpose", "allow_exec"]),
-                "forge.worktree.sandbox_receipt.v1",
-                &["forge", "worktree", "sandbox", "run", "--worktree", "<worktree-id>", "--purpose", "<preview|test>", "--allow-exec", "--output", "json", "--", "<command>"],
+                "foundry.worktree.sandbox_receipt.v1",
+                &["foundry", "worktree", "sandbox", "run", "--worktree", "<worktree-id>", "--purpose", "<preview|test>", "--allow-exec", "--output", "json", "--", "<command>"],
                 ToolFlags::new(false, false),
             ),
             tool(
-                "forge.worktree.sandbox.start",
+                "foundry.worktree.sandbox.start",
                 "Start Worktree Sandbox",
-                "Start a detached, persistent preview or test sandbox under a Forge supervisor after explicit execution authorization.",
+                "Start a detached, persistent preview or test sandbox under a Foundry supervisor after explicit execution authorization.",
                 object_schema(&[
                     ("worktree", "string", "registered worktree id or root"),
                     ("purpose", "string", "preview|test"),
@@ -6949,35 +6957,35 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("command", "array", "optional command argv override"),
                     ("allow_exec", "boolean", "explicit payload execution authorization"),
                 ], &["worktree", "purpose", "allow_exec"]),
-                "forge.worktree.sandbox_lifecycle.v1",
-                &["forge", "worktree", "sandbox", "start", "--worktree", "<worktree-id>", "--purpose", "<preview|test>", "--allow-exec", "--output", "json", "--", "<command>"],
+                "foundry.worktree.sandbox_lifecycle.v1",
+                &["foundry", "worktree", "sandbox", "start", "--worktree", "<worktree-id>", "--purpose", "<preview|test>", "--allow-exec", "--output", "json", "--", "<command>"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.worktree.sandbox.status",
+                "foundry.worktree.sandbox.status",
                 "Inspect Worktree Sandbox",
                 "Inspect the durable lifecycle state for a persistent preview or test sandbox.",
                 object_schema(&[("sandbox_id", "string", "persistent sandbox id")], &["sandbox_id"]),
-                "forge.worktree.sandbox_lifecycle.v1",
-                &["forge", "worktree", "sandbox", "status", "--sandbox", "<sandbox-id>", "--output", "json"],
+                "foundry.worktree.sandbox_lifecycle.v1",
+                &["foundry", "worktree", "sandbox", "status", "--sandbox", "<sandbox-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.worktree.sandbox.stop",
+                "foundry.worktree.sandbox.stop",
                 "Stop Worktree Sandbox",
                 "Stop the persistent sandbox payload process group after explicit stop authorization and persist the terminal lifecycle state.",
                 object_schema(&[
                     ("sandbox_id", "string", "persistent sandbox id"),
                     ("allow_stop", "boolean", "explicit process-group termination authorization"),
                 ], &["sandbox_id", "allow_stop"]),
-                "forge.worktree.sandbox_lifecycle.v1",
-                &["forge", "worktree", "sandbox", "stop", "--sandbox", "<sandbox-id>", "--allow-stop", "--output", "json"],
+                "foundry.worktree.sandbox_lifecycle.v1",
+                &["foundry", "worktree", "sandbox", "stop", "--sandbox", "<sandbox-id>", "--allow-stop", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.harness.token_headroom",
+                "foundry.harness.token_headroom",
                 "Analyze Token Headroom",
-                "Apply Forge-native local token-headroom routing to a context or tool-output payload and report estimated savings plus reversible retrieval metadata.",
+                "Apply Foundry-native local token-headroom routing to a context or tool-output payload and report estimated savings plus reversible retrieval metadata.",
                 object_schema(&[
                     ("content", "string", "context or tool-output payload"),
                     ("content_kind", "string", "optional json|log|search|code|text hint"),
@@ -6986,173 +6994,173 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("reversible", "boolean", "whether to include retrieval metadata"),
                     ("persist", "boolean", "whether to store reversible content locally"),
                 ], &["content"]),
-                "forge.harness.token_headroom.v1",
-                &["forge", "harness", "token-headroom", "--content", "<payload>", "--output", "json"],
+                "foundry.harness.token_headroom.v1",
+                &["foundry", "harness", "token-headroom", "--content", "<payload>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.harness.retrieve_headroom",
+                "foundry.harness.retrieve_headroom",
                 "Retrieve Headroom Blob",
-                "Retrieve metadata or content for a persisted Forge headroom blob by retrieval ref.",
+                "Retrieve metadata or content for a persisted Foundry headroom blob by retrieval ref.",
                 object_schema(&[
-                    ("retrieval_ref", "string", "forge://harness/headroom/<sha256> or raw sha256"),
+                    ("retrieval_ref", "string", "foundry://harness/headroom/<sha256> or raw sha256"),
                     ("include_content", "boolean", "include original and compressed content"),
                 ], &["retrieval_ref"]),
-                "forge.harness.headroom_retrieval.v1",
-                &["forge", "harness", "retrieve-headroom", "--ref", "<retrieval-ref>", "--output", "json"],
+                "foundry.harness.headroom_retrieval.v1",
+                &["foundry", "harness", "retrieve-headroom", "--ref", "<retrieval-ref>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.harness.headroom_stats",
+                "foundry.harness.headroom_stats",
                 "Inspect Headroom Stats",
-                "Aggregate persisted Forge headroom blobs by source and content kind, including top reversible retrieval refs for token-savings observability.",
+                "Aggregate persisted Foundry headroom blobs by source and content kind, including top reversible retrieval refs for token-savings observability.",
                 object_schema(&[
                     ("source", "string", "optional persisted headroom source filter"),
                     ("content_kind", "string", "optional json|log|search|code|text filter"),
                     ("limit", "integer", "maximum top saved blobs to return"),
                 ], &[]),
-                "forge.harness.headroom_stats.v1",
-                &["forge", "harness", "headroom-stats", "--output", "json"],
+                "foundry.harness.headroom_stats.v1",
+                &["foundry", "harness", "headroom-stats", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.harness.mode",
+                "foundry.harness.mode",
                 "Inspect Harness Mode",
-                "Report the effective Forge-first harness mode, source, project config, exec policy status and precedence before wrapper, shim or exec use.",
+                "Report the effective Foundry-first harness mode, source, project config, exec policy status and precedence before wrapper, shim or exec use.",
                 object_schema(&[
-                    ("forge_first", "boolean", "simulate an explicit Forge-first CLI flag"),
+                    ("foundry_first", "boolean", "simulate an explicit Foundry-first CLI flag"),
                     ("observe_only", "boolean", "simulate an observe-only CLI override"),
-                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("project_root", "string", "optional project root containing .foundry/harness.json"),
                 ], &[]),
-                "forge.harness.mode.v1",
-                &["forge", "harness", "mode", "--project-root", "<project-root>", "--output", "json"],
+                "foundry.harness.mode.v1",
+                &["foundry", "harness", "mode", "--project-root", "<project-root>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.harness.doctor",
-                "Audit Forge Harness Readiness",
-                "Return a read-only consolidated harness readiness report for one brain CLI, combining Forge-first mode, project policy, shim status, wrapper/session lifecycle plan and token-headroom readiness without installing shims or launching child processes.",
+                "foundry.harness.doctor",
+                "Audit Foundry Harness Readiness",
+                "Return a read-only consolidated harness readiness report for one brain CLI, combining Foundry-first mode, project policy, shim status, wrapper/session lifecycle plan and token-headroom readiness without installing shims or launching child processes.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
-                    ("shim_dir", "string", "directory where Forge-owned shims should live"),
-                    ("forge_first", "boolean", "simulate an explicit Forge-first CLI flag"),
+                    ("shim_dir", "string", "directory where Foundry-owned shims should live"),
+                    ("foundry_first", "boolean", "simulate an explicit Foundry-first CLI flag"),
                     ("observe_only", "boolean", "simulate an observe-only CLI override"),
-                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("project_root", "string", "optional project root containing .foundry/harness.json"),
                     ("workflow_id", "string", "optional workflow lineage for readiness"),
                     ("task_id", "string", "optional task/node lineage for readiness"),
                     ("run_id", "string", "optional async run lineage for readiness"),
                     ("context_budget", "integer", "context byte budget"),
                     ("token_headroom", "boolean", "enable token-headroom readiness"),
                 ], &["executor", "shim_dir"]),
-                "forge.harness.doctor.v1",
-                &["forge", "harness", "doctor", "--executor", "<executor>", "--shim-dir", "<dir>", "--project-root", "<project-root>", "--output", "json"],
+                "foundry.harness.doctor.v1",
+                &["foundry", "harness", "doctor", "--executor", "<executor>", "--shim-dir", "<dir>", "--project-root", "<project-root>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.harness.headroom_plan",
+                "foundry.harness.headroom_plan",
                 "Plan Harness Headroom",
-                "Return a read-only Forge harness headroom plan for one brain CLI, including effective context budget, token-headroom source, wrapper env, session lifecycle plan, compression pipeline, reserve strategy and next commands.",
+                "Return a read-only Foundry harness headroom plan for one brain CLI, including effective context budget, token-headroom source, wrapper env, session lifecycle plan, compression pipeline, reserve strategy and next commands.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
                     ("command", "array", "optional command argv to launch under the harness"),
-                    ("forge_first", "boolean", "prefer Forge context routing before native CLI defaults"),
+                    ("foundry_first", "boolean", "prefer Foundry context routing before native CLI defaults"),
                     ("observe_only", "boolean", "force one read-only observe-only planning pass"),
-                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("project_root", "string", "optional project root containing .foundry/harness.json"),
                     ("workflow_id", "string", "optional workflow lineage"),
                     ("task_id", "string", "optional task/node lineage"),
                     ("run_id", "string", "optional async run lineage"),
                     ("context_budget", "integer", "context byte budget"),
                     ("token_headroom", "boolean", "enable token-headroom env"),
                 ], &["executor"]),
-                "forge.harness.headroom_plan.v1",
-                &["forge", "harness", "headroom-plan", "--executor", "<executor>", "--project-root", "<project-root>", "--output", "json"],
+                "foundry.harness.headroom_plan.v1",
+                &["foundry", "harness", "headroom-plan", "--executor", "<executor>", "--project-root", "<project-root>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.harness.adoption_plan",
-                "Plan Forge-First Harness Adoption",
-                "Return a read-only ordered adoption plan for making one project use Forge-first CLI harness defaults, token headroom, shims, executor sync and lineage-required execution without writing config, installing shims or launching child processes.",
+                "foundry.harness.adoption_plan",
+                "Plan Foundry-First Harness Adoption",
+                "Return a read-only ordered adoption plan for making one project use Foundry-first CLI harness defaults, token headroom, shims, executor sync and lineage-required execution without writing config, installing shims or launching child processes.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
-                    ("shim_dir", "string", "directory where Forge-owned shims should live"),
-                    ("forge_first", "boolean", "simulate an explicit Forge-first CLI flag"),
+                    ("shim_dir", "string", "directory where Foundry-owned shims should live"),
+                    ("foundry_first", "boolean", "simulate an explicit Foundry-first CLI flag"),
                     ("observe_only", "boolean", "simulate an observe-only CLI override"),
-                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("project_root", "string", "optional project root containing .foundry/harness.json"),
                     ("workflow_id", "string", "optional workflow lineage"),
                     ("task_id", "string", "optional task/node lineage"),
                     ("run_id", "string", "optional async run lineage"),
                     ("context_budget", "integer", "context byte budget"),
                     ("token_headroom", "boolean", "enable token-headroom readiness"),
                 ], &["executor", "shim_dir"]),
-                "forge.harness.adoption_plan.v1",
-                &["forge", "harness", "adoption-plan", "--executor", "<executor>", "--shim-dir", "<dir>", "--project-root", "<project-root>", "--output", "json"],
+                "foundry.harness.adoption_plan.v1",
+                &["foundry", "harness", "adoption-plan", "--executor", "<executor>", "--shim-dir", "<dir>", "--project-root", "<project-root>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.harness.activation_profile",
-                "Project Forge-First Shell Activation",
-                "Return a shell activation/deactivation profile that puts Forge-owned CLI shims first in PATH and exports Forge-first harness defaults. Dry-run by default; with apply, shell_rc and approved_by it writes a reversible Forge-managed shell startup block without launching child CLIs.",
+                "foundry.harness.activation_profile",
+                "Project Foundry-First Shell Activation",
+                "Return a shell activation/deactivation profile that puts Foundry-owned CLI shims first in PATH and exports Foundry-first harness defaults. Dry-run by default; with apply, shell_rc and approved_by it writes a reversible Foundry-managed shell startup block without launching child CLIs.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
-                    ("shim_dir", "string", "directory where Forge-owned shims should live"),
-                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("shim_dir", "string", "directory where Foundry-owned shims should live"),
+                    ("project_root", "string", "optional project root containing .foundry/harness.json"),
                     ("shell_rc", "string", "optional shell startup file to update when apply=true"),
                     ("apply", "boolean", "write the managed shell startup block when true"),
                     ("approved_by", "string", "required approver when apply=true"),
                     ("context_budget", "integer", "context byte budget"),
                     ("token_headroom", "boolean", "enable token-headroom defaults"),
                 ], &["executor", "shim_dir"]),
-                "forge.harness.activation_profile.v1",
-                &["forge", "harness", "activation-profile", "--executor", "<executor>", "--shim-dir", "<dir>", "--project-root", "<project-root>", "--output", "json"],
+                "foundry.harness.activation_profile.v1",
+                &["foundry", "harness", "activation-profile", "--executor", "<executor>", "--shim-dir", "<dir>", "--project-root", "<project-root>", "--output", "json"],
                 ToolFlags::new(false, false),
             ),
             tool(
-                "forge.harness.bootstrap",
-                "Bootstrap Forge-First Harness",
-                "Plan by default, or with explicit approval write project .forge/harness.json and install Forge-owned CLI shims for one executor. It keeps dry-run safe by default and reports the adoption plan, config write and shim install evidence.",
+                "foundry.harness.bootstrap",
+                "Bootstrap Foundry-First Harness",
+                "Plan by default, or with explicit approval write project .foundry/harness.json and install Foundry-owned CLI shims for one executor. It keeps dry-run safe by default and reports the adoption plan, config write and shim install evidence.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
-                    ("shim_dir", "string", "directory where Forge-owned shims should live"),
-                    ("project_root", "string", "project root where .forge/harness.json should be written"),
+                    ("shim_dir", "string", "directory where Foundry-owned shims should live"),
+                    ("project_root", "string", "project root where .foundry/harness.json should be written"),
                     ("context_budget", "integer", "default context byte budget"),
                     ("token_headroom", "boolean", "enable token-headroom defaults"),
                     ("apply", "boolean", "write project config and install shim when true"),
                     ("approved_by", "string", "required approver when apply=true"),
-                    ("force", "boolean", "allow replacing an existing Forge-owned or disposable shim"),
+                    ("force", "boolean", "allow replacing an existing Foundry-owned or disposable shim"),
                 ], &["executor", "shim_dir", "project_root"]),
-                "forge.harness.bootstrap.v1",
-                &["forge", "harness", "bootstrap", "--executor", "<executor>", "--shim-dir", "<dir>", "--project-root", "<project-root>", "--output", "json"],
+                "foundry.harness.bootstrap.v1",
+                &["foundry", "harness", "bootstrap", "--executor", "<executor>", "--shim-dir", "<dir>", "--project-root", "<project-root>", "--output", "json"],
                 ToolFlags::new(false, false),
             ),
             tool(
-                "forge.harness.wrap_plan",
-                "Plan Forge-First CLI Wrapper",
-                "Return a non-destructive Forge-first wrapper plan for Codex, Claude, Gemini or OpenCode with context budget, token-headroom environment shaping and session lifecycle gates.",
+                "foundry.harness.wrap_plan",
+                "Plan Foundry-First CLI Wrapper",
+                "Return a non-destructive Foundry-first wrapper plan for Codex, Claude, Gemini or OpenCode with context budget, token-headroom environment shaping and session lifecycle gates.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
                     ("command", "array", "command argv to launch under the harness"),
-                    ("forge_first", "boolean", "prefer Forge context routing before native CLI defaults"),
-                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("foundry_first", "boolean", "prefer Foundry context routing before native CLI defaults"),
+                    ("project_root", "string", "optional project root containing .foundry/harness.json"),
                     ("workflow_id", "string", "optional workflow lineage"),
                     ("task_id", "string", "optional task/node lineage"),
                     ("run_id", "string", "optional async run lineage"),
                     ("context_budget", "integer", "context byte budget"),
                     ("token_headroom", "boolean", "enable token-headroom env"),
                 ], &["executor"]),
-                "forge.harness.cli_wrapper_plan.v1",
-                &["forge", "harness", "wrap-plan", "--executor", "<executor>", "--output", "json"],
+                "foundry.harness.cli_wrapper_plan.v1",
+                &["foundry", "harness", "wrap-plan", "--executor", "<executor>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.harness.install_shims",
-                "Install Forge-First CLI Shims",
-                "Install a Forge-owned PATH shim for a brain CLI without overwriting an existing non-Forge file unless explicitly forced.",
+                "foundry.harness.install_shims",
+                "Install Foundry-First CLI Shims",
+                "Install a Foundry-owned PATH shim for a brain CLI without overwriting an existing non-Foundry file unless explicitly forced.",
                 object_schema(&[
-                    ("shim_dir", "string", "directory where Forge-owned shims will be written"),
+                    ("shim_dir", "string", "directory where Foundry-owned shims will be written"),
                     ("executor", "string", "codex|claude|gemini|opencode"),
                     ("real_cmd", "string", "optional resolved native CLI command/path; omitted values are discovered from PATH outside shim_dir"),
-                    ("forge_first", "boolean", "prefer Forge context routing before native CLI defaults"),
-                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("foundry_first", "boolean", "prefer Foundry context routing before native CLI defaults"),
+                    ("project_root", "string", "optional project root containing .foundry/harness.json"),
                     ("workflow_id", "string", "optional workflow lineage"),
                     ("task_id", "string", "optional task/node lineage"),
                     ("run_id", "string", "optional async run lineage"),
@@ -7160,46 +7168,46 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("token_headroom", "boolean", "enable token-headroom env"),
                     ("force", "boolean", "allow replacing an existing file"),
                 ], &["shim_dir", "executor"]),
-                "forge.harness.shim_install.v1",
-                &["forge", "harness", "install-shims", "--shim-dir", "<dir>", "--executor", "<executor>", "--project-root", "<project-root>", "--output", "json"],
+                "foundry.harness.shim_install.v1",
+                &["foundry", "harness", "install-shims", "--shim-dir", "<dir>", "--executor", "<executor>", "--project-root", "<project-root>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.harness.install_provider_adapter",
+                "foundry.harness.install_provider_adapter",
                 "Install Connected-Brain Provider Adapter",
-                "Install a Forge-owned provider adapter command that is separate from daily PATH shims and emits forge.connected_external_brain.provider_output.v1 only when later executed by milestone collection.",
+                "Install a Foundry-owned provider adapter command that is separate from daily PATH shims and emits foundry.connected_external_brain.provider_output.v1 only when later executed by milestone collection.",
                 object_schema(&[
-                    ("shim_dir", "string", "directory where Forge-owned provider adapters will be written"),
+                    ("shim_dir", "string", "directory where Foundry-owned provider adapters will be written"),
                     ("executor", "string", "codex|claude|gemini|opencode"),
                     ("real_cmd", "string", "optional approved provider CLI command/path; omitted values are discovered from PATH outside shim_dir"),
-                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("project_root", "string", "optional project root containing .foundry/harness.json"),
                     ("token_headroom", "boolean", "record token-headroom intent in adapter output"),
-                    ("force", "boolean", "allow replacing an existing Forge-owned adapter file"),
+                    ("force", "boolean", "allow replacing an existing Foundry-owned adapter file"),
                 ], &["shim_dir", "executor"]),
-                "forge.harness.provider_adapter_install.v1",
-                &["forge", "harness", "install-provider-adapter", "--shim-dir", "<dir>", "--executor", "<executor>", "--real-cmd", "<provider-cli>", "--project-root", "<project-root>", "--output", "json"],
+                "foundry.harness.provider_adapter_install.v1",
+                &["foundry", "harness", "install-provider-adapter", "--shim-dir", "<dir>", "--executor", "<executor>", "--real-cmd", "<provider-cli>", "--project-root", "<project-root>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.harness.shim_status",
-                "Inspect Forge-First CLI Shim Status",
-                "Audit whether a brain CLI shim exists, is Forge-owned, has PATH precedence and avoids recursion before using Forge-first shells.",
+                "foundry.harness.shim_status",
+                "Inspect Foundry-First CLI Shim Status",
+                "Audit whether a brain CLI shim exists, is Foundry-owned, has PATH precedence and avoids recursion before using Foundry-first shells.",
                 object_schema(&[
-                    ("shim_dir", "string", "directory where Forge-owned shims should live"),
+                    ("shim_dir", "string", "directory where Foundry-owned shims should live"),
                     ("executor", "string", "codex|claude|gemini|opencode"),
                 ], &["shim_dir", "executor"]),
-                "forge.harness.shim_status.v1",
-                &["forge", "harness", "shim-status", "--shim-dir", "<dir>", "--executor", "<executor>", "--output", "json"],
+                "foundry.harness.shim_status.v1",
+                &["foundry", "harness", "shim-status", "--shim-dir", "<dir>", "--executor", "<executor>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.harness.exec",
-                "Execute Forge Harness Receipt",
-                "Return a dry-run or explicitly guarded execution receipt for a Forge-first brain CLI invocation, including executable resolution, env overlay, bounded output hashes and workflow timeline event evidence when lineage is present.",
+                "foundry.harness.exec",
+                "Execute Foundry Harness Receipt",
+                "Return a dry-run or explicitly guarded execution receipt for a Foundry-first brain CLI invocation, including executable resolution, env overlay, bounded output hashes and workflow timeline event evidence when lineage is present.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
                     ("command", "array", "command argv to launch under the harness"),
-                    ("forge_first", "boolean", "prefer Forge context routing before native CLI defaults"),
+                    ("foundry_first", "boolean", "prefer Foundry context routing before native CLI defaults"),
                     ("workflow_id", "string", "optional workflow lineage"),
                     ("task_id", "string", "optional task/node lineage"),
                     ("run_id", "string", "optional async run lineage"),
@@ -7209,26 +7217,26 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("allow_exec", "boolean", "must be true together with dry_run=false before executing"),
                     ("secret_env", "array", "optional ENV=vault.reference mappings resolved only with secret permissions"),
                     ("secret_permissions", "array", "must include credential_secret_permissions and tool_usage_permissions for injection"),
-                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("project_root", "string", "optional project root containing .foundry/harness.json"),
                     ("cwd", "string", "optional child working directory"),
                 ], &["executor"]),
-                "forge.harness.exec_receipt.v1",
-                &["forge", "harness", "exec", "--executor", "<executor>", "--project-root", "<project-root>", "--", "<cmd>"],
+                "foundry.harness.exec_receipt.v1",
+                &["foundry", "harness", "exec", "--executor", "<executor>", "--project-root", "<project-root>", "--", "<cmd>"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.task.handoff",
+                "foundry.task.handoff",
                 "Acquire Task Handoff",
                 "Acquire a bounded executor handoff packet for an authorized task executor, optionally resolving project memory governance.",
                 task_handoff_input_schema(),
                 EXECUTOR_HANDOFF_COMPACT_SCHEMA_VERSION,
-                &["forge", "task", "handoff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--executor", "<executor>", "--view", "compact", "--output", "json"],
+                &["foundry", "task", "handoff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--executor", "<executor>", "--view", "compact", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.patch.plan",
+                "foundry.patch.plan",
                 "Plan File Patch",
-                "Create a Forge-owned, bounded file patch plan with snapshots, permission gates and diff review without applying changes.",
+                "Create a Foundry-owned, bounded file patch plan with snapshots, permission gates and diff review without applying changes.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                     ("task_id", "string", "task id"),
@@ -7236,12 +7244,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("paths", "array", "repo-relative file paths"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "task_id", "intent", "paths"]),
-                "forge.patch_plan.v1",
-                &["forge", "patch", "plan", "--workflow", "<workflow-id>", "--task", "<task-id>", "--intent", "<intent>", "--path", "<path>", "--output", "json"],
+                "foundry.patch_plan.v1",
+                &["foundry", "patch", "plan", "--workflow", "<workflow-id>", "--task", "<task-id>", "--intent", "<intent>", "--path", "<path>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.patch.apply",
+                "foundry.patch.apply",
                 "Apply File Patch",
                 "Record a file patch as applied: snapshot current file state, run validation, and persist an apply artifact with rollback support.",
                 object_schema(&[
@@ -7251,12 +7259,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("origin", "string", "codex|opencode|skill|mcp"),
                     ("plan_artifact", "string", "optional path to patch plan artifact for lineage"),
                 ], &["workflow_id", "task_id", "paths"]),
-                "forge.patch_apply.v1",
-                &["forge", "patch", "apply", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>", "--output", "json"],
+                "foundry.patch_apply.v1",
+                &["foundry", "patch", "apply", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.patch.review",
+                "foundry.patch.review",
                 "Review File Patch",
                 "Review current repo diffs for a bounded file patch, persist review evidence, and keep source files unchanged.",
                 object_schema(&[
@@ -7266,12 +7274,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("origin", "string", "codex|opencode|skill|mcp"),
                     ("plan_artifact", "string", "optional patch plan artifact for lineage"),
                 ], &["workflow_id", "task_id", "paths"]),
-                "forge.patch_review.v1",
-                &["forge", "patch", "review", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>", "--output", "json"],
+                "foundry.patch_review.v1",
+                &["foundry", "patch", "review", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.patch.diff",
+                "foundry.patch.diff",
                 "Navigate File Patch Diff",
                 "Build a read-only multi-file diff navigation model with selectable file and hunk indexes.",
                 object_schema(&[
@@ -7283,12 +7291,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("context_lines", "number", "git diff context line count"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "task_id", "paths"]),
-                "forge.patch_diff.v1",
-                &["forge", "patch", "diff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>", "--output", "json"],
+                "foundry.patch_diff.v1",
+                &["foundry", "patch", "diff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.patch.revert",
+                "foundry.patch.revert",
                 "Revert File Patch",
                 "Record a guarded revert proposal for a previously applied file patch without restoring files automatically.",
                 object_schema(&[
@@ -7297,12 +7305,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("apply_artifact", "string", "path to the apply artifact to revert"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "task_id", "apply_artifact"]),
-                "forge.patch_revert.v1",
-                &["forge", "patch", "revert", "--workflow", "<workflow-id>", "--task", "<task-id>", "--apply-artifact", "<path>", "--output", "json"],
+                "foundry.patch_revert.v1",
+                &["foundry", "patch", "revert", "--workflow", "<workflow-id>", "--task", "<task-id>", "--apply-artifact", "<path>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.patch.restore",
+                "foundry.patch.restore",
                 "Restore File Patch",
                 "Execute an explicitly approved repo-local file restore from a patch revert artifact and persist restore evidence.",
                 object_schema(&[
@@ -7313,40 +7321,40 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("confirm_restore", "boolean", "must be true to execute restore"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "task_id", "revert_artifact", "approved_by", "confirm_restore"]),
-                "forge.patch_restore.v1",
-                &["forge", "patch", "restore", "--workflow", "<workflow-id>", "--task", "<task-id>", "--revert-artifact", "<path>", "--approved-by", "<operator>", "--confirm-restore", "--output", "json"],
+                "foundry.patch_restore.v1",
+                &["foundry", "patch", "restore", "--workflow", "<workflow-id>", "--task", "<task-id>", "--revert-artifact", "<path>", "--approved-by", "<operator>", "--confirm-restore", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.validation.status",
+                "foundry.validation.status",
                 "Query Validation Status",
                 "Run the current validation gate projection without promoting unfinished work.",
                 object_schema(&[("workflow_id", "string", "workflow id")], &["workflow_id"]),
-                "forge.mcp.validation_status.v1",
-                &["forge", "validate", "--workflow", "<workflow-id>", "--output", "json"],
+                "foundry.mcp.validation_status.v1",
+                &["foundry", "validate", "--workflow", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.artifact.fetch",
+                "foundry.artifact.fetch",
                 "Fetch Workflow Artifact",
-                "List or fetch bounded artifact content from Forge-owned artifact refs asynchronously.",
+                "List or fetch bounded artifact content from Foundry-owned artifact refs asynchronously.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
-                    ("path", "string", "optional artifact path from Forge artifact listing"),
+                    ("path", "string", "optional artifact path from Foundry artifact listing"),
                     ("max_bytes", "integer", "maximum UTF-8 content bytes to return"),
                 ], &["workflow_id"]),
-                "forge.mcp.artifact_fetch.v1",
-                &["forge", "artifacts", "--workflow", "<workflow-id>", "--output", "json"],
+                "foundry.mcp.artifact_fetch.v1",
+                &["foundry", "artifacts", "--workflow", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.milestone.status",
-                "Inspect Forge Milestone Status",
-                "Inspect the Forge 0.5 milestone boundary, capability statuses and promotion gate.",
+                "foundry.milestone.status",
+                "Inspect Foundry Milestone Status",
+                "Inspect the Foundry 0.5 milestone boundary, capability statuses and promotion gate.",
                 object_schema(&[("version", "string", "milestone version, currently 0.5")], &[]),
-                "forge.milestone.status.v1",
+                "foundry.milestone.status.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "milestone",
                     "status",
                     "--version",
@@ -7357,13 +7365,13 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.milestone.manifest",
-                "Generate Forge Milestone Manifest",
-                "Generate the Forge 0.5 promotion manifest with requirements, completed and missing capabilities, validation evidence, attached evidence, demos, gaps and decision.",
+                "foundry.milestone.manifest",
+                "Generate Foundry Milestone Manifest",
+                "Generate the Foundry 0.5 promotion manifest with requirements, completed and missing capabilities, validation evidence, attached evidence, demos, gaps and decision.",
                 object_schema(&[("version", "string", "milestone version, currently 0.5")], &[]),
-                "forge.milestone.manifest.v1",
+                "foundry.milestone.manifest.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "milestone",
                     "manifest",
                     "--version",
@@ -7374,13 +7382,13 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.milestone.production_plan",
+                "foundry.milestone.production_plan",
                 "Plan Production Readiness Evidence",
                 "Return the fail-closed production-readiness evidence requirements without executing commands, collecting evidence or mutating state.",
                 object_schema(&[("version", "string", "milestone version, currently 0.5")], &[]),
-                "forge.milestone.production_readiness_plan.v1",
+                "foundry.milestone.production_readiness_plan.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "milestone",
                     "production-plan",
                     "--version",
@@ -7391,7 +7399,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.milestone.production_readiness",
+                "foundry.milestone.production_readiness",
                 "Evaluate Production Readiness",
                 "Evaluate an explicit secret-free manifest and its evidence root read-only, returning the existing fail-closed production-readiness report without executing commands or inventing evidence.",
                 object_schema(&[
@@ -7399,9 +7407,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("manifest", "string", "manifest path inside evidence_root"),
                     ("evidence_root", "string", "root directory containing the manifest and referenced evidence"),
                 ], &["manifest", "evidence_root"]),
-                "forge.milestone.production_readiness.v1",
+                "foundry.milestone.production_readiness.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "milestone",
                     "production-readiness",
                     "--version",
@@ -7416,9 +7424,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.milestone.attach_evidence",
+                "foundry.milestone.attach_evidence",
                 "Attach Milestone Evidence",
-                "Attach an operator-approved milestone evidence artifact into the Forge store and global event timeline without auto-promoting the milestone.",
+                "Attach an operator-approved milestone evidence artifact into the Foundry store and global event timeline without auto-promoting the milestone.",
                 object_schema(&[
                     ("version", "string", "milestone version, currently 0.5"),
                     ("capability_id", "string", "milestone capability id"),
@@ -7426,11 +7434,11 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("summary", "string", "short evidence summary"),
                     ("artifact_path", "string", "local path to the evidence artifact"),
                     ("approved_by", "string", "operator approving this evidence attachment"),
-                    ("origin", "string", "codex|opencode|gemini|forge_cli|skill|mcp"),
+                    ("origin", "string", "codex|opencode|gemini|foundry_cli|skill|mcp"),
                 ], &["capability_id", "kind", "summary", "artifact_path", "approved_by"]),
-                "forge.milestone.attached_evidence.v1",
+                "foundry.milestone.attached_evidence.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "milestone",
                     "attach-evidence",
                     "--version",
@@ -7445,20 +7453,20 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.milestone.evidence_plan",
+                "foundry.milestone.evidence_plan",
                 "Plan Milestone Evidence Collection",
                 "Inspect project manifests, secret-free manifest_templates, attached evidence and collection commands before collecting real milestone receipts.",
                 object_schema(&[
                     ("version", "string", "milestone version, currently 0.5"),
                     ("capability_id", "string", "milestone capability id"),
                     ("kind", "string", "optional evidence kind; defaults to the capability collector default"),
-                    ("project_root", "string", "project root containing .forge manifests"),
+                    ("project_root", "string", "project root containing .foundry manifests"),
                     ("connected_brain", "string", "optional connected brain provider id"),
                     ("connected_runtime", "string", "optional connected multimodal runtime id"),
                 ], &["capability_id"]),
-                "forge.milestone.evidence_plan.v1",
+                "foundry.milestone.evidence_plan.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "milestone",
                     "evidence-plan",
                     "--version",
@@ -7471,13 +7479,13 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.milestone.prepare_evidence_inputs",
+                "foundry.milestone.prepare_evidence_inputs",
                 "Prepare Milestone Evidence Inputs",
-                "Materialize secret-free milestone evidence manifest templates under a project .forge directory. Dry-run by default; apply requires approved_by and refuses overwrite unless force is true.",
+                "Materialize secret-free milestone evidence manifest templates under a project .foundry directory. Dry-run by default; apply requires approved_by and refuses overwrite unless force is true.",
                 object_schema(&[
                     ("version", "string", "milestone version, currently 0.5"),
                     ("capability_id", "string", "milestone capability id"),
-                    ("project_root", "string", "project root where .forge manifests are prepared"),
+                    ("project_root", "string", "project root where .foundry manifests are prepared"),
                     ("connected_brain", "string", "optional connected brain provider id"),
                     ("connected_runtime", "string", "optional connected multimodal runtime id"),
                     ("provider_command", "string", "optional approved absolute connected-brain provider adapter command for replacement_grade_cli"),
@@ -7486,11 +7494,11 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("apply", "boolean", "write files when true; dry-run when false or omitted"),
                     ("approved_by", "string", "operator approving file writes when apply is true"),
                     ("force", "boolean", "allow overwriting existing template targets after review"),
-                    ("origin", "string", "codex|opencode|gemini|forge_cli|skill|mcp"),
+                    ("origin", "string", "codex|opencode|gemini|foundry_cli|skill|mcp"),
                 ], &["capability_id"]),
-                "forge.milestone.prepare_evidence_inputs.v1",
+                "foundry.milestone.prepare_evidence_inputs.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "milestone",
                     "prepare-evidence-inputs",
                     "--version",
@@ -7505,21 +7513,21 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.milestone.collect_evidence",
+                "foundry.milestone.collect_evidence",
                 "Collect and Attach Milestone Evidence",
                 "Run a ready, approval-gated milestone evidence source, persist the generated receipt artifact and attach it to the milestone without auto-promoting.",
                 object_schema(&[
                     ("version", "string", "milestone version, currently 0.5"),
                     ("capability_id", "string", "milestone capability id"),
-                    ("project_root", "string", "project root containing .forge manifests"),
+                    ("project_root", "string", "project root containing .foundry manifests"),
                     ("connected_brain", "string", "optional connected brain provider id"),
                     ("connected_runtime", "string", "optional connected multimodal runtime id"),
                     ("approved_by", "string", "operator approving evidence collection and attachment"),
-                    ("origin", "string", "codex|opencode|gemini|forge_cli|skill|mcp"),
+                    ("origin", "string", "codex|opencode|gemini|foundry_cli|skill|mcp"),
                 ], &["capability_id", "approved_by"]),
-                "forge.milestone.collect_evidence.v1",
+                "foundry.milestone.collect_evidence.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "milestone",
                     "collect-evidence",
                     "--version",
@@ -7536,20 +7544,20 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.milestone.collect_ready_evidence",
+                "foundry.milestone.collect_ready_evidence",
                 "Collect Ready Milestone Evidence",
-                "Attempt every required Forge 0.5 milestone evidence kind, attach receipts whose inputs are ready and report skipped or failed kinds without auto-promoting.",
+                "Attempt every required Foundry 0.5 milestone evidence kind, attach receipts whose inputs are ready and report skipped or failed kinds without auto-promoting.",
                 object_schema(&[
                     ("version", "string", "milestone version, currently 0.5"),
-                    ("project_root", "string", "project root containing .forge manifests"),
+                    ("project_root", "string", "project root containing .foundry manifests"),
                     ("connected_brain", "string", "optional connected brain provider id"),
                     ("connected_runtime", "string", "optional connected multimodal runtime id"),
                     ("approved_by", "string", "operator approving ready evidence collection and attachment"),
-                    ("origin", "string", "codex|opencode|gemini|forge_cli|skill|mcp"),
+                    ("origin", "string", "codex|opencode|gemini|foundry_cli|skill|mcp"),
                 ], &["approved_by"]),
-                "forge.milestone.collect_ready_evidence.v1",
+                "foundry.milestone.collect_ready_evidence.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "milestone",
                     "collect-ready-evidence",
                     "--version",
@@ -7562,13 +7570,13 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.milestone.research",
-                "Inspect Forge Milestone Research",
-                "Inspect the source-grounded Forge 0.5 creative-runtime research baseline, validation gates and workflow templates.",
+                "foundry.milestone.research",
+                "Inspect Foundry Milestone Research",
+                "Inspect the source-grounded Foundry 0.5 creative-runtime research baseline, validation gates and workflow templates.",
                 object_schema(&[("version", "string", "milestone version, currently 0.5")], &[]),
-                "forge.milestone.research.v1",
+                "foundry.milestone.research.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "milestone",
                     "research",
                     "--version",
@@ -7579,13 +7587,13 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.milestone.export_demo",
+                "foundry.milestone.export_demo",
                 "Generate Milestone Export Demo",
-                "Generate a self-contained export/demo workflow with screen and document creative artifacts, design token collection, and full lineage evidence for the Forge 0.5 export/demo baseline.",
+                "Generate a self-contained export/demo workflow with screen and document creative artifacts, design token collection, and full lineage evidence for the Foundry 0.5 export/demo baseline.",
                 object_schema(&[], &[]),
-                "forge.milestone.export_demo.v1",
+                "foundry.milestone.export_demo.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "milestone",
                     "export-demo",
                     "--origin",
@@ -7596,17 +7604,17 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.milestone.cli_demo",
+                "foundry.milestone.cli_demo",
                 "Generate Replacement CLI Demo",
-                "Generate deterministic Forge-first replacement-grade CLI demo evidence for coding, patch lifecycle artifacts, connected external brain providers, research/artifact and long-running async workflows without mutating external resources.",
+                "Generate deterministic Foundry-first replacement-grade CLI demo evidence for coding, patch lifecycle artifacts, connected external brain providers, research/artifact and long-running async workflows without mutating external resources.",
                 object_schema(&[
                     ("origin", "string", "codex|opencode|skill|mcp"),
-                    ("project_root", "string", "optional project root containing .forge/connected-brain-runtimes.json"),
+                    ("project_root", "string", "optional project root containing .foundry/connected-brain-runtimes.json"),
                     ("connected_brain", "string", "optional provider id from the connected brain runtime manifest"),
                 ], &[]),
-                "forge.milestone.cli_demo.v1",
+                "foundry.milestone.cli_demo.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "milestone",
                     "cli-demo",
                     "--origin",
@@ -7617,16 +7625,16 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
-                "forge.multimodal.status",
+                "foundry.multimodal.status",
                 "Inspect Experimental Multimodal Status",
-                "List Forge-owned experimental multimodal capabilities, missing model/runtime gaps, disabled-by-default feature flag state and runtime guard requirements without accessing devices or installing models.",
+                "List Foundry-owned experimental multimodal capabilities, missing model/runtime gaps, disabled-by-default feature flag state and runtime guard requirements without accessing devices or installing models.",
                 object_schema(&[
                     ("enable_experimental", "boolean", "optional explicit experimental flag for planning output only"),
-                    ("project_root", "string", "optional project root containing .forge/multimodal.json"),
+                    ("project_root", "string", "optional project root containing .foundry/multimodal.json"),
                 ], &[]),
-                "forge.multimodal.status.v1",
+                "foundry.multimodal.status.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "multimodal",
                     "status",
                     "--output",
@@ -7635,17 +7643,17 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.multimodal.install_plan",
+                "foundry.multimodal.install_plan",
                 "Generate Multimodal Install Plan",
                 "Generate a plan-only install and benchmark manifest for one multimodal capability. This tool never downloads models or mutates local devices.",
                 object_schema(&[
-                    ("capability_id", "string", "capability id from forge.multimodal.status"),
+                    ("capability_id", "string", "capability id from foundry.multimodal.status"),
                     ("enable_experimental", "boolean", "optional explicit experimental flag for planning output only"),
-                    ("project_root", "string", "optional project root containing .forge/multimodal.json"),
+                    ("project_root", "string", "optional project root containing .foundry/multimodal.json"),
                 ], &["capability_id"]),
-                "forge.multimodal.install_plan.v1",
+                "foundry.multimodal.install_plan.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "multimodal",
                     "install-plan",
                     "--capability",
@@ -7656,18 +7664,18 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.multimodal.readiness",
+                "foundry.multimodal.readiness",
                 "Inspect Multimodal Readiness",
-                "Inspect runtime PATH candidates and Forge model manifests for one multimodal capability without installs, model execution, device access, network access or automation.",
+                "Inspect runtime PATH candidates and Foundry model manifests for one multimodal capability without installs, model execution, device access, network access or automation.",
                 object_schema(&[
-                    ("capability_id", "string", "capability id from forge.multimodal.status"),
+                    ("capability_id", "string", "capability id from foundry.multimodal.status"),
                     ("enable_experimental", "boolean", "optional explicit experimental flag for readiness output only"),
-                    ("project_root", "string", "optional project root containing .forge/multimodal.json and .forge/multimodal-models"),
+                    ("project_root", "string", "optional project root containing .foundry/multimodal.json and .foundry/multimodal-models"),
                     ("allow", "boolean", "optional explicit runtime guard allow for readiness reporting only; no execution is performed"),
                 ], &["capability_id"]),
-                "forge.multimodal.readiness.v1",
+                "foundry.multimodal.readiness.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "multimodal",
                     "readiness",
                     "--capability",
@@ -7678,17 +7686,17 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.multimodal.benchmark_template",
+                "foundry.multimodal.benchmark_template",
                 "Generate Multimodal Benchmark Template",
                 "Generate a plan-only benchmark/report template for one multimodal capability. This tool performs no installs, model execution, device access or automation.",
                 object_schema(&[
-                    ("capability_id", "string", "capability id from forge.multimodal.status"),
+                    ("capability_id", "string", "capability id from foundry.multimodal.status"),
                     ("enable_experimental", "boolean", "optional explicit experimental flag for planning output only"),
-                    ("project_root", "string", "optional project root containing .forge/multimodal.json"),
+                    ("project_root", "string", "optional project root containing .foundry/multimodal.json"),
                 ], &["capability_id"]),
-                "forge.multimodal.benchmark_template.v1",
+                "foundry.multimodal.benchmark_template.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "multimodal",
                     "benchmark-template",
                     "--capability",
@@ -7699,23 +7707,23 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.multimodal.benchmark_result",
+                "foundry.multimodal.benchmark_result",
                 "Record Multimodal Fixture Benchmark Result",
                 "Generate an approval-gated fixture-only benchmark result artifact for one multimodal capability without installs, model execution, device access, network access or automation.",
                 object_schema(
                     &[
-                        ("capability_id", "string", "capability id from forge.multimodal.status"),
-                        ("fixture_id", "string", "fixture id from forge.multimodal.benchmark_template"),
+                        ("capability_id", "string", "capability id from foundry.multimodal.status"),
+                        ("fixture_id", "string", "fixture id from foundry.multimodal.benchmark_template"),
                         ("approved_by", "string", "required human/operator approval identity"),
                         ("confirm_fixture_only", "boolean", "must be true to confirm no model/device/network execution"),
                         ("enable_experimental", "boolean", "optional explicit experimental flag for evidence output only"),
-                        ("project_root", "string", "optional project root containing .forge/multimodal.json"),
+                        ("project_root", "string", "optional project root containing .foundry/multimodal.json"),
                     ],
                     &["capability_id", "fixture_id", "approved_by", "confirm_fixture_only"],
                 ),
-                "forge.multimodal.benchmark_result.v1",
+                "foundry.multimodal.benchmark_result.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "multimodal",
                     "benchmark-result",
                     "--capability",
@@ -7731,19 +7739,19 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.multimodal.runtime_benchmark",
+                "foundry.multimodal.runtime_benchmark",
                 "Run Guarded Multimodal Runtime Benchmark",
-                "Run an approval-gated, guard-approved deterministic or project-connected runtime benchmark after experimental opt-in. This performs no installs, device access or network access; connected runtimes are loaded from a project manifest and require an explicit connected_runtime id. A connected runtime can declare production evidence with approval, model manifest hash, artifacts and quality/latency thresholds; Forge marks that benchmark promotion_ready only when the probe measurements satisfy the contract.",
+                "Run an approval-gated, guard-approved deterministic or project-connected runtime benchmark after experimental opt-in. This performs no installs, device access or network access; connected runtimes are loaded from a project manifest and require an explicit connected_runtime id. A connected runtime can declare production evidence with approval, model manifest hash, artifacts and quality/latency thresholds; Foundry marks that benchmark promotion_ready only when the probe measurements satisfy the contract.",
                 object_schema(
                     &[
-                        ("capability_id", "string", "capability id from forge.multimodal.status"),
-                        ("fixture_id", "string", "fixture id from forge.multimodal.benchmark_template"),
+                        ("capability_id", "string", "capability id from foundry.multimodal.status"),
+                        ("fixture_id", "string", "fixture id from foundry.multimodal.benchmark_template"),
                         ("approved_by", "string", "required human/operator approval identity"),
                         ("confirm_runtime_execution", "boolean", "must be true to confirm runtime execution is approved"),
                         ("allow_model", "boolean", "must be true after reviewing the model runtime guard"),
                         ("enable_experimental", "boolean", "optional explicit experimental flag"),
-                        ("project_root", "string", "optional project root containing .forge/multimodal.json"),
-                        ("connected_runtime", "string", "optional runtime id from .forge/multimodal-runtimes.json to probe under the same guard"),
+                        ("project_root", "string", "optional project root containing .foundry/multimodal.json"),
+                        ("connected_runtime", "string", "optional runtime id from .foundry/multimodal-runtimes.json to probe under the same guard"),
                     ],
                     &[
                         "capability_id",
@@ -7753,9 +7761,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         "allow_model",
                     ],
                 ),
-                "forge.multimodal.runtime_benchmark.v1",
+                "foundry.multimodal.runtime_benchmark.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "multimodal",
                     "runtime-benchmark",
                     "--capability",
@@ -7772,17 +7780,17 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.multimodal.demo_plan",
+                "foundry.multimodal.demo_plan",
                 "Generate Multimodal Demo Plan",
                 "Generate a guarded demo plan for local image recognition, audio transcription/synthesis or Blender/avatar preparation. This tool performs no installs, model execution, device access or automation.",
                 object_schema(&[
                     ("demo_id", "string", "local_image_recognition|audio_transcription_synthesis|blender_avatar_preparation"),
                     ("enable_experimental", "boolean", "optional explicit experimental flag for planning output only"),
-                    ("project_root", "string", "optional project root containing .forge/multimodal.json"),
+                    ("project_root", "string", "optional project root containing .foundry/multimodal.json"),
                 ], &["demo_id"]),
-                "forge.multimodal.demo_plan.v1",
+                "foundry.multimodal.demo_plan.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "multimodal",
                     "demo-plan",
                     "--demo",
@@ -7793,17 +7801,17 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.multimodal.demo_receipt",
+                "foundry.multimodal.demo_receipt",
                 "Record Multimodal Guarded Demo Receipt",
                 "Record approval-gated guarded demo evidence after experimental opt-in using a local fixture receipt and explicit guard matrix. This tool performs no installs, real model execution, device access, filesystem access or network access unless separate guard approvals are supplied and recorded.",
                 object_schema(
                     &[
                         ("demo_id", "string", "local_image_recognition|audio_transcription_synthesis|blender_avatar_preparation"),
-                        ("fixture_id", "string", "fixture id from forge.multimodal.benchmark_template"),
+                        ("fixture_id", "string", "fixture id from foundry.multimodal.benchmark_template"),
                         ("approved_by", "string", "required human/operator approval identity"),
                         ("confirm_local_fixture", "boolean", "must be true to confirm the receipt uses a secret-free local fixture"),
                         ("enable_experimental", "boolean", "optional explicit experimental flag for evidence output"),
-                        ("project_root", "string", "optional project root containing .forge/multimodal.json"),
+                        ("project_root", "string", "optional project root containing .foundry/multimodal.json"),
                         ("allow_model", "boolean", "record model runtime guard approval without executing a real model"),
                         ("allow_camera", "boolean", "record camera guard approval; omitted means blocked/no access"),
                         ("allow_microphone", "boolean", "record microphone guard approval; omitted means blocked/no access"),
@@ -7818,9 +7826,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         "confirm_local_fixture",
                     ],
                 ),
-                "forge.multimodal.demo_receipt.v1",
+                "foundry.multimodal.demo_receipt.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "multimodal",
                     "demo-receipt",
                     "--demo",
@@ -7836,19 +7844,19 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.multimodal.guard",
+                "foundry.multimodal.guard",
                 "Evaluate Multimodal Runtime Guard",
-                "Evaluate whether a camera, microphone, screen, input, peripheral, model or filesystem multimodal action is allowed under Forge's experimental opt-in policy.",
+                "Evaluate whether a camera, microphone, screen, input, peripheral, model or filesystem multimodal action is allowed under Foundry's experimental opt-in policy.",
                 object_schema(&[
                     ("capability", "string", "capability id or permission scope"),
                     ("action", "string", "requested action such as access, capture, transcribe or automate"),
                     ("enable_experimental", "boolean", "experimental feature flag"),
-                    ("project_root", "string", "optional project root containing .forge/multimodal.json"),
+                    ("project_root", "string", "optional project root containing .foundry/multimodal.json"),
                     ("allow", "boolean", "explicit human/runtime allow for this action"),
                 ], &["capability", "action"]),
-                "forge.multimodal.guard.v1",
+                "foundry.multimodal.guard.v1",
                 &[
-                    "forge",
+                    "foundry",
                     "multimodal",
                     "guard",
                     "--capability",
@@ -7861,30 +7869,30 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.creative.list",
+                "foundry.creative.list",
                 "List Creative Artifacts",
                 "List creative artifacts (screens, whiteboards, documents, slide decks, components) attached to a workflow.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                 ], &["workflow_id"]),
-                "forge.creative.list.v1",
-                &["forge", "workflow", "list-creative", "--workflow", "<workflow-id>", "--output", "json"],
+                "foundry.creative.list.v1",
+                &["foundry", "workflow", "list-creative", "--workflow", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.creative.inspect",
+                "foundry.creative.inspect",
                 "Inspect Creative Artifact",
                 "Inspect a specific creative artifact with full spec content.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                     ("artifact_id", "string", "creative artifact id"),
                 ], &["workflow_id", "artifact_id"]),
-                "forge.creative.inspect.v1",
-                &["forge", "workflow", "inspect-creative", "--workflow", "<workflow-id>", "--artifact", "<artifact-id>", "--output", "json"],
+                "foundry.creative.inspect.v1",
+                &["foundry", "workflow", "inspect-creative", "--workflow", "<workflow-id>", "--artifact", "<artifact-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.creative.attach",
+                "foundry.creative.attach",
                 "Attach Creative Artifact",
                 "Attach a new creative artifact (screen, whiteboard, document, slide_deck, component) to a workflow.",
                 object_schema(&[
@@ -7893,12 +7901,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("kind", "string", "screen|whiteboard|document|slide_deck|component"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "title", "kind"]),
-                "forge.creative.attach.v1",
-                &["forge", "workflow", "attach-creative", "--workflow", "<workflow-id>", "--title", "<title>", "--kind", "<kind>", "--output", "json"],
+                "foundry.creative.attach.v1",
+                &["foundry", "workflow", "attach-creative", "--workflow", "<workflow-id>", "--title", "<title>", "--kind", "<kind>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.creative.collaboration_event",
+                "foundry.creative.collaboration_event",
                 "Record Creative Collaboration Event",
                 "Record presence, comment, patch, conflict or rollback state on a creative artifact with workflow revision and audit history.",
                 object_schema(&[
@@ -7911,47 +7919,47 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("selections", "array", "optional selected object ids"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "artifact_id", "kind", "actor", "summary"]),
-                "forge.creative_collaboration.event.v1",
-                &["forge", "workflow", "collaboration-event", "--workflow", "<workflow-id>", "--artifact", "<artifact-id>", "--kind", "<kind>", "--output", "json"],
+                "foundry.creative_collaboration.event.v1",
+                &["foundry", "workflow", "collaboration-event", "--workflow", "<workflow-id>", "--artifact", "<artifact-id>", "--kind", "<kind>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.creative.collaboration_status",
+                "foundry.creative.collaboration_status",
                 "Inspect Creative Collaboration Status",
                 "Inspect presence, comments, patch stream, conflicts, rollbacks and audit history for a creative artifact.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                     ("artifact_id", "string", "creative artifact id"),
                 ], &["workflow_id", "artifact_id"]),
-                "forge.creative_collaboration.status.v1",
-                &["forge", "workflow", "collaboration-status", "--workflow", "<workflow-id>", "--artifact", "<artifact-id>", "--output", "json"],
+                "foundry.creative_collaboration.status.v1",
+                &["foundry", "workflow", "collaboration-status", "--workflow", "<workflow-id>", "--artifact", "<artifact-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.tokens.get",
+                "foundry.tokens.get",
                 "Get Design Tokens",
                 "Get the design token collection (colors, typography, spacing, etc.) attached to a workflow.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                 ], &["workflow_id"]),
-                "forge.tokens.get.v1",
-                &["forge", "workflow", "get-tokens", "--workflow", "<workflow-id>", "--output", "json"],
+                "foundry.tokens.get.v1",
+                &["foundry", "workflow", "get-tokens", "--workflow", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.tokens.resolve",
+                "foundry.tokens.resolve",
                 "Resolve Design Tokens",
                 "Resolve raw tokens, semantic aliases and optional mode overrides, then return impact references across creative artifacts.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                     ("mode", "string", "optional token mode, for example dark"),
                 ], &["workflow_id"]),
-                "forge.tokens.resolve.v1",
-                &["forge", "workflow", "resolve-tokens", "--workflow", "<workflow-id>", "--output", "json"],
+                "foundry.tokens.resolve.v1",
+                &["foundry", "workflow", "resolve-tokens", "--workflow", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
-                "forge.tokens.set",
+                "foundry.tokens.set",
                 "Set Design Tokens",
                 "Set or replace the design token collection on a workflow with a minimal token set.",
                 object_schema(&[
@@ -7959,12 +7967,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("name", "string", "token collection name"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "name"]),
-                "forge.tokens.set.v1",
-                &["forge", "workflow", "set-tokens", "--workflow", "<workflow-id>", "--name", "<name>", "--output", "json"],
+                "foundry.tokens.set.v1",
+                &["foundry", "workflow", "set-tokens", "--workflow", "<workflow-id>", "--name", "<name>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
-                "forge.tokens.patch",
+                "foundry.tokens.patch",
                 "Patch Design Token",
                 "Apply a targeted patch-by-intent to a single design token while preserving creative artifact content and token references.",
                 object_schema(&[
@@ -7973,17 +7981,19 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("value", "string", "new token value"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "token_name", "value"]),
-                "forge.tokens.patch.v1",
-                &["forge", "workflow", "patch-token", "--workflow", "<workflow-id>", "--token", "<token-name>", "--value", "<value>", "--output", "json"],
+                "foundry.tokens.patch.v1",
+                &["foundry", "workflow", "patch-token", "--workflow", "<workflow-id>", "--token", "<token-name>", "--value", "<value>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
         ],
     }
 }
 
-pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Result<McpCallReport> {
+pub fn call_mcp_tool(store: &FoundryStore, tool_name: &str, input: Value) -> Result<McpCallReport> {
+    let tool_name = crate::brand::canonical_identifier(tool_name);
+    let tool_name = tool_name.as_ref();
     let result = match tool_name {
-        "forge.teamwork.plan" => {
+        "foundry.teamwork.plan" => {
             let input: TeamworkPlanInput = parse_input(input)?;
             if input.lanes.is_empty() && input.max_parallel_agents.is_none() {
                 serde_json::to_value(plan_teamwork_workflow(
@@ -8021,7 +8031,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 )?)?
             }
         }
-        "forge.mission.start" => {
+        "foundry.mission.start" => {
             let input: MissionStartInput = parse_input(input)?;
             serde_json::to_value(start_mission(
                 store,
@@ -8031,11 +8041,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 PathBuf::from(input.worktree).as_path(),
             )?)?
         }
-        "forge.mission.drive" => {
+        "foundry.mission.drive" => {
             let input: MissionIdInput = parse_input(input)?;
             serde_json::to_value(drive_mission(store, &input.mission_id)?)?
         }
-        "forge.mission.execute" => {
+        "foundry.mission.execute" => {
             let input: MissionExecuteInput = parse_input(input)?;
             let mission = load_mission(store, &input.mission_id)?;
             let agent = mission
@@ -8087,7 +8097,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             }
             serde_json::to_value(execute_mission_command(store, request)?)?
         }
-        "forge.mission.submit" => {
+        "foundry.mission.submit" => {
             let input: MissionSubmitInput = parse_input(input)?;
             serde_json::to_value(submit_mission(
                 store,
@@ -8108,11 +8118,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.mission.resume" => {
+        "foundry.mission.resume" => {
             let input: MissionIdInput = parse_input(input)?;
             serde_json::to_value(resume_mission(store, &input.mission_id)?)?
         }
-        "forge.mission.execution.list" => {
+        "foundry.mission.execution.list" => {
             let input: MissionExecutionListInput = parse_input(input)?;
             serde_json::to_value(list_mission_execution_receipts(
                 store,
@@ -8120,11 +8130,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.task_id.as_deref(),
             )?)?
         }
-        "forge.mission.execution.inspect" => {
+        "foundry.mission.execution.inspect" => {
             let input: MissionExecutionInspectInput = parse_input(input)?;
             serde_json::to_value(inspect_mission_execution_receipt(store, &input.receipt_id)?)?
         }
-        "forge.mission.execution.reconcile" => {
+        "foundry.mission.execution.reconcile" => {
             let input: MissionExecutionReconcileInput = parse_input(input)?;
             serde_json::to_value(reconcile_mission_execution(
                 store,
@@ -8137,7 +8147,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.workflow.list" => {
+        "foundry.workflow.list" => {
             let input: WorkflowListInput = parse_input(input)?;
             let filters =
                 WorkflowRegistryFilters::new(parse_lifecycle(input.lifecycle.as_deref())?)
@@ -8145,7 +8155,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     .with_quality_action(clean_optional(input.quality_action));
             serde_json::to_value(list_workflows_with_filters(store, filters)?)?
         }
-        "forge.workflow.inspect" => {
+        "foundry.workflow.inspect" => {
             let input: WorkflowInspectInput = parse_input(input)?;
             serde_json::to_value(inspect_workflow_with_focus(
                 store,
@@ -8154,7 +8164,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.task_id.as_deref(),
             )?)?
         }
-        "forge.events.list" => {
+        "foundry.events.list" => {
             let input: WorkflowEventsInput = parse_input(input)?;
             serde_json::to_value(build_workflow_event_stream(
                 store,
@@ -8162,7 +8172,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.limit,
             )?)?
         }
-        "forge.events.timeline" => {
+        "foundry.events.timeline" => {
             let input: EventTimelineInput = parse_input(input)?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let organization_id = input.organization_id.or(input.organization);
@@ -8184,7 +8194,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &operating_context,
             )?)?
         }
-        "forge.ops.snapshot" => {
+        "foundry.ops.snapshot" => {
             let input: OpsSnapshotInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let project_root = input.project_root.as_deref().map(PathBuf::from);
@@ -8194,7 +8204,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 project_root.as_deref(),
             )?)?
         }
-        "forge.ops.addon_renderer_event" => {
+        "foundry.ops.addon_renderer_event" => {
             let input: OpsAddonRendererEventInput = parse_input(input)?;
             let workflow_id = input
                 .workflow_id
@@ -8231,7 +8241,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.events.observability" => {
+        "foundry.events.observability" => {
             let input: EventObservabilityInput = parse_input(input)?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let organization_id = input.organization_id.or(input.organization);
@@ -8257,7 +8267,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &operating_context,
             )?)?
         }
-        "forge.events.observability_history" => {
+        "foundry.events.observability_history" => {
             let input: EventObservabilityHistoryInput = parse_input(input)?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let organization_id = input.organization_id.or(input.organization);
@@ -8285,7 +8295,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &operating_context,
             )?)?
         }
-        "forge.events.improvement_policy" => {
+        "foundry.events.improvement_policy" => {
             let input: EventImprovementPolicyInput = parse_input(input)?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let organization_id = input.organization_id.or(input.organization);
@@ -8316,7 +8326,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &operating_context,
             )?)?
         }
-        "forge.events.ingest" => {
+        "foundry.events.ingest" => {
             let input: InboundEventMcpIngestInput = parse_input(input)?;
             let project_root = input
                 .project_root
@@ -8333,7 +8343,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &operating_context,
             )?)?
         }
-        "forge.events.inbox" => {
+        "foundry.events.inbox" => {
             let input: InboundEventInboxInput = parse_input(input)?;
             let project_root = input
                 .project_root
@@ -8347,7 +8357,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &operating_context,
             )?)?
         }
-        "forge.events.scan" => {
+        "foundry.events.scan" => {
             let input: InboundEventScanInput = parse_input(input)?;
             let project_root = input
                 .project_root
@@ -8361,7 +8371,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.dispatch_activations.unwrap_or(false),
             )?)?
         }
-        "forge.events.worker" => {
+        "foundry.events.worker" => {
             let input: InboundEventWorkerLoopInput = parse_input(input)?;
             let project_root = input
                 .project_root
@@ -8382,7 +8392,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.events.service_plan" => {
+        "foundry.events.service_plan" => {
             let input: EventServicePlanInput = parse_input(input)?;
             let project_root = input
                 .project_root
@@ -8415,7 +8425,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input
                     .signature_header
                     .as_deref()
-                    .unwrap_or("X-Forge-Signature"),
+                    .unwrap_or("X-Foundry-Signature"),
                 input.lease_seconds.unwrap_or(300),
                 input.heartbeat_seconds.unwrap_or(60),
                 input.backoff_initial_seconds.unwrap_or(5),
@@ -8423,7 +8433,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.shutdown_grace_seconds.unwrap_or(30),
             )?)?
         }
-        "forge.events.service_run" => {
+        "foundry.events.service_run" => {
             let input: EventServiceRunInput = parse_input(input)?;
             let project_root = input
                 .project_root
@@ -8449,7 +8459,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     input
                         .lease_owner
                         .as_deref()
-                        .unwrap_or("forge.event_service_manager"),
+                        .unwrap_or("foundry.event_service_manager"),
                     input.lease_seconds.unwrap_or(300),
                     input.heartbeat_seconds.unwrap_or(60),
                 )?)?
@@ -8473,12 +8483,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     input
                         .signature_header
                         .as_deref()
-                        .unwrap_or("X-Forge-Signature"),
+                        .unwrap_or("X-Foundry-Signature"),
                     stop_file.as_deref(),
                     input
                         .lease_owner
                         .as_deref()
-                        .unwrap_or("forge.event_service_manager"),
+                        .unwrap_or("foundry.event_service_manager"),
                     input.lease_seconds.unwrap_or(300),
                     input.heartbeat_seconds.unwrap_or(60),
                 )?)?
@@ -8486,7 +8496,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 anyhow::bail!("unsupported event service kind for service_run: {normalized_kind}");
             }
         }
-        "forge.events.service_supervise" => {
+        "foundry.events.service_supervise" => {
             let input: EventServiceSuperviseInput = parse_input(input)?;
             let project_root = input
                 .project_root
@@ -8520,12 +8530,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input
                     .signature_header
                     .as_deref()
-                    .unwrap_or("X-Forge-Signature"),
+                    .unwrap_or("X-Foundry-Signature"),
                 stop_file.as_deref(),
                 input
                     .lease_owner
                     .as_deref()
-                    .unwrap_or("forge.event_service_supervisor"),
+                    .unwrap_or("foundry.event_service_supervisor"),
                 input.lease_seconds.unwrap_or(300),
                 input.heartbeat_seconds.unwrap_or(60),
                 input.max_runs.unwrap_or(1),
@@ -8533,7 +8543,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.backoff_max_seconds.unwrap_or(300),
             )?)?
         }
-        "forge.events.runtime_reconcile" => {
+        "foundry.events.runtime_reconcile" => {
             let input: EventRuntimeReconcileInput = parse_input(input)?;
             let project_root = input
                 .project_root
@@ -8556,7 +8566,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input
                     .lease_owner
                     .as_deref()
-                    .unwrap_or("forge.event_runtime_reconcile"),
+                    .unwrap_or("foundry.event_runtime_reconcile"),
                 input.lease_seconds.unwrap_or(300),
                 input.heartbeat_seconds.unwrap_or(60),
                 input.max_runs.unwrap_or(1),
@@ -8566,12 +8576,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input
                     .schedule_executor
                     .as_deref()
-                    .unwrap_or("forge-runtime-scheduler"),
+                    .unwrap_or("foundry-runtime-scheduler"),
                 input.schedule_max_workers.unwrap_or(1),
                 input.schedule_ttl_seconds.unwrap_or(300),
             )?)?
         }
-        "forge.events.runtime_daemon" => {
+        "foundry.events.runtime_daemon" => {
             let input: EventRuntimeReconcileInput = parse_input(input)?;
             let project_root = input
                 .project_root
@@ -8596,7 +8606,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input
                     .lease_owner
                     .as_deref()
-                    .unwrap_or("forge.event_runtime_daemon"),
+                    .unwrap_or("foundry.event_runtime_daemon"),
                 input.lease_seconds.unwrap_or(300),
                 input.heartbeat_seconds.unwrap_or(60),
                 input.max_runs.unwrap_or(1),
@@ -8606,12 +8616,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input
                     .schedule_executor
                     .as_deref()
-                    .unwrap_or("forge-runtime-scheduler"),
+                    .unwrap_or("foundry-runtime-scheduler"),
                 input.schedule_max_workers.unwrap_or(1),
                 input.schedule_ttl_seconds.unwrap_or(300),
             )?)?
         }
-        "forge.events.services" => {
+        "foundry.events.services" => {
             let input: EventServicesInput = parse_input(input)?;
             let service_kind = input.kind.or(input.service_kind);
             let project_root = input
@@ -8626,7 +8636,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.limit.unwrap_or(20),
             )?)?
         }
-        "forge.events.services_recover" => {
+        "foundry.events.services_recover" => {
             let input: EventServicesInput = parse_input(input)?;
             let service_kind = input.kind.or(input.service_kind);
             let project_root = input
@@ -8641,7 +8651,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
-        "forge.events.adapters" => {
+        "foundry.events.adapters" => {
             let input: EventAdaptersInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
@@ -8653,7 +8663,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.direction.as_deref(),
             ))?
         }
-        "forge.events.emit" => {
+        "foundry.events.emit" => {
             let input: EventEmitInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
@@ -8671,14 +8681,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     addon_id,
                     event_type: input.event_type,
                     action: input.action,
-                    origin: input.origin.unwrap_or_else(|| "forge".to_string()),
+                    origin: input.origin.unwrap_or_else(|| "foundry".to_string()),
                     payload: input.payload.unwrap_or_else(|| json!({})),
                     dry_run: input.dry_run.unwrap_or(false),
                 },
                 &operating_context,
             )?)?
         }
-        "forge.events.route" => {
+        "foundry.events.route" => {
             let input: InboundEventRouteInput = parse_input(input)?;
             let project_root = input
                 .project_root
@@ -8686,7 +8696,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .unwrap_or_else(|| PathBuf::from("."));
             serde_json::to_value(route_inbound_event(store, &input.event_id, &project_root)?)?
         }
-        "forge.events.dispatch_activations" => {
+        "foundry.events.dispatch_activations" => {
             let input: InboundEventActivationDispatchInput = parse_input(input)?;
             let project_root = input
                 .project_root
@@ -8699,7 +8709,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.dry_run.unwrap_or(false),
             )?)?
         }
-        "forge.cost.ledger" => {
+        "foundry.cost.ledger" => {
             let input: CostLedgerInput = parse_input(input)?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let organization_id = input.organization_id.or(input.organization);
@@ -8719,7 +8729,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &operating_context,
             )?)?
         }
-        "forge.cost.materialize" => {
+        "foundry.cost.materialize" => {
             let input: CostLedgerMaterializeInput = parse_input(input)?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let organization_id = input.organization_id.or(input.organization);
@@ -8743,7 +8753,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &operating_context,
             )?)?
         }
-        "forge.cost.incremental" => {
+        "foundry.cost.incremental" => {
             let input: CostLedgerIncrementalInput = parse_input(input)?;
             let organization_id = input.organization_id.or(input.organization);
             let brand_id = input.brand_id.or(input.brand);
@@ -8766,7 +8776,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &operating_context,
             )?)?
         }
-        "forge.cost.history" => {
+        "foundry.cost.history" => {
             let input: CostLedgerHistoryInput = parse_input(input)?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let organization_id = input.organization_id.or(input.organization);
@@ -8792,7 +8802,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &operating_context,
             )?)?
         }
-        "forge.cost.maintain" => {
+        "foundry.cost.maintain" => {
             let input: CostLedgerMaintainInput = parse_input(input)?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let organization_id = input.organization_id.or(input.organization);
@@ -8819,7 +8829,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &operating_context,
             )?)?
         }
-        "forge.cost.daemon" => {
+        "foundry.cost.daemon" => {
             let input: CostLedgerDaemonInput = parse_input(input)?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let organization_id = input.organization_id.or(input.organization);
@@ -8851,7 +8861,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &operating_context,
             )?)?
         }
-        "forge.cost.retention" => {
+        "foundry.cost.retention" => {
             let input: CostLedgerRetentionInput = parse_input(input)?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let organization_id = input.organization_id.or(input.organization);
@@ -8882,7 +8892,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &operating_context,
             )?)?
         }
-        "forge.improve.candidates" => {
+        "foundry.improve.candidates" => {
             let input: ImprovementCandidatesInput = parse_input(input)?;
             serde_json::to_value(rank_improvement_candidates_with_filter(
                 store,
@@ -8893,14 +8903,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.improve.apply_event_policy" => {
+        "foundry.improve.apply_event_policy" => {
             let input: ImproveApplyEventPolicyInput = parse_input(input)?;
             let workflow_id = input
                 .workflow_id
                 .or(input.workflow)
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| {
-                    anyhow::anyhow!("forge.improve.apply_event_policy requires workflow_id")
+                    anyhow::anyhow!("foundry.improve.apply_event_policy requires workflow_id")
                 })?;
             let recommendation_id = input.recommendation_id.or(input.recommendation);
             let recommended_policy = input.recommended_policy.or(input.policy);
@@ -8914,14 +8924,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
-        "forge.improve.benchmark_event_policy" => {
+        "foundry.improve.benchmark_event_policy" => {
             let input: ImproveBenchmarkEventPolicyInput = parse_input(input)?;
             let workflow_id = input
                 .workflow_id
                 .or(input.workflow)
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| {
-                    anyhow::anyhow!("forge.improve.benchmark_event_policy requires workflow_id")
+                    anyhow::anyhow!("foundry.improve.benchmark_event_policy requires workflow_id")
                 })?;
             let recommendation_id = input.recommendation_id.or(input.recommendation);
             let recommended_policy = input.recommended_policy.or(input.policy);
@@ -8933,14 +8943,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
-        "forge.improve.promote_event_policy" => {
+        "foundry.improve.promote_event_policy" => {
             let input: ImprovePromoteEventPolicyInput = parse_input(input)?;
             let workflow_id = input
                 .workflow_id
                 .or(input.workflow)
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| {
-                    anyhow::anyhow!("forge.improve.promote_event_policy requires workflow_id")
+                    anyhow::anyhow!("foundry.improve.promote_event_policy requires workflow_id")
                 })?;
             let recommendation_id = input.recommendation_id.or(input.recommendation);
             let recommended_policy = input.recommended_policy.or(input.policy);
@@ -8953,7 +8963,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
-        "forge.cli.create" => {
+        "foundry.cli.create" => {
             let input: CliFactoryCreateMcpInput = parse_input(input)?;
             let commands = input.commands.or(input.command).unwrap_or_default();
             let compound_commands = input
@@ -8971,7 +8981,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.interactive.home" => {
+        "foundry.interactive.home" => {
             let input: InteractiveHomeInput = if input.is_null() {
                 InteractiveHomeInput { project_root: None }
             } else {
@@ -8984,10 +8994,10 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.interactive.guided_cockpit" => {
+        "foundry.interactive.guided_cockpit" => {
             serde_json::to_value(build_interactive_guided_cockpit(store)?)?
         }
-        "forge.interactive.ui_composition" => {
+        "foundry.interactive.ui_composition" => {
             let input: InteractiveHomeInput = if input.is_null() {
                 InteractiveHomeInput { project_root: None }
             } else {
@@ -8996,14 +9006,16 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let project_root = input.project_root.map(PathBuf::from);
             serde_json::to_value(build_interactive_ui_composition(store, project_root)?)?
         }
-        "forge.interactive.readiness" => serde_json::to_value(build_interactive_readiness(store)?)?,
-        "forge.interactive.operational_cockpit" => {
+        "foundry.interactive.readiness" => {
+            serde_json::to_value(build_interactive_readiness(store)?)?
+        }
+        "foundry.interactive.operational_cockpit" => {
             serde_json::to_value(build_interactive_operational_cockpit(store)?)?
         }
-        "forge.interactive.improvement_loop" => {
+        "foundry.interactive.improvement_loop" => {
             serde_json::to_value(build_interactive_improvement_loop(store)?)?
         }
-        "forge.interactive.architecture" => {
+        "foundry.interactive.architecture" => {
             let input: InteractiveHomeInput = if input.is_null() {
                 InteractiveHomeInput { project_root: None }
             } else {
@@ -9012,7 +9024,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let project_root = input.project_root.map(PathBuf::from);
             serde_json::to_value(build_interactive_architecture_compass(store, project_root)?)?
         }
-        "forge.interactive.release_gates" => {
+        "foundry.interactive.release_gates" => {
             let input: MilestoneStatusInput = if input.is_null() {
                 MilestoneStatusInput {
                     version: None,
@@ -9028,7 +9040,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 project_root.as_deref(),
             )?)?
         }
-        "forge.interactive.harness" => {
+        "foundry.interactive.harness" => {
             let input: InteractiveHarnessInput = if input.is_null() {
                 InteractiveHarnessInput::default()
             } else {
@@ -9044,7 +9056,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             if let Some(project_root) = input.project_root {
                 options.project_root = Some(PathBuf::from(project_root));
             }
-            options.forge_first = input.forge_first.unwrap_or(false);
+            options.foundry_first = input.foundry_first.unwrap_or(false);
             options.observe_only = input.observe_only.unwrap_or(false);
             options.workflow_id = input.workflow_id.or(input.workflow);
             options.task_id = input.task_id.or(input.task);
@@ -9053,7 +9065,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             options.token_headroom = input.token_headroom;
             serde_json::to_value(build_interactive_harness(store, options)?)?
         }
-        "forge.interactive.sessions" => {
+        "foundry.interactive.sessions" => {
             let input: BrainSessionsInput = if input.is_null() {
                 BrainSessionsInput::default()
             } else {
@@ -9068,7 +9080,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.interactive.command_palette" => {
+        "foundry.interactive.command_palette" => {
             let input: InteractiveCommandPaletteInput = if input.is_null() {
                 InteractiveCommandPaletteInput::default()
             } else {
@@ -9081,7 +9093,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 project_root.as_deref(),
             )?)?
         }
-        "forge.interactive.action_registry" => {
+        "foundry.interactive.action_registry" => {
             let input: InteractiveCommandPaletteInput = if input.is_null() {
                 InteractiveCommandPaletteInput::default()
             } else {
@@ -9094,14 +9106,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 project_root.as_deref(),
             )?)?
         }
-        "forge.interactive.action_invocation" => {
+        "foundry.interactive.action_invocation" => {
             let input: InteractiveActionInvocationInput = if input.is_null() {
                 InteractiveActionInvocationInput::default()
             } else {
                 parse_input(input)?
             };
             let action_id = input.action_id.or(input.action).ok_or_else(|| {
-                anyhow::anyhow!("forge.interactive.action_invocation requires action_id")
+                anyhow::anyhow!("foundry.interactive.action_invocation requires action_id")
             })?;
             let project_root = input.project_root.map(PathBuf::from);
             serde_json::to_value(build_interactive_action_invocation_for_project(
@@ -9110,14 +9122,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 project_root.as_deref(),
             )?)?
         }
-        "forge.interactive.action_dispatch" => {
+        "foundry.interactive.action_dispatch" => {
             let input: InteractiveActionDispatchInput = if input.is_null() {
                 InteractiveActionDispatchInput::default()
             } else {
                 parse_input(input)?
             };
             let action_id = input.action_id.or(input.action).ok_or_else(|| {
-                anyhow::anyhow!("forge.interactive.action_dispatch requires action_id")
+                anyhow::anyhow!("foundry.interactive.action_dispatch requires action_id")
             })?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             let project_root = input.project_root.map(PathBuf::from);
@@ -9129,7 +9141,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.payload,
             )?)?
         }
-        "forge.interactive.autocomplete" => {
+        "foundry.interactive.autocomplete" => {
             let input: InteractiveAutocompleteInput = if input.is_null() {
                 InteractiveAutocompleteInput::default()
             } else {
@@ -9142,13 +9154,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 project_root.as_deref(),
             )?)?
         }
-        "forge.interactive.patch_workbench" => {
+        "foundry.interactive.patch_workbench" => {
             serde_json::to_value(build_interactive_patch_workbench(store)?)?
         }
-        "forge.interactive.permissions" => {
+        "foundry.interactive.permissions" => {
             serde_json::to_value(build_interactive_permissions(store)?)?
         }
-        "forge.interactive.addon_capabilities" => {
+        "foundry.interactive.addon_capabilities" => {
             let input: InteractiveProjectRootInput = if input.is_null() {
                 InteractiveProjectRootInput::default()
             } else {
@@ -9160,7 +9172,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 project_root.as_deref(),
             ))?
         }
-        "forge.interactive.core_boundary" => {
+        "foundry.interactive.core_boundary" => {
             let input: InteractiveProjectRootInput = if input.is_null() {
                 InteractiveProjectRootInput::default()
             } else {
@@ -9172,7 +9184,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 project_root.as_deref(),
             ))?
         }
-        "forge.interactive.identity" => {
+        "foundry.interactive.identity" => {
             let input: InteractiveIdentityInput = if input.is_null() {
                 InteractiveIdentityInput::default()
             } else {
@@ -9184,7 +9196,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .unwrap_or_else(|| PathBuf::from("."));
             serde_json::to_value(build_interactive_identity(store, &project_root)?)?
         }
-        "forge.interactive.operating_context" => {
+        "foundry.interactive.operating_context" => {
             let input: InteractiveIdentityInput = if input.is_null() {
                 InteractiveIdentityInput::default()
             } else {
@@ -9196,13 +9208,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .unwrap_or_else(|| PathBuf::from("."));
             serde_json::to_value(build_interactive_operating_context(store, &project_root)?)?
         }
-        "forge.interactive.task_board" => {
+        "foundry.interactive.task_board" => {
             serde_json::to_value(build_interactive_task_board(store)?)?
         }
-        "forge.interactive.workflow_mutation" => {
+        "foundry.interactive.workflow_mutation" => {
             serde_json::to_value(build_interactive_workflow_mutation(store)?)?
         }
-        "forge.interactive.replacement_cli" => {
+        "foundry.interactive.replacement_cli" => {
             let input: InteractiveHomeInput = if input.is_null() {
                 InteractiveHomeInput { project_root: None }
             } else {
@@ -9215,7 +9227,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.interactive.multimodal_runtime" => {
+        "foundry.interactive.multimodal_runtime" => {
             let input: InteractiveMultimodalRuntimeInput = if input.is_null() {
                 InteractiveMultimodalRuntimeInput::default()
             } else {
@@ -9231,18 +9243,22 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.enable_experimental.unwrap_or(false),
             )?)?
         }
-        "forge.interactive.workflow_sidebar" => {
+        "foundry.interactive.workflow_sidebar" => {
             serde_json::to_value(build_interactive_workflow_sidebar(store)?)?
         }
-        "forge.interactive.artifacts" => serde_json::to_value(build_interactive_artifacts(store)?)?,
-        "forge.interactive.token_usage" => {
+        "foundry.interactive.artifacts" => {
+            serde_json::to_value(build_interactive_artifacts(store)?)?
+        }
+        "foundry.interactive.token_usage" => {
             serde_json::to_value(build_interactive_token_usage(store)?)?
         }
-        "forge.interactive.workflow_dag" => {
+        "foundry.interactive.workflow_dag" => {
             serde_json::to_value(build_interactive_workflow_dag(store)?)?
         }
-        "forge.interactive.schedules" => serde_json::to_value(build_interactive_schedules(store))?,
-        "forge.interactive.context_memory" => {
+        "foundry.interactive.schedules" => {
+            serde_json::to_value(build_interactive_schedules(store))?
+        }
+        "foundry.interactive.context_memory" => {
             let input: MemoryPolicyInput = if input.is_null() {
                 MemoryPolicyInput { project_root: None }
             } else {
@@ -9254,11 +9270,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             serde_json::to_value(build_interactive_context_memory(store, &project_root)?)?
         }
-        "forge.interactive.structured_logs" => {
+        "foundry.interactive.structured_logs" => {
             serde_json::to_value(build_interactive_structured_logs(store)?)?
         }
-        "forge.brain_router" => serde_json::to_value(load_executors(store)?.brain_router)?,
-        "forge.sessions" => {
+        "foundry.brain_router" => serde_json::to_value(load_executors(store)?.brain_router)?,
+        "foundry.sessions" => {
             let input: BrainSessionsInput = if input.is_null() {
                 BrainSessionsInput::default()
             } else {
@@ -9275,12 +9291,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.session.history" => {
+        "foundry.session.history" => {
             let input: BrainSessionHistoryInput = parse_input(input)?;
             let session_id = input
                 .session_id
                 .or(input.session)
-                .ok_or_else(|| anyhow::anyhow!("forge.session.history requires session_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("foundry.session.history requires session_id"))?;
             let report = load_executors(store)?;
             serde_json::to_value(build_brain_session_history_report(
                 store,
@@ -9288,12 +9304,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &session_id,
             )?)?
         }
-        "forge.session.lifecycle" => {
+        "foundry.session.lifecycle" => {
             let input: BrainSessionLifecycleInput = parse_input(input)?;
             let session_id = input
                 .session_id
                 .or(input.session)
-                .ok_or_else(|| anyhow::anyhow!("forge.session.lifecycle requires session_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("foundry.session.lifecycle requires session_id"))?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
@@ -9312,7 +9328,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.shell.launch_plan" => {
+        "foundry.shell.launch_plan" => {
             let input: ShellLaunchPlanInput = parse_input(input)?;
             let executor = input.executor.or(input.brain);
             let workflow_id = input.workflow_id.or(input.workflow);
@@ -9331,7 +9347,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             ))?
         }
-        "forge.shell.record_plan" => {
+        "foundry.shell.record_plan" => {
             let input: ShellLaunchPlanInput = parse_input(input)?;
             let executor = input.executor.or(input.brain);
             let workflow_id = input.workflow_id.or(input.workflow);
@@ -9353,8 +9369,8 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.addons.installed" => serde_json::to_value(list_installed_addons(store)?)?,
-        "forge.addons.capabilities" => {
+        "foundry.addons.installed" => serde_json::to_value(list_installed_addons(store)?)?,
+        "foundry.addons.capabilities" => {
             let input: AddonCapabilityIndexInput = parse_input(input)?;
             let addon_id = input.addon_id.or(input.addon);
             let capability_id = input.capability_id.or(input.capability);
@@ -9365,7 +9381,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.lifecycle.as_deref(),
             )?)?
         }
-        "forge.addons.observability" => {
+        "foundry.addons.observability" => {
             let input: AddonObservabilityInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
@@ -9378,7 +9394,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.dispatch_limit.unwrap_or(1000),
             )?)?
         }
-        "forge.addons.contracts" => {
+        "foundry.addons.contracts" => {
             let input: AddonRuntimeContractInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
@@ -9392,7 +9408,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.lifecycle.as_deref(),
             ))?
         }
-        "forge.addons.planners" => {
+        "foundry.addons.planners" => {
             let input: AddonPlannerRegistryInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
@@ -9407,7 +9423,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.lifecycle.as_deref(),
             ))?
         }
-        "forge.addons.contract_policy" => {
+        "foundry.addons.contract_policy" => {
             let input: AddonRuntimeContractInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
@@ -9423,13 +9439,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.lifecycle.as_deref(),
             ))?
         }
-        "forge.addons.dispatch_contract" => {
+        "foundry.addons.dispatch_contract" => {
             let input: AddonRuntimeDispatchInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
             let addon_id = input.addon_id.or(input.addon);
             let contract_id = input.contract_id.or(input.contract).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.dispatch_contract requires contract_id")
+                anyhow::anyhow!("foundry.addons.dispatch_contract requires contract_id")
             })?;
             serde_json::to_value(enqueue_addon_runtime_contract_dispatch(
                 store,
@@ -9441,13 +9457,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.dry_run.unwrap_or(false),
             )?)?
         }
-        "forge.addons.dispatch_planner" => {
+        "foundry.addons.dispatch_planner" => {
             let input: AddonPlannerDispatchInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
             let addon_id = input.addon_id.or(input.addon);
             let contract_id = input.contract_id.or(input.contract).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.dispatch_planner requires contract_id")
+                anyhow::anyhow!("foundry.addons.dispatch_planner requires contract_id")
             })?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let task_id = input.task_id.or(input.task);
@@ -9468,16 +9484,16 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.addons.execute_planner" => {
+        "foundry.addons.execute_planner" => {
             let input: AddonPlannerDispatchInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
             let addon_id = input.addon_id.or(input.addon);
             let contract_id = input.contract_id.or(input.contract).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.execute_planner requires contract_id")
+                anyhow::anyhow!("foundry.addons.execute_planner requires contract_id")
             })?;
             let worker_id = input.worker_id.or(input.worker).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.execute_planner requires worker_id")
+                anyhow::anyhow!("foundry.addons.execute_planner requires worker_id")
             })?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let task_id = input.task_id.or(input.task);
@@ -9502,16 +9518,16 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.addons.execute_validator" => {
+        "foundry.addons.execute_validator" => {
             let input: AddonValidatorExecutionInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
             let addon_id = input.addon_id.or(input.addon);
             let contract_id = input.contract_id.or(input.contract).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.execute_validator requires contract_id")
+                anyhow::anyhow!("foundry.addons.execute_validator requires contract_id")
             })?;
             let worker_id = input.worker_id.or(input.worker).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.execute_validator requires worker_id")
+                anyhow::anyhow!("foundry.addons.execute_validator requires worker_id")
             })?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let task_id = input.task_id.or(input.task);
@@ -9535,16 +9551,16 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.addons.apply_validator_outcome" => {
+        "foundry.addons.apply_validator_outcome" => {
             let input: AddonValidatorOutcomeApplyInput = parse_input(input)?;
             let dispatch_id = input.dispatch_id.or(input.dispatch).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.apply_validator_outcome requires dispatch_id")
+                anyhow::anyhow!("foundry.addons.apply_validator_outcome requires dispatch_id")
             })?;
             let workflow_id = input.workflow_id.or(input.workflow).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.apply_validator_outcome requires workflow_id")
+                anyhow::anyhow!("foundry.addons.apply_validator_outcome requires workflow_id")
             })?;
             let task_id = input.task_id.or(input.task).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.apply_validator_outcome requires task_id")
+                anyhow::anyhow!("foundry.addons.apply_validator_outcome requires task_id")
             })?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(apply_addon_validator_outcome(
@@ -9558,19 +9574,19 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.addons.execute_executor" => {
+        "foundry.addons.execute_executor" => {
             let input: AddonExecutorExecutionInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
             let addon_id = input.addon_id.or(input.addon);
             let contract_id = input.contract_id.or(input.contract).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.execute_executor requires contract_id")
+                anyhow::anyhow!("foundry.addons.execute_executor requires contract_id")
             })?;
             let worker_id = input.worker_id.or(input.worker).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.execute_executor requires worker_id")
+                anyhow::anyhow!("foundry.addons.execute_executor requires worker_id")
             })?;
             let task_ref = input.task_ref.or(input.task).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.execute_executor requires task_ref")
+                anyhow::anyhow!("foundry.addons.execute_executor requires task_ref")
             })?;
             let workflow_id = input.workflow_id.or(input.workflow);
             serde_json::to_value(execute_addon_executor(
@@ -9592,19 +9608,19 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.addons.execute_handoff" => {
+        "foundry.addons.execute_handoff" => {
             let input: AddonHandoffExecutionInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
             let addon_id = input.addon_id.or(input.addon);
             let contract_id = input.contract_id.or(input.contract).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.execute_handoff requires contract_id")
+                anyhow::anyhow!("foundry.addons.execute_handoff requires contract_id")
             })?;
             let worker_id = input.worker_id.or(input.worker).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.execute_handoff requires worker_id")
+                anyhow::anyhow!("foundry.addons.execute_handoff requires worker_id")
             })?;
             let handoff_ref = input.handoff_ref.or(input.handoff).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.execute_handoff requires handoff_ref")
+                anyhow::anyhow!("foundry.addons.execute_handoff requires handoff_ref")
             })?;
             serde_json::to_value(execute_addon_handoff(
                 store,
@@ -9624,7 +9640,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.addons.dispatches" => {
+        "foundry.addons.dispatches" => {
             let input: AddonRuntimeDispatchListInput = parse_input(input)?;
             let addon_id = input.addon_id.or(input.addon);
             let contract_id = input.contract_id.or(input.contract);
@@ -9636,14 +9652,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.limit.unwrap_or(20),
             )?)?
         }
-        "forge.addons.run_dispatch" => {
+        "foundry.addons.run_dispatch" => {
             let input: AddonRuntimeDispatchRunInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
-            let dispatch_id = input
-                .dispatch_id
-                .or(input.dispatch)
-                .ok_or_else(|| anyhow::anyhow!("forge.addons.run_dispatch requires dispatch_id"))?;
+            let dispatch_id = input.dispatch_id.or(input.dispatch).ok_or_else(|| {
+                anyhow::anyhow!("foundry.addons.run_dispatch requires dispatch_id")
+            })?;
             serde_json::to_value(run_addon_runtime_contract_dispatch(
                 store,
                 &catalog,
@@ -9652,7 +9667,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.dry_run.unwrap_or(false),
             )?)?
         }
-        "forge.addons.dispatch_worker" => {
+        "foundry.addons.dispatch_worker" => {
             let input: AddonRuntimeDispatchWorkerInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
@@ -9665,15 +9680,15 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.dry_run.unwrap_or(false),
             )?)?
         }
-        "forge.addons.execute_dispatch" => {
+        "foundry.addons.execute_dispatch" => {
             let input: AddonRuntimeDispatchRunInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
             let dispatch_id = input.dispatch_id.or(input.dispatch).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.execute_dispatch requires dispatch_id")
+                anyhow::anyhow!("foundry.addons.execute_dispatch requires dispatch_id")
             })?;
             let worker_id = input.worker_id.or(input.worker).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.execute_dispatch requires worker_id")
+                anyhow::anyhow!("foundry.addons.execute_dispatch requires worker_id")
             })?;
             serde_json::to_value(execute_addon_runtime_contract_dispatch(
                 store,
@@ -9684,17 +9699,16 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.dry_run.unwrap_or(false),
             )?)?
         }
-        "forge.addons.claim_dispatch" => {
+        "foundry.addons.claim_dispatch" => {
             let input: AddonRuntimeDispatchClaimInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
             let dispatch_id = input.dispatch_id.or(input.dispatch).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.claim_dispatch requires dispatch_id")
+                anyhow::anyhow!("foundry.addons.claim_dispatch requires dispatch_id")
             })?;
-            let worker_id = input
-                .worker_id
-                .or(input.worker)
-                .ok_or_else(|| anyhow::anyhow!("forge.addons.claim_dispatch requires worker_id"))?;
+            let worker_id = input.worker_id.or(input.worker).ok_or_else(|| {
+                anyhow::anyhow!("foundry.addons.claim_dispatch requires worker_id")
+            })?;
             serde_json::to_value(claim_addon_runtime_contract_dispatch(
                 store,
                 &catalog,
@@ -9704,15 +9718,15 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.dry_run.unwrap_or(false),
             )?)?
         }
-        "forge.addons.complete_dispatch" => {
+        "foundry.addons.complete_dispatch" => {
             let input: AddonRuntimeDispatchCompleteInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
             let dispatch_id = input.dispatch_id.or(input.dispatch).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.complete_dispatch requires dispatch_id")
+                anyhow::anyhow!("foundry.addons.complete_dispatch requires dispatch_id")
             })?;
             let worker_id = input.worker_id.or(input.worker).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.complete_dispatch requires worker_id")
+                anyhow::anyhow!("foundry.addons.complete_dispatch requires worker_id")
             })?;
             serde_json::to_value(complete_addon_runtime_contract_dispatch(
                 store,
@@ -9728,10 +9742,10 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.addons.register_worker" => {
+        "foundry.addons.register_worker" => {
             let input: AddonRuntimeWorkerRegisterInput = parse_input(input)?;
             let worker_id = input.worker_id.or(input.worker).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.register_worker requires worker_id")
+                anyhow::anyhow!("foundry.addons.register_worker requires worker_id")
             })?;
             serde_json::to_value(register_addon_runtime_worker(
                 store,
@@ -9747,7 +9761,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.addons.workers" => {
+        "foundry.addons.workers" => {
             let input: AddonRuntimeWorkerListInput = parse_input(input)?;
             serde_json::to_value(list_addon_runtime_workers(
                 store,
@@ -9757,7 +9771,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.limit.unwrap_or(20),
             )?)?
         }
-        "forge.addons.views" => {
+        "foundry.addons.views" => {
             let input: AddonViewsInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
@@ -9769,7 +9783,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.lifecycle.as_deref(),
             ))?
         }
-        "forge.addons.permissions" => {
+        "foundry.addons.permissions" => {
             let input: AddonPermissionAuthorizationInput = parse_input(input)?;
             let addon_id = input.addon_id.or(input.addon);
             let permission_id = input.permission_id.or(input.permission);
@@ -9780,13 +9794,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.status.as_deref(),
             )?)?
         }
-        "forge.addons.authorize_permission" => {
+        "foundry.addons.authorize_permission" => {
             let input: AddonPermissionMutationInput = parse_input(input)?;
             let addon_id = input.addon_id.or(input.addon).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.authorize_permission requires addon_id")
+                anyhow::anyhow!("foundry.addons.authorize_permission requires addon_id")
             })?;
             let permission_id = input.permission_id.or(input.permission).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.authorize_permission requires permission_id")
+                anyhow::anyhow!("foundry.addons.authorize_permission requires permission_id")
             })?;
             serde_json::to_value(authorize_addon_permission(
                 store,
@@ -9797,13 +9811,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.source.as_deref().unwrap_or("mcp"),
             )?)?
         }
-        "forge.addons.revoke_permission" => {
+        "foundry.addons.revoke_permission" => {
             let input: AddonPermissionMutationInput = parse_input(input)?;
             let addon_id = input.addon_id.or(input.addon).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.revoke_permission requires addon_id")
+                anyhow::anyhow!("foundry.addons.revoke_permission requires addon_id")
             })?;
             let permission_id = input.permission_id.or(input.permission).ok_or_else(|| {
-                anyhow::anyhow!("forge.addons.revoke_permission requires permission_id")
+                anyhow::anyhow!("foundry.addons.revoke_permission requires permission_id")
             })?;
             serde_json::to_value(revoke_addon_permission(
                 store,
@@ -9813,12 +9827,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.source.as_deref().unwrap_or("mcp"),
             )?)?
         }
-        "forge.addons.catalog" => {
+        "foundry.addons.catalog" => {
             let input: AddonCatalogInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             serde_json::to_value(load_addon_catalog_from_store(store, &addon_dirs)?)?
         }
-        "forge.addons.resolve" => {
+        "foundry.addons.resolve" => {
             let input: AddonResolveInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let mut registry_sources = input.registry_sources.unwrap_or_default();
@@ -9850,13 +9864,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             };
             serde_json::to_value(report)?
         }
-        "forge.addons.validate" => {
+        "foundry.addons.validate" => {
             let input: AddonCatalogInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
             serde_json::to_value(validate_addon_catalog(&catalog))?
         }
-        "forge.addons.lifecycle_plan" => {
+        "foundry.addons.lifecycle_plan" => {
             let input: AddonLifecyclePlanInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let addon_id = input.id.or(input.addon_id);
@@ -9871,7 +9885,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &addon_dirs,
             )?)?
         }
-        "forge.addons.install" => {
+        "foundry.addons.install" => {
             let input: AddonInstallInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             serde_json::to_value(install_addon(
@@ -9880,7 +9894,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &addon_dirs,
             )?)?
         }
-        "forge.addons.package" => {
+        "foundry.addons.package" => {
             let input: AddonPackageInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let package_path = input.package_path.as_deref().map(PathBuf::from);
@@ -9898,7 +9912,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.addons.trust_key" => {
+        "foundry.addons.trust_key" => {
             let input: AddonTrustKeyInput = parse_input(input)?;
             serde_json::to_value(trust_addon_package_key(
                 store,
@@ -9913,7 +9927,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.addons.trust_store" => {
+        "foundry.addons.trust_store" => {
             let input: AddonTrustStoreInput = parse_input(input)?;
             serde_json::to_value(list_addon_trust_store(
                 store,
@@ -9924,7 +9938,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.limit.unwrap_or(20),
             )?)?
         }
-        "forge.addons.publish_package" => {
+        "foundry.addons.publish_package" => {
             let input: AddonPackagePathInput = parse_input(input)?;
             let package = input
                 .package
@@ -9936,7 +9950,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.source.as_deref().unwrap_or("mcp"),
             )?)?
         }
-        "forge.addons.fetch_package" => {
+        "foundry.addons.fetch_package" => {
             let input: AddonPackageFetchInput = parse_input(input)?;
             let cache_dir = input.cache_dir.as_deref().map(PathBuf::from);
             let lock_path = input.lock.or(input.lock_path).map(PathBuf::from);
@@ -9950,7 +9964,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 lock_path.as_deref(),
             )?)?
         }
-        "forge.addons.sync_registry" => {
+        "foundry.addons.sync_registry" => {
             let input: AddonRegistrySyncInput = parse_input(input)?;
             let cache_dir = input.cache_dir.as_deref().map(PathBuf::from);
             let lock_path = input.lock.or(input.lock_path).map(PathBuf::from);
@@ -9964,7 +9978,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 lock_path.as_deref(),
             )?)?
         }
-        "forge.addons.package_lock" => {
+        "foundry.addons.package_lock" => {
             let input: AddonPackageLockInput = parse_input(input)?;
             let write_path = input.write.or(input.write_path).map(PathBuf::from);
             serde_json::to_value(create_addon_package_lock(
@@ -9977,7 +9991,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.limit.unwrap_or(200),
             )?)?
         }
-        "forge.addons.marketplace" => {
+        "foundry.addons.marketplace" => {
             let input: AddonMarketplaceInput = parse_input(input)?;
             serde_json::to_value(list_addon_marketplace(
                 store,
@@ -9988,7 +10002,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.limit.unwrap_or(20),
             )?)?
         }
-        "forge.addons.install_package" => {
+        "foundry.addons.install_package" => {
             let input: AddonPackagePathInput = parse_input(input)?;
             let package = input
                 .package
@@ -10003,7 +10017,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 lock_path.as_deref(),
             )?)?
         }
-        "forge.addons.migration_workflow" => {
+        "foundry.addons.migration_workflow" => {
             let input: AddonMigrationWorkflowInput = parse_input(input)?;
             serde_json::to_value(create_addon_migration_workflow(
                 store,
@@ -10013,7 +10027,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
-        "forge.addons.upgrade" => {
+        "foundry.addons.upgrade" => {
             let input: AddonInstallInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             serde_json::to_value(upgrade_addon(
@@ -10022,7 +10036,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &addon_dirs,
             )?)?
         }
-        "forge.addons.downgrade" => {
+        "foundry.addons.downgrade" => {
             let input: AddonInstallInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             serde_json::to_value(downgrade_addon(
@@ -10031,22 +10045,22 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &addon_dirs,
             )?)?
         }
-        "forge.addons.enable" => {
+        "foundry.addons.enable" => {
             let input: AddonLifecycleInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             serde_json::to_value(enable_addon(store, &input.id, &addon_dirs)?)?
         }
-        "forge.addons.disable" => {
+        "foundry.addons.disable" => {
             let input: AddonLifecycleInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             serde_json::to_value(disable_addon(store, &input.id, &addon_dirs)?)?
         }
-        "forge.addons.uninstall" => {
+        "foundry.addons.uninstall" => {
             let input: AddonLifecycleInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             serde_json::to_value(uninstall_addon(store, &input.id, &addon_dirs)?)?
         }
-        "forge.identity.context" => {
+        "foundry.identity.context" => {
             let input: IdentityContextInput = parse_input(input)?;
             let project_root = input
                 .project_root
@@ -10054,7 +10068,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .unwrap_or_else(|| PathBuf::from("."));
             serde_json::to_value(inspect_project_operating_context(&project_root)?)?
         }
-        "forge.identity.registry" => {
+        "foundry.identity.registry" => {
             let input: IdentityRegistryInput = parse_input(input)?;
             serde_json::to_value(list_identity_registry(
                 store,
@@ -10062,7 +10076,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.id.as_deref(),
             )?)?
         }
-        "forge.identity.memberships" => {
+        "foundry.identity.memberships" => {
             let input: IdentityMembershipInput = parse_input(input)?;
             let subject_id = input.subject_id.or(input.subject);
             let organization_id = input.organization_id.or(input.organization);
@@ -10078,7 +10092,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.status.as_deref(),
             )?)?
         }
-        "forge.identity.membership_update" => {
+        "foundry.identity.membership_update" => {
             let input: IdentityMembershipUpdateMcpInput = parse_input(input)?;
             let subject_id = input
                 .subject_id
@@ -10122,7 +10136,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.identity.link" => {
+        "foundry.identity.link" => {
             let input: IdentityLinkMcpInput = parse_input(input)?;
             serde_json::to_value(link_identity(
                 store,
@@ -10137,7 +10151,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.identity.unlink" => {
+        "foundry.identity.unlink" => {
             let input: IdentityLinkMcpInput = parse_input(input)?;
             serde_json::to_value(unlink_identity(
                 store,
@@ -10152,7 +10166,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.identity.links" => {
+        "foundry.identity.links" => {
             let input: IdentityLinksInput = parse_input(input)?;
             serde_json::to_value(list_identity_links(
                 store,
@@ -10161,11 +10175,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.status.as_deref(),
             )?)?
         }
-        "forge.identity.resolve" => {
+        "foundry.identity.resolve" => {
             let input: IdentityResolveInput = parse_input(input)?;
             serde_json::to_value(resolve_identity(store, &input.scope, &input.id)?)?
         }
-        "forge.identity.tenant_index" => {
+        "foundry.identity.tenant_index" => {
             let input: TenantIndexInput = parse_input(input)?;
             let organization_id = input.organization_id.or(input.organization);
             let brand_id = input.brand_id.or(input.brand);
@@ -10180,11 +10194,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 workflow_id.as_deref(),
             )?)?
         }
-        "forge.identity.tenant_audit" => serde_json::to_value(audit_tenant_index(store)?)?,
-        "forge.identity.tenant_policy" => {
+        "foundry.identity.tenant_audit" => serde_json::to_value(audit_tenant_index(store)?)?,
+        "foundry.identity.tenant_policy" => {
             let input: TenantPolicyInput = parse_input(input)?;
             let workflow_id = input.workflow_id.or(input.workflow).ok_or_else(|| {
-                anyhow::anyhow!("forge.identity.tenant_policy requires workflow_id")
+                anyhow::anyhow!("foundry.identity.tenant_policy requires workflow_id")
             })?;
             serde_json::to_value(evaluate_tenant_policy_for_action(
                 store,
@@ -10193,7 +10207,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.action.as_deref().unwrap_or("tenant policy"),
             )?)?
         }
-        "forge.identity.sync" => {
+        "foundry.identity.sync" => {
             let input: IdentityContextInput = parse_input(input)?;
             let project_root = input
                 .project_root
@@ -10201,7 +10215,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .unwrap_or_else(|| PathBuf::from("."));
             serde_json::to_value(sync_project_operating_context(store, &project_root)?)?
         }
-        "forge.memory.policy" => {
+        "foundry.memory.policy" => {
             let input = if input.is_null() {
                 MemoryPolicyInput { project_root: None }
             } else {
@@ -10213,7 +10227,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 project_root.as_deref(),
             ))?
         }
-        "forge.memory.configure" => {
+        "foundry.memory.configure" => {
             let input: MemoryConfigureInput = parse_input(input)?;
             serde_json::to_value(configure_memory_governance(
                 MemoryGovernanceConfigOptions {
@@ -10228,7 +10242,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.memory.search" => {
+        "foundry.memory.search" => {
             let input: MemorySearchInput = parse_input(input)?;
             serde_json::to_value(search_memory(
                 store,
@@ -10249,7 +10263,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.memory.promote" => {
+        "foundry.memory.promote" => {
             let input: MemoryPromotionInput = parse_input(input)?;
             serde_json::to_value(promote_memory(
                 store,
@@ -10273,7 +10287,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.memory.promotions" => {
+        "foundry.memory.promotions" => {
             let input: MemoryPromotionIndexInput = parse_input(input)?;
             serde_json::to_value(list_memory_promotions(
                 store,
@@ -10283,7 +10297,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.workflow_id,
             )?)?
         }
-        "forge.memory.retention" => {
+        "foundry.memory.retention" => {
             let input: MemoryRetentionInput = parse_input(input)?;
             serde_json::to_value(memory_retention_report(
                 store,
@@ -10299,7 +10313,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.memory.cleanup" => {
+        "foundry.memory.cleanup" => {
             let input: MemoryCleanupInput = parse_input(input)?;
             serde_json::to_value(memory_cleanup_report(
                 store,
@@ -10321,8 +10335,8 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.interactive.slash_commands" => serde_json::to_value(slash_command_catalog())?,
-        "forge.interactive.route" => {
+        "foundry.interactive.slash_commands" => serde_json::to_value(slash_command_catalog())?,
+        "foundry.interactive.route" => {
             let input: InteractiveRouteInput = parse_input(input)?;
             serde_json::to_value(route_interactive_input(
                 store,
@@ -10330,7 +10344,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
-        "forge.security.secret_scan" => {
+        "foundry.security.secret_scan" => {
             let input: SecuritySecretScanInput = parse_input(input)?;
             let tenant_context = input
                 .workflow_id
@@ -10359,7 +10373,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.credential_vault.describe" => {
+        "foundry.credential_vault.describe" => {
             let input: CredentialVaultInput = parse_input(input)?;
             serde_json::to_value(run_credential_vault_describe(
                 input.vault_bin.as_deref().map(PathBuf::from).as_deref(),
@@ -10367,7 +10381,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &PathBuf::from(input.data),
             )?)?
         }
-        "forge.credential_vault.records" => {
+        "foundry.credential_vault.records" => {
             let input: CredentialVaultInput = parse_input(input)?;
             serde_json::to_value(run_credential_vault_records(
                 input.vault_bin.as_deref().map(PathBuf::from).as_deref(),
@@ -10375,7 +10389,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &PathBuf::from(input.data),
             )?)?
         }
-        "forge.aws.check" => {
+        "foundry.aws.check" => {
             let input: AwsCheckInput = parse_input(input)?;
             serde_json::to_value(run_aws_ops_check(
                 input.aws_ops_bin.as_deref().map(PathBuf::from).as_deref(),
@@ -10387,7 +10401,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.vault_data.as_deref().map(PathBuf::from).as_deref(),
             )?)?
         }
-        "forge.aws.inventory" => {
+        "foundry.aws.inventory" => {
             let input: AwsInventoryInput = parse_input(input)?;
             serde_json::to_value(run_aws_ops_inventory(
                 input.aws_ops_bin.as_deref().map(PathBuf::from).as_deref(),
@@ -10402,7 +10416,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.full.unwrap_or(false),
             )?)?
         }
-        "forge.aws.raw" => {
+        "foundry.aws.raw" => {
             let input: AwsRawInput = parse_input(input)?;
             serde_json::to_value(run_aws_ops_raw(
                 input.aws_ops_bin.as_deref().map(PathBuf::from).as_deref(),
@@ -10417,7 +10431,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &input.aws_args,
             )?)?
         }
-        "forge.schedule.create_daily_goal_research" => {
+        "foundry.schedule.create_daily_goal_research" => {
             let input: DailyGoalResearchInput = parse_input(input)?;
             let timezone = input
                 .timezone
@@ -10432,7 +10446,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.schedule.update" => {
+        "foundry.schedule.update" => {
             let input: ScheduleUpdateInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(update_workflow_schedule(
@@ -10448,7 +10462,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.schedule.pause" => {
+        "foundry.schedule.pause" => {
             let input: LoopStateInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(update_loop_state(
@@ -10459,7 +10473,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.schedule.resume" => {
+        "foundry.schedule.resume" => {
             let input: LoopStateInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(update_loop_state(
@@ -10470,7 +10484,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.schedule.stop" => {
+        "foundry.schedule.stop" => {
             let input: LoopStateInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(update_loop_state(
@@ -10481,11 +10495,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.schedule.run_due" => {
+        "foundry.schedule.run_due" => {
             let input: RunDueInput = parse_input(input)?;
             serde_json::to_value(run_due_workflow(store, &input.workflow_id)?)?
         }
-        "forge.schedule.scan_due" => {
+        "foundry.schedule.scan_due" => {
             let input: ScanDueInput = parse_input(input)?;
             let executor = input
                 .executor
@@ -10498,7 +10512,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 scan_due_workflows(store, &executor, ttl_seconds)?
             })?
         }
-        "forge.schedule.worker_status" => {
+        "foundry.schedule.worker_status" => {
             let input: WorkerStatusInput = parse_input(input)?;
             let executor = input
                 .executor
@@ -10512,7 +10526,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 ttl_seconds,
             )?)?
         }
-        "forge.schedule.list" => {
+        "foundry.schedule.list" => {
             let input: WorkflowListInput = parse_input(input)?;
             let filters =
                 WorkflowRegistryFilters::new(parse_lifecycle(input.lifecycle.as_deref())?)
@@ -10521,13 +10535,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     .only_scheduled_or_looping();
             serde_json::to_value(list_workflows_with_filters(store, filters)?)?
         }
-        "forge.schedule.summary" | "forge.schedule.loop_summary" => {
+        "foundry.schedule.summary" | "foundry.schedule.loop_summary" => {
             let workflows = store.load_workflows()?;
             let task_slices: Vec<&[crate::graph::AtomicTask]> =
                 workflows.iter().map(|wf| wf.tasks.as_slice()).collect();
             serde_json::to_value(aggregate_summary(&task_slices))?
         }
-        "forge.loop.inspect" => {
+        "foundry.loop.inspect" => {
             let input: LoopInspectInput = parse_input(input)?;
             serde_json::to_value(inspect_workflow_with_focus(
                 store,
@@ -10536,12 +10550,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 None,
             )?)?
         }
-        "forge.run.start" => {
+        "foundry.run.start" => {
             let input: RunStartInput = parse_input(input)?;
             let parallel_team = explicit_parallel_team_from_mcp_lanes(
                 input.lanes,
                 input.max_parallel_agents,
-                "forge.run.start.mcp",
+                "foundry.run.start.mcp",
             )?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(start_async_request_with_idempotency_and_parallel_team(
@@ -10552,12 +10566,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 parallel_team,
             )?)?
         }
-        "forge.run.resume" => {
+        "foundry.run.resume" => {
             let input: RunIdInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(resume_async_request(store, &input.run_id, &origin)?)?
         }
-        "forge.run.heartbeat" => {
+        "foundry.run.heartbeat" => {
             let input: RunHeartbeatInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(heartbeat_request(
@@ -10570,7 +10584,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.run.drive" => {
+        "foundry.run.drive" => {
             let input: RunDriveInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(drive_request(
@@ -10581,7 +10595,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.run.step" => {
+        "foundry.run.step" => {
             let input: RunStepInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(step_request(
@@ -10592,7 +10606,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.run.execute_wave" => {
+        "foundry.run.execute_wave" => {
             let input: RunExecuteWaveInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             let executor = input
@@ -10620,7 +10634,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.run.complete_task" => {
+        "foundry.run.complete_task" => {
             let input: RunCompleteTaskInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             let executor = input.executor.unwrap_or_else(|| "mcp".to_string());
@@ -10649,7 +10663,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.run.final_package" => {
+        "foundry.run.final_package" => {
             let input: RunIdInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(create_final_delivery_package(
@@ -10658,7 +10672,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.workflow.ensure_final_audit" => {
+        "foundry.workflow.ensure_final_audit" => {
             let input: EnsureFinalAuditInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             let executor = input.executor.unwrap_or_else(|| "mcp".to_string());
@@ -10669,7 +10683,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.run.switch_executor" => {
+        "foundry.run.switch_executor" => {
             let input: RunSwitchExecutorInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(switch_request_executor(
@@ -10690,25 +10704,25 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.run.recover_stale" => {
+        "foundry.run.recover_stale" => {
             let input: RunIdInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(recover_stale_request(store, &input.run_id, &origin)?)?
         }
-        "forge.run.status" => {
+        "foundry.run.status" => {
             let input: RunIdInput = parse_input(input)?;
             serde_json::to_value(load_request_status(store, &input.run_id)?)?
         }
-        "forge.request.list" => {
+        "foundry.request.list" => {
             let input: RequestListInput = parse_input(input)?;
             serde_json::to_value(list_requests(store, input.status.as_deref())?)?
         }
-        "forge.request.cancel" => {
+        "foundry.request.cancel" => {
             let input: RequestCancelInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(cancel_request(store, &input.run_id, &origin)?)?
         }
-        "forge.workflow.update_goal" => {
+        "foundry.workflow.update_goal" => {
             let input: WorkflowUpdateGoalInput = parse_input(input)?;
             serde_json::to_value(update_workflow_goal_with_expected_revision(
                 store,
@@ -10718,7 +10732,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.expected_revision,
             )?)?
         }
-        "forge.workflow.add_task" => {
+        "foundry.workflow.add_task" => {
             let input: WorkflowAddTaskInput = parse_input(input)?;
             serde_json::to_value(add_workflow_task(
                 store,
@@ -10732,7 +10746,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.workflow.update_task" => {
+        "foundry.workflow.update_task" => {
             let input: WorkflowUpdateTaskInput = parse_input(input)?;
             serde_json::to_value(update_workflow_task_with_expected_revision(
                 store,
@@ -10747,7 +10761,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.expected_revision,
             )?)?
         }
-        "forge.workflow.set_priority" => {
+        "foundry.workflow.set_priority" => {
             let input: WorkflowSetPriorityInput = parse_input(input)?;
             serde_json::to_value(set_workflow_task_priority(
                 store,
@@ -10760,7 +10774,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.workflow.add_dependency" => {
+        "foundry.workflow.add_dependency" => {
             let input: WorkflowDependencyInput = parse_input(input)?;
             serde_json::to_value(add_workflow_task_dependency(
                 store,
@@ -10773,7 +10787,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.workflow.remove_dependency" => {
+        "foundry.workflow.remove_dependency" => {
             let input: WorkflowDependencyInput = parse_input(input)?;
             serde_json::to_value(remove_workflow_task_dependency(
                 store,
@@ -10786,7 +10800,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.workflow.set_impediment" => {
+        "foundry.workflow.set_impediment" => {
             let input: WorkflowSetImpedimentInput = parse_input(input)?;
             serde_json::to_value(set_workflow_task_impediment(
                 store,
@@ -10800,7 +10814,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.workflow.clear_impediment" => {
+        "foundry.workflow.clear_impediment" => {
             let input: WorkflowClearImpedimentInput = parse_input(input)?;
             serde_json::to_value(clear_workflow_task_impediment(
                 store,
@@ -10813,7 +10827,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.workflow.update_node_brain" => {
+        "foundry.workflow.update_node_brain" => {
             let input: WorkflowUpdateNodeBrainInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             let agent_slots = input
@@ -10834,7 +10848,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.workflow.attach_artifact" => {
+        "foundry.workflow.attach_artifact" => {
             let input: WorkflowAttachArtifactInput = parse_input(input)?;
             serde_json::to_value(attach_workflow_artifact_with_tags(
                 store,
@@ -10845,7 +10859,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &input.tags,
             )?)?
         }
-        "forge.interaction.create_choice" => {
+        "foundry.interaction.create_choice" => {
             let input: InteractionCreateChoiceInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             let kind = input.kind.unwrap_or_else(|| "single_choice".to_string());
@@ -10863,7 +10877,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.interaction.create_form" => {
+        "foundry.interaction.create_form" => {
             let input: InteractionCreateFormInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(create_form_interaction(
@@ -10876,7 +10890,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.interaction.answer" => {
+        "foundry.interaction.answer" => {
             let input: InteractionAnswerInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(answer_human_interaction(
@@ -10889,7 +10903,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.interaction.expire" => {
+        "foundry.interaction.expire" => {
             let input: InteractionExpireInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(expire_human_interaction(
@@ -10899,8 +10913,8 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.interaction.list" => serde_json::to_value(list_human_interactions(store)?)?,
-        "forge.context.request" => {
+        "foundry.interaction.list" => serde_json::to_value(list_human_interactions(store)?)?,
+        "foundry.context.request" => {
             let input: ContextRequestInput = parse_input(input)?;
             ensure_workflow_policy(store, &input.workflow_id, "context request")?;
             let workflow = store.load_workflow(&input.workflow_id)?;
@@ -10924,7 +10938,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 SecretVaultPersistOptions {
                     store,
                     workflow_id: Some(&workflow.id),
-                    origin: "forge_mcp_context",
+                    origin: "foundry_mcp_context",
                     tenant_context: &tenant_context,
                 },
             )?;
@@ -10967,7 +10981,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 view => bail!("unsupported context view `{view}`; expected full or compact"),
             }
         }
-        "forge.worktree.guard.check" => {
+        "foundry.worktree.guard.check" => {
             let input: WorktreeGuardCheckInput = parse_input(input)?;
             serde_json::to_value(evaluate_worktree_modification_guard(
                 store,
@@ -10981,7 +10995,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.worktree.guard.create_predecessor" => {
+        "foundry.worktree.guard.create_predecessor" => {
             let input: WorktreeGuardCreatePredecessorInput = parse_input(input)?;
             serde_json::to_value(create_worktree_guard_predecessor_task(
                 store,
@@ -10995,7 +11009,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
-        "forge.worktree.sandbox.plan" => {
+        "foundry.worktree.sandbox.plan" => {
             let input: WorktreeSandboxInput = parse_input(input)?;
             serde_json::to_value(plan_worktree_sandbox(
                 store,
@@ -11008,7 +11022,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.worktree.sandbox.run" => {
+        "foundry.worktree.sandbox.run" => {
             let input: WorktreeSandboxInput = parse_input(input)?;
             serde_json::to_value(run_worktree_sandbox(
                 store,
@@ -11022,7 +11036,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.allow_exec.unwrap_or(false),
             )?)?
         }
-        "forge.worktree.sandbox.start" => {
+        "foundry.worktree.sandbox.start" => {
             let input: WorktreeSandboxInput = parse_input(input)?;
             serde_json::to_value(start_worktree_sandbox(
                 store,
@@ -11036,14 +11050,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.allow_exec.unwrap_or(false),
             )?)?
         }
-        "forge.worktree.sandbox.status" => {
+        "foundry.worktree.sandbox.status" => {
             let input: WorktreeSandboxStatusInput = parse_input(input)?;
             serde_json::to_value(inspect_worktree_sandbox_lifecycle(
                 store,
                 &input.sandbox_id,
             )?)?
         }
-        "forge.worktree.sandbox.stop" => {
+        "foundry.worktree.sandbox.stop" => {
             let input: WorktreeSandboxStopInput = parse_input(input)?;
             serde_json::to_value(stop_worktree_sandbox(
                 store,
@@ -11051,7 +11065,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.allow_stop.unwrap_or(false),
             )?)?
         }
-        "forge.harness.token_headroom" => {
+        "foundry.harness.token_headroom" => {
             let input: HarnessTokenHeadroomInput = parse_input(input)?;
             let content_kind = input.content_kind.or(input.kind);
             let report = analyze_token_headroom(
@@ -11068,7 +11082,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             };
             serde_json::to_value(report)?
         }
-        "forge.harness.retrieve_headroom" => {
+        "foundry.harness.retrieve_headroom" => {
             let input: HarnessRetrieveHeadroomInput = parse_input(input)?;
             serde_json::to_value(retrieve_headroom_blob(
                 store,
@@ -11076,7 +11090,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.include_content.unwrap_or(false),
             )?)?
         }
-        "forge.harness.headroom_stats" => {
+        "foundry.harness.headroom_stats" => {
             let input: HarnessHeadroomStatsInput = if input.is_null() {
                 HarnessHeadroomStatsInput {
                     source: None,
@@ -11097,24 +11111,24 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.harness.mode" => {
+        "foundry.harness.mode" => {
             let input: HarnessModeInput = parse_input(input)?;
             serde_json::to_value(build_harness_mode_report(HarnessModeOptions {
-                forge_first: input.forge_first.unwrap_or(false),
+                foundry_first: input.foundry_first.unwrap_or(false),
                 observe_only: input.observe_only.unwrap_or(false),
                 project_root: input.project_root.as_deref().map(std::path::Path::new),
             }))?
         }
-        "forge.harness.doctor" => {
+        "foundry.harness.doctor" => {
             let input: HarnessDoctorInput = parse_input(input)?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
             let project_root = input.project_root.as_deref().map(std::path::Path::new);
-            let (effective_forge_first, _) = if let Some(forge_first) = input.forge_first {
-                (forge_first, "mcp_input")
+            let (effective_foundry_first, _) = if let Some(foundry_first) = input.foundry_first {
+                (foundry_first, "mcp_input")
             } else if let Some(project_root) = project_root {
-                resolve_harness_forge_first_source_for_project(false, false, Some(project_root))
+                resolve_harness_foundry_first_source_for_project(false, false, Some(project_root))
             } else {
                 (true, "mcp_default")
             };
@@ -11124,13 +11138,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget_source: "mcp_input",
                 token_headroom: input.token_headroom,
                 token_headroom_source: "mcp_input",
-                forge_first: effective_forge_first,
+                foundry_first: effective_foundry_first,
                 default_context_budget: DEFAULT_CONTEXT_BUDGET,
             });
             serde_json::to_value(build_harness_doctor_report(HarnessDoctorOptions {
                 shim_dir: std::path::Path::new(&input.shim_dir),
                 executor: &input.executor,
-                forge_first: input.forge_first.unwrap_or(false),
+                foundry_first: input.foundry_first.unwrap_or(false),
                 observe_only: input.observe_only.unwrap_or(false),
                 project_root,
                 workflow_id: workflow_id.as_deref(),
@@ -11140,11 +11154,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget_source: &runtime_policy.context_budget_source,
                 token_headroom: runtime_policy.token_headroom,
                 token_headroom_source: &runtime_policy.token_headroom_source,
-                require_token_headroom_for_forge_first: runtime_policy
-                    .require_token_headroom_for_forge_first,
+                require_token_headroom_for_foundry_first: runtime_policy
+                    .require_token_headroom_for_foundry_first,
             })?)?
         }
-        "forge.harness.headroom_plan" => {
+        "foundry.harness.headroom_plan" => {
             let input: HarnessHeadroomPlanInput = parse_input(input)?;
             let command = input.command.or(input.cmd).unwrap_or_default();
             let workflow_id = input.workflow_id.or(input.workflow);
@@ -11152,12 +11166,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let run_id = input.run_id.or(input.run);
             let project_root = input.project_root.as_deref().map(std::path::Path::new);
             let observe_only = input.observe_only.unwrap_or(false);
-            let (forge_first, forge_first_source) = if observe_only {
+            let (foundry_first, foundry_first_source) = if observe_only {
                 (false, "observe_only_flag")
-            } else if let Some(forge_first) = input.forge_first {
-                (forge_first, "mcp_input")
+            } else if let Some(foundry_first) = input.foundry_first {
+                (foundry_first, "mcp_input")
             } else if let Some(project_root) = project_root {
-                resolve_harness_forge_first_source_for_project(false, false, Some(project_root))
+                resolve_harness_foundry_first_source_for_project(false, false, Some(project_root))
             } else {
                 (true, "mcp_default")
             };
@@ -11167,14 +11181,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget_source: "mcp_input",
                 token_headroom: input.token_headroom,
                 token_headroom_source: "mcp_input",
-                forge_first,
+                foundry_first,
                 default_context_budget: DEFAULT_CONTEXT_BUDGET,
             });
             serde_json::to_value(build_harness_headroom_plan(HarnessHeadroomPlanOptions {
                 executor: &input.executor,
                 command: &command,
-                forge_first,
-                forge_first_source,
+                foundry_first,
+                foundry_first_source,
                 project_root,
                 workflow_id: workflow_id.as_deref(),
                 task_id: task_id.as_deref(),
@@ -11183,23 +11197,23 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget_source: &runtime_policy.context_budget_source,
                 token_headroom: runtime_policy.token_headroom,
                 token_headroom_source: &runtime_policy.token_headroom_source,
-                require_token_headroom_for_forge_first: runtime_policy
-                    .require_token_headroom_for_forge_first,
+                require_token_headroom_for_foundry_first: runtime_policy
+                    .require_token_headroom_for_foundry_first,
             }))?
         }
-        "forge.harness.adoption_plan" => {
+        "foundry.harness.adoption_plan" => {
             let input: HarnessAdoptionPlanInput = parse_input(input)?;
             let workflow_id = input.workflow_id.or(input.workflow);
             let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
             let project_root = input.project_root.as_deref().map(std::path::Path::new);
             let observe_only = input.observe_only.unwrap_or(false);
-            let effective_forge_first = if observe_only {
+            let effective_foundry_first = if observe_only {
                 false
-            } else if let Some(forge_first) = input.forge_first {
-                forge_first
+            } else if let Some(foundry_first) = input.foundry_first {
+                foundry_first
             } else if let Some(project_root) = project_root {
-                resolve_harness_forge_first_source_for_project(false, false, Some(project_root)).0
+                resolve_harness_foundry_first_source_for_project(false, false, Some(project_root)).0
             } else {
                 true
             };
@@ -11209,13 +11223,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget_source: "mcp_input",
                 token_headroom: input.token_headroom,
                 token_headroom_source: "mcp_input",
-                forge_first: effective_forge_first,
+                foundry_first: effective_foundry_first,
                 default_context_budget: DEFAULT_CONTEXT_BUDGET,
             });
             serde_json::to_value(build_harness_adoption_plan(HarnessAdoptionPlanOptions {
                 shim_dir: std::path::Path::new(&input.shim_dir),
                 executor: &input.executor,
-                forge_first: input.forge_first.unwrap_or(false),
+                foundry_first: input.foundry_first.unwrap_or(false),
                 observe_only,
                 project_root,
                 workflow_id: workflow_id.as_deref(),
@@ -11225,11 +11239,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget_source: &runtime_policy.context_budget_source,
                 token_headroom: runtime_policy.token_headroom,
                 token_headroom_source: &runtime_policy.token_headroom_source,
-                require_token_headroom_for_forge_first: runtime_policy
-                    .require_token_headroom_for_forge_first,
+                require_token_headroom_for_foundry_first: runtime_policy
+                    .require_token_headroom_for_foundry_first,
             })?)?
         }
-        "forge.harness.activation_profile" => {
+        "foundry.harness.activation_profile" => {
             let input: HarnessActivationProfileInput = parse_input(input)?;
             let project_root = input.project_root.as_deref().map(std::path::Path::new);
             let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
@@ -11238,7 +11252,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget_source: "mcp_input",
                 token_headroom: input.token_headroom,
                 token_headroom_source: "mcp_input",
-                forge_first: true,
+                foundry_first: true,
                 default_context_budget: DEFAULT_CONTEXT_BUDGET,
             });
             serde_json::to_value(build_harness_activation_profile(
@@ -11256,7 +11270,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.harness.bootstrap" => {
+        "foundry.harness.bootstrap" => {
             let input: HarnessBootstrapInput = parse_input(input)?;
             let project_root = std::path::Path::new(&input.project_root);
             let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
@@ -11265,7 +11279,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget_source: "mcp_input",
                 token_headroom: input.token_headroom,
                 token_headroom_source: "mcp_input",
-                forge_first: true,
+                foundry_first: true,
                 default_context_budget: DEFAULT_CONTEXT_BUDGET,
             });
             serde_json::to_value(build_harness_bootstrap_report(HarnessBootstrapOptions {
@@ -11282,17 +11296,19 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 force: input.force.unwrap_or(false),
             })?)?
         }
-        "forge.harness.wrap_plan" => {
+        "foundry.harness.wrap_plan" => {
             let input: HarnessWrapPlanInput = parse_input(input)?;
             let command = input.command.or(input.cmd).unwrap_or_default();
             let workflow_id = input.workflow_id.or(input.workflow);
             let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
             let project_root = input.project_root.as_deref().map(std::path::Path::new);
-            let (forge_first, forge_first_source) = if let Some(forge_first) = input.forge_first {
-                (forge_first, "mcp_input")
+            let (foundry_first, foundry_first_source) = if let Some(foundry_first) =
+                input.foundry_first
+            {
+                (foundry_first, "mcp_input")
             } else if let Some(project_root) = project_root {
-                resolve_harness_forge_first_source_for_project(false, false, Some(project_root))
+                resolve_harness_foundry_first_source_for_project(false, false, Some(project_root))
             } else {
                 (true, "mcp_default")
             };
@@ -11302,14 +11318,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget_source: "mcp_input",
                 token_headroom: input.token_headroom,
                 token_headroom_source: "mcp_input",
-                forge_first,
+                foundry_first,
                 default_context_budget: DEFAULT_CONTEXT_BUDGET,
             });
             serde_json::to_value(build_cli_wrapper_plan(CliWrapperPlanOptions {
                 executor: &input.executor,
                 command: &command,
-                forge_first,
-                forge_first_source,
+                foundry_first,
+                foundry_first_source,
                 project_root,
                 workflow_id: workflow_id.as_deref(),
                 task_id: task_id.as_deref(),
@@ -11318,11 +11334,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget_source: &runtime_policy.context_budget_source,
                 token_headroom: runtime_policy.token_headroom,
                 token_headroom_source: &runtime_policy.token_headroom_source,
-                require_token_headroom_for_forge_first: runtime_policy
-                    .require_token_headroom_for_forge_first,
+                require_token_headroom_for_foundry_first: runtime_policy
+                    .require_token_headroom_for_foundry_first,
             }))?
         }
-        "forge.harness.install_shims" => {
+        "foundry.harness.install_shims" => {
             let input: HarnessInstallShimsInput = parse_input(input)?;
             let real_cmd = input
                 .real_cmd
@@ -11332,10 +11348,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
             let project_root = input.project_root.as_deref().map(std::path::Path::new);
-            let (forge_first, forge_first_source) = if let Some(forge_first) = input.forge_first {
-                (forge_first, "mcp_input")
+            let (foundry_first, foundry_first_source) = if let Some(foundry_first) =
+                input.foundry_first
+            {
+                (foundry_first, "mcp_input")
             } else if let Some(project_root) = project_root {
-                resolve_harness_forge_first_source_for_project(false, false, Some(project_root))
+                resolve_harness_foundry_first_source_for_project(false, false, Some(project_root))
             } else {
                 (true, "mcp_default")
             };
@@ -11345,7 +11363,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget_source: "mcp_input",
                 token_headroom: input.token_headroom,
                 token_headroom_source: "mcp_input",
-                forge_first,
+                foundry_first,
                 default_context_budget: DEFAULT_CONTEXT_BUDGET,
             });
             serde_json::to_value(install_cli_harness_shim(CliShimInstallOptions {
@@ -11353,8 +11371,8 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 executor: &input.executor,
                 real_cmd: real_cmd.as_deref(),
                 store_path: Some(store.path()),
-                forge_first,
-                forge_first_source,
+                foundry_first,
+                foundry_first_source,
                 workflow_id: workflow_id.as_deref(),
                 task_id: task_id.as_deref(),
                 run_id: run_id.as_deref(),
@@ -11363,7 +11381,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 force: input.force.unwrap_or(false),
             })?)?
         }
-        "forge.harness.install_provider_adapter" => {
+        "foundry.harness.install_provider_adapter" => {
             let input: HarnessInstallProviderAdapterInput = parse_input(input)?;
             let real_cmd = input
                 .real_cmd
@@ -11376,7 +11394,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget_source: "mcp_input",
                 token_headroom: input.token_headroom,
                 token_headroom_source: "mcp_input",
-                forge_first: true,
+                foundry_first: true,
                 default_context_budget: DEFAULT_CONTEXT_BUDGET,
             });
             serde_json::to_value(install_cli_provider_adapter(
@@ -11390,14 +11408,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.harness.shim_status" => {
+        "foundry.harness.shim_status" => {
             let input: HarnessShimStatusInput = parse_input(input)?;
             serde_json::to_value(inspect_cli_harness_shim_status(CliShimStatusOptions {
                 shim_dir: std::path::Path::new(&input.shim_dir),
                 executor: &input.executor,
             })?)?
         }
-        "forge.harness.exec" => {
+        "foundry.harness.exec" => {
             let input: HarnessExecInput = parse_input(input)?;
             let command = input.command.or(input.cmd).unwrap_or_default();
             let workflow_id = input.workflow_id.or(input.workflow);
@@ -11438,10 +11456,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             } else {
                 explicit_cwd
             };
-            let (forge_first, forge_first_source) = if let Some(forge_first) = input.forge_first {
-                (forge_first, "mcp_input")
+            let (foundry_first, foundry_first_source) = if let Some(foundry_first) =
+                input.foundry_first
+            {
+                (foundry_first, "mcp_input")
             } else if let Some(project_root) = project_root.as_deref() {
-                resolve_harness_forge_first_source_for_project(false, false, Some(project_root))
+                resolve_harness_foundry_first_source_for_project(false, false, Some(project_root))
             } else {
                 (true, "mcp_default")
             };
@@ -11451,7 +11471,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget_source: "mcp_input",
                 token_headroom: input.token_headroom,
                 token_headroom_source: "mcp_input",
-                forge_first,
+                foundry_first,
                 default_context_budget: DEFAULT_CONTEXT_BUDGET,
             });
             let secret_env = input.secret_env.unwrap_or_default();
@@ -11460,8 +11480,8 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 store: Some(store),
                 executor: &input.executor,
                 command: &command,
-                forge_first,
-                forge_first_source,
+                foundry_first,
+                foundry_first_source,
                 workflow_id: workflow_id.as_deref(),
                 task_id: task_id.as_deref(),
                 run_id: run_id.as_deref(),
@@ -11469,8 +11489,8 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget_source: &runtime_policy.context_budget_source,
                 token_headroom: runtime_policy.token_headroom,
                 token_headroom_source: &runtime_policy.token_headroom_source,
-                require_token_headroom_for_forge_first: runtime_policy
-                    .require_token_headroom_for_forge_first,
+                require_token_headroom_for_foundry_first: runtime_policy
+                    .require_token_headroom_for_foundry_first,
                 dry_run: input.dry_run.unwrap_or(true),
                 allow_exec: input.allow_exec.unwrap_or(false),
                 secret_env: &secret_env,
@@ -11479,7 +11499,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 cwd: cwd.as_deref(),
             })?)?
         }
-        "forge.task.handoff" => {
+        "foundry.task.handoff" => {
             let input: TaskHandoffInput = parse_input(input)?;
             let project_root = input.project_root.as_deref().map(PathBuf::from);
             let view = match input.view.as_deref().unwrap_or("compact") {
@@ -11498,7 +11518,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 view,
             )?)?
         }
-        "forge.patch.plan" => {
+        "foundry.patch.plan" => {
             let input: PatchPlanInput = parse_input(input)?;
             serde_json::to_value(build_patch_plan(
                 store,
@@ -11509,7 +11529,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
-        "forge.patch.apply" => {
+        "foundry.patch.apply" => {
             let input: PatchApplyInput = parse_input(input)?;
             serde_json::to_value(build_patch_apply(
                 store,
@@ -11521,7 +11541,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 None,
             )?)?
         }
-        "forge.patch.review" => {
+        "foundry.patch.review" => {
             let input: PatchReviewInput = parse_input(input)?;
             serde_json::to_value(build_patch_review(
                 store,
@@ -11532,7 +11552,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.plan_artifact.as_deref(),
             )?)?
         }
-        "forge.patch.diff" => {
+        "foundry.patch.diff" => {
             let input: PatchDiffInput = parse_input(input)?;
             serde_json::to_value(build_patch_diff(
                 store,
@@ -11547,7 +11567,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.patch.revert" => {
+        "foundry.patch.revert" => {
             let input: PatchRevertInput = parse_input(input)?;
             serde_json::to_value(build_patch_revert(
                 store,
@@ -11558,7 +11578,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 None,
             )?)?
         }
-        "forge.patch.restore" => {
+        "foundry.patch.restore" => {
             let input: PatchRestoreInput = parse_input(input)?;
             serde_json::to_value(build_patch_restore(
                 store,
@@ -11570,7 +11590,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
-        "forge.validation.status" => {
+        "foundry.validation.status" => {
             let input: WorkflowIdInput = parse_input(input)?;
             let workflow = store.load_workflow(&input.workflow_id)?;
             let workflow_revision = workflow
@@ -11586,26 +11606,26 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 validation,
             })?
         }
-        "forge.artifact.fetch" => {
+        "foundry.artifact.fetch" => {
             let input: ArtifactFetchInput = parse_input(input)?;
             serde_json::to_value(fetch_artifact(store, input)?)?
         }
-        "forge.milestone.status" => {
+        "foundry.milestone.status" => {
             let input: MilestoneStatusInput = parse_input(input)?;
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
             serde_json::to_value(build_milestone_status(&version)?)?
         }
-        "forge.milestone.manifest" => {
+        "foundry.milestone.manifest" => {
             let input: MilestoneStatusInput = parse_input(input)?;
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
             serde_json::to_value(build_milestone_manifest_with_store(&version, Some(store))?)?
         }
-        "forge.milestone.production_plan" => {
+        "foundry.milestone.production_plan" => {
             let input: MilestoneStatusInput = parse_input(input)?;
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
             serde_json::to_value(build_production_readiness_plan(&version)?)?
         }
-        "forge.milestone.production_readiness" => {
+        "foundry.milestone.production_readiness" => {
             let input: ProductionReadinessInput = parse_input(input)?;
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
             let manifest = PathBuf::from(input.manifest);
@@ -11617,7 +11637,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 store_path: store.path(),
             })?)?
         }
-        "forge.milestone.attach_evidence" => {
+        "foundry.milestone.attach_evidence" => {
             let input: MilestoneAttachEvidenceInput = parse_input(input)?;
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
             let capability_id = input
@@ -11642,7 +11662,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.milestone.evidence_plan" => {
+        "foundry.milestone.evidence_plan" => {
             let input: MilestoneEvidencePlanInput = parse_input(input)?;
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
             let capability_id = input
@@ -11661,7 +11681,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.milestone.prepare_evidence_inputs" => {
+        "foundry.milestone.prepare_evidence_inputs" => {
             let input: MilestonePrepareEvidenceInputsInput = parse_input(input)?;
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
             let capability_id = input
@@ -11689,7 +11709,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.milestone.collect_evidence" => {
+        "foundry.milestone.collect_evidence" => {
             let input: MilestoneCollectEvidenceInput = parse_input(input)?;
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
             let capability_id = input
@@ -11712,7 +11732,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.milestone.collect_ready_evidence" => {
+        "foundry.milestone.collect_ready_evidence" => {
             let input: MilestoneCollectReadyEvidenceInput = parse_input(input)?;
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
             let project_root = input.project_root.map(PathBuf::from);
@@ -11729,15 +11749,15 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.milestone.research" => {
+        "foundry.milestone.research" => {
             let input: MilestoneStatusInput = parse_input(input)?;
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
             serde_json::to_value(build_milestone_research(&version)?)?
         }
-        "forge.milestone.export_demo" => {
+        "foundry.milestone.export_demo" => {
             serde_json::to_value(build_milestone_export_demo(store, "mcp")?)?
         }
-        "forge.milestone.cli_demo" => {
+        "foundry.milestone.cli_demo" => {
             let input: MilestoneCliDemoInput = parse_input(input)?;
             let project_root = input.project_root.as_deref().map(std::path::Path::new);
             serde_json::to_value(build_replacement_cli_demo_with_options(
@@ -11749,7 +11769,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.multimodal.status" => {
+        "foundry.multimodal.status" => {
             let input: MultimodalStatusInput = parse_input(input)?;
             let feature_flag = resolve_multimodal_feature_flag(
                 input.enable_experimental.unwrap_or(false),
@@ -11757,7 +11777,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             );
             serde_json::to_value(build_multimodal_status_with_feature_flag(feature_flag))?
         }
-        "forge.multimodal.install_plan" => {
+        "foundry.multimodal.install_plan" => {
             let input: MultimodalInstallPlanInput = parse_input(input)?;
             let feature_flag = resolve_multimodal_feature_flag(
                 input.enable_experimental.unwrap_or(false),
@@ -11772,7 +11792,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 feature_flag.enabled,
             )?)?
         }
-        "forge.multimodal.readiness" => {
+        "foundry.multimodal.readiness" => {
             let input: MultimodalReadinessInput = parse_input(input)?;
             let feature_flag = resolve_multimodal_feature_flag(
                 input.enable_experimental.unwrap_or(false),
@@ -11789,7 +11809,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 project_root: input.project_root.as_deref().map(std::path::Path::new),
             })?)?
         }
-        "forge.multimodal.benchmark_template" => {
+        "foundry.multimodal.benchmark_template" => {
             let input: MultimodalBenchmarkTemplateInput = parse_input(input)?;
             let feature_flag = resolve_multimodal_feature_flag(
                 input.enable_experimental.unwrap_or(false),
@@ -11804,7 +11824,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 feature_flag.enabled,
             )?)?
         }
-        "forge.multimodal.benchmark_result" => {
+        "foundry.multimodal.benchmark_result" => {
             let input: MultimodalBenchmarkResultInput = parse_input(input)?;
             let feature_flag = resolve_multimodal_feature_flag(
                 input.enable_experimental.unwrap_or(false),
@@ -11828,7 +11848,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.multimodal.runtime_benchmark" => {
+        "foundry.multimodal.runtime_benchmark" => {
             let input: MultimodalRuntimeBenchmarkInput = parse_input(input)?;
             let feature_flag = resolve_multimodal_feature_flag(
                 input.enable_experimental.unwrap_or(false),
@@ -11855,7 +11875,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.multimodal.demo_plan" => {
+        "foundry.multimodal.demo_plan" => {
             let input: MultimodalDemoPlanInput = parse_input(input)?;
             let feature_flag = resolve_multimodal_feature_flag(
                 input.enable_experimental.unwrap_or(false),
@@ -11867,7 +11887,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .ok_or_else(|| anyhow::anyhow!("demo_id is required"))?;
             serde_json::to_value(build_multimodal_demo_plan(&demo, feature_flag.enabled)?)?
         }
-        "forge.multimodal.demo_receipt" => {
+        "foundry.multimodal.demo_receipt" => {
             let input: MultimodalDemoReceiptInput = parse_input(input)?;
             let feature_flag = resolve_multimodal_feature_flag(
                 input.enable_experimental.unwrap_or(false),
@@ -11897,7 +11917,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.multimodal.guard" => {
+        "foundry.multimodal.guard" => {
             let input: MultimodalGuardInput = parse_input(input)?;
             let feature_flag = resolve_multimodal_feature_flag(
                 input.enable_experimental.unwrap_or(false),
@@ -11910,11 +11930,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.allow.unwrap_or(false),
             )?)?
         }
-        "forge.creative.list" => {
+        "foundry.creative.list" => {
             let input: CreativeListInput = parse_input(input)?;
             serde_json::to_value(list_creative_artifacts(store, &input.workflow_id)?)?
         }
-        "forge.creative.inspect" => {
+        "foundry.creative.inspect" => {
             let input: CreativeInspectInput = parse_input(input)?;
             serde_json::to_value(inspect_creative_artifact(
                 store,
@@ -11922,7 +11942,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &input.artifact_id,
             )?)?
         }
-        "forge.creative.attach" => {
+        "foundry.creative.attach" => {
             let input: CreativeAttachInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             let artifact = build_creative_artifact(&input.title, &input.kind, &origin)?;
@@ -11933,7 +11953,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.creative.collaboration_event" => {
+        "foundry.creative.collaboration_event" => {
             let input: CreativeCollaborationEventInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(record_creative_collaboration_event(
@@ -11950,7 +11970,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 },
             )?)?
         }
-        "forge.creative.collaboration_status" => {
+        "foundry.creative.collaboration_status" => {
             let input: CreativeCollaborationStatusInput = parse_input(input)?;
             serde_json::to_value(inspect_creative_collaboration(
                 store,
@@ -11958,11 +11978,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &input.artifact_id,
             )?)?
         }
-        "forge.tokens.get" => {
+        "foundry.tokens.get" => {
             let input: TokensGetInput = parse_input(input)?;
             serde_json::to_value(get_workflow_token_collection(store, &input.workflow_id)?)?
         }
-        "forge.tokens.resolve" => {
+        "foundry.tokens.resolve" => {
             let input: TokensGetInput = parse_input(input)?;
             serde_json::to_value(resolve_workflow_tokens(
                 store,
@@ -11970,7 +11990,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.mode.as_deref(),
             )?)?
         }
-        "forge.tokens.set" => {
+        "foundry.tokens.set" => {
             let input: TokensSetInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(set_workflow_token_collection(
@@ -11980,7 +12000,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &origin,
             )?)?
         }
-        "forge.tokens.patch" => {
+        "foundry.tokens.patch" => {
             let input: TokensPatchInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(patch_workflow_token(
@@ -12002,7 +12022,10 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
     })
 }
 
-fn fetch_artifact(store: &ForgeStore, input: ArtifactFetchInput) -> Result<McpArtifactFetchReport> {
+fn fetch_artifact(
+    store: &FoundryStore,
+    input: ArtifactFetchInput,
+) -> Result<McpArtifactFetchReport> {
     let _workflow = store.load_workflow(&input.workflow_id)?;
     let artifacts = list_workflow_artifacts(&store.base_dir(), &input.workflow_id)?;
     let max_bytes = input.max_bytes.unwrap_or(0).min(MAX_ARTIFACT_FETCH_BYTES);
@@ -12062,7 +12085,7 @@ fn tool(
     description: &str,
     input_schema: Value,
     output_schema: &str,
-    forge_command: &[&str],
+    foundry_command: &[&str],
     flags: ToolFlags,
 ) -> McpToolSpec {
     McpToolSpec {
@@ -12071,7 +12094,7 @@ fn tool(
         description: description.to_string(),
         input_schema,
         output_schema: output_schema.to_string(),
-        forge_command: forge_command
+        foundry_command: foundry_command
             .iter()
             .map(|item| (*item).to_string())
             .collect(),
@@ -12082,7 +12105,7 @@ fn tool(
 
 fn output_schema_selector(tool_name: &str) -> Option<Value> {
     match tool_name {
-        "forge.context.request" => Some(json!({
+        "foundry.context.request" => Some(json!({
             "input_field": "view",
             "default_value": "compact",
             "mapping": {
@@ -12090,7 +12113,7 @@ fn output_schema_selector(tool_name: &str) -> Option<Value> {
                 "compact": CONTEXT_COMPACT_VIEW_SCHEMA_VERSION,
             }
         })),
-        "forge.task.handoff" => Some(json!({
+        "foundry.task.handoff" => Some(json!({
             "input_field": "view",
             "default_value": "compact",
             "mapping": {
@@ -12111,7 +12134,7 @@ fn context_request_input_schema() -> Value {
             (
                 "project_root",
                 "string",
-                "optional project root containing .forge/memory-governance.json",
+                "optional project root containing .foundry/memory-governance.json",
             ),
             (
                 "view",
@@ -12266,7 +12289,7 @@ fn task_handoff_input_schema() -> Value {
             (
                 "project_root",
                 "string",
-                "optional project root containing .forge/memory-governance.json",
+                "optional project root containing .foundry/memory-governance.json",
             ),
             (
                 "view",

@@ -3,14 +3,14 @@ use crate::graph::{
     HumanInteractionSpec, TaskStatus, Workflow, WorkflowRevision,
 };
 use crate::identity::ensure_workflow_policy;
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use anyhow::{bail, Context, Result};
 use chrono::{Duration, Utc};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-const HUMAN_INTERACTION_SUMMARY_SCHEMA_VERSION: &str = "forge.human_interaction.summary.v1";
+const HUMAN_INTERACTION_SUMMARY_SCHEMA_VERSION: &str = "foundry.human_interaction.summary.v1";
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct HumanInteractionSummary {
@@ -129,7 +129,7 @@ pub fn blocking_human_interaction(workflow: &Workflow) -> Option<HumanInteractio
         let interaction = task.human_interaction.as_ref()?;
         if interaction.required && matches!(interaction.state.as_str(), "pending" | "timed_out") {
             Some(HumanInteractionBlocker {
-                schema_version: "forge.human_interaction.blocker.v1".to_string(),
+                schema_version: "foundry.human_interaction.blocker.v1".to_string(),
                 workflow_id: workflow.id.clone(),
                 task_id: task.id.clone(),
                 task_title: task.title.clone(),
@@ -146,7 +146,7 @@ pub fn blocking_human_interaction(workflow: &Workflow) -> Option<HumanInteractio
 }
 
 pub fn create_choice_interaction(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: CreateChoiceInteractionRequest<'_>,
 ) -> Result<HumanInteractionReport> {
     ensure_workflow_policy(store, request.workflow_id, "create human interaction")?;
@@ -172,7 +172,7 @@ pub fn create_choice_interaction(
 }
 
 pub fn create_form_interaction(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     prompt: &str,
@@ -186,7 +186,7 @@ pub fn create_form_interaction(
         bail!("at least one --field is required for a human form interaction");
     }
     let form = HumanFormSchema {
-        schema_version: "forge.human_form.v1".to_string(),
+        schema_version: "foundry.human_form.v1".to_string(),
         title: prompt.to_string(),
         review_before_submit: true,
         save_as_template_available: true,
@@ -209,7 +209,7 @@ pub fn create_form_interaction(
 }
 
 pub fn answer_human_interaction(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     selected_options: &[String],
@@ -236,7 +236,7 @@ pub fn answer_human_interaction(
         }
         validate_answer(interaction, selected_options, &parsed_fields)?;
         let decision = HumanDecisionRecord {
-            schema_version: "forge.human_decision.v1".to_string(),
+            schema_version: "foundry.human_decision.v1".to_string(),
             decision_id: format!("decision_{}", compact_uuid()),
             workflow_id: workflow_id.to_string(),
             task_id: task_id.to_string(),
@@ -301,7 +301,7 @@ pub fn answer_human_interaction(
 }
 
 pub fn expire_human_interaction(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     origin: &str,
@@ -372,7 +372,7 @@ pub fn expire_human_interaction(
     })
 }
 
-pub fn list_human_interactions(store: &ForgeStore) -> Result<HumanInteractionListReport> {
+pub fn list_human_interactions(store: &FoundryStore) -> Result<HumanInteractionListReport> {
     let workflows = store.load_workflows()?;
     let mut interactions = Vec::new();
     let mut all_tasks = Vec::new();
@@ -398,7 +398,7 @@ pub fn list_human_interactions(store: &ForgeStore) -> Result<HumanInteractionLis
 }
 
 fn create_interaction(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: CreateInteractionRequest<'_>,
 ) -> Result<HumanInteractionReport> {
     let mut workflow = store.load_workflow(request.workflow_id)?;
@@ -419,14 +419,14 @@ fn create_interaction(
         );
     }
     let interaction = HumanInteractionSpec {
-        schema_version: "forge.human_interaction.v1".to_string(),
+        schema_version: "foundry.human_interaction.v1".to_string(),
         interaction_id: format!("hi_{}", compact_uuid()),
         kind: request.kind.to_string(),
         prompt: request.prompt.to_string(),
         required: true,
         state: "pending".to_string(),
         explanation:
-            "Forge paused this task because human judgment is required before execution continues."
+            "Foundry paused this task because human judgment is required before execution continues."
                 .to_string(),
         choices: request.choices,
         form: request.form,

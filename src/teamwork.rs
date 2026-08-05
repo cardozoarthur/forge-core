@@ -6,7 +6,7 @@ use crate::graph::{
 };
 use crate::intent::parse_intent;
 use crate::request::{create_run_record, save_run_record};
-use crate::storage::{open_configured_connection, ForgeStore};
+use crate::storage::{open_configured_connection, FoundryStore};
 use crate::worktree::{
     bind_worktree, bound_worktree_mutation_claim, create_worktree, discover_worktrees,
     list_registered_worktrees, WorktreeCreateOptions, WorktreeMutationClaim, WorktreeRecord,
@@ -52,7 +52,7 @@ pub struct TeamworkPlanningEvidence {
 impl Default for TeamworkPlanningEvidence {
     fn default() -> Self {
         Self {
-            schema_version: "forge.teamwork.planning_evidence.v1".to_string(),
+            schema_version: "foundry.teamwork.planning_evidence.v1".to_string(),
             status: "not_materialized".to_string(),
             completed_task_ids: Vec::new(),
             evidence: Vec::new(),
@@ -124,7 +124,7 @@ pub struct TeamworkWorkspaceIsolation {
 impl Default for TeamworkWorkspaceIsolation {
     fn default() -> Self {
         Self {
-            schema_version: "forge.teamwork.workspace_isolation.v1".to_string(),
+            schema_version: "foundry.teamwork.workspace_isolation.v1".to_string(),
             status: "task_worktree_bindings_required".to_string(),
             mutation_claim: "exclusive_worktree_mutation".to_string(),
             task_scoped_worktree_required: true,
@@ -264,7 +264,7 @@ struct CachedBrain {
 }
 
 pub fn plan_teamwork_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     goal: &str,
     detached: bool,
     bypass_cache: bool,
@@ -279,7 +279,7 @@ pub fn plan_teamwork_workflow(
 }
 
 pub fn plan_teamwork_workflow_with_config(
-    store: &ForgeStore,
+    store: &FoundryStore,
     goal: &str,
     detached: bool,
     bypass_cache: bool,
@@ -344,8 +344,8 @@ pub fn plan_teamwork_workflow_with_config(
         }
     }
 
-    // 2. Fetch and Cache Benchmarks if FORGE_BENCHMARK_URL is configured
-    let benchmark_url = std::env::var("FORGE_BENCHMARK_URL").ok();
+    // 2. Fetch and Cache Benchmarks if FOUNDRY_BENCHMARK_URL is configured
+    let benchmark_url = crate::brand::env_var("FOUNDRY_BENCHMARK_URL").ok();
     let mut benchmark_scores = Vec::new();
     let mut benchmarks_json = None;
 
@@ -579,7 +579,7 @@ pub fn plan_teamwork_workflow_with_config(
     // 4. Assemble the Roster
     let roles = teamwork_roles_for_config(&parallelism, orchestrator_brain, auditor_brain);
     let strategy = TeamworkStrategy {
-        schema_version: "forge.teamwork.strategy.v1".to_string(),
+        schema_version: "foundry.teamwork.strategy.v1".to_string(),
         mode: if detached {
             "detached_teamwork_run".to_string()
         } else {
@@ -588,8 +588,8 @@ pub fn plan_teamwork_workflow_with_config(
         source_evidence: vec![
             "Antigravity agy exposes /teamwork-preview as an internal slash-command pattern, not as a public CLI subcommand.".to_string(),
             "Observed flow: prompt draft, user approval, delegated teamwork_preview subagents, execution approvals, and artifact-bound handoff.".to_string(),
-            "Forge adaptation keeps workflow state, context routing, validation gates, artifacts, and executor policy inside Forge.".to_string(),
-            format!("Goal and benchmark heuristics recommended {advisory_worker_brain}; Forge resolved the configured lanes as {lane_summary} without transferring workflow authority to an executor."),
+            "Foundry adaptation keeps workflow state, context routing, validation gates, artifacts, and executor policy inside Foundry.".to_string(),
+            format!("Goal and benchmark heuristics recommended {advisory_worker_brain}; Foundry resolved the configured lanes as {lane_summary} without transferring workflow authority to an executor."),
         ],
         phases: vec![
             TeamworkPhase {
@@ -630,7 +630,7 @@ pub fn plan_teamwork_workflow_with_config(
 
     apply_teamwork_parallel_topology(&mut workflow, &roles, &parallelism)?;
     let planning_evidence = complete_materialized_teamwork_planning_nodes(&mut workflow)?;
-    let run = create_run_record(&workflow, "forge_cli", "accepted");
+    let run = create_run_record(&workflow, "foundry_cli", "accepted");
     let run_id = if detached {
         Some(run.run_id.clone())
     } else {
@@ -642,7 +642,7 @@ pub fn plan_teamwork_workflow_with_config(
         .map(serde_json::to_value)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let response = TeamworkResponse {
-        schema_version: "forge.teamwork.plan.v1".to_string(),
+        schema_version: "foundry.teamwork.plan.v1".to_string(),
         status: "planned".to_string(),
         workflow_id: workflow.id.clone(),
         run_id,
@@ -652,7 +652,7 @@ pub fn plan_teamwork_workflow_with_config(
         roster: TeamworkRoster {
             agent_count: roles.len(),
             max_parallel_agents: parallelism.max_parallel_agents,
-            policy: "forge_authority_configured_parallel_lanes".to_string(),
+            policy: "foundry_authority_configured_parallel_lanes".to_string(),
             roles,
         },
         workspace_isolation: TeamworkWorkspaceIsolation {
@@ -729,11 +729,11 @@ fn complete_materialized_teamwork_planning_nodes(
         created_at: chrono::Utc::now(),
     });
     Ok(TeamworkPlanningEvidence {
-        schema_version: "forge.teamwork.planning_evidence.v1".to_string(),
+        schema_version: "foundry.teamwork.planning_evidence.v1".to_string(),
         status: "materialized".to_string(),
         completed_task_ids: required.into_iter().map(str::to_string).collect(),
         evidence,
-        reason: "Forge completed only the deterministic meta-work already performed by plan_teamwork_workflow; executor branches, joins, documentation and promotion remain pending validation."
+        reason: "Foundry completed only the deterministic meta-work already performed by plan_teamwork_workflow; executor branches, joins, documentation and promotion remain pending validation."
             .to_string(),
     })
 }
@@ -768,7 +768,7 @@ struct TeamworkWorktreeReportContext<'a> {
 }
 
 pub fn prepare_teamwork_worktrees(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: TeamworkWorktreePrepareOptions,
 ) -> Result<TeamworkWorktreePreparationReport> {
     let workflow_id = required_teamwork_text(&options.workflow_id, "workflow id")?;
@@ -1068,7 +1068,7 @@ fn teamwork_worktree_report(
         "teamwork_worktrees_prepared"
     };
     TeamworkWorktreePreparationReport {
-        schema_version: "forge.teamwork.worktree_preparation.v1".to_string(),
+        schema_version: "foundry.teamwork.worktree_preparation.v1".to_string(),
         status: status.to_string(),
         workflow_id: context.workflow_id.to_string(),
         repository: context.repository.display().to_string(),
@@ -1211,14 +1211,14 @@ fn teamwork_external_task_brain(task: &AtomicTask) -> Result<Option<String>> {
     let mut explicit = BTreeSet::new();
     if let Some(brain) = task.node_brain_routing.default_brain.as_deref() {
         let brain = canonical_executor_id(brain);
-        if !brain.is_empty() && !matches!(brain.as_str(), "forge" | "auto") {
+        if !brain.is_empty() && !matches!(brain.as_str(), "foundry" | "auto") {
             explicit.insert(brain);
         }
     }
     for slot in &task.node_brain_routing.agent_slots {
         if let Some(brain) = slot.brain_id.as_deref() {
             let brain = canonical_executor_id(brain);
-            if !brain.is_empty() && !matches!(brain.as_str(), "forge" | "auto") {
+            if !brain.is_empty() && !matches!(brain.as_str(), "foundry" | "auto") {
                 explicit.insert(brain);
             }
         }
@@ -1327,13 +1327,13 @@ fn validate_existing_teamwork_worktree(
 }
 
 fn teamwork_worktree_create_command(
-    store: &ForgeStore,
+    store: &FoundryStore,
     repository: &Path,
     path: &Path,
     branch: &str,
 ) -> Vec<String> {
     vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "--store".to_string(),
         store.path().display().to_string(),
         "worktree".to_string(),
@@ -1353,14 +1353,14 @@ fn teamwork_worktree_create_command(
 }
 
 fn teamwork_worktree_bind_command(
-    store: &ForgeStore,
+    store: &FoundryStore,
     path: &Path,
     workflow_id: &str,
     task_id: &str,
     origin: &str,
 ) -> Vec<String> {
     vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "--store".to_string(),
         store.path().display().to_string(),
         "worktree".to_string(),
@@ -1402,7 +1402,7 @@ pub fn core_parallel_team_from_teamwork(
 pub fn normalize_explicit_parallel_team(
     mut spec: CoreParallelTeamSpec,
 ) -> Result<CoreParallelTeamSpec> {
-    if spec.schema_version != CORE_PARALLEL_TEAM_SCHEMA_VERSION {
+    if !crate::brand::identifier_matches(&spec.schema_version, CORE_PARALLEL_TEAM_SCHEMA_VERSION) {
         return Err(anyhow!(
             "unsupported Core parallel team schema_version `{}`; expected {CORE_PARALLEL_TEAM_SCHEMA_VERSION}",
             spec.schema_version
@@ -1577,13 +1577,13 @@ fn resolve_teamwork_parallel_config(
         lane.brain = canonical_executor_id(&lane.brain);
         if disallowed_brains.contains(&lane.brain) {
             return Err(anyhow!(
-                "teamwork lane {} requires brain {}, but Forge executor policy marks it disallowed",
+                "teamwork lane {} requires brain {}, but Foundry executor policy marks it disallowed",
                 lane.id,
                 lane.brain
             ));
         }
     }
-    let normalized = core_parallel_team_from_teamwork(&config, "forge_teamwork_command")?;
+    let normalized = core_parallel_team_from_teamwork(&config, "foundry_teamwork_command")?;
     Ok(TeamworkParallelConfig::from(&normalized))
 }
 
@@ -1663,7 +1663,7 @@ fn teamwork_roles_for_config(
         role: "Orchestrator".to_string(),
         brain: orchestrator_brain,
         parallel_group: "control".to_string(),
-        responsibility: "Turn the approved goal into an auditable graph while Forge remains the workflow authority.".to_string(),
+        responsibility: "Turn the approved goal into an auditable graph while Foundry remains the workflow authority.".to_string(),
     });
     roles.extend(teamwork_lane_roles_for_config(config));
     roles.push(TeamworkRole {
@@ -1719,7 +1719,7 @@ fn bind_teamwork_role(task: &mut AtomicTask, role: &TeamworkRole) {
         brain_id: Some(role.brain.clone()),
         role: role.role.clone(),
         parallel_group: role.parallel_group.clone(),
-        state_owner: "forge".to_string(),
+        state_owner: "foundry".to_string(),
     }];
     routing.max_parallel_agents = 1;
     routing.supports_parallel_agent_brains = true;
@@ -1815,7 +1815,7 @@ fn retarget_teamwork_lane_join(
         ValidationRule {
             kind: TEAMWORK_GIT_FAN_IN_VALIDATION_KIND.to_string(),
             command: None,
-            expected: "all dependency Git heads are converged into the task-scoped join worktree under an immutable Forge receipt before executor dispatch".to_string(),
+            expected: "all dependency Git heads are converged into the task-scoped join worktree under an immutable Foundry receipt before executor dispatch".to_string(),
         },
     ];
     task.work_item.item_type = "validation_story".to_string();
@@ -1832,7 +1832,7 @@ fn retarget_teamwork_lane_join(
 
 fn retarget_teamwork_final_join(task: &mut AtomicTask, dependencies: Vec<String>) {
     task.title = "Audit and join configured teamwork lanes".to_string();
-    task.goal = "Audit every lane join and produce one promotion decision under Forge authority"
+    task.goal = "Audit every lane join and produce one promotion decision under Foundry authority"
         .to_string();
     task.dependencies = dependencies;
     task.expected_output = "Cross-lane audit and promotion evidence".to_string();
@@ -1849,14 +1849,14 @@ fn retarget_teamwork_final_join(task: &mut AtomicTask, dependencies: Vec<String>
         ValidationRule {
             kind: TEAMWORK_GIT_FAN_IN_VALIDATION_KIND.to_string(),
             command: None,
-            expected: "all lane-join Git heads are converged into the final auditor worktree under an immutable Forge receipt before executor dispatch".to_string(),
+            expected: "all lane-join Git heads are converged into the final auditor worktree under an immutable Foundry receipt before executor dispatch".to_string(),
         },
     ];
     task.work_item.item_type = "validation_story".to_string();
     task.work_item.parent_id = task.dependencies.first().cloned();
     task.work_item.acceptance_criteria = vec![
         "all configured lane joins are represented".to_string(),
-        "Forge remains the promotion authority".to_string(),
+        "Foundry remains the promotion authority".to_string(),
     ];
     task.work_item.goal_validation.goal =
         "Configured teamwork lanes are definitively ready as one delivery".to_string();
@@ -1939,7 +1939,7 @@ fn apply_teamwork_parallel_topology(
     roles: &[TeamworkRole],
     config: &TeamworkParallelConfig,
 ) -> Result<()> {
-    let normalized = core_parallel_team_from_teamwork(config, "forge_teamwork_command")?;
+    let normalized = core_parallel_team_from_teamwork(config, "foundry_teamwork_command")?;
     let normalized_config = TeamworkParallelConfig::from(&normalized);
     let mut normalized_roles = roles.to_vec();
     for role in &mut normalized_roles {
@@ -2480,7 +2480,7 @@ mod tests {
     #[test]
     fn default_plan_preserves_two_generic_workers() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
 
         let response =
             plan_teamwork_workflow(&store, "Deliver two independent branches", false, false)
@@ -2507,7 +2507,7 @@ mod tests {
     #[test]
     fn configured_plan_persists_lanes_roster_strategy_workflow_run_and_event() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let config = frontend_backend_config();
         let response = plan_teamwork_workflow_with_config(
             &store,
@@ -2527,7 +2527,7 @@ mod tests {
             .iter()
             .any(|task| task.id == "task-005-backend-005"));
         let persisted_core_team = workflow.core_orchestration.parallel_team.as_ref().unwrap();
-        assert_eq!(persisted_core_team.source, "forge_teamwork_command");
+        assert_eq!(persisted_core_team.source, "foundry_teamwork_command");
         assert_eq!(persisted_core_team.lanes[0].executor_id, "agy");
         assert_eq!(persisted_core_team.lanes[1].executor_id, "codex");
 
@@ -2543,7 +2543,7 @@ mod tests {
         assert_eq!(persisted.strategy.parallelism, config);
         assert_eq!(
             persisted.strategy.schema_version,
-            "forge.teamwork.strategy.v1"
+            "foundry.teamwork.strategy.v1"
         );
         assert_eq!(
             persisted.strategy.phases[1].execution_model,
@@ -2555,7 +2555,7 @@ mod tests {
     #[test]
     fn configured_lane_brain_cannot_bypass_executor_policy() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         store
             .save_executor_state("agy", &serde_json::json!({ "allowed": false }))
             .unwrap();
@@ -2576,7 +2576,7 @@ mod tests {
     #[test]
     fn configured_parallel_ceiling_cannot_invent_agents_without_independent_slots() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let mut config = frontend_backend_config();
         config.max_parallel_agents = 9;
 
@@ -2598,7 +2598,7 @@ mod tests {
     #[test]
     fn teamwork_plan_rolls_back_workflow_run_and_event_as_one_unit() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let connection = open_configured_connection(store.path()).unwrap();
         connection
             .execute_batch(

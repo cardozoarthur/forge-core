@@ -2,7 +2,7 @@ use crate::artifact::hex_sha256;
 use crate::graph::{task, ExecutorKind, TaskStatus, ValidationRule, WorkflowRevision};
 use crate::identity::ensure_workflow_policy;
 use crate::security::{sanitize_prompt_secrets, SecretSanitizationOptions};
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -15,21 +15,22 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub const WORKTREE_CONFIG_SCHEMA_VERSION: &str = "forge.worktree.config.v1";
-pub const WORKTREE_RECORD_SCHEMA_VERSION: &str = "forge.worktree.record.v1";
-pub const WORKTREE_BINDING_SCHEMA_VERSION: &str = "forge.worktree.binding.v1";
-pub const WORKTREE_MUTATION_CLAIM_SCHEMA_VERSION: &str = "forge.worktree.mutation_claim.v1";
-pub const WORKTREE_DISCOVERY_SCHEMA_VERSION: &str = "forge.worktree.discovery.v1";
-pub const WORKTREE_SANDBOX_PLAN_SCHEMA_VERSION: &str = "forge.worktree.sandbox_plan.v1";
-pub const WORKTREE_SANDBOX_RECEIPT_SCHEMA_VERSION: &str = "forge.worktree.sandbox_receipt.v1";
-pub const WORKTREE_SANDBOX_LIFECYCLE_SCHEMA_VERSION: &str = "forge.worktree.sandbox_lifecycle.v1";
-pub const WORKTREE_MODIFICATION_GUARD_SCHEMA_VERSION: &str = "forge.worktree.modification_guard.v1";
-pub const WORKTREE_PREDECESSOR_TASK_SCHEMA_VERSION: &str = "forge.worktree.predecessor_task.v1";
+pub const WORKTREE_CONFIG_SCHEMA_VERSION: &str = "foundry.worktree.config.v1";
+pub const WORKTREE_RECORD_SCHEMA_VERSION: &str = "foundry.worktree.record.v1";
+pub const WORKTREE_BINDING_SCHEMA_VERSION: &str = "foundry.worktree.binding.v1";
+pub const WORKTREE_MUTATION_CLAIM_SCHEMA_VERSION: &str = "foundry.worktree.mutation_claim.v1";
+pub const WORKTREE_DISCOVERY_SCHEMA_VERSION: &str = "foundry.worktree.discovery.v1";
+pub const WORKTREE_SANDBOX_PLAN_SCHEMA_VERSION: &str = "foundry.worktree.sandbox_plan.v1";
+pub const WORKTREE_SANDBOX_RECEIPT_SCHEMA_VERSION: &str = "foundry.worktree.sandbox_receipt.v1";
+pub const WORKTREE_SANDBOX_LIFECYCLE_SCHEMA_VERSION: &str = "foundry.worktree.sandbox_lifecycle.v1";
+pub const WORKTREE_MODIFICATION_GUARD_SCHEMA_VERSION: &str =
+    "foundry.worktree.modification_guard.v1";
+pub const WORKTREE_PREDECESSOR_TASK_SCHEMA_VERSION: &str = "foundry.worktree.predecessor_task.v1";
 
-const DEFAULT_CONFIG_PATH: &str = ".forge/worktree.toml";
-const DEFAULT_SANDBOX_ROOT: &str = ".forge/sandboxes/internal";
+const DEFAULT_CONFIG_PATH: &str = ".foundry/worktree.toml";
+const DEFAULT_SANDBOX_ROOT: &str = ".foundry/sandboxes/internal";
 const BUBBLEWRAP_WORKTREE_ROOT: &str = "/workspace";
-const BUBBLEWRAP_HOME: &str = "/home/forge";
+const BUBBLEWRAP_HOME: &str = "/home/foundry";
 const MAX_SANDBOX_COMMAND_SECONDS: u64 = 3_600;
 const MAX_SANDBOX_OUTPUT_BYTES: usize = 16 * 1_048_576;
 
@@ -191,7 +192,8 @@ pub struct WorktreeRecord {
     pub dirty: bool,
     pub changed_path_count: usize,
     pub is_main_worktree: bool,
-    pub created_by_forge: bool,
+    #[serde(alias = "created_by_forge")] // foundry-brand-allow: legacy-compat
+    pub created_by_foundry: bool,
     #[serde(default)]
     pub identity_sha256: String,
     pub config: WorktreeConfigSnapshot,
@@ -234,7 +236,7 @@ pub struct WorktreeRegisterOptions {
     pub workflow_id: Option<String>,
     pub task_id: Option<String>,
     pub origin: String,
-    pub created_by_forge: bool,
+    pub created_by_foundry: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -393,8 +395,10 @@ pub struct WorktreeSandboxPlan {
     pub inherited_environment: Vec<String>,
     pub configured_environment_keys: Vec<String>,
     pub config_sha256: String,
-    pub forge_store_path: String,
-    pub forge_store_path_mounted: bool,
+    #[serde(alias = "forge_store_path")] // foundry-brand-allow: legacy-compat
+    pub foundry_store_path: String,
+    #[serde(alias = "forge_store_path_mounted")] // foundry-brand-allow: legacy-compat
+    pub foundry_store_path_mounted: bool,
     pub max_command_seconds: u64,
     pub max_output_bytes: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -504,7 +508,7 @@ pub fn discover_worktrees(repository: &Path) -> Result<WorktreeDiscoveryReport> 
 }
 
 pub fn create_worktree(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: WorktreeCreateOptions,
 ) -> Result<WorktreeMutationReport> {
     if !options.allow_repository_mutation {
@@ -556,7 +560,7 @@ pub fn create_worktree(
             workflow_id: None,
             task_id: None,
             origin: options.origin,
-            created_by_forge: true,
+            created_by_foundry: true,
         },
     )?;
     Ok(WorktreeMutationReport {
@@ -569,7 +573,7 @@ pub fn create_worktree(
 }
 
 pub fn register_worktree(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: WorktreeRegisterOptions,
 ) -> Result<WorktreeMutationReport> {
     if options.task_id.is_some() && options.workflow_id.is_none() {
@@ -604,12 +608,13 @@ pub fn register_worktree(
         .as_ref()
         .map(|record| record.registered_at.clone())
         .unwrap_or_else(|| now.clone());
-    let created_by_forge = existing
+    let created_by_foundry = existing
         .as_ref()
-        .map(|record| record.created_by_forge)
+        .map(|record| record.created_by_foundry)
         .unwrap_or(false)
-        || options.created_by_forge;
-    let mut record = record_from_state(id, state, created_by_forge, bindings, registered_at, now)?;
+        || options.created_by_foundry;
+    let mut record =
+        record_from_state(id, state, created_by_foundry, bindings, registered_at, now)?;
     if let Some(existing) = existing {
         if !existing.identity_sha256.is_empty()
             && existing.identity_sha256 != record.identity_sha256
@@ -650,7 +655,7 @@ pub fn register_worktree(
 }
 
 pub fn bind_worktree(
-    store: &ForgeStore,
+    store: &FoundryStore,
     selector: &str,
     workflow_id: &str,
     task_id: Option<&str>,
@@ -722,7 +727,7 @@ pub fn bind_worktree(
 }
 
 pub fn initialize_worktree(
-    store: &ForgeStore,
+    store: &FoundryStore,
     selector: &str,
     allow_worktree_write: bool,
     force: bool,
@@ -785,7 +790,7 @@ pub fn initialize_worktree(
 }
 
 pub fn approve_worktree_config(
-    store: &ForgeStore,
+    store: &FoundryStore,
     selector: &str,
     allow_guardrail_update: bool,
     approved_by: &str,
@@ -828,7 +833,7 @@ pub fn approve_worktree_config(
 }
 
 pub fn evaluate_worktree_modification_guard(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: WorktreeModificationGuardRequest,
 ) -> Result<WorktreeModificationGuardReport> {
     let operation = request.operation.trim().to_lowercase();
@@ -960,7 +965,7 @@ pub fn evaluate_worktree_modification_guard(
     let mut next_commands = Vec::new();
     if !config_approved {
         next_commands.push(vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "--store".to_string(),
             absolute_store_path(store).display().to_string(),
             "worktree".to_string(),
@@ -975,7 +980,7 @@ pub fn evaluate_worktree_modification_guard(
         ]);
     } else if !delegated_paths.is_empty() {
         let mut command = vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "--store".to_string(),
             absolute_store_path(store).display().to_string(),
             "worktree".to_string(),
@@ -1034,7 +1039,7 @@ pub fn evaluate_worktree_modification_guard(
 
 #[allow(clippy::too_many_arguments)]
 pub fn create_worktree_guard_predecessor_task(
-    store: &ForgeStore,
+    store: &FoundryStore,
     worktree: &str,
     workflow_id: &str,
     current_task_id: &str,
@@ -1225,7 +1230,7 @@ pub fn create_worktree_guard_predecessor_task(
 }
 
 pub fn list_registered_worktrees(
-    store: &ForgeStore,
+    store: &FoundryStore,
     repository: Option<&Path>,
     workflow_id: Option<&str>,
 ) -> Result<WorktreeListReport> {
@@ -1255,11 +1260,11 @@ pub fn list_registered_worktrees(
     })
 }
 
-pub fn inspect_registered_worktree(store: &ForgeStore, selector: &str) -> Result<WorktreeRecord> {
+pub fn inspect_registered_worktree(store: &FoundryStore, selector: &str) -> Result<WorktreeRecord> {
     refresh_worktree_record(&load_worktree_record(store, selector)?)
 }
 
-pub fn resolve_worktree_selector_root(store: &ForgeStore, selector: &str) -> Result<PathBuf> {
+pub fn resolve_worktree_selector_root(store: &FoundryStore, selector: &str) -> Result<PathBuf> {
     let candidate = PathBuf::from(selector);
     if candidate.exists() {
         return Ok(inspect_git_worktree(&candidate)?.worktree_root);
@@ -1303,7 +1308,7 @@ pub fn worktree_context_for_project(
 }
 
 pub fn bound_worktree_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: Option<&str>,
 ) -> Result<Option<WorktreeContextReport>> {
@@ -1338,7 +1343,7 @@ pub fn bound_worktree_context(
 }
 
 pub fn bound_worktree_mutation_claim(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
 ) -> Result<Option<WorktreeMutationClaim>> {
@@ -1382,7 +1387,7 @@ pub fn bound_worktree_mutation_claim(
 }
 
 pub fn resolve_bound_worktree_root(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: Option<&str>,
 ) -> Result<Option<PathBuf>> {
@@ -1391,7 +1396,7 @@ pub fn resolve_bound_worktree_root(
 }
 
 pub fn resolve_effective_project_root(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: Option<&str>,
     explicit_project_root: Option<&Path>,
@@ -1420,7 +1425,7 @@ pub fn resolve_effective_project_root(
 }
 
 pub fn plan_worktree_sandbox(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: WorktreeSandboxRequest,
 ) -> Result<WorktreeSandboxPlan> {
     if request.task_id.is_some() && request.workflow_id.is_none() {
@@ -1705,7 +1710,7 @@ pub fn plan_worktree_sandbox(
     let mut inherited_environment = Vec::new();
     let mut unsafe_inherited_environment_count = 0usize;
     for name in &config.sandbox.inherit_environment {
-        let Some(value) = std::env::var_os(name) else {
+        let Some(value) = crate::brand::env_var_os(name) else {
             continue;
         };
         let value = value.to_string_lossy();
@@ -1769,8 +1774,8 @@ pub fn plan_worktree_sandbox(
         inherited_environment,
         configured_environment_keys,
         config_sha256: config_snapshot.sha256,
-        forge_store_path: absolute_store_path(store).display().to_string(),
-        forge_store_path_mounted: runtime != "bubblewrap",
+        foundry_store_path: absolute_store_path(store).display().to_string(),
+        foundry_store_path_mounted: runtime != "bubblewrap",
         max_command_seconds: config
             .guardrails
             .max_command_seconds
@@ -1785,14 +1790,14 @@ pub fn plan_worktree_sandbox(
         notes: vec![
             "The process runtime scopes cwd, environment and evidence to the worktree but is not an OS security boundary.".to_string(),
             "The Bubblewrap runtime exposes only system runtime directories, mounts the worktree read-only, permits writes only below the managed sandbox root and optionally isolates the network.".to_string(),
-            "Inside Bubblewrap, FORGE_STORE_PATH is a host-side lineage locator; the central store is not mounted, so nested Forge mutations must run outside the sandbox.".to_string(),
+            "Inside Bubblewrap, FOUNDRY_STORE_PATH is a host-side lineage locator; the central store is not mounted, so nested Foundry mutations must run outside the sandbox.".to_string(),
             "Docker, Kubernetes and Knative remain separately authorized async substrates and are never installed or mutated by this command.".to_string(),
         ],
     })
 }
 
 pub fn run_worktree_sandbox(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: WorktreeSandboxRequest,
     allow_exec: bool,
 ) -> Result<WorktreeSandboxReceipt> {
@@ -1800,7 +1805,7 @@ pub fn run_worktree_sandbox(
 }
 
 fn run_worktree_sandbox_internal(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: WorktreeSandboxRequest,
     allow_exec: bool,
     sandbox_id: Option<&str>,
@@ -1914,7 +1919,7 @@ fn run_worktree_sandbox_internal(
 }
 
 pub fn start_worktree_sandbox(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: WorktreeSandboxRequest,
     allow_exec: bool,
 ) -> Result<WorktreeSandboxLifecycleReport> {
@@ -1974,7 +1979,7 @@ pub fn start_worktree_sandbox(
     save_worktree_sandbox_lifecycle(store, &report, Some("worktree_sandbox_starting"))?;
 
     let child = match std::env::current_exe()
-        .context("failed to resolve Forge executable")
+        .context("failed to resolve Foundry executable")
         .and_then(|current_exe| {
             Command::new(current_exe)
                 .arg("--store")
@@ -2023,7 +2028,7 @@ pub fn start_worktree_sandbox(
 }
 
 pub fn supervise_worktree_sandbox(
-    store: &ForgeStore,
+    store: &FoundryStore,
     sandbox_id: &str,
     allow_supervisor_exec: bool,
 ) -> Result<WorktreeSandboxLifecycleReport> {
@@ -2057,7 +2062,7 @@ pub fn supervise_worktree_sandbox(
 }
 
 pub fn inspect_worktree_sandbox_lifecycle(
-    store: &ForgeStore,
+    store: &FoundryStore,
     sandbox_id: &str,
 ) -> Result<WorktreeSandboxLifecycleReport> {
     let report = load_worktree_sandbox_lifecycle_raw(store, sandbox_id)?;
@@ -2103,7 +2108,7 @@ pub fn inspect_worktree_sandbox_lifecycle(
 }
 
 fn load_worktree_sandbox_lifecycle_raw(
-    store: &ForgeStore,
+    store: &FoundryStore,
     sandbox_id: &str,
 ) -> Result<WorktreeSandboxLifecycleReport> {
     let value = store
@@ -2114,7 +2119,7 @@ fn load_worktree_sandbox_lifecycle_raw(
 }
 
 pub fn stop_worktree_sandbox(
-    store: &ForgeStore,
+    store: &FoundryStore,
     sandbox_id: &str,
     allow_stop: bool,
 ) -> Result<WorktreeSandboxLifecycleReport> {
@@ -2191,7 +2196,7 @@ pub fn stop_worktree_sandbox(
 }
 
 fn save_worktree_sandbox_lifecycle(
-    store: &ForgeStore,
+    store: &FoundryStore,
     report: &WorktreeSandboxLifecycleReport,
     event_kind: Option<&str>,
 ) -> Result<()> {
@@ -2199,7 +2204,7 @@ fn save_worktree_sandbox_lifecycle(
 }
 
 fn save_worktree_sandbox_lifecycle_raw(
-    store: &ForgeStore,
+    store: &FoundryStore,
     report: &WorktreeSandboxLifecycleReport,
     event_kind: Option<&str>,
 ) -> Result<()> {
@@ -2221,7 +2226,7 @@ fn save_worktree_sandbox_lifecycle_raw(
 }
 
 fn mutate_worktree_sandbox_lifecycle(
-    store: &ForgeStore,
+    store: &FoundryStore,
     sandbox_id: &str,
     event_kind: Option<&str>,
     mutation: impl FnOnce(&mut WorktreeSandboxLifecycleReport) -> Result<bool>,
@@ -2236,7 +2241,7 @@ fn mutate_worktree_sandbox_lifecycle(
 }
 
 fn mark_lifecycle_supervisor_started(
-    store: &ForgeStore,
+    store: &FoundryStore,
     sandbox_id: &str,
     supervisor_pid: u32,
 ) -> Result<()> {
@@ -2252,7 +2257,7 @@ fn mark_lifecycle_supervisor_started(
 }
 
 fn mark_lifecycle_payload_started(
-    store: &ForgeStore,
+    store: &FoundryStore,
     sandbox_id: &str,
     payload_pid: u32,
 ) -> Result<()> {
@@ -2274,7 +2279,7 @@ fn mark_lifecycle_payload_started(
 }
 
 fn mark_lifecycle_payload_descendants(
-    store: &ForgeStore,
+    store: &FoundryStore,
     sandbox_id: &str,
     payload_descendant_pids: &BTreeSet<u32>,
 ) -> Result<()> {
@@ -2292,7 +2297,7 @@ fn mark_lifecycle_payload_descendants(
     Ok(())
 }
 
-fn lifecycle_stop_requested(store: &ForgeStore, sandbox_id: &str) -> Result<bool> {
+fn lifecycle_stop_requested(store: &FoundryStore, sandbox_id: &str) -> Result<bool> {
     let report = load_worktree_sandbox_lifecycle_raw(store, sandbox_id)?;
     Ok(report.stop_requested_at.is_some()
         || report.status == "sandbox_stopping"
@@ -2300,7 +2305,7 @@ fn lifecycle_stop_requested(store: &ForgeStore, sandbox_id: &str) -> Result<bool
 }
 
 fn finish_worktree_sandbox_lifecycle(
-    store: &ForgeStore,
+    store: &FoundryStore,
     sandbox_id: &str,
     receipt: &WorktreeSandboxReceipt,
 ) -> Result<WorktreeSandboxLifecycleReport> {
@@ -2329,7 +2334,7 @@ fn finish_worktree_sandbox_lifecycle(
 }
 
 fn fail_worktree_sandbox_lifecycle(
-    store: &ForgeStore,
+    store: &FoundryStore,
     sandbox_id: &str,
     error: anyhow::Error,
 ) -> Result<WorktreeSandboxLifecycleReport> {
@@ -2384,7 +2389,7 @@ fn sandbox_lifecycle_terminal(status: &str) -> bool {
 }
 
 fn resolve_bound_worktree(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: Option<&str>,
 ) -> Result<Option<WorktreeRecord>> {
@@ -2439,7 +2444,7 @@ fn context_from_record(record: WorktreeRecord) -> WorktreeContextReport {
 fn record_from_state(
     id: String,
     state: GitWorktreeState,
-    created_by_forge: bool,
+    created_by_foundry: bool,
     bindings: Vec<WorktreeBinding>,
     registered_at: String,
     updated_at: String,
@@ -2459,7 +2464,7 @@ fn record_from_state(
         dirty: state.dirty,
         changed_path_count: state.changed_path_count,
         is_main_worktree: state.is_main_worktree,
-        created_by_forge,
+        created_by_foundry,
         identity_sha256,
         config,
         approved_config_sha256: None,
@@ -2476,7 +2481,7 @@ fn refresh_worktree_record(record: &WorktreeRecord) -> Result<WorktreeRecord> {
     let mut refreshed = record_from_state(
         record.id.clone(),
         state,
-        record.created_by_forge,
+        record.created_by_foundry,
         record.bindings.clone(),
         record.registered_at.clone(),
         Utc::now().to_rfc3339(),
@@ -2494,7 +2499,14 @@ fn refresh_worktree_record(record: &WorktreeRecord) -> Result<WorktreeRecord> {
 }
 
 fn load_worktree_config(root: &Path) -> Result<WorktreeConfigSnapshot> {
-    let path = resolve_relative_inside(root, DEFAULT_CONFIG_PATH)?;
+    let selected = crate::brand::project_config_path_for_read(root, "worktree.toml");
+    let relative = selected
+        .strip_prefix(root)
+        .with_context(|| format!("worktree config escaped registered root {}", root.display()))?;
+    let relative = relative
+        .to_str()
+        .context("worktree config path is not valid UTF-8")?;
+    let path = resolve_relative_inside(root, relative)?;
     if !path.exists() {
         return Ok(WorktreeConfigSnapshot {
             status: "missing".to_string(),
@@ -2507,7 +2519,7 @@ fn load_worktree_config(root: &Path) -> Result<WorktreeConfigSnapshot> {
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let config: WorktreeConfig = toml::from_str(&content)
         .with_context(|| format!("invalid worktree config {}", path.display()))?;
-    if config.schema_version != WORKTREE_CONFIG_SCHEMA_VERSION {
+    if !crate::brand::identifier_matches(&config.schema_version, WORKTREE_CONFIG_SCHEMA_VERSION) {
         bail!(
             "unsupported worktree config schema `{}` in {}; expected {}",
             config.schema_version,
@@ -2554,7 +2566,7 @@ fn validate_worktree_config(config: &WorktreeConfig) -> Result<()> {
     for name in &config.sandbox.inherit_environment {
         if sensitive_name(name) {
             bail!(
-                "inherited sandbox environment `{name}` looks sensitive; use the Forge credential vault instead"
+                "inherited sandbox environment `{name}` looks sensitive; use the Foundry credential vault instead"
             );
         }
         if dangerous_environment_name(name) && !default_inherited_environment().contains(name) {
@@ -2566,7 +2578,7 @@ fn validate_worktree_config(config: &WorktreeConfig) -> Result<()> {
     for (name, value) in &config.sandbox.environment {
         if sensitive_name(name) {
             bail!(
-                "sandbox environment `{name}` looks sensitive; use the Forge credential vault instead of a versioned worktree manifest"
+                "sandbox environment `{name}` looks sensitive; use the Foundry credential vault instead of a versioned worktree manifest"
             );
         }
         if value.contains(['\0', '\n', '\r']) {
@@ -2578,14 +2590,14 @@ fn validate_worktree_config(config: &WorktreeConfig) -> Result<()> {
         );
         if secret_report.detection_count > 0 {
             bail!(
-                "sandbox environment `{name}` contains a detected secret; use the Forge credential vault instead of a versioned worktree manifest"
+                "sandbox environment `{name}` contains a detected secret; use the Foundry credential vault instead of a versioned worktree manifest"
             );
         }
     }
     for key in config.settings.keys() {
         if sensitive_name(key) {
             bail!(
-                "worktree setting `{key}` looks sensitive; use the Forge credential vault instead"
+                "worktree setting `{key}` looks sensitive; use the Foundry credential vault instead"
             );
         }
     }
@@ -2761,7 +2773,7 @@ fn git_inspection_command(root: &Path) -> Command {
         .env_clear()
         .env(
             "PATH",
-            std::env::var_os("PATH").unwrap_or_else(worktree_default_git_path),
+            crate::brand::env_var_os("PATH").unwrap_or_else(worktree_default_git_path),
         )
         .env("LC_ALL", "C")
         .env("LANG", "C")
@@ -2774,7 +2786,7 @@ fn git_inspection_command(root: &Path) -> Command {
         .arg("-C")
         .arg(root);
     #[cfg(windows)]
-    if let Some(system_root) = std::env::var_os("SystemRoot") {
+    if let Some(system_root) = crate::brand::env_var_os("SystemRoot") {
         command.env("SystemRoot", system_root);
     }
     command
@@ -2820,7 +2832,7 @@ fn ensure_valid_branch_name(repository: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-fn save_worktree_record(store: &ForgeStore, record: &WorktreeRecord) -> Result<()> {
+fn save_worktree_record(store: &FoundryStore, record: &WorktreeRecord) -> Result<()> {
     store.save_worktree_state(
         &record.id,
         &record.repository_root,
@@ -2831,7 +2843,7 @@ fn save_worktree_record(store: &ForgeStore, record: &WorktreeRecord) -> Result<(
     )
 }
 
-fn load_all_worktree_records(store: &ForgeStore) -> Result<Vec<WorktreeRecord>> {
+fn load_all_worktree_records(store: &FoundryStore) -> Result<Vec<WorktreeRecord>> {
     store
         .load_worktree_states()?
         .into_iter()
@@ -2839,7 +2851,7 @@ fn load_all_worktree_records(store: &ForgeStore) -> Result<Vec<WorktreeRecord>> 
         .collect()
 }
 
-fn load_worktree_record(store: &ForgeStore, selector: &str) -> Result<WorktreeRecord> {
+fn load_worktree_record(store: &FoundryStore, selector: &str) -> Result<WorktreeRecord> {
     let selector_path = Path::new(selector);
     for record in load_all_worktree_records(store)? {
         if record.id == selector || paths_equal(Path::new(&record.worktree_root), selector_path) {
@@ -2849,14 +2861,17 @@ fn load_worktree_record(store: &ForgeStore, selector: &str) -> Result<WorktreeRe
     bail!("registered worktree not found: {selector}")
 }
 
-fn find_worktree_record_by_path(store: &ForgeStore, path: &Path) -> Result<Option<WorktreeRecord>> {
+fn find_worktree_record_by_path(
+    store: &FoundryStore,
+    path: &Path,
+) -> Result<Option<WorktreeRecord>> {
     Ok(load_all_worktree_records(store)?
         .into_iter()
         .find(|record| paths_equal(Path::new(&record.worktree_root), path)))
 }
 
 fn remove_scope_binding_from_other_worktrees(
-    store: &ForgeStore,
+    store: &FoundryStore,
     selected_id: &str,
     workflow_id: &str,
     task_id: Option<&str>,
@@ -3092,7 +3107,7 @@ fn execute_bounded_command(plan: &WorktreeSandboxPlan, sandbox_root: &Path) -> C
 fn execute_bounded_command_for_lifecycle(
     plan: &WorktreeSandboxPlan,
     sandbox_root: &Path,
-    lifecycle: Option<(&ForgeStore, &str)>,
+    lifecycle: Option<(&FoundryStore, &str)>,
 ) -> CommandExecution {
     let started = Instant::now();
     let baseline_children = match prepare_descendant_tracking() {
@@ -3126,7 +3141,7 @@ fn execute_bounded_command_for_lifecycle(
             if matches!(name.as_str(), "PATH" | "HOME" | "TMPDIR") {
                 continue;
             }
-            if let Some(value) = std::env::var_os(name) {
+            if let Some(value) = crate::brand::env_var_os(name) {
                 if let Err(error) = ensure_inherited_environment_value_safe(name, &value) {
                     return command_execution_failure(started, false, error);
                 }
@@ -3142,28 +3157,28 @@ fn execute_bounded_command_for_lifecycle(
         }
         environment_arguments.extend([
             "--setenv".to_string(),
-            "FORGE_WORKTREE_ROOT".to_string(),
+            "FOUNDRY_WORKTREE_ROOT".to_string(),
             plan.runtime_worktree_root.clone(),
             "--setenv".to_string(),
-            "FORGE_SANDBOX_ROOT".to_string(),
+            "FOUNDRY_SANDBOX_ROOT".to_string(),
             plan.runtime_sandbox_root.clone(),
             "--setenv".to_string(),
-            "FORGE_SANDBOX_PURPOSE".to_string(),
+            "FOUNDRY_SANDBOX_PURPOSE".to_string(),
             plan.purpose.clone(),
             "--setenv".to_string(),
-            "FORGE_STORE_PATH".to_string(),
-            plan.forge_store_path.clone(),
+            "FOUNDRY_STORE_PATH".to_string(),
+            plan.foundry_store_path.clone(),
         ]);
         if let Some(binding) = &plan.binding {
             environment_arguments.extend([
                 "--setenv".to_string(),
-                "FORGE_WORKFLOW_ID".to_string(),
+                "FOUNDRY_WORKFLOW_ID".to_string(),
                 binding.workflow_id.clone(),
             ]);
             if let Some(task_id) = &binding.task_id {
                 environment_arguments.extend([
                     "--setenv".to_string(),
-                    "FORGE_TASK_ID".to_string(),
+                    "FOUNDRY_TASK_ID".to_string(),
                     task_id.clone(),
                 ]);
             }
@@ -3187,7 +3202,7 @@ fn execute_bounded_command_for_lifecycle(
         .stderr(Stdio::piped());
     if plan.runtime != "bubblewrap" {
         for name in &plan.inherited_environment {
-            if let Some(value) = std::env::var_os(name) {
+            if let Some(value) = crate::brand::env_var_os(name) {
                 if let Err(error) = ensure_inherited_environment_value_safe(name, &value) {
                     return command_execution_failure(started, false, error);
                 }
@@ -3202,15 +3217,15 @@ fn execute_bounded_command_for_lifecycle(
         .binding
         .as_ref()
         .map(|binding| (binding.workflow_id.as_str(), binding.task_id.as_deref()));
-    command.env("FORGE_WORKTREE_ROOT", &plan.runtime_worktree_root);
-    command.env("FORGE_SANDBOX_ROOT", &plan.runtime_sandbox_root);
-    command.env("FORGE_SANDBOX_PURPOSE", &plan.purpose);
-    command.env("FORGE_STORE_PATH", &plan.forge_store_path);
+    command.env("FOUNDRY_WORKTREE_ROOT", &plan.runtime_worktree_root);
+    command.env("FOUNDRY_SANDBOX_ROOT", &plan.runtime_sandbox_root);
+    command.env("FOUNDRY_SANDBOX_PURPOSE", &plan.purpose);
+    command.env("FOUNDRY_STORE_PATH", &plan.foundry_store_path);
     command.env("TMPDIR", sandbox_root.join("tmp"));
     if let Some((workflow_id, task_id)) = record {
-        command.env("FORGE_WORKFLOW_ID", workflow_id);
+        command.env("FOUNDRY_WORKFLOW_ID", workflow_id);
         if let Some(task_id) = task_id {
-            command.env("FORGE_TASK_ID", task_id);
+            command.env("FOUNDRY_TASK_ID", task_id);
         }
     }
 
@@ -3842,7 +3857,7 @@ fn ensure_inherited_environment_value_safe(name: &str, value: &std::ffi::OsStr) 
     Ok(())
 }
 
-fn record_sandbox_receipt(store: &ForgeStore, receipt: &WorktreeSandboxReceipt) -> Result<()> {
+fn record_sandbox_receipt(store: &FoundryStore, receipt: &WorktreeSandboxReceipt) -> Result<()> {
     let workflow_id = receipt
         .binding
         .as_ref()
@@ -4026,7 +4041,7 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
     }
 }
 
-fn absolute_store_path(store: &ForgeStore) -> PathBuf {
+fn absolute_store_path(store: &FoundryStore) -> PathBuf {
     if store.path().is_absolute() {
         store.path().to_path_buf()
     } else {
@@ -4115,7 +4130,11 @@ fn default_modifiable_paths() -> Vec<String> {
 }
 
 fn default_protected_paths() -> Vec<String> {
-    vec![".git/".to_string(), ".forge/worktree.toml".to_string()]
+    vec![
+        ".git/".to_string(),
+        ".foundry/worktree.toml".to_string(),
+        format!("{}/worktree.toml", crate::brand::LEGACY_STATE_DIRECTORY),
+    ]
 }
 
 fn default_max_command_seconds() -> u64 {
@@ -4207,8 +4226,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         assert_eq!(
-            resolve_relative_inside(root, ".forge/sandboxes/internal").unwrap(),
-            root.join(".forge/sandboxes/internal")
+            resolve_relative_inside(root, ".foundry/sandboxes/internal").unwrap(),
+            root.join(".foundry/sandboxes/internal")
         );
         assert!(resolve_relative_inside(root, "../outside").is_err());
         assert!(resolve_relative_inside(root, "/outside").is_err());
@@ -4232,8 +4251,8 @@ mod tests {
 
     #[test]
     fn bubblewrap_uses_stable_guest_paths_and_minimal_writable_mounts() {
-        let worktree = Path::new("/tmp/forge-worktree-smoke/worktree");
-        let sandbox = worktree.join(".forge/sandboxes/internal");
+        let worktree = Path::new("/tmp/foundry-worktree-smoke/worktree");
+        let sandbox = worktree.join(".foundry/sandboxes/internal");
         let working_directory = worktree.join("src");
         let runtime_paths =
             sandbox_runtime_paths("bubblewrap", worktree, &sandbox, &working_directory).unwrap();
@@ -4243,7 +4262,7 @@ mod tests {
         );
         assert_eq!(
             runtime_paths.sandbox_root,
-            Path::new(BUBBLEWRAP_WORKTREE_ROOT).join(".forge/sandboxes/internal")
+            Path::new(BUBBLEWRAP_WORKTREE_ROOT).join(".foundry/sandboxes/internal")
         );
         assert_eq!(
             runtime_paths.working_directory,
@@ -4300,7 +4319,7 @@ mod tests {
     fn bubblewrap_remaps_only_a_canonical_worktree_executable_to_guest_root() {
         let temp = tempfile::tempdir().unwrap();
         let worktree = temp.path().join("worktree");
-        let sandbox = worktree.join(".forge/sandboxes/internal");
+        let sandbox = worktree.join(".foundry/sandboxes/internal");
         let executable = worktree.join("fixture-bin/cargo");
         let input = worktree.join("fixture-data/input.txt");
         let external = temp.path().join("external.txt");
@@ -4340,7 +4359,7 @@ mod tests {
     fn persisted_worktree_configuration_redacts_values_but_keeps_policy_keys() {
         let mut snapshot = WorktreeConfigSnapshot {
             status: "configured".to_string(),
-            path: "/worktree/.forge/worktree.toml".to_string(),
+            path: "/worktree/.foundry/worktree.toml".to_string(),
             sha256: "config-hash".to_string(),
             config: WorktreeConfig::default(),
         };

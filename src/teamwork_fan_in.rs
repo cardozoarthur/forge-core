@@ -1,6 +1,6 @@
 use crate::artifact::hex_sha256;
 use crate::graph::TaskStatus;
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use crate::worktree::{
     bind_worktree, bound_worktree_mutation_claim, inspect_registered_worktree,
     list_registered_worktrees, WorktreeBinding, WorktreeRecord,
@@ -15,9 +15,10 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 pub const TEAMWORK_GIT_FAN_IN_VALIDATION_RULE: &str = "git_dependency_fan_in";
-pub const TEAMWORK_FAN_IN_SCHEMA_VERSION: &str = "forge.worktree.dependency_integration_receipt.v1";
+pub const TEAMWORK_FAN_IN_SCHEMA_VERSION: &str =
+    "foundry.worktree.dependency_integration_receipt.v1";
 pub const TEAMWORK_FAN_IN_STATUS_SCHEMA_VERSION: &str =
-    "forge.worktree.dependency_integration_status.v1";
+    "foundry.worktree.dependency_integration_status.v1";
 
 const INTEGRATED_EVENT_KIND: &str = "worktree_dependencies_integrated";
 const CONFLICT_EVENT_KIND: &str = "worktree_dependency_integration_conflict";
@@ -56,7 +57,8 @@ pub struct TeamworkFanInWorktreeRef {
     #[serde(default)]
     pub binding_config_sha256: String,
     pub head: String,
-    pub created_by_forge: bool,
+    #[serde(alias = "created_by_forge")] // foundry-brand-allow: legacy-compat
+    pub created_by_foundry: bool,
     pub clean: bool,
 }
 
@@ -198,7 +200,7 @@ enum FanInGitOutcome {
 }
 
 pub fn integrate_worktree_dependencies(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: &IntegrateDependenciesOptions<'_>,
 ) -> Result<TeamworkFanInReport> {
     let mut prepared = prepare_fan_in(store, options.workflow_id, options.task_id)?;
@@ -278,7 +280,7 @@ pub fn integrate_worktree_dependencies(
 fn acquire_destination_fan_in_lock(destination: &Path) -> Result<DestinationFanInLock> {
     let git_dir = git_text(destination, &["rev-parse", "--absolute-git-dir"])?;
     let git_dir = canonical_path(Path::new(&git_dir))?;
-    let lock_path = git_dir.join("forge-dependency-fan-in.lock");
+    let lock_path = git_dir.join("foundry-dependency-fan-in.lock");
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -307,7 +309,7 @@ fn acquire_destination_fan_in_lock(destination: &Path) -> Result<DestinationFanI
 }
 
 fn perform_git_integration(
-    store: &ForgeStore,
+    store: &FoundryStore,
     prepared: &PreparedFanIn,
     destination_root: &Path,
 ) -> Result<FanInGitOutcome> {
@@ -327,17 +329,17 @@ fn perform_git_integration(
 
     if git_head(destination_root)? != prepared.pre_head {
         bail!(
-            "dependency merge moved destination HEAD before the Forge integration commit; expected {}",
+            "dependency merge moved destination HEAD before the Foundry integration commit; expected {}",
             prepared.pre_head
         );
     }
     revalidate_sources_unchanged(store, &prepared.sources)?;
 
     let commit_message = integration_commit_message(prepared);
-    let commit_output = run_forge_commit(destination_root, &commit_message)?;
+    let commit_output = run_foundry_commit(destination_root, &commit_message)?;
     if !commit_output.status.success() {
         bail!(
-            "failed to create Forge dependency integration commit: {}",
+            "failed to create Foundry dependency integration commit: {}",
             bounded_git_message(&commit_output)
         );
     }
@@ -352,7 +354,7 @@ fn perform_git_integration(
         .into_iter()
         .all(|integrated| integrated);
     if result_head == prepared.pre_head || !destination_clean || !all_sources_integrated {
-        bail!("Forge integration commit failed post-commit verification");
+        bail!("Foundry integration commit failed post-commit verification");
     }
     revalidate_worktree_unchanged(store, &prepared.destination, &result_head)?;
     revalidate_sources_unchanged(store, &prepared.sources)?;
@@ -364,7 +366,7 @@ fn perform_git_integration(
 }
 
 fn persist_replay_report(
-    store: &ForgeStore,
+    store: &FoundryStore,
     prepared: &mut PreparedFanIn,
     authorization: TeamworkFanInAuthorizationReceipt,
     options: &IntegrateDependenciesOptions<'_>,
@@ -390,7 +392,7 @@ fn persist_replay_report(
 }
 
 fn persist_success_report(
-    store: &ForgeStore,
+    store: &FoundryStore,
     prepared: &mut PreparedFanIn,
     authorization: TeamworkFanInAuthorizationReceipt,
     options: &IntegrateDependenciesOptions<'_>,
@@ -419,7 +421,7 @@ fn persist_success_report(
 }
 
 fn rebind_destination(
-    store: &ForgeStore,
+    store: &FoundryStore,
     prepared: &mut PreparedFanIn,
     options: &IntegrateDependenciesOptions<'_>,
     expected_head: &str,
@@ -477,7 +479,7 @@ fn error_after_rollback(
 }
 
 pub fn current_teamwork_fan_in_status(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
 ) -> Result<CurrentTeamworkFanInStatus> {
@@ -688,11 +690,11 @@ fn validate_recorded_fan_in_report(
         || report.destination.head != report.result_head
         || (event_kind == INTEGRATED_EVENT_KIND
             && report.destination.binding_head != report.result_head)
-        || !report.destination.created_by_forge
+        || !report.destination.created_by_foundry
         || !report.destination.clean
         || report.sources.iter().any(|source| {
             source.worktree.task_id.is_empty()
-                || !source.worktree.created_by_forge
+                || !source.worktree.created_by_foundry
                 || !source.worktree.clean
                 || source.worktree.worktree_identity_sha256.is_empty()
                 || source.worktree.binding_config_sha256.is_empty()
@@ -757,7 +759,7 @@ fn paths_are_sorted_unique(paths: &[String]) -> bool {
 }
 
 fn recorded_worktree_ref_current(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     expected: &TeamworkFanInWorktreeRef,
@@ -799,7 +801,7 @@ fn recorded_worktree_ref_current(
         && record.head == expected.head
         && !record.dirty
         && !record.detached
-        && record.created_by_forge
+        && record.created_by_foundry
         && record.identity_sha256 == expected.worktree_identity_sha256
         && record.config.sha256 == expected.binding_config_sha256
         && record.branch.as_deref() == Some(expected.branch.as_str())
@@ -816,7 +818,7 @@ fn canonical_paths_equal(left: &str, right: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn prepare_fan_in(store: &ForgeStore, workflow_id: &str, task_id: &str) -> Result<PreparedFanIn> {
+fn prepare_fan_in(store: &FoundryStore, workflow_id: &str, task_id: &str) -> Result<PreparedFanIn> {
     require_text(workflow_id, "workflow id")?;
     require_text(task_id, "task id")?;
     let workflow = store.load_workflow(workflow_id)?;
@@ -986,7 +988,7 @@ fn prepare_fan_in(store: &ForgeStore, workflow_id: &str, task_id: &str) -> Resul
 }
 
 fn load_task_worktree(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
 ) -> Result<PreparedTaskWorktree> {
@@ -1009,8 +1011,12 @@ fn load_task_worktree(
         );
     }
     let record = inspect_registered_worktree(store, &claim.worktree_id)?;
-    if !record.created_by_forge {
-        bail!("task {} worktree {} is not Forge-owned", task_id, record.id);
+    if !record.created_by_foundry {
+        bail!(
+            "task {} worktree {} is not Foundry-owned",
+            task_id,
+            record.id
+        );
     }
     if record.dirty {
         bail!(
@@ -1021,7 +1027,7 @@ fn load_task_worktree(
     }
     if record.detached {
         bail!(
-            "task {} worktree {} uses detached HEAD; a Forge-owned branch is required",
+            "task {} worktree {} uses detached HEAD; a Foundry-owned branch is required",
             task_id,
             record.id
         );
@@ -1087,7 +1093,7 @@ fn load_task_worktree(
 }
 
 fn task_binding_owner_ids(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
 ) -> Result<Vec<String>> {
@@ -1110,13 +1116,13 @@ fn task_binding_owner_ids(
     Ok(owners)
 }
 
-fn revalidate_prepared_state(store: &ForgeStore, prepared: &PreparedFanIn) -> Result<()> {
+fn revalidate_prepared_state(store: &FoundryStore, prepared: &PreparedFanIn) -> Result<()> {
     revalidate_worktree_unchanged(store, &prepared.destination, &prepared.pre_head)?;
     revalidate_sources_unchanged(store, &prepared.sources)
 }
 
 fn revalidate_sources_unchanged(
-    store: &ForgeStore,
+    store: &FoundryStore,
     sources: &[PreparedTaskWorktree],
 ) -> Result<()> {
     for source in sources {
@@ -1126,7 +1132,7 @@ fn revalidate_sources_unchanged(
 }
 
 fn revalidate_worktree_unchanged(
-    store: &ForgeStore,
+    store: &FoundryStore,
     expected: &PreparedTaskWorktree,
     expected_head: &str,
 ) -> Result<()> {
@@ -1140,7 +1146,7 @@ fn revalidate_worktree_unchanged(
         || current.record.head != expected_head
         || current.record.dirty
         || current.record.branch != expected.record.branch
-        || !current.record.created_by_forge
+        || !current.record.created_by_foundry
         || current.record.identity_sha256 != expected.record.identity_sha256
         || current.record.config.sha256 != expected.record.config.sha256
         || canonical_path(Path::new(&current.record.repository_root))?
@@ -1153,7 +1159,7 @@ fn revalidate_worktree_unchanged(
         || current.binding.config_sha256_at_binding != expected.binding.config_sha256_at_binding
     {
         bail!(
-            "worktree {} or its task-scoped binding drifted during dependency fan-in: expected head={} branch={:?} clean Forge-owned source",
+            "worktree {} or its task-scoped binding drifted during dependency fan-in: expected head={} branch={:?} clean Foundry-owned source",
             expected.record.id,
             expected_head,
             expected.record.branch
@@ -1277,7 +1283,7 @@ fn success_report(
         Vec::new(),
         false,
         false,
-        "Forge created one deterministic-order integration commit from the frozen dependency HEADs"
+        "Foundry created one deterministic-order integration commit from the frozen dependency HEADs"
             .to_string(),
     )
 }
@@ -1342,7 +1348,7 @@ fn build_report(
             rollback_required,
             rollback_verified,
             limitation: if repository_mutation_attempted {
-                "Git temporarily updates the destination index/worktree before the Forge commit; on any merge failure Forge aborts or hard-resets only this clean Forge-owned destination and verifies exact pre_head restoration."
+                "Git temporarily updates the destination index/worktree before the Foundry commit; on any merge failure Foundry aborts or hard-resets only this clean Foundry-owned destination and verifies exact pre_head restoration."
             } else {
                 "No Git repository mutation was attempted."
             }
@@ -1377,7 +1383,7 @@ fn worktree_ref(task_id: &str, prepared: &PreparedTaskWorktree) -> TeamworkFanIn
         worktree_identity_sha256: prepared.record.identity_sha256.clone(),
         binding_config_sha256: prepared.binding.config_sha256_at_binding.clone(),
         head: prepared.record.head.clone(),
-        created_by_forge: prepared.record.created_by_forge,
+        created_by_foundry: prepared.record.created_by_foundry,
         clean: !prepared.record.dirty,
     }
 }
@@ -1433,7 +1439,7 @@ fn hash_plan(
     sources: &[TeamworkFanInSourceRef],
 ) -> Result<String> {
     Ok(hex_sha256(&serde_json::to_vec(&serde_json::json!({
-        "schema_version": "forge.worktree.dependency_integration_plan.v1",
+        "schema_version": "foundry.worktree.dependency_integration_plan.v1",
         "workflow_id": workflow_id,
         "task_id": task_id,
         "destination_worktree_id": destination_worktree_id,
@@ -1461,7 +1467,7 @@ fn integration_commit_message(prepared: &PreparedFanIn) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "forge: integrate dependencies for {}\n\nWorkflow: {}\nSources: {}",
+        "foundry: integrate dependencies for {}\n\nWorkflow: {}\nSources: {}",
         prepared.task_id, prepared.workflow_id, sources
     )
 }
@@ -1589,14 +1595,14 @@ fn run_no_commit_merge(destination: &Path, source_heads: &[String]) -> Result<Ou
         .context("failed to invoke Git dependency merge")
 }
 
-fn run_forge_commit(destination: &Path, message: &str) -> Result<Output> {
+fn run_foundry_commit(destination: &Path, message: &str) -> Result<Output> {
     let committed_at = Utc::now().to_rfc3339();
     git_command(destination)
         .args([
             "-c",
-            "user.name=Forge Core",
+            "user.name=Foundry Core",
             "-c",
-            "user.email=forge-core@localhost.invalid",
+            "user.email=foundry-core@localhost.invalid",
             "-c",
             "commit.gpgsign=false",
             "-c",
@@ -1622,7 +1628,7 @@ fn restore_destination(destination: &Path, pre_head: &str) -> Result<bool> {
         let reset = git_output(destination, &["reset", "--hard", pre_head])?;
         if !reset.status.success() {
             bail!(
-                "failed to restore Forge-owned destination to {}: {}",
+                "failed to restore Foundry-owned destination to {}: {}",
                 pre_head,
                 bounded_git_message(&reset)
             );
@@ -1773,7 +1779,7 @@ fn git_output(path: &Path, args: &[&str]) -> Result<Output> {
 }
 
 fn git_command(path: &Path) -> Command {
-    let path_environment = std::env::var_os("PATH").unwrap_or_else(default_git_path);
+    let path_environment = crate::brand::env_var_os("PATH").unwrap_or_else(default_git_path);
     let mut command = Command::new(trusted_git_program());
     command
         .env_clear()
@@ -1792,7 +1798,7 @@ fn git_command(path: &Path) -> Command {
         .arg(format!("core.hooksPath={}", git_null_config_path()))
         .args(["-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false"]);
     #[cfg(windows)]
-    if let Some(system_root) = std::env::var_os("SystemRoot") {
+    if let Some(system_root) = crate::brand::env_var_os("SystemRoot") {
         command.env("SystemRoot", system_root);
     }
     command

@@ -1,6 +1,6 @@
 use crate::graph::{TaskStatus, Workflow};
 use crate::identity::{ensure_workflow_policy, evaluate_tenant_policy_for_action};
-use crate::storage::{ForgeStore, TaskLeaseWrite};
+use crate::storage::{FoundryStore, TaskLeaseWrite};
 use crate::worktree::{bound_worktree_mutation_claim, WorktreeMutationClaim};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -60,7 +60,7 @@ pub struct TaskLeaseReleaseReport {
 }
 
 pub fn acquire_task_lease(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     executor: &str,
@@ -213,7 +213,7 @@ pub fn acquire_task_lease(
 }
 
 pub fn validate_task_lease_for_execution(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     executor: &str,
@@ -288,7 +288,7 @@ pub fn validate_task_lease_for_execution(
 }
 
 fn find_active_workspace_conflict(
-    store: &ForgeStore,
+    store: &FoundryStore,
     requested: &TaskLease,
     now: DateTime<Utc>,
 ) -> Result<Option<TaskLeaseWorkspaceConflict>> {
@@ -332,7 +332,7 @@ fn same_worktree_identity(left: &WorktreeMutationClaim, right: &WorktreeMutation
 }
 
 pub fn release_task_lease(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     lease_id: &str,
@@ -367,11 +367,11 @@ pub fn release_task_lease(
     Ok(report)
 }
 
-fn ensure_task_exists(store: &ForgeStore, workflow_id: &str, task_id: &str) -> Result<()> {
+fn ensure_task_exists(store: &FoundryStore, workflow_id: &str, task_id: &str) -> Result<()> {
     load_task_status(store, workflow_id, task_id).map(|_| ())
 }
 
-fn load_task_status(store: &ForgeStore, workflow_id: &str, task_id: &str) -> Result<TaskStatus> {
+fn load_task_status(store: &FoundryStore, workflow_id: &str, task_id: &str) -> Result<TaskStatus> {
     let workflow = store.load_workflow(workflow_id)?;
     task_status_from_workflow(&workflow, task_id)
 }
@@ -386,7 +386,7 @@ fn task_status_from_workflow(workflow: &Workflow, task_id: &str) -> Result<TaskS
 }
 
 fn ensure_workflow_snapshot_policy(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     action: &str,
 ) -> Result<()> {
@@ -411,7 +411,7 @@ fn ensure_workflow_snapshot_policy(
 }
 
 fn record_task_lease_acquire_audit(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     event_kind: &str,
     mut report: TaskLeaseAcquireReport,
@@ -439,7 +439,7 @@ fn task_status_name(status: &TaskStatus) -> &'static str {
 }
 
 fn load_current_lease(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
 ) -> Result<Option<TaskLease>> {
@@ -455,7 +455,7 @@ mod tests {
     use super::{acquire_task_lease, validate_task_lease_for_execution};
     use crate::graph::TaskStatus;
     use crate::intent::parse_intent;
-    use crate::storage::{ForgeStore, IdentityMembershipWrite};
+    use crate::storage::{FoundryStore, IdentityMembershipWrite};
     use crate::worktree::{
         bind_worktree, create_worktree, register_worktree, WorktreeCreateOptions,
         WorktreeRegisterOptions,
@@ -488,9 +488,9 @@ mod tests {
         git(repository, &["init", "-q"]);
         git(
             repository,
-            &["config", "user.email", "forge-tests@example.invalid"],
+            &["config", "user.email", "foundry-tests@example.invalid"],
         );
-        git(repository, &["config", "user.name", "Forge Tests"]);
+        git(repository, &["config", "user.name", "Foundry Tests"]);
         fs::write(repository.join("README.md"), "workspace claim fixture\n").unwrap();
         git(repository, &["add", "README.md"]);
         git(repository, &["commit", "-q", "-m", "fixture"]);
@@ -501,7 +501,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repository = temp.path().join("repository");
         initialize_repository(&repository);
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
 
         let first = crate::graph::create_workflow(parse_intent("First isolated delivery"));
         let second = crate::graph::create_workflow(parse_intent("Second isolated delivery"));
@@ -517,7 +517,7 @@ mod tests {
                 workflow_id: Some(first.id.clone()),
                 task_id: Some(first_task.clone()),
                 origin: "lease-test".to_string(),
-                created_by_forge: false,
+                created_by_foundry: false,
             },
         )
         .unwrap();
@@ -529,7 +529,7 @@ mod tests {
                 workflow_id: Some(second.id.clone()),
                 task_id: Some(second_task.clone()),
                 origin: "lease-test".to_string(),
-                created_by_forge: false,
+                created_by_foundry: false,
             },
         )
         .unwrap();
@@ -561,7 +561,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repository = temp.path().join("repository");
         initialize_repository(&repository);
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let workflow = crate::graph::create_workflow(parse_intent(
             "Run independent mutating agents in separate worktrees",
         ));
@@ -576,7 +576,7 @@ mod tests {
             WorktreeCreateOptions {
                 repository: repository.clone(),
                 path: first_root.clone(),
-                branch: "forge-test-agent-one".to_string(),
+                branch: "foundry-test-agent-one".to_string(),
                 start_point: Some("HEAD".to_string()),
                 allow_repository_mutation: true,
                 origin: "lease-test".to_string(),
@@ -588,7 +588,7 @@ mod tests {
             WorktreeCreateOptions {
                 repository,
                 path: second_root.clone(),
-                branch: "forge-test-agent-two".to_string(),
+                branch: "foundry-test-agent-two".to_string(),
                 start_point: Some("HEAD".to_string()),
                 allow_repository_mutation: true,
                 origin: "lease-test".to_string(),
@@ -677,7 +677,7 @@ mod tests {
     fn lease_status_check_and_insert_are_atomic_against_terminal_transition() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("atomic-task-lease.sqlite");
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         let workflow = crate::graph::create_workflow(parse_intent(
             "Do not lease a task after its terminal transition commits",
         ));
@@ -706,7 +706,7 @@ mod tests {
         let worker_workflow_id = workflow_id.clone();
         let worker_task_id = task_id.clone();
         let handle = thread::spawn(move || {
-            let worker_store = ForgeStore::open(&worker_path).unwrap();
+            let worker_store = FoundryStore::open(&worker_path).unwrap();
             started_sender.send(()).unwrap();
             result_sender
                 .send(acquire_task_lease(
@@ -740,7 +740,7 @@ mod tests {
         assert!(report.lease.is_none());
         handle.join().unwrap();
 
-        let reopened = ForgeStore::open(&path).unwrap();
+        let reopened = FoundryStore::open(&path).unwrap();
         assert!(reopened
             .load_task_lease(&workflow_id, &task_id)
             .unwrap()
@@ -762,7 +762,7 @@ mod tests {
     fn lease_policy_check_and_insert_are_atomic_against_membership_revocation() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("atomic-task-lease-policy.sqlite");
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         let mut workflow = crate::graph::create_workflow(parse_intent(
             "Do not lease a task after tenant access is revoked",
         ));
@@ -829,7 +829,7 @@ mod tests {
         let worker_workflow_id = workflow_id.clone();
         let worker_task_id = task_id.clone();
         let handle = thread::spawn(move || {
-            let worker_store = ForgeStore::open(&worker_path).unwrap();
+            let worker_store = FoundryStore::open(&worker_path).unwrap();
             started_sender.send(()).unwrap();
             result_sender
                 .send(acquire_task_lease(
@@ -864,7 +864,7 @@ mod tests {
         );
         handle.join().unwrap();
 
-        let reopened = ForgeStore::open(&path).unwrap();
+        let reopened = FoundryStore::open(&path).unwrap();
         assert!(reopened
             .load_task_lease(&workflow_id, &task_id)
             .unwrap()
@@ -875,7 +875,7 @@ mod tests {
     fn committed_lease_is_returned_when_audit_event_fails() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("task-lease-audit-failure.sqlite");
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         let workflow = crate::graph::create_workflow(parse_intent(
             "Return a committed lease when its audit event fails",
         ));

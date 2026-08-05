@@ -2,15 +2,16 @@ use crate::mission::{
     builtin_squad_catalog, validate_squad_definition, MissionSimulationReport,
     StructuredAgentDelivery,
 };
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use crate::worktree::list_registered_worktrees;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const MISSION_PLATFORM_CATALOG_SCHEMA_VERSION: &str = "forge.mission_platform.catalog.v1";
-pub const MISSION_PLATFORM_SIMULATION_SCHEMA_VERSION: &str = "forge.mission_platform.simulation.v1";
+pub const MISSION_PLATFORM_CATALOG_SCHEMA_VERSION: &str = "foundry.mission_platform.catalog.v1";
+pub const MISSION_PLATFORM_SIMULATION_SCHEMA_VERSION: &str =
+    "foundry.mission_platform.simulation.v1";
 pub const MISSION_PLATFORM_CAPABILITY_COUNT: usize = 40;
 pub const MISSION_PLATFORM_RUNTIME_REAL: &str = "runtime_real";
 pub const MISSION_PLATFORM_BOUNDED_SIMULATION: &str = "bounded_simulation";
@@ -286,7 +287,7 @@ pub enum ExecutionTarget {
     Edge,
     Browser,
     MobileDevice,
-    RemoteForgeWorker,
+    RemoteFoundryWorker,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -309,7 +310,7 @@ pub enum MediaOperation {
 pub enum VoiceControlLevel {
     ActiveAgent,
     MissionOperations,
-    ForgeSupervisor,
+    FoundrySupervisor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -864,7 +865,7 @@ pub fn execution_targets() -> Vec<ExecutionTarget> {
         ExecutionTarget::Edge,
         ExecutionTarget::Browser,
         ExecutionTarget::MobileDevice,
-        ExecutionTarget::RemoteForgeWorker,
+        ExecutionTarget::RemoteFoundryWorker,
     ]
 }
 
@@ -929,7 +930,7 @@ pub fn route_voice_command(input: &str) -> Option<VoiceCommandRoute> {
         )
     } else if normalized.contains("cancelar agente") || normalized.contains("cancel agent") {
         (
-            VoiceControlLevel::ForgeSupervisor,
+            VoiceControlLevel::FoundrySupervisor,
             "agent.cancel",
             "agent",
             true,
@@ -983,7 +984,7 @@ pub fn build_language_gateway_plan(
         if trimmed.contains('/')
             || trimmed.contains("::")
             || trimmed.ends_with(".rs")
-            || trimmed.starts_with("forge.")
+            || trimmed.starts_with("foundry.")
             || (trimmed.starts_with('E')
                 && trimmed[1..].chars().all(|value| value.is_ascii_digit()))
         {
@@ -1135,7 +1136,7 @@ fn effect_receipt(
         "result_sha256": result_sha256,
     });
     CapabilityEffectReceipt {
-        schema_version: "forge.mission_platform.effect_receipt.v1".to_string(),
+        schema_version: "foundry.mission_platform.effect_receipt.v1".to_string(),
         id: format!("effect_{}", &json_sha256(&id_material)[..24]),
         capability_id: capability_id.to_string(),
         adapter: adapter.to_string(),
@@ -1177,7 +1178,7 @@ fn execute_effect_adapter(capability_id: &str, dependency: &Value) -> Result<Val
                 let definition = registered
                     .get(role)
                     .ok_or_else(|| format!("canonical role is not registered: {role}"))?;
-                if required_str(definition, "contract")? != "forge.agent.v1" {
+                if required_str(definition, "contract")? != "foundry.agent.v1" {
                     return Err(format!("canonical role has an invalid contract: {role}"));
                 }
                 resolved.push(json!({"role": role, "definition": definition}));
@@ -1419,7 +1420,7 @@ fn execute_effect_adapter(capability_id: &str, dependency: &Value) -> Result<Val
             if mission_worktree != record_root
                 || workflow_id != binding_workflow_id
                 || identity != binding_identity
-                || dependency["binding"]["schema_version"] != "forge.worktree.binding.v1"
+                || dependency["binding"]["schema_version"] != "foundry.worktree.binding.v1"
             {
                 return Err("mission worktree has no matching durable binding receipt".to_string());
             }
@@ -1715,7 +1716,7 @@ impl MissionPlatformProbeEnvironment {
                 let id = value.as_str()?.to_string();
                 Some((
                     id.clone(),
-                    json!({"id": format!("builtin-role/{id}"), "contract": "forge.agent.v1"}),
+                    json!({"id": format!("builtin-role/{id}"), "contract": "foundry.agent.v1"}),
                 ))
             })
             .collect::<BTreeMap<_, _>>();
@@ -1738,7 +1739,7 @@ impl MissionPlatformProbeEnvironment {
             .filter_map(|kind| {
                 let value = serde_json::to_value(kind).ok()?;
                 let name = value.as_str()?;
-                Some(json!({"kind": name, "locator": format!("forge://catalog/{name}/v1")}))
+                Some(json!({"kind": name, "locator": format!("foundry://catalog/{name}/v1")}))
             })
             .collect::<Vec<_>>();
         insert_effect_fixture(
@@ -1832,7 +1833,7 @@ impl MissionPlatformProbeEnvironment {
             json!({
                 "required_fields": ["feature_description", "acceptance_criteria", "related_issue"],
                 "recipe_values": {"acceptance_criteria": "required"},
-                "workspace_values": {"related_issue": "FORGE-1"},
+                "workspace_values": {"related_issue": "FOUNDRY-1"},
                 "context_values": {},
             }),
         );
@@ -1899,14 +1900,14 @@ impl MissionPlatformProbeEnvironment {
             json!({
                 "target_id": "staging-ssh",
                 "targets": [{"id": "staging-ssh", "kind": "ssh", "credential": "vault://ssh/staging"}],
-                "command": ["forge", "validate"],
+                "command": ["foundry", "validate"],
             }),
         );
         insert_effect_fixture(
             &mut environment,
             "native_media_tools",
             "media_tool.invoke",
-            json!({"operation": "media_inspect", "tools": {"media_inspect": "forge.media.inspect.v1"}, "input": "artifact://preview.png"}),
+            json!({"operation": "media_inspect", "tools": {"media_inspect": "foundry.media.inspect.v1"}, "input": "artifact://preview.png"}),
         );
         insert_effect_fixture(
             &mut environment,
@@ -1919,7 +1920,7 @@ impl MissionPlatformProbeEnvironment {
             "operational_translation",
             "translation.transform_preserving_contracts",
             json!({
-                "source": "Corrija `UserId` em src/api.rs sem alterar forge.agent.v1 ou E0425.",
+                "source": "Corrija `UserId` em src/api.rs sem alterar foundry.agent.v1 ou E0425.",
                 "source_locale": "pt-BR",
                 "agent_locale": "en",
                 "output_locale": "en",
@@ -1969,7 +1970,7 @@ impl MissionPlatformProbeEnvironment {
         environment
     }
 
-    pub fn with_store(store: &ForgeStore, mission: &MissionSimulationReport) -> Self {
+    pub fn with_store(store: &FoundryStore, mission: &MissionSimulationReport) -> Self {
         let mut environment = Self::for_mission(mission);
         let Some(selected) = mission.mission.worktree.as_deref() else {
             return environment;
@@ -2063,7 +2064,7 @@ fn deterministic_probe(
     let input_sha256 = json_sha256(&fixture.dependency);
     let actual = execute_effect_adapter(&capability.id, &fixture.dependency);
     let receipt_shape_valid = fixture.receipt.schema_version
-        == "forge.mission_platform.effect_receipt.v1"
+        == "foundry.mission_platform.effect_receipt.v1"
         && fixture.receipt.capability_id == capability.id
         && fixture.receipt.input_sha256 == input_sha256
         && fixture.receipt.result_sha256 == json_sha256(&fixture.receipt.result)
@@ -2289,7 +2290,7 @@ fn runtime_capability_probe(
             let typed = record
                 .handoffs
                 .iter()
-                .all(|handoff| handoff.schema_version == "forge.agent_handoff.v1");
+                .all(|handoff| handoff.schema_version == "foundry.agent_handoff.v1");
             (
                 typed && !record.handoffs.is_empty(),
                 json!({"typed_gateway_handoffs": typed, "handoff_count": record.handoffs.len()}),
@@ -2378,7 +2379,7 @@ pub fn simulate_mission_platform_with_environment(
             "real SSH, Docker, Kubernetes or remote-worker execution".to_string(),
             "real microphone, speech, translation or media provider execution".to_string(),
             "high availability, multi-tenant isolation or multi-day soak".to_string(),
-            "operational production evidence required by forge.milestone.production_readiness.v1"
+            "operational production evidence required by foundry.milestone.production_readiness.v1"
                 .to_string(),
         ],
     }
@@ -2392,7 +2393,7 @@ pub fn simulate_mission_platform(
 }
 
 pub fn simulate_mission_platform_with_store(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &MissionSimulationReport,
 ) -> MissionPlatformSimulationReport {
     let environment = MissionPlatformProbeEnvironment::with_store(store, mission);
@@ -2407,7 +2408,7 @@ mod tests {
 
     fn bounded_mission() -> MissionSimulationReport {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         simulate_mission(
             &store,
             "Verify adversarial mission platform effects",
@@ -2480,12 +2481,12 @@ mod tests {
     #[test]
     fn language_gateway_protects_operational_tokens() {
         let plan = build_language_gateway_plan(
-            "Corrija `UserId` em src/api.rs; preserve forge.agent.v1 e E0425.",
+            "Corrija `UserId` em src/api.rs; preserve foundry.agent.v1 e E0425.",
             "pt-BR",
             "en",
             "pt-BR",
         );
-        for expected in ["UserId", "src/api.rs", "forge.agent.v1", "E0425"] {
+        for expected in ["UserId", "src/api.rs", "foundry.agent.v1", "E0425"] {
             assert!(plan.protected_segments.contains(&expected.to_string()));
         }
         assert_eq!(plan.preservation_rules.len(), 8);

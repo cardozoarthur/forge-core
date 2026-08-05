@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 pub fn ir_schema_version() -> String {
-    "forge.ir.v1".to_string()
+    "foundry.ir.v1".to_string()
 }
 
 fn default_updated_at() -> DateTime<Utc> {
@@ -174,7 +174,7 @@ impl Default for CreativeCollaborationState {
 impl CreativeCollaborationState {
     pub fn summary(&self) -> CreativeCollaborationSummary {
         CreativeCollaborationSummary {
-            schema_version: "forge.creative_collaboration.summary.v1".to_string(),
+            schema_version: "foundry.creative_collaboration.summary.v1".to_string(),
             active_presence_count: self
                 .presences
                 .iter()
@@ -809,7 +809,7 @@ pub fn resolve_token_collection(
     let impact_preview = preview_token_impact(artifacts, &known_names);
 
     TokenResolutionReport {
-        schema_version: "forge.tokens.resolution.v1".to_string(),
+        schema_version: "foundry.tokens.resolution.v1".to_string(),
         collection_name: collection.name.clone(),
         mode,
         resolved_tokens,
@@ -957,7 +957,7 @@ fn preview_token_impact(
     };
 
     TokenImpactPreview {
-        schema_version: "forge.tokens.impact_preview.v1".to_string(),
+        schema_version: "foundry.tokens.impact_preview.v1".to_string(),
         affected_token_count: affected_tokens.len(),
         affected_artifact_count: affected_artifacts.len(),
         references,
@@ -1135,7 +1135,7 @@ fn extract_token_ref(value: &str, token_names: &BTreeSet<String>) -> Option<Stri
 }
 
 fn creative_collaboration_schema_version() -> String {
-    "forge.creative_collaboration.v1".to_string()
+    "foundry.creative_collaboration.v1".to_string()
 }
 
 // -- Patch-by-Intent --

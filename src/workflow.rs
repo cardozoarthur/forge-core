@@ -14,7 +14,7 @@ use crate::ir::{
     CreativeCollaborationState, CreativeCollaborationSummary, PatchByIntent, PatchRecord,
     TokenCollection, TokenImpactPreview, TokenResolutionReport,
 };
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use crate::validation::{validate_workflow, validate_workflow_structure, ValidationReport};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use uuid::Uuid;
 
-const WORKFLOW_MUTATION_SCHEMA_VERSION: &str = "forge.workflow_mutation.v1";
+const WORKFLOW_MUTATION_SCHEMA_VERSION: &str = "foundry.workflow_mutation.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowGoalUpdateReport {
@@ -245,7 +245,7 @@ pub struct ProductDecisionInput {
 }
 
 pub fn record_product_decision(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     input: ProductDecisionInput,
 ) -> Result<ProductDecisionReport> {
@@ -292,7 +292,7 @@ pub fn record_product_decision(
 }
 
 pub fn update_workflow_goal(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     goal: &str,
     origin: &str,
@@ -301,7 +301,7 @@ pub fn update_workflow_goal(
 }
 
 pub fn update_workflow_goal_with_expected_revision(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     goal: &str,
     origin: &str,
@@ -389,7 +389,7 @@ pub fn update_workflow_goal_with_expected_revision(
 }
 
 pub fn pause_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     origin: &str,
 ) -> Result<WorkflowStatusUpdateReport> {
@@ -404,7 +404,7 @@ pub fn pause_workflow(
 }
 
 pub fn resume_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     origin: &str,
 ) -> Result<WorkflowStatusUpdateReport> {
@@ -421,7 +421,7 @@ pub fn resume_workflow(
 }
 
 pub fn complete_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     origin: &str,
 ) -> Result<WorkflowStatusUpdateReport> {
@@ -444,7 +444,7 @@ pub fn complete_workflow(
 }
 
 fn set_workflow_status(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     new_status: &str,
     origin: &str,
@@ -503,7 +503,7 @@ fn resumed_workflow_status(workflow: &crate::graph::Workflow) -> String {
 }
 
 pub fn update_workflow_task(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     input: WorkflowTaskUpdateInput<'_>,
 ) -> Result<WorkflowTaskUpdateReport> {
@@ -511,7 +511,7 @@ pub fn update_workflow_task(
 }
 
 pub fn update_workflow_task_with_expected_revision(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     input: WorkflowTaskUpdateInput<'_>,
     expected_revision: Option<u64>,
@@ -613,7 +613,7 @@ pub fn update_workflow_task_with_expected_revision(
 }
 
 pub fn add_workflow_task(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     input: WorkflowTaskAddInput,
 ) -> Result<WorkflowMutationReport> {
@@ -705,7 +705,7 @@ pub fn add_workflow_task(
 }
 
 pub fn set_workflow_task_priority(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     input: WorkflowTaskPriorityInput,
 ) -> Result<WorkflowMutationReport> {
@@ -779,7 +779,7 @@ pub fn set_workflow_task_priority(
 }
 
 pub fn add_workflow_task_dependency(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     input: WorkflowTaskDependencyInput,
 ) -> Result<WorkflowMutationReport> {
@@ -787,7 +787,7 @@ pub fn add_workflow_task_dependency(
 }
 
 pub fn remove_workflow_task_dependency(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     input: WorkflowTaskDependencyInput,
 ) -> Result<WorkflowMutationReport> {
@@ -795,7 +795,7 @@ pub fn remove_workflow_task_dependency(
 }
 
 fn mutate_workflow_task_dependency(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     input: WorkflowTaskDependencyInput,
     add: bool,
@@ -930,7 +930,7 @@ fn mutate_workflow_task_dependency(
 }
 
 pub fn set_workflow_task_impediment(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     input: WorkflowTaskImpedimentInput,
 ) -> Result<WorkflowMutationReport> {
@@ -1034,7 +1034,7 @@ pub fn set_workflow_task_impediment(
 }
 
 pub fn clear_workflow_task_impediment(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     input: WorkflowTaskImpedimentClearInput,
 ) -> Result<WorkflowMutationReport> {
@@ -1184,7 +1184,7 @@ fn ensure_structural_mutation_allowed(workflow: &Workflow, action: &str) -> Resu
     }
 }
 
-fn ensure_not_mission_bound(store: &ForgeStore, workflow: &Workflow) -> Result<()> {
+fn ensure_not_mission_bound(store: &FoundryStore, workflow: &Workflow) -> Result<()> {
     if store.workflow_is_mission_bound(&workflow.id)? {
         bail!(
             "workflow {} is mission-bound; generic workflow mutations require a mission-aware adapter",
@@ -1210,7 +1210,7 @@ fn ensure_expected_revision(workflow: &Workflow, expected_revision: Option<u64>)
     Ok(())
 }
 
-fn ensure_no_task_lease(store: &ForgeStore, workflow_id: &str, task_id: &str) -> Result<()> {
+fn ensure_no_task_lease(store: &FoundryStore, workflow_id: &str, task_id: &str) -> Result<()> {
     if store.load_task_lease(workflow_id, task_id)?.is_some() {
         bail!(
             "task {task_id} in workflow {workflow_id} has an active execution lease; release or cancel the handoff before mutation"
@@ -1405,12 +1405,12 @@ pub fn parse_node_brain_agent_slot(value: &str) -> Result<NodeBrainAgentSlotSpec
         brain_id: empty_to_none(parts[0]),
         role: role.to_string(),
         parallel_group: parallel_group.to_string(),
-        state_owner: "forge".to_string(),
+        state_owner: "foundry".to_string(),
     })
 }
 
 pub fn update_workflow_node_brain_routing(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     input: WorkflowNodeBrainRoutingUpdateInput,
 ) -> Result<WorkflowNodeBrainRoutingUpdateReport> {
@@ -1453,17 +1453,17 @@ pub fn update_workflow_node_brain_routing(
         };
 
         routing.scope = "agentic_ai_node".to_string();
-        routing.orchestrator_brain = "forge".to_string();
-        routing.selection_owner = "forge".to_string();
+        routing.orchestrator_brain = "foundry".to_string();
+        routing.selection_owner = "foundry".to_string();
         routing.supports_parallel_agent_brains = true;
         routing.supports_multiple_agents_per_brain = true;
         routing.hot_swappable = true;
-        routing.state_owner = "forge_workflow_state".to_string();
-        routing.memory_source = "forge_memory_router".to_string();
-        routing.skills_source = "forge_skill_router".to_string();
-        routing.mcp_source = "forge_mcp_router".to_string();
+        routing.state_owner = "foundry_workflow_state".to_string();
+        routing.memory_source = "foundry_memory_router".to_string();
+        routing.skills_source = "foundry_skill_router".to_string();
+        routing.mcp_source = "foundry_mcp_router".to_string();
         routing.switch_command = vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "request".to_string(),
             "switch-executor".to_string(),
             "--run".to_string(),
@@ -1474,7 +1474,7 @@ pub fn update_workflow_node_brain_routing(
             "json".to_string(),
         ];
         routing.workflow_mutation_command = vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "workflow".to_string(),
             "update-node-brain".to_string(),
             "--workflow".to_string(),
@@ -1587,7 +1587,7 @@ pub fn update_workflow_node_brain_routing(
 }
 
 pub fn attach_workflow_artifact(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     source_path: &Path,
     kind: &str,
@@ -1597,7 +1597,7 @@ pub fn attach_workflow_artifact(
 }
 
 pub fn attach_workflow_artifact_with_tags(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     source_path: &Path,
     kind: &str,
@@ -1647,7 +1647,7 @@ pub(crate) fn prepare_workflow_artifact_attach(
 }
 
 pub(crate) fn record_prepared_workflow_artifact(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     prepared: &PreparedArtifactAttach,
 ) -> Result<ArtifactAttachReport> {
@@ -1723,7 +1723,7 @@ fn collect_tag_parts(tags: &mut BTreeSet<String>, value: &str) {
 }
 
 pub fn validate_child_subflow_binding(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     child_workflow_id: &str,
@@ -2017,7 +2017,7 @@ pub struct TokenPatchReport {
 }
 
 pub fn attach_creative_artifact(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     artifact: CreativeArtifact,
     origin: &str,
@@ -2063,7 +2063,7 @@ pub fn attach_creative_artifact(
 }
 
 pub fn list_creative_artifacts(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
 ) -> Result<CreativeArtifactListReport> {
     let workflow = store.load_workflow(workflow_id)?;
@@ -2087,7 +2087,7 @@ pub fn list_creative_artifacts(
 }
 
 pub fn inspect_creative_artifact(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     artifact_id: &str,
 ) -> Result<CreativeArtifactInspectReport> {
@@ -2106,7 +2106,7 @@ pub fn inspect_creative_artifact(
 }
 
 pub fn record_creative_collaboration_event(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: CreativeCollaborationEventRequest,
 ) -> Result<CreativeCollaborationEventReport> {
     let workflow_id = request.workflow_id;
@@ -2251,7 +2251,7 @@ pub fn record_creative_collaboration_event(
 }
 
 pub fn inspect_creative_collaboration(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     artifact_id: &str,
 ) -> Result<CreativeCollaborationStatusReport> {
@@ -2272,7 +2272,7 @@ pub fn inspect_creative_collaboration(
 }
 
 pub fn set_workflow_token_collection(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     token_collection: TokenCollection,
     origin: &str,
@@ -2305,7 +2305,7 @@ pub fn set_workflow_token_collection(
 }
 
 pub fn get_workflow_token_collection(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
 ) -> Result<TokenCollectionReport> {
     let workflow = store.load_workflow(workflow_id)?;
@@ -2318,7 +2318,7 @@ pub fn get_workflow_token_collection(
 }
 
 pub fn resolve_workflow_tokens(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     mode: Option<&str>,
 ) -> Result<TokenResolutionWorkflowReport> {
@@ -2338,7 +2338,7 @@ pub fn resolve_workflow_tokens(
 }
 
 pub fn patch_workflow_token(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     token_name: &str,
     value: &str,

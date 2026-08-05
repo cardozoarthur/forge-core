@@ -11,7 +11,7 @@ use crate::request::{
     drive_request_with_context_budget, load_run_record, DispatchFrontier, RequestDriveReport,
 };
 use crate::security::{sanitize_prompt_secrets, SecretSanitizationOptions};
-use crate::storage::{ExecutorRuntimeClaimWrite, ForgeStore};
+use crate::storage::{ExecutorRuntimeClaimWrite, FoundryStore};
 use crate::worktree::bound_worktree_context;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -27,13 +27,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-pub const EXECUTOR_RUNTIME_RECEIPT_SCHEMA_VERSION: &str = "forge.executor_runtime.receipt.v1";
+pub const EXECUTOR_RUNTIME_RECEIPT_SCHEMA_VERSION: &str = "foundry.executor_runtime.receipt.v1";
 pub const EXECUTOR_RUNTIME_GIT_OBSERVATION_SCHEMA_VERSION: &str =
-    "forge.executor_runtime.git_observation.v1";
-pub const EXECUTOR_RUNTIME_CLAIMED_SCHEMA_VERSION: &str = "forge.executor_runtime.claimed.v1";
-pub const EXECUTOR_RUNTIME_STARTED_SCHEMA_VERSION: &str = "forge.executor_runtime.started.v1";
-pub const EXECUTOR_WAVE_REPORT_SCHEMA_VERSION: &str = "forge.executor_wave.report.v1";
-pub const REQUEST_EXECUTOR_WAVE_SCHEMA_VERSION: &str = "forge.request_executor_wave.v1";
+    "foundry.executor_runtime.git_observation.v1";
+pub const EXECUTOR_RUNTIME_CLAIMED_SCHEMA_VERSION: &str = "foundry.executor_runtime.claimed.v1";
+pub const EXECUTOR_RUNTIME_STARTED_SCHEMA_VERSION: &str = "foundry.executor_runtime.started.v1";
+pub const EXECUTOR_WAVE_REPORT_SCHEMA_VERSION: &str = "foundry.executor_wave.report.v1";
+pub const REQUEST_EXECUTOR_WAVE_SCHEMA_VERSION: &str = "foundry.request_executor_wave.v1";
 pub const EXECUTOR_RUNTIME_LEASE_GRACE_SECONDS: u64 = 300;
 pub const MAX_EXECUTOR_WAVE_WORKERS: usize = 64;
 pub const DEFAULT_REQUEST_EXECUTOR_WAVE_EXECUTOR: &str = "auto";
@@ -92,7 +92,7 @@ pub struct ExecutorRuntimeStreamEvidence {
 
 /// Provider-reported token counters normalized without changing their accounting semantics.
 ///
-/// If a provider omits `total_tokens`, Forge derives it only when both
+/// If a provider omits `total_tokens`, Foundry derives it only when both
 /// `input_tokens` and `output_tokens` are present, using
 /// `input_tokens + output_tokens`. Cache and reasoning/thinking counters are
 /// details of those totals and are not added again.
@@ -347,7 +347,7 @@ pub fn build_agy_runtime_command(
 }
 
 pub fn execute_executor_wave(
-    store: &ForgeStore,
+    store: &FoundryStore,
     requests: Vec<ExecutorRuntimeRequest>,
     max_parallel: usize,
 ) -> Result<ExecutorWaveReport> {
@@ -432,7 +432,7 @@ pub fn execute_executor_wave(
         let sender = sender.clone();
         let store_path = store.path().to_path_buf();
         handles.push(thread::spawn(move || {
-            let worker_store = match ForgeStore::open(&store_path) {
+            let worker_store = match FoundryStore::open(&store_path) {
                 Ok(store) => store,
                 Err(error) => {
                     let _ = sender.send(WaveWorkerMessage::InitializationError(
@@ -575,7 +575,7 @@ pub fn execute_executor_wave(
 }
 
 pub fn execute_request_executor_wave(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: &RequestExecutorWaveOptions<'_>,
 ) -> Result<RequestExecutorWaveReport> {
     if !options.allow_exec {
@@ -719,7 +719,7 @@ pub fn execute_request_executor_wave(
             .any(|slot| slot.parallel_group == IMPLEMENTATION_WAVE_PARALLEL_GROUP);
         let prompt_packet = serde_json::to_string(&package.prompt_packet)?;
         let mut prompt = format!(
-            "Forge owns workflow state and final promotion. Execute only the bounded task below inside the task-bound worktree. Do not mark the Forge task complete and do not treat process exit as validation. At the end, report changed files, validations actually run, observed exit codes and blockers.\n\nForge prompt packet:\n{prompt_packet}\n\nBounded task context (sha256={}):\n{}",
+            "Foundry owns workflow state and final promotion. Execute only the bounded task below inside the task-bound worktree. Do not mark the Foundry task complete and do not treat process exit as validation. At the end, report changed files, validations actually run, observed exit codes and blockers.\n\nFoundry prompt packet:\n{prompt_packet}\n\nBounded task context (sha256={}):\n{}",
             package.context_sha256, package.content
         );
         append_implementation_wave_prompt(&mut prompt, implementation_wave);
@@ -746,7 +746,7 @@ pub fn execute_request_executor_wave(
         &workflow.id,
         "request_executor_wave_started",
         &serde_json::json!({
-            "schema_version": "forge.request_executor_wave_event.v1",
+            "schema_version": "foundry.request_executor_wave_event.v1",
             "run_id": drive.run_id,
             "wave_id": frontier.wave.wave_id,
             "workflow_revision": frontier.wave.workflow_revision,
@@ -763,7 +763,7 @@ pub fn execute_request_executor_wave(
         &workflow.id,
         "request_executor_wave_finished",
         &serde_json::json!({
-            "schema_version": "forge.request_executor_wave_event.v1",
+            "schema_version": "foundry.request_executor_wave_event.v1",
             "run_id": drive.run_id,
             "wave_id": frontier.wave.wave_id,
             "origin": options.origin,
@@ -779,7 +779,7 @@ pub fn execute_request_executor_wave(
         .iter()
         .map(|receipt| {
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "--store".to_string(),
                 store.path().display().to_string(),
                 "request".to_string(),
@@ -817,7 +817,7 @@ pub fn execute_request_executor_wave(
         validation_commands,
         task_completion_attempted: false,
         output_accepted_as_validation: false,
-        reason: "Forge executed the admitted Codex/Agy processes in parallel and preserved every task lease for explicit validation; no task was promoted automatically.".to_string(),
+        reason: "Foundry executed the admitted Codex/Agy processes in parallel and preserved every task lease for explicit validation; no task was promoted automatically.".to_string(),
     })
 }
 
@@ -864,7 +864,7 @@ fn executor_runtime_request_sha256(
 }
 
 pub fn execute_executor_runtime(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: ExecutorRuntimeRequest,
 ) -> Result<ExecutorRuntimeReceipt> {
     let mut prepared = prepare_executor_runtime(store, &request)?;
@@ -899,7 +899,7 @@ pub fn execute_executor_runtime(
                 "executor_runtime_claimed",
                 &serde_json::json!({
                     "schema_version": EXECUTOR_RUNTIME_CLAIMED_SCHEMA_VERSION,
-                    "origin": "forge_executor_runtime",
+                    "origin": "foundry_executor_runtime",
                     "execution_id": execution_id,
                     "workflow_id": request.workflow_id,
                     "run_id": request.run_id,
@@ -975,7 +975,7 @@ pub fn execute_executor_runtime(
             "executor_runtime_started",
             &serde_json::json!({
                 "schema_version": EXECUTOR_RUNTIME_STARTED_SCHEMA_VERSION,
-                "origin": "forge_executor_runtime",
+                "origin": "foundry_executor_runtime",
                 "execution_id": execution_id,
                 "workflow_id": request.workflow_id,
                 "run_id": request.run_id,
@@ -1020,11 +1020,11 @@ pub fn execute_executor_runtime(
         _ => unreachable!("executor canonicalization is validated during preparation"),
     };
     command
-        .env("FORGE_WORKFLOW_ID", &request.workflow_id)
-        .env("FORGE_RUN_ID", &request.run_id)
-        .env("FORGE_TASK_ID", &request.task_id)
-        .env("FORGE_TASK_LEASE_ID", &request.lease_id)
-        .env("FORGE_EXECUTOR_RUNTIME", "1")
+        .env("FOUNDRY_WORKFLOW_ID", &request.workflow_id)
+        .env("FOUNDRY_RUN_ID", &request.run_id)
+        .env("FOUNDRY_TASK_ID", &request.task_id)
+        .env("FOUNDRY_TASK_LEASE_ID", &request.lease_id)
+        .env("FOUNDRY_EXECUTOR_RUNTIME", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1120,7 +1120,7 @@ pub fn execute_executor_runtime(
 }
 
 fn wait_for_idempotent_executor_receipt(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: &ExecutorRuntimeRequest,
     prepared: &PreparedExecutorRuntime,
     request_sha256: &str,
@@ -1184,7 +1184,7 @@ fn wait_for_idempotent_executor_receipt(
 }
 
 fn finalize_executor_runtime(
-    store: &ForgeStore,
+    store: &FoundryStore,
     owner_token: &str,
     receipt: &ExecutorRuntimeReceipt,
 ) -> Result<()> {
@@ -1212,7 +1212,7 @@ fn finalize_executor_runtime(
 }
 
 fn prepare_executor_runtime(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: &ExecutorRuntimeRequest,
 ) -> Result<PreparedExecutorRuntime> {
     require_text(&request.workflow_id, "workflow id")?;
@@ -1547,7 +1547,7 @@ fn executor_runtime_git_path(cwd: &Path, args: &[&str]) -> Result<PathBuf> {
 }
 
 fn ensure_executor_runtime_lease_window(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: &ExecutorRuntimeRequest,
     lease_executor: &str,
     cwd: &Path,
@@ -1596,7 +1596,7 @@ fn ensure_executor_runtime_lease_window(
 }
 
 fn revalidate_executor_runtime_before_spawn(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: &ExecutorRuntimeRequest,
     prepared: &mut PreparedExecutorRuntime,
 ) -> Result<()> {
@@ -1684,7 +1684,7 @@ fn harden_codex_git_environment(command: &mut Command) {
     command.env("GIT_TERMINAL_PROMPT", "0");
 }
 
-fn load_executor_state(store: &ForgeStore, executor: &str) -> Result<ExecutorState> {
+fn load_executor_state(store: &FoundryStore, executor: &str) -> Result<ExecutorState> {
     load_executors(store)?
         .executors
         .into_iter()
@@ -2444,11 +2444,11 @@ fn build_receipt(
 }
 
 fn record_executor_runtime_finished(
-    store: &ForgeStore,
+    store: &FoundryStore,
     receipt: &ExecutorRuntimeReceipt,
 ) -> Result<()> {
     let mut event = serde_json::to_value(receipt)?;
-    event["origin"] = serde_json::Value::String("forge_executor_runtime".to_string());
+    event["origin"] = serde_json::Value::String("foundry_executor_runtime".to_string());
     store.record_event(&receipt.workflow_id, "executor_runtime_finished", &event)
 }
 

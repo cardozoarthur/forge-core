@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
 
-const STORE_CHECK_SCHEMA: &str = "forge.store.check.v1";
-const STORE_BACKUP_SCHEMA: &str = "forge.store.backup.v1";
-const STORE_RESTORE_SCHEMA: &str = "forge.store.restore.v1";
+const STORE_CHECK_SCHEMA: &str = "foundry.store.check.v1";
+const STORE_BACKUP_SCHEMA: &str = "foundry.store.backup.v1";
+const STORE_RESTORE_SCHEMA: &str = "foundry.store.restore.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StoreCheckReport {
@@ -473,7 +473,7 @@ fn temporary_sibling(path: &Path, purpose: &str) -> PathBuf {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("forge.sqlite");
+        .unwrap_or("foundry.sqlite");
     path.with_file_name(format!(".{file_name}.{purpose}.{}.tmp", Uuid::new_v4()))
 }
 
@@ -481,7 +481,7 @@ fn rollback_sibling(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("forge.sqlite");
+        .unwrap_or("foundry.sqlite");
     path.with_file_name(format!(
         "{file_name}.pre-restore-{}-{}.sqlite",
         Utc::now().format("%Y%m%dT%H%M%SZ"),

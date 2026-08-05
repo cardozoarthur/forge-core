@@ -2,6 +2,7 @@ pub mod adapter;
 pub mod addon;
 pub mod artifact;
 pub mod aws_ops;
+pub mod brand;
 pub mod checkpoint;
 pub mod cli_factory;
 pub mod cli_integration;

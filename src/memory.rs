@@ -1,7 +1,7 @@
 use crate::artifact::hex_sha256;
 use crate::identity::ensure_workflow_policy;
 use crate::storage::{
-    ForgeStore, MemoryPromotionQuery, MemoryPromotionWrite, StoredMemoryPromotionRecord,
+    FoundryStore, MemoryPromotionQuery, MemoryPromotionWrite, StoredMemoryPromotionRecord,
 };
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -14,7 +14,7 @@ use uuid::Uuid;
 const DEFAULT_LIMIT: usize = 10;
 const MAX_CHUNK_WORDS: usize = 400;
 const CHUNK_OVERLAP_WORDS: usize = 48;
-const MEMORY_GOVERNANCE_SCHEMA_VERSION: &str = "forge.memory_governance_config.v1";
+const MEMORY_GOVERNANCE_SCHEMA_VERSION: &str = "foundry.memory_governance_config.v1";
 
 #[derive(Debug, Clone)]
 pub struct MemorySearchOptions {
@@ -518,7 +518,7 @@ pub fn configure_memory_governance(
             approved_at: Utc::now().to_rfc3339(),
             reason: reason.to_string(),
         },
-        governance_rule: "project .forge/memory-governance.json controls the default memory level, scopes, audience, privacy and retention posture for Forge-owned project operations".to_string(),
+        governance_rule: "project .foundry/memory-governance.json controls the default memory level, scopes, audience, privacy and retention posture for Foundry-owned project operations".to_string(),
     };
 
     if let Some(parent) = config_path.parent() {
@@ -532,7 +532,7 @@ pub fn configure_memory_governance(
     Ok(report)
 }
 
-pub fn memory_policy_report(store: &ForgeStore) -> MemoryPolicyReport {
+pub fn memory_policy_report(store: &FoundryStore) -> MemoryPolicyReport {
     memory_policy_report_for_project(store, None)
 }
 
@@ -543,7 +543,7 @@ pub fn project_memory_governance_report(
 }
 
 pub fn memory_policy_report_for_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: Option<&Path>,
 ) -> MemoryPolicyReport {
     let project_memory = store.base_dir().join("memory");
@@ -556,27 +556,27 @@ pub fn memory_policy_report_for_project(
         retention_mode: project_governance.retention_mode.clone(),
     };
     MemoryPolicyReport {
-        schema_version: "forge.memory_policy.v1".to_string(),
+        schema_version: "foundry.memory_policy.v1".to_string(),
         status: "memory_policy_ready".to_string(),
         file_first: true,
         hidden_state_disallowed: true,
         project_governance,
         effective_defaults,
         search_policy: MemorySearchPolicy {
-            schema_version: "forge.memory_search_policy.v1".to_string(),
-            retrieval_tool: "forge memory search".to_string(),
+            schema_version: "foundry.memory_search_policy.v1".to_string(),
+            retrieval_tool: "foundry memory search".to_string(),
             precise_read_tool: "read the returned path and line range only".to_string(),
             indexing: "markdown chunking plus deterministic lexical semantic scoring; embeddings can replace the scorer behind the same result contract".to_string(),
             chunk_target_tokens: MAX_CHUNK_WORDS,
             returns_full_file: false,
-            provider: "forge_builtin_file_memory".to_string(),
+            provider: "foundry_builtin_file_memory".to_string(),
             future_embedding_boundary: "provider/model are explicit on every result so vector backends can be introduced without changing governance semantics".to_string(),
         },
         memory_levels: memory_level_policies(),
         scopes: vec![
             MemoryScopePolicy {
                 scope: "global".to_string(),
-                default_path: "~/.forge/memory".to_string(),
+                default_path: "~/.foundry/memory".to_string(),
                 lifecycle: "long_lived_cross_project".to_string(),
                 default_shareability: "global_shared_after_classification".to_string(),
                 default_visibility: "internal".to_string(),
@@ -600,7 +600,7 @@ pub fn memory_policy_report_for_project(
                 lifecycle: "project_lived".to_string(),
                 default_shareability: "project_shared".to_string(),
                 default_visibility: "internal".to_string(),
-                notes: "Project-local facts, decisions, architecture notes and delivery history under the project's .forge directory.".to_string(),
+                notes: "Project-local facts, decisions, architecture notes and delivery history under the project's .foundry directory.".to_string(),
             },
             MemoryScopePolicy {
                 scope: "processing".to_string(),
@@ -707,7 +707,7 @@ pub fn memory_policy_report_for_project(
             },
         ],
         business_operating_model: BusinessOperatingModel {
-            schema_version: "forge.company_request_model.v1".to_string(),
+            schema_version: "foundry.company_request_model.v1".to_string(),
             default_departments: vec![
                 "product".to_string(),
                 "technical".to_string(),
@@ -745,7 +745,11 @@ pub fn memory_policy_report_for_project(
 }
 
 fn memory_governance_config_path(project_root: &Path) -> PathBuf {
-    project_root.join(".forge").join("memory-governance.json")
+    project_root.join(".foundry").join("memory-governance.json")
+}
+
+fn memory_governance_config_read_path(project_root: &Path) -> PathBuf {
+    crate::brand::project_config_path_for_read(project_root, "memory-governance.json")
 }
 
 fn load_project_memory_governance(project_root: Option<&Path>) -> ProjectMemoryGovernanceReport {
@@ -766,7 +770,7 @@ fn load_project_memory_governance(project_root: Option<&Path>) -> ProjectMemoryG
         };
     };
 
-    let config_path = memory_governance_config_path(project_root);
+    let config_path = memory_governance_config_read_path(project_root);
     let default_level = "MEMORY_STANDARD".to_string();
     if !config_path.exists() {
         return ProjectMemoryGovernanceReport {
@@ -857,7 +861,7 @@ fn normalize_governance_mode(value: &str, default_value: &str) -> String {
 }
 
 fn bind_memory_to_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     action: &str,
     organization_id: &mut Option<String>,
@@ -989,7 +993,7 @@ fn push_workflow_memory_scope(scopes: &mut Vec<String>, scope: &str, enabled: bo
 }
 
 pub fn search_memory(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: MemorySearchOptions,
 ) -> Result<MemorySearchReport> {
     let mut options = options;
@@ -1126,7 +1130,7 @@ pub fn search_memory(
                     start_line: chunk.start_line,
                     end_line: chunk.end_line,
                     score,
-                    provider: "forge_builtin_file_memory".to_string(),
+                    provider: "foundry_builtin_file_memory".to_string(),
                     model: "hybrid_lexical_semantic_v1".to_string(),
                     access_decision: "allowed_by_audience_visibility_policy".to_string(),
                     snippet: compact_snippet(&chunk.text, 420),
@@ -1150,7 +1154,7 @@ pub fn search_memory(
     results.truncate(limit);
 
     Ok(MemorySearchReport {
-        schema_version: "forge.memory_search.v1".to_string(),
+        schema_version: "foundry.memory_search.v1".to_string(),
         status: "memory_search_complete".to_string(),
         query: options.query,
         audience,
@@ -1196,7 +1200,7 @@ pub fn search_memory(
 }
 
 pub fn promote_memory(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: MemoryPromotionOptions,
 ) -> Result<MemoryPromotionReport> {
     let mut options = options;
@@ -1300,7 +1304,7 @@ pub fn promote_memory(
     }
 
     let report = MemoryPromotionReport {
-        schema_version: "forge.memory_promotion.v1".to_string(),
+        schema_version: "foundry.memory_promotion.v1".to_string(),
         status: if options.dry_run {
             "memory_promotion_planned".to_string()
         } else {
@@ -1333,7 +1337,7 @@ pub fn promote_memory(
                 "global".to_string(),
             ],
             workflow_binding,
-            rule: "Forge promotes only curated summaries with explicit approval, classification and source lineage; raw processing memory is not copied by default."
+            rule: "Foundry promotes only curated summaries with explicit approval, classification and source lineage; raw processing memory is not copied by default."
                 .to_string(),
         },
     };
@@ -1379,7 +1383,7 @@ pub fn promote_memory(
 }
 
 pub fn list_memory_promotions(
-    store: &ForgeStore,
+    store: &FoundryStore,
     from_scope: Option<String>,
     to_scope: Option<String>,
     approved_by: Option<String>,
@@ -1438,7 +1442,7 @@ pub fn list_memory_promotions(
         .map(memory_promotion_index_entry_from_record)
         .collect::<Vec<_>>();
     Ok(MemoryPromotionIndexReport {
-        schema_version: "forge.memory_promotion_index.v1".to_string(),
+        schema_version: "foundry.memory_promotion_index.v1".to_string(),
         status: "memory_promotion_index_loaded".to_string(),
         filters: MemoryPromotionIndexFilters {
             workflow_id: workflow_binding
@@ -1463,7 +1467,7 @@ pub fn list_memory_promotions(
 }
 
 pub fn memory_retention_report(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: MemoryRetentionOptions,
 ) -> Result<MemoryRetentionReport> {
     let mut options = options;
@@ -1564,7 +1568,7 @@ pub fn memory_retention_report(
         .filter(|item| item.action == "delete_after_final_packaging")
         .count();
     Ok(MemoryRetentionReport {
-        schema_version: "forge.memory_retention.v1".to_string(),
+        schema_version: "foundry.memory_retention.v1".to_string(),
         status: "memory_retention_evaluated".to_string(),
         requested_scopes,
         searched_roots: roots
@@ -1596,7 +1600,7 @@ pub fn memory_retention_report(
 }
 
 pub fn memory_cleanup_report(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: MemoryCleanupOptions,
 ) -> Result<MemoryCleanupReport> {
     let mode = normalize_cleanup_mode(&options.mode)?;
@@ -1726,7 +1730,7 @@ pub fn memory_cleanup_report(
     let confirm_recorded = options.dry_run || options.confirm;
     let destructive_actions_performed = !options.dry_run && (archived_count + deleted_count > 0);
     Ok(MemoryCleanupReport {
-        schema_version: "forge.memory_cleanup.v1".to_string(),
+        schema_version: "foundry.memory_cleanup.v1".to_string(),
         status: if options.dry_run {
             "memory_cleanup_planned".to_string()
         } else {
@@ -1935,7 +1939,7 @@ fn memory_level_policies() -> Vec<MemoryLevelPolicy> {
             default_audience: "internal".to_string(),
             can_read_private: false,
             lifecycle: "bounded_default".to_string(),
-            notes: "Default Forge memory posture: all configured scopes can be searched, still gated by audience and visibility."
+            notes: "Default Foundry memory posture: all configured scopes can be searched, still gated by audience and visibility."
                 .to_string(),
         },
         MemoryLevelPolicy {
@@ -2010,7 +2014,7 @@ fn apply_memory_level(scopes: &[String], memory_level: &str) -> Vec<String> {
 }
 
 fn resolve_roots(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: &MemorySearchOptions,
     scopes: &[String],
 ) -> Vec<MemoryRoot> {
@@ -2066,10 +2070,10 @@ fn resolve_roots(
 }
 
 fn default_global_memory_root() -> PathBuf {
-    std::env::var_os("HOME")
+    crate::brand::env_var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".forge")
+        .join(".foundry")
         .join("memory")
 }
 
@@ -2089,7 +2093,7 @@ struct PromotedMemoryRenderInput<'a> {
 }
 
 fn promotion_target_root(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: &MemoryPromotionOptions,
     to_scope: &str,
 ) -> PathBuf {
@@ -2136,7 +2140,7 @@ fn ensure_shareability_allowed_for_target(scope: &str, shareability: &str) -> Re
 fn render_promoted_memory(input: &PromotedMemoryRenderInput<'_>) -> String {
     let mut content = String::new();
     content.push_str("---\n");
-    content.push_str("schema_version: forge.promoted_memory.v1\n");
+    content.push_str("schema_version: foundry.promoted_memory.v1\n");
     content.push_str(&format!("promotion_id: {}\n", input.promotion_id));
     content.push_str(&format!("visibility: {}\n", input.visibility));
     content.push_str(&format!("shareability: {}\n", input.shareability));

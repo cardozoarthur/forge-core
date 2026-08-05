@@ -30,17 +30,22 @@ const GLOBAL_EVENTS_OBSERVABILITY_QUEUE_TRIGGER: &str = "trg_global_events_obser
 const EVENT_OBSERVABILITY_DELETE_QUEUE_TRIGGER: &str = "trg_event_observability_delete_queue";
 const RUNTIME_SECRET_ENCRYPTED_INSERT_TRIGGER: &str = "trg_runtime_secret_vault_encrypted_insert";
 const RUNTIME_SECRET_ENCRYPTED_UPDATE_TRIGGER: &str = "trg_runtime_secret_vault_encrypted_update";
-const RUNTIME_SECRET_ENVELOPE_PREFIX: &str = "forge:vault:v1";
-const RUNTIME_SECRET_KEY_FILE_PREFIX: &str = "forge-secret-vault-key-v1:";
-const RUNTIME_SECRET_KEY_ENV: &str = "FORGE_SECRET_VAULT_KEY";
-const RUNTIME_SECRET_KEY_FILE_ENV: &str = "FORGE_SECRET_VAULT_KEY_FILE";
-const RUNTIME_SECRET_PREVIOUS_KEYS_ENV: &str = "FORGE_SECRET_VAULT_PREVIOUS_KEYS";
-const RUNTIME_SECRET_PREVIOUS_KEY_FILES_ENV: &str = "FORGE_SECRET_VAULT_PREVIOUS_KEY_FILES";
+const RUNTIME_SECRET_ENVELOPE_PREFIX: &str = "foundry:vault:v1";
+const LEGACY_RUNTIME_SECRET_ENVELOPE_PREFIX: &str = "forge:vault:v1"; // foundry-brand-allow: legacy-compat
+const RUNTIME_SECRET_KEY_FILE_PREFIX: &str = "foundry-secret-vault-key-v1:";
+const LEGACY_RUNTIME_SECRET_KEY_FILE_PREFIX: &str = "forge-secret-vault-key-v1:"; // foundry-brand-allow: legacy-compat
+const RUNTIME_SECRET_KEY_ENV: &str = "FOUNDRY_SECRET_VAULT_KEY";
+const RUNTIME_SECRET_KEY_FILE_ENV: &str = "FOUNDRY_SECRET_VAULT_KEY_FILE";
+const RUNTIME_SECRET_PREVIOUS_KEYS_ENV: &str = "FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS";
+const RUNTIME_SECRET_PREVIOUS_KEY_FILES_ENV: &str = "FOUNDRY_SECRET_VAULT_PREVIOUS_KEY_FILES";
 const RUNTIME_SECRET_SCRUB_CURSOR: &str = "runtime_secret_vault_encryption_v1_scrub";
 const RUNTIME_SECRET_NONCE_BYTES: usize = 24;
 const RUNTIME_SECRET_KEY_BYTES: usize = 32;
 const RUNTIME_SECRET_KEY_FILE_MAX_BYTES: u64 = 16 * 1024;
 const RUNTIME_SECRET_MAX_BYTES: usize = 1024 * 1024;
+const RUNTIME_SECRET_AAD_CONTEXT: &[u8] = b"foundry.runtime.secret-vault.aead.v1";
+const LEGACY_RUNTIME_SECRET_AAD_CONTEXT: &[u8] = b"forge.runtime.secret-vault.aead.v1"; // foundry-brand-allow: legacy-compat
+const LEGACY_PROJECT_DIRECTORY: &str = ".forge"; // foundry-brand-allow: legacy-compat
 const GLOBAL_EVENTS_OBSERVABILITY_QUEUE_TRIGGER_SQL: &str = r#"
 CREATE TRIGGER trg_global_events_observability_queue
 AFTER INSERT ON global_events
@@ -63,7 +68,8 @@ END;
 const RUNTIME_SECRET_ENCRYPTED_INSERT_TRIGGER_SQL: &str = r#"
 CREATE TRIGGER trg_runtime_secret_vault_encrypted_insert
 BEFORE INSERT ON runtime_secret_vault
-WHEN NEW.secret_value NOT GLOB 'forge:vault:v1:*'
+WHEN NEW.secret_value NOT GLOB 'foundry:vault:v1:*'
+ AND NEW.secret_value NOT GLOB 'forge:vault:v1:*' -- foundry-brand-allow: legacy-compat
 BEGIN
     SELECT RAISE(ABORT, 'runtime secret vault requires an encrypted v1 envelope');
 END;
@@ -71,7 +77,8 @@ END;
 const RUNTIME_SECRET_ENCRYPTED_UPDATE_TRIGGER_SQL: &str = r#"
 CREATE TRIGGER trg_runtime_secret_vault_encrypted_update
 BEFORE UPDATE OF secret_value ON runtime_secret_vault
-WHEN NEW.secret_value NOT GLOB 'forge:vault:v1:*'
+WHEN NEW.secret_value NOT GLOB 'foundry:vault:v1:*'
+ AND NEW.secret_value NOT GLOB 'forge:vault:v1:*' -- foundry-brand-allow: legacy-compat
 BEGIN
     SELECT RAISE(ABORT, 'runtime secret vault requires an encrypted v1 envelope');
 END;
@@ -94,11 +101,14 @@ type InboundEventRow = (
 );
 type RuntimeSecretStoredRecord = (String, Zeroizing<String>, String, i64);
 
-pub struct ForgeStore {
+pub struct FoundryStore {
     path: PathBuf,
     connection: Connection,
     runtime_secret_cipher: RuntimeSecretCipher,
 }
+
+#[deprecated(since = "0.6.0", note = "use FoundryStore")]
+pub type ForgeStore = FoundryStore; // foundry-brand-allow: legacy-compat
 
 struct RuntimeSecretCipher {
     current: RuntimeSecretKey,
@@ -112,8 +122,8 @@ struct RuntimeSecretKey {
 
 impl RuntimeSecretCipher {
     fn load(store_path: &Path, encrypted_records_exist: bool) -> Result<Self> {
-        let configured_key = std::env::var_os(RUNTIME_SECRET_KEY_ENV);
-        let configured_key_file = std::env::var_os(RUNTIME_SECRET_KEY_FILE_ENV);
+        let configured_key = crate::brand::env_var_os(RUNTIME_SECRET_KEY_ENV);
+        let configured_key_file = crate::brand::env_var_os(RUNTIME_SECRET_KEY_FILE_ENV);
         if configured_key.is_some() && configured_key_file.is_some() {
             anyhow::bail!(
                 "{RUNTIME_SECRET_KEY_ENV} and {RUNTIME_SECRET_KEY_FILE_ENV} are mutually exclusive"
@@ -158,7 +168,7 @@ impl RuntimeSecretCipher {
             previous.extend(read_runtime_secret_keyring(&fallback_path, true)?);
         }
 
-        if let Some(encoded_previous) = std::env::var_os(RUNTIME_SECRET_PREVIOUS_KEYS_ENV) {
+        if let Some(encoded_previous) = crate::brand::env_var_os(RUNTIME_SECRET_PREVIOUS_KEYS_ENV) {
             let encoded_previous =
                 Zeroizing::new(encoded_previous.into_string().map_err(|_| {
                     anyhow::anyhow!("{RUNTIME_SECRET_PREVIOUS_KEYS_ENV} must contain valid UTF-8")
@@ -175,7 +185,9 @@ impl RuntimeSecretCipher {
             }
         }
 
-        if let Some(previous_files) = std::env::var_os(RUNTIME_SECRET_PREVIOUS_KEY_FILES_ENV) {
+        if let Some(previous_files) =
+            crate::brand::env_var_os(RUNTIME_SECRET_PREVIOUS_KEY_FILES_ENV)
+        {
             for path in std::env::split_paths(&previous_files) {
                 previous.extend(read_runtime_secret_keyring(&path, false)?);
             }
@@ -198,13 +210,32 @@ impl RuntimeSecretCipher {
         value_len: usize,
         plaintext: &[u8],
     ) -> Result<String> {
+        self.encrypt_with_format(
+            vault_key,
+            value_sha256,
+            value_len,
+            plaintext,
+            RUNTIME_SECRET_ENVELOPE_PREFIX,
+            RUNTIME_SECRET_AAD_CONTEXT,
+        )
+    }
+
+    fn encrypt_with_format(
+        &self,
+        vault_key: &str,
+        value_sha256: &str,
+        value_len: usize,
+        plaintext: &[u8],
+        envelope_prefix: &str,
+        aad_context: &[u8],
+    ) -> Result<String> {
         validate_runtime_secret_metadata(plaintext, value_sha256, value_len)?;
         let mut nonce = [0u8; RUNTIME_SECRET_NONCE_BYTES];
         getrandom::fill(&mut nonce)
             .map_err(|_| anyhow::anyhow!("failed to obtain OS randomness for secret encryption"))?;
         let cipher = XChaCha20Poly1305::new_from_slice(self.current.bytes.as_ref())
             .map_err(|_| anyhow::anyhow!("failed to initialize runtime secret vault cipher"))?;
-        let aad = runtime_secret_aad(vault_key, value_sha256, value_len);
+        let aad = runtime_secret_aad(aad_context, vault_key, value_sha256, value_len);
         let ciphertext = cipher
             .encrypt(
                 XNonce::from_slice(&nonce),
@@ -215,7 +246,7 @@ impl RuntimeSecretCipher {
             )
             .map_err(|_| anyhow::anyhow!("failed to encrypt runtime secret vault value"))?;
         Ok(format!(
-            "{RUNTIME_SECRET_ENVELOPE_PREFIX}:{}:{}:{}",
+            "{envelope_prefix}:{}:{}:{}",
             self.current.id,
             hex_encode(&nonce),
             hex_encode(&ciphertext)
@@ -230,11 +261,19 @@ impl RuntimeSecretCipher {
         envelope: &str,
     ) -> Result<(Zeroizing<Vec<u8>>, bool)> {
         let components = envelope.split(':').collect::<Vec<_>>();
-        if components.len() != 6
-            || components[0] != "forge"
-            || components[1] != "vault"
-            || components[2] != "v1"
-        {
+        let (aad_context, legacy_envelope) = match components.as_slice() {
+            ["foundry", "vault", "v1", ..] if components.len() == 6 => {
+                (RUNTIME_SECRET_AAD_CONTEXT, false)
+            }
+            // foundry-brand-allow: legacy-compat
+            ["forge", "vault", "v1", ..] if components.len() == 6 => {
+                (LEGACY_RUNTIME_SECRET_AAD_CONTEXT, true)
+            }
+            _ => {
+                anyhow::bail!("runtime secret vault contains an unsupported encrypted envelope");
+            }
+        };
+        if components.len() != 6 {
             anyhow::bail!("runtime secret vault contains an unsupported encrypted envelope");
         }
         let key_id = components[3];
@@ -262,7 +301,7 @@ impl RuntimeSecretCipher {
         let ciphertext = hex_decode(components[5], "runtime secret ciphertext")?;
         let cipher = XChaCha20Poly1305::new_from_slice(key.bytes.as_ref())
             .map_err(|_| anyhow::anyhow!("failed to initialize runtime secret vault cipher"))?;
-        let aad = runtime_secret_aad(vault_key, value_sha256, value_len);
+        let aad = runtime_secret_aad(aad_context, vault_key, value_sha256, value_len);
         let plaintext = cipher
             .decrypt(
                 XNonce::from_slice(&nonce),
@@ -277,7 +316,10 @@ impl RuntimeSecretCipher {
                 )
             })?;
         validate_runtime_secret_metadata(&plaintext, value_sha256, value_len)?;
-        Ok((Zeroizing::new(plaintext), key.id != self.current.id))
+        Ok((
+            Zeroizing::new(plaintext),
+            !legacy_envelope && key.id != self.current.id,
+        ))
     }
 }
 
@@ -285,6 +327,7 @@ impl RuntimeSecretKey {
     fn parse(encoded: &str, source: &str) -> Result<Self> {
         let encoded = encoded
             .strip_prefix(RUNTIME_SECRET_KEY_FILE_PREFIX)
+            .or_else(|| encoded.strip_prefix(LEGACY_RUNTIME_SECRET_KEY_FILE_PREFIX))
             .unwrap_or(encoded);
         if encoded.len() != RUNTIME_SECRET_KEY_BYTES * 2 {
             anyhow::bail!(
@@ -312,8 +355,13 @@ impl RuntimeSecretKey {
     }
 }
 
-fn runtime_secret_aad(vault_key: &str, value_sha256: &str, value_len: usize) -> Vec<u8> {
-    let mut aad = b"forge.runtime.secret-vault.aead.v1".to_vec();
+fn runtime_secret_aad(
+    context: &[u8],
+    vault_key: &str,
+    value_sha256: &str,
+    value_len: usize,
+) -> Vec<u8> {
+    let mut aad = context.to_vec();
     append_len_prefixed(&mut aad, vault_key.as_bytes());
     append_len_prefixed(&mut aad, value_sha256.as_bytes());
     aad.extend_from_slice(&(value_len as u64).to_be_bytes());
@@ -532,7 +580,13 @@ fn runtime_secret_encrypted_records_exist(connection: &Connection) -> Result<boo
     }
     connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_secret_vault WHERE secret_value LIKE 'forge:vault:%')",
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM runtime_secret_vault
+                WHERE secret_value LIKE 'foundry:vault:%'
+                   OR secret_value LIKE 'forge:vault:%' -- foundry-brand-allow: legacy-compat
+            )
+            "#,
             [],
             |row| row.get(0),
         )
@@ -586,7 +640,11 @@ fn prepare_private_store_path(path: &Path) -> Result<()> {
         let parent_existed = parent.exists();
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create store directory {}", parent.display()))?;
-        if !parent_existed || parent.file_name().is_some_and(|name| name == ".forge") {
+        if !parent_existed
+            || parent
+                .file_name()
+                .is_some_and(|name| name == ".foundry" || name == LEGACY_PROJECT_DIRECTORY)
+        {
             secure_private_directory(parent)?;
         }
     }
@@ -1693,7 +1751,7 @@ fn save_tenant_index_record_on_connection(
     Ok(())
 }
 
-impl ForgeStore {
+impl FoundryStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let connection = open_configured_connection(&path)?;
@@ -1886,6 +1944,7 @@ impl ForgeStore {
             WHERE type = 'table'
               AND name IN (
                   'squad_definitions',
+                  -- foundry-brand-allow: legacy-compat
                   'forge_missions',
                   'mission_agent_instances',
                   'mission_handoffs',
@@ -2028,7 +2087,9 @@ impl ForgeStore {
     ) -> Result<(Zeroizing<Vec<u8>>, usize, bool)> {
         let value_len = usize::try_from(raw_value_len)
             .context("runtime secret vault contains an invalid value length")?;
-        if stored_value.starts_with("forge:vault:") {
+        if stored_value.starts_with(RUNTIME_SECRET_ENVELOPE_PREFIX)
+            || stored_value.starts_with(LEGACY_RUNTIME_SECRET_ENVELOPE_PREFIX)
+        {
             let (plaintext, requires_reencryption) = self.runtime_secret_cipher.decrypt(
                 vault_key,
                 value_sha256,
@@ -2251,7 +2312,7 @@ impl ForgeStore {
                 installed_at TEXT NOT NULL,
                 PRIMARY KEY (id, version)
             );
-            CREATE TABLE IF NOT EXISTS forge_missions (
+            CREATE TABLE IF NOT EXISTS forge_missions ( -- foundry-brand-allow: legacy-compat
                 id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
                 squad_id TEXT NOT NULL,
@@ -2261,10 +2322,10 @@ impl ForgeStore {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_forge_missions_workflow
-                ON forge_missions(workflow_id);
-            CREATE INDEX IF NOT EXISTS idx_forge_missions_status
-                ON forge_missions(status);
+            CREATE INDEX IF NOT EXISTS idx_forge_missions_workflow -- foundry-brand-allow: legacy-compat
+                ON forge_missions(workflow_id); -- foundry-brand-allow: legacy-compat
+            CREATE INDEX IF NOT EXISTS idx_forge_missions_status -- foundry-brand-allow: legacy-compat
+                ON forge_missions(status); -- foundry-brand-allow: legacy-compat
             CREATE TABLE IF NOT EXISTS mission_agent_instances (
                 id TEXT PRIMARY KEY,
                 mission_id TEXT NOT NULL,
@@ -2463,13 +2524,15 @@ impl ForgeStore {
             ON runtime_secret_vault (organization_id, brand_id, product_id, vault_reference);
             CREATE TRIGGER IF NOT EXISTS trg_runtime_secret_vault_encrypted_insert
             BEFORE INSERT ON runtime_secret_vault
-            WHEN NEW.secret_value NOT GLOB 'forge:vault:v1:*'
+            WHEN NEW.secret_value NOT GLOB 'foundry:vault:v1:*'
+             AND NEW.secret_value NOT GLOB 'forge:vault:v1:*' -- foundry-brand-allow: legacy-compat
             BEGIN
                 SELECT RAISE(ABORT, 'runtime secret vault requires an encrypted v1 envelope');
             END;
             CREATE TRIGGER IF NOT EXISTS trg_runtime_secret_vault_encrypted_update
             BEFORE UPDATE OF secret_value ON runtime_secret_vault
-            WHEN NEW.secret_value NOT GLOB 'forge:vault:v1:*'
+            WHEN NEW.secret_value NOT GLOB 'foundry:vault:v1:*'
+             AND NEW.secret_value NOT GLOB 'forge:vault:v1:*' -- foundry-brand-allow: legacy-compat
             BEGIN
                 SELECT RAISE(ABORT, 'runtime secret vault requires an encrypted v1 envelope');
             END;
@@ -3451,6 +3514,7 @@ impl ForgeStore {
 
     pub fn workflow_is_mission_bound(&self, workflow_id: &str) -> Result<bool> {
         let bound: i64 = self.connection.query_row(
+            // foundry-brand-allow: legacy-compat
             "SELECT EXISTS(SELECT 1 FROM forge_missions WHERE workflow_id = ?1)",
             params![workflow_id],
             |row| row.get(0),
@@ -3994,7 +4058,7 @@ impl ForgeStore {
             ],
         )?;
         let data = serde_json::json!({
-            "schema_version": "forge.runtime.secret_vault.audit.v1",
+            "schema_version": "foundry.runtime.secret_vault.audit.v1",
             "action": "write",
             "vault_reference": write.vault_reference,
             "workflow_id": write.workflow_id,
@@ -4081,7 +4145,7 @@ impl ForgeStore {
             )
             .unwrap_or_else(|| (workflow_key.to_string(), String::new(), 0));
         let data = serde_json::json!({
-            "schema_version": "forge.runtime.secret_vault.audit.v1",
+            "schema_version": "foundry.runtime.secret_vault.audit.v1",
             "action": "resolve",
             "vault_reference": access.vault_reference,
             "workflow_id": access.workflow_id,
@@ -7933,7 +7997,7 @@ fn extract_event_origin(data: &serde_json::Value) -> String {
             }
         }
     }
-    "forge".to_string()
+    "foundry".to_string()
 }
 
 #[cfg(test)]
@@ -7941,9 +8005,11 @@ mod tests {
     use super::{
         ensure_wal, event_observability_trigger_count, event_observability_triggers_are_valid,
         open_configured_connection, operational_tenant_columns, runtime_secret_fallback_key_path,
-        ForgeStore, GlobalEventWrite, RuntimeSecretKey, RuntimeSecretVaultAccess,
+        FoundryStore, GlobalEventWrite, RuntimeSecretKey, RuntimeSecretVaultAccess,
         RuntimeSecretVaultWrite, EVENT_OBSERVABILITY_RECONCILIATION_BATCH_SIZE,
-        RUNTIME_SECRET_ENVELOPE_PREFIX, STORE_SCHEMA_VERSION,
+        LEGACY_RUNTIME_SECRET_AAD_CONTEXT, LEGACY_RUNTIME_SECRET_ENVELOPE_PREFIX,
+        LEGACY_RUNTIME_SECRET_KEY_FILE_PREFIX, RUNTIME_SECRET_AAD_CONTEXT,
+        RUNTIME_SECRET_ENVELOPE_PREFIX, RUNTIME_SECRET_KEY_FILE_PREFIX, STORE_SCHEMA_VERSION,
     };
     use rusqlite::{params, Connection};
     use std::path::{Path, PathBuf};
@@ -7952,7 +8018,7 @@ mod tests {
     use std::time::Duration;
 
     fn save_test_runtime_secret<'a>(
-        store: &ForgeStore,
+        store: &FoundryStore,
         secret: &'a str,
         tenant_context: &'a serde_json::Value,
     ) {
@@ -7976,7 +8042,7 @@ mod tests {
     }
 
     fn resolve_test_runtime_secret(
-        store: &ForgeStore,
+        store: &FoundryStore,
         tenant_context: &serde_json::Value,
     ) -> anyhow::Result<super::RuntimeSecretVaultResolve> {
         store.resolve_runtime_secret(RuntimeSecretVaultAccess {
@@ -8061,7 +8127,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         let version: i64 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -8069,6 +8135,7 @@ mod tests {
         assert_eq!(version, STORE_SCHEMA_VERSION);
         for table in [
             "squad_definitions",
+            // foundry-brand-allow: legacy-compat
             "forge_missions",
             "mission_agent_instances",
             "mission_handoffs",
@@ -8243,7 +8310,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         let version: i64 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -8318,7 +8385,7 @@ mod tests {
         assert!(same_mission_duplicate.is_err());
         drop(store);
 
-        let reopened = ForgeStore::open(&path).unwrap();
+        let reopened = FoundryStore::open(&path).unwrap();
         let version: i64 = reopened
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -8354,10 +8421,10 @@ mod tests {
     #[test]
     fn runtime_secret_vault_persists_only_authenticated_envelopes() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("forge.sqlite");
+        let path = temp.path().join("foundry.sqlite");
         let tenant_context = serde_json::json!({});
         let secret = "runtime-secret-value-123456";
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
 
         save_test_runtime_secret(&store, secret, &tenant_context);
 
@@ -8382,12 +8449,111 @@ mod tests {
     }
 
     #[test]
+    fn runtime_secret_vault_reads_0_5_fixture_without_rewrite_and_writes_foundry() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("legacy-0.5.sqlite");
+        let key_path = runtime_secret_fallback_key_path(&path);
+        let tenant_context = serde_json::json!({});
+        let legacy_secret = "legacy-runtime-secret-0.5";
+        let legacy_sha256 = crate::artifact::hex_sha256(legacy_secret.as_bytes());
+        let store = FoundryStore::open(&path).unwrap();
+        save_test_runtime_secret(&store, legacy_secret, &tenant_context);
+
+        let vault_key: String = store
+            .connection
+            .query_row(
+                "SELECT vault_key FROM runtime_secret_vault WHERE vault_reference = 'project.test.default'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let legacy_envelope = store
+            .runtime_secret_cipher
+            .encrypt_with_format(
+                &vault_key,
+                &legacy_sha256,
+                legacy_secret.len(),
+                legacy_secret.as_bytes(),
+                LEGACY_RUNTIME_SECRET_ENVELOPE_PREFIX,
+                LEGACY_RUNTIME_SECRET_AAD_CONTEXT,
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE runtime_secret_vault SET secret_value = ?1 WHERE vault_key = ?2",
+                params![legacy_envelope, vault_key],
+            )
+            .unwrap();
+        drop(store);
+
+        let canonical_key_file = std::fs::read_to_string(&key_path).unwrap();
+        assert!(canonical_key_file.starts_with(RUNTIME_SECRET_KEY_FILE_PREFIX));
+        let legacy_key_file = canonical_key_file.replacen(
+            RUNTIME_SECRET_KEY_FILE_PREFIX,
+            LEGACY_RUNTIME_SECRET_KEY_FILE_PREFIX,
+            1,
+        );
+        std::fs::write(&key_path, legacy_key_file).unwrap();
+
+        let reopened = FoundryStore::open(&path).unwrap();
+        let stored_legacy: String = reopened
+            .connection
+            .query_row(
+                "SELECT secret_value FROM runtime_secret_vault WHERE vault_reference = 'project.test.default'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_legacy, legacy_envelope);
+        assert_eq!(
+            resolve_test_runtime_secret(&reopened, &tenant_context)
+                .unwrap()
+                .secret_value,
+            legacy_secret
+        );
+
+        let foundry_secret = "foundry-runtime-secret-0.6";
+        let foundry_sha256 = crate::artifact::hex_sha256(foundry_secret.as_bytes());
+        reopened
+            .save_runtime_secret(RuntimeSecretVaultWrite {
+                vault_reference: "project.test.foundry",
+                workflow_id: Some("wf-secret-test"),
+                scope: "project",
+                provider: "test",
+                kind: "api_key",
+                classification: "secret",
+                secret_value: foundry_secret,
+                value_sha256: &foundry_sha256,
+                value_len: foundry_secret.len(),
+                source: "test",
+                origin: "storage_test",
+                tenant_context: &tenant_context,
+            })
+            .unwrap();
+        let stored_foundry: String = reopened
+            .connection
+            .query_row(
+                "SELECT secret_value FROM runtime_secret_vault WHERE vault_reference = 'project.test.foundry'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored_foundry.starts_with(RUNTIME_SECRET_ENVELOPE_PREFIX));
+        assert!(!stored_foundry.starts_with(LEGACY_RUNTIME_SECRET_ENVELOPE_PREFIX));
+        assert_ne!(
+            RUNTIME_SECRET_AAD_CONTEXT,
+            LEGACY_RUNTIME_SECRET_AAD_CONTEXT
+        );
+    }
+
+    #[test]
     fn runtime_secret_vault_migrates_legacy_plaintext_without_serializing_it() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("forge.sqlite");
+        let path = temp.path().join("foundry.sqlite");
         let tenant_context = serde_json::json!({});
         let secret = "legacy-runtime-secret-123456";
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         save_test_runtime_secret(&store, secret, &tenant_context);
         drop(store);
 
@@ -8408,7 +8574,7 @@ mod tests {
             .unwrap();
         drop(legacy);
 
-        let migrated = ForgeStore::open(&path).unwrap();
+        let migrated = FoundryStore::open(&path).unwrap();
         let stored: String = migrated
             .connection
             .query_row(
@@ -8430,11 +8596,11 @@ mod tests {
     #[test]
     fn runtime_secret_vault_rotates_from_a_previous_key_on_open() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("forge.sqlite");
+        let path = temp.path().join("foundry.sqlite");
         let key_path = runtime_secret_fallback_key_path(&path);
         let tenant_context = serde_json::json!({});
         let secret = "rotated-runtime-secret-123456";
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         save_test_runtime_secret(&store, secret, &tenant_context);
         drop(store);
 
@@ -8448,7 +8614,7 @@ mod tests {
         )
         .unwrap();
 
-        let rotated = ForgeStore::open(&path).unwrap();
+        let rotated = FoundryStore::open(&path).unwrap();
         let stored: String = rotated
             .connection
             .query_row(
@@ -8470,10 +8636,10 @@ mod tests {
     #[test]
     fn runtime_secret_vault_fails_closed_for_tampered_ciphertext() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("forge.sqlite");
+        let path = temp.path().join("foundry.sqlite");
         let tenant_context = serde_json::json!({});
         let secret = "tamper-detection-secret-123456";
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         save_test_runtime_secret(&store, secret, &tenant_context);
         let mut stored: String = store
             .connection
@@ -8503,32 +8669,32 @@ mod tests {
     #[test]
     fn runtime_secret_vault_fails_closed_when_local_key_is_missing() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("forge.sqlite");
+        let path = temp.path().join("foundry.sqlite");
         let key_path = runtime_secret_fallback_key_path(&path);
         let tenant_context = serde_json::json!({});
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         save_test_runtime_secret(&store, "missing-key-secret-123456", &tenant_context);
         drop(store);
         std::fs::remove_file(key_path).unwrap();
 
-        let error = ForgeStore::open(&path).err().unwrap().to_string();
+        let error = FoundryStore::open(&path).err().unwrap().to_string();
         assert!(error.contains("encryption key is unavailable"));
     }
 
     #[cfg(unix)]
     #[test]
-    fn forge_store_secures_directory_database_sidecars_and_key_material() {
+    fn foundry_store_secures_directory_database_sidecars_and_key_material() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
-        let store_dir = temp.path().join(".forge");
+        let store_dir = temp.path().join(".foundry");
         std::fs::create_dir(&store_dir).unwrap();
         std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
-        let path = store_dir.join("forge.sqlite");
+        let path = store_dir.join("foundry.sqlite");
         std::fs::write(&path, []).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
 
-        let _store = ForgeStore::open(&path).unwrap();
+        let _store = FoundryStore::open(&path).unwrap();
 
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&store_dir), 0o700);
@@ -8542,8 +8708,8 @@ mod tests {
     }
 
     #[test]
-    fn forge_store_open_accepts_sqlite_memory_journal() {
-        let store = ForgeStore::open(":memory:").unwrap();
+    fn foundry_store_open_accepts_sqlite_memory_journal() {
+        let store = FoundryStore::open(":memory:").unwrap();
 
         let mode: String = store
             .connection
@@ -8553,8 +8719,9 @@ mod tests {
     }
 
     #[test]
-    fn forge_store_open_accepts_sqlite_shared_memory_uri() {
-        let store = ForgeStore::open("file:forge_store_memory?mode=memory&cache=shared").unwrap();
+    fn foundry_store_open_accepts_sqlite_shared_memory_uri() {
+        let store =
+            FoundryStore::open("file:foundry_store_memory?mode=memory&cache=shared").unwrap();
 
         let mode: String = store
             .connection
@@ -8576,7 +8743,7 @@ mod tests {
     fn configured_connection_enforces_sqlite_security_pragmas() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("sqlite-security-pragmas.sqlite");
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
 
         let foreign_keys: i64 = store
             .connection
@@ -8595,7 +8762,7 @@ mod tests {
     fn raw_global_event_insert_is_reconciled_from_persistent_queue_on_reopen() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("raw-event-reconciliation.sqlite");
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         assert_eq!(store.store_schema_version().unwrap(), STORE_SCHEMA_VERSION);
         drop(store);
 
@@ -8628,7 +8795,7 @@ mod tests {
         assert_eq!(queued, 1);
         drop(connection);
 
-        let reopened = ForgeStore::open(&path).unwrap();
+        let reopened = FoundryStore::open(&path).unwrap();
         let indexed: i64 = reopened
             .connection
             .query_row(
@@ -8653,7 +8820,7 @@ mod tests {
     fn deleted_observability_index_row_is_reconciled_on_reopen() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("deleted-observability-index.sqlite");
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         let tenant_context = serde_json::json!({
             "organization": {"id": "org-test"},
             "brand": {"id": "brand-test"},
@@ -8692,7 +8859,7 @@ mod tests {
         assert_eq!(queued, 1);
         drop(store);
 
-        let reopened = ForgeStore::open(&path).unwrap();
+        let reopened = FoundryStore::open(&path).unwrap();
         let indexed: i64 = reopened
             .connection
             .query_row(
@@ -8719,7 +8886,7 @@ mod tests {
         let path = temp
             .path()
             .join("atomic-observability-reconciliation.sqlite");
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         store
             .connection
             .execute_batch(
@@ -8787,7 +8954,7 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let reopened = ForgeStore::open(&path).unwrap();
+        let reopened = FoundryStore::open(&path).unwrap();
         let global_events: i64 = reopened
             .connection
             .query_row(
@@ -8823,7 +8990,7 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("concurrent-observability-openers.sqlite");
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         store
             .connection
             .execute_batch(
@@ -8911,7 +9078,7 @@ mod tests {
             let worker_path = path.clone();
             handles.push(thread::spawn(move || {
                 worker_barrier.wait();
-                ForgeStore::open(worker_path).map(drop)
+                FoundryStore::open(worker_path).map(drop)
             }));
         }
         barrier.wait();
@@ -8962,7 +9129,7 @@ mod tests {
         let path = temp
             .path()
             .join("bounded-observability-reconciliation.sqlite");
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         store
             .with_transaction(|| {
                 for index in 0..event_count {
@@ -8990,7 +9157,7 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let reopened = ForgeStore::open(&path).unwrap();
+        let reopened = FoundryStore::open(&path).unwrap();
         let indexed: usize = reopened
             .connection
             .query_row(
@@ -9011,7 +9178,7 @@ mod tests {
         assert_eq!(queued, EXTRA_EVENTS);
         drop(reopened);
 
-        let fully_reconciled = ForgeStore::open(&path).unwrap();
+        let fully_reconciled = FoundryStore::open(&path).unwrap();
         let indexed: usize = fully_reconciled
             .connection
             .query_row(
@@ -9039,7 +9206,7 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("bounded-observability-migration.sqlite");
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         store
             .connection
             .execute_batch(
@@ -9086,7 +9253,7 @@ mod tests {
         assert_eq!(queued, 0);
         drop(store);
 
-        let reopened = ForgeStore::open(&path).unwrap();
+        let reopened = FoundryStore::open(&path).unwrap();
         let indexed: usize = reopened
             .connection
             .query_row(
@@ -9117,7 +9284,7 @@ mod tests {
         );
         drop(reopened);
 
-        let fully_reconciled = ForgeStore::open(&path).unwrap();
+        let fully_reconciled = FoundryStore::open(&path).unwrap();
         let indexed: usize = fully_reconciled
             .connection
             .query_row(
@@ -9142,7 +9309,7 @@ mod tests {
     fn missing_observability_trigger_is_recreated_and_gap_is_reconciled() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("missing-observability-trigger.sqlite");
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         store
             .connection
             .execute_batch("DROP TRIGGER trg_global_events_observability_queue")
@@ -9182,7 +9349,7 @@ mod tests {
         assert_eq!(queued, 0);
         drop(store);
 
-        let reopened = ForgeStore::open(&path).unwrap();
+        let reopened = FoundryStore::open(&path).unwrap();
         assert_eq!(
             event_observability_trigger_count(&reopened.connection).unwrap(),
             2
@@ -9211,7 +9378,7 @@ mod tests {
     fn malformed_observability_trigger_is_replaced_and_gap_is_reconciled() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("malformed-observability-trigger.sqlite");
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         assert!(event_observability_triggers_are_valid(&store.connection).unwrap());
         store
             .connection
@@ -9253,7 +9420,7 @@ mod tests {
         let global_event_id = store.connection.last_insert_rowid();
         drop(store);
 
-        let reopened = ForgeStore::open(&path).unwrap();
+        let reopened = FoundryStore::open(&path).unwrap();
         assert!(event_observability_triggers_are_valid(&reopened.connection).unwrap());
         let indexed: i64 = reopened
             .connection
@@ -9279,7 +9446,7 @@ mod tests {
     fn reopen_with_empty_observability_queue_does_not_rewrite_index() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("empty-observability-queue.sqlite");
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         let tenant_context = serde_json::json!({
             "organization": {"id": "org-test"},
             "brand": {"id": "brand-test"},
@@ -9323,7 +9490,7 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let reopened = ForgeStore::open(&path).unwrap();
+        let reopened = FoundryStore::open(&path).unwrap();
         let indexed: i64 = reopened
             .connection
             .query_row(
@@ -9339,7 +9506,7 @@ mod tests {
     fn orphaned_operational_tenant_rows_are_repaired_once_then_reopen_read_only() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("orphaned-operational-tenant.sqlite");
-        let store = ForgeStore::open(&path).unwrap();
+        let store = FoundryStore::open(&path).unwrap();
         store
             .connection
             .execute_batch(
@@ -9366,7 +9533,7 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let repaired = ForgeStore::open(&path).unwrap();
+        let repaired = FoundryStore::open(&path).unwrap();
         let default_tenant = operational_tenant_columns(None);
         for table in ["runs", "task_leases", "task_checkpoints"] {
             let tenant = repaired
@@ -9406,7 +9573,7 @@ mod tests {
         let worker_path = path.clone();
         let handle = thread::spawn(move || {
             sender
-                .send(ForgeStore::open(worker_path).map(|_| ()))
+                .send(FoundryStore::open(worker_path).map(|_| ()))
                 .unwrap();
         });
         let reopened = match receiver.recv_timeout(Duration::from_secs(1)) {

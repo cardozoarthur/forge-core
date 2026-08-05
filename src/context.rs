@@ -14,39 +14,40 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-pub(crate) const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v30";
-const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v2";
-const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "forge.context.routing_contract.v1";
-const ROUTING_REPAIR_SCHEMA_VERSION: &str = "forge.context.routing_repair.v1";
-const BUDGET_PLAN_SCHEMA_VERSION: &str = "forge.context.budget_plan.v1";
-const MINIMUM_CORRECT_SET_SCHEMA_VERSION: &str = "forge.context.minimum_correct_set.v1";
-const PERSONA_PROFILE_SCHEMA_VERSION: &str = "forge.context.persona_profile.v1";
-const PERSONA_CONTRACT_SCHEMA_VERSION: &str = "forge.context.persona_contract.v2";
-const CONTEXT_DELTA_SCHEMA_VERSION: &str = "forge.context.delta.v1";
-const ROUTING_ECONOMY_SCHEMA_VERSION: &str = "forge.context.routing_economy.v1";
-const PROMPT_PACKET_SCHEMA_VERSION: &str = "forge.context.prompt_packet.v2";
-const EXECUTOR_PROMPT_PACKET_VERSION: &str = "forge.executor.prompt_packet.v2";
-const CONTEXT_SECRET_GUARDRAIL_SCHEMA_VERSION: &str = "forge.context.secret_guardrail.v1";
+pub(crate) const CONTEXT_SCHEMA_VERSION: &str = "foundry.context.v30";
+const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "foundry.context.routing_fingerprint.v2";
+const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "foundry.context.routing_contract.v1";
+const ROUTING_REPAIR_SCHEMA_VERSION: &str = "foundry.context.routing_repair.v1";
+const BUDGET_PLAN_SCHEMA_VERSION: &str = "foundry.context.budget_plan.v1";
+const MINIMUM_CORRECT_SET_SCHEMA_VERSION: &str = "foundry.context.minimum_correct_set.v1";
+const PERSONA_PROFILE_SCHEMA_VERSION: &str = "foundry.context.persona_profile.v1";
+const PERSONA_CONTRACT_SCHEMA_VERSION: &str = "foundry.context.persona_contract.v2";
+const CONTEXT_DELTA_SCHEMA_VERSION: &str = "foundry.context.delta.v1";
+const ROUTING_ECONOMY_SCHEMA_VERSION: &str = "foundry.context.routing_economy.v1";
+const PROMPT_PACKET_SCHEMA_VERSION: &str = "foundry.context.prompt_packet.v2";
+const EXECUTOR_PROMPT_PACKET_VERSION: &str = "foundry.executor.prompt_packet.v2";
+const CONTEXT_SECRET_GUARDRAIL_SCHEMA_VERSION: &str = "foundry.context.secret_guardrail.v1";
 const ORGANIZATION_PROMPT_CONTEXT_SCHEMA_VERSION: &str =
-    "forge.context.organization_prompt_context.v1";
-const PERSONALITY_DECISION_SCHEMA_VERSION: &str = "forge.context.personality_decision.v1";
-const COMPANY_WORK_DECISION_SCHEMA_VERSION: &str = "forge.context.company_work_decision.v1";
-const CONTEXT_REPLAY_MANIFEST_SCHEMA_VERSION: &str = "forge.context.replay_manifest.v1";
-const CONTEXT_SELECTION_RECEIPT_SCHEMA_VERSION: &str = "forge.context.selection_receipt.v1";
-const EXECUTION_POLICY_DECISION_SCHEMA_VERSION: &str = "forge.context.execution_policy_decision.v1";
-const CONTEXT_SELECTOR_VERSION: &str = "forge.context.selector.v2";
-const EXECUTOR_PROFILE_SCHEMA_VERSION: &str = "forge.context.executor_profile.v1";
-const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v1";
-const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "forge.context_routing_quality.v1";
+    "foundry.context.organization_prompt_context.v1";
+const PERSONALITY_DECISION_SCHEMA_VERSION: &str = "foundry.context.personality_decision.v1";
+const COMPANY_WORK_DECISION_SCHEMA_VERSION: &str = "foundry.context.company_work_decision.v1";
+const CONTEXT_REPLAY_MANIFEST_SCHEMA_VERSION: &str = "foundry.context.replay_manifest.v1";
+const CONTEXT_SELECTION_RECEIPT_SCHEMA_VERSION: &str = "foundry.context.selection_receipt.v1";
+const EXECUTION_POLICY_DECISION_SCHEMA_VERSION: &str =
+    "foundry.context.execution_policy_decision.v1";
+const CONTEXT_SELECTOR_VERSION: &str = "foundry.context.selector.v2";
+const EXECUTOR_PROFILE_SCHEMA_VERSION: &str = "foundry.context.executor_profile.v1";
+const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "foundry.inspect_context_action.v1";
+const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "foundry.context_routing_quality.v1";
 const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
-    "forge.context_routing_quality_summary.v1";
-const CONTEXT_HANDOFF_SUMMARY_SCHEMA_VERSION: &str = "forge.context_handoff_summary.v1";
-const CONTINUATION_PLAN_SCHEMA_VERSION: &str = "forge.context.continuation_plan.v1";
-const CONTEXT_MEMORY_POLICY_SCHEMA_VERSION: &str = "forge.context.memory_policy.v1";
-const CONTEXT_DEFERRED_DISCOVERY_SCHEMA_VERSION: &str = "forge.context.deferred_discovery.v1";
-const CONTEXT_ROUTER_SCHEMA_VERSION: &str = "forge.context.router.v1";
-const CONTEXT_COMPACT_OMISSION_SCHEMA_VERSION: &str = "forge.context.compact_omissions.v1";
-pub(crate) const CONTEXT_COMPACT_VIEW_SCHEMA_VERSION: &str = "forge.context.compact.v2";
+    "foundry.context_routing_quality_summary.v1";
+const CONTEXT_HANDOFF_SUMMARY_SCHEMA_VERSION: &str = "foundry.context_handoff_summary.v1";
+const CONTINUATION_PLAN_SCHEMA_VERSION: &str = "foundry.context.continuation_plan.v1";
+const CONTEXT_MEMORY_POLICY_SCHEMA_VERSION: &str = "foundry.context.memory_policy.v1";
+const CONTEXT_DEFERRED_DISCOVERY_SCHEMA_VERSION: &str = "foundry.context.deferred_discovery.v1";
+const CONTEXT_ROUTER_SCHEMA_VERSION: &str = "foundry.context.router.v1";
+const CONTEXT_COMPACT_OMISSION_SCHEMA_VERSION: &str = "foundry.context.compact_omissions.v1";
+pub(crate) const CONTEXT_COMPACT_VIEW_SCHEMA_VERSION: &str = "foundry.context.compact.v2";
 pub(crate) const COMPACT_PREDECESSOR_TASK_LIMIT: usize = 4;
 pub(crate) const COMPACT_PREDECESSOR_VALIDATION_RULE_LIMIT: usize = 2;
 pub(crate) const COMPACT_EXPAND_COMMAND_LIMIT: usize = 4;
@@ -1500,7 +1501,7 @@ pub fn build_compact_context_view_with_predecessor_plans(
 
     if package.routing_repair.action == "increase_context_budget" && predecessor_frontier.is_empty()
     {
-        let mut command = forge_store_command(store_path);
+        let mut command = foundry_store_command(store_path);
         command.extend([
             "context".to_string(),
             "--workflow".to_string(),
@@ -1996,7 +1997,7 @@ fn build_compact_expand_commands(
     secret_redaction_count: &mut usize,
 ) -> Vec<Vec<String>> {
     let mut commands = Vec::new();
-    let mut full_context = forge_store_command(store_path);
+    let mut full_context = foundry_store_command(store_path);
     full_context.extend([
         "context".to_string(),
         "--workflow".to_string(),
@@ -2023,7 +2024,7 @@ fn build_compact_expand_commands(
             .any(|deferred| deferred == source_id)
     };
     if source_deferred("workflow_registry_search") {
-        let mut command = forge_store_command(store_path);
+        let mut command = foundry_store_command(store_path);
         command.extend([
             "list".to_string(),
             "--output".to_string(),
@@ -2045,7 +2046,7 @@ fn build_compact_expand_commands(
             })
             .unwrap_or(package.task_id.as_str());
         let task_query = sanitize_compact_human_text(task_query, secret_redaction_count);
-        let mut command = forge_store_command(store_path);
+        let mut command = foundry_store_command(store_path);
         command.extend([
             "memory".to_string(),
             "search".to_string(),
@@ -2059,7 +2060,7 @@ fn build_compact_expand_commands(
         commands.push(command);
     }
     if source_deferred("mcp_servers_and_tools") {
-        let mut command = forge_store_command(store_path);
+        let mut command = foundry_store_command(store_path);
         command.extend([
             "mcp".to_string(),
             "tools".to_string(),
@@ -2184,9 +2185,9 @@ fn finalize_compact_envelope_economy(mut view: ContextCompactView) -> ContextCom
     view
 }
 
-fn forge_store_command(store_path: &Path) -> Vec<String> {
+fn foundry_store_command(store_path: &Path) -> Vec<String> {
     vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "--store".to_string(),
         store_path.display().to_string(),
     ]
@@ -2208,7 +2209,7 @@ fn task_handoff_command(
     budget: usize,
     project_root: Option<&Path>,
 ) -> Vec<String> {
-    let mut command = forge_store_command(store_path);
+    let mut command = foundry_store_command(store_path);
     command.extend([
         "task".to_string(),
         "handoff".to_string(),
@@ -3347,25 +3348,25 @@ fn build_deferred_discovery_plan(
             load_state: String::new(),
             priority: 70,
             trigger: "node_requires_governed_project_memory".to_string(),
-            reason: "Project memory is searched explicitly through Forge memory policy rather than being inlined by default.".to_string(),
+            reason: "Project memory is searched explicitly through Foundry memory policy rather than being inlined by default.".to_string(),
         },
     );
 
     let mut expand_commands = vec![
-        "forge context --workflow {workflow_id} --task {task_id} --budget {budget} --view compact --output json"
+        "foundry context --workflow {workflow_id} --task {task_id} --budget {budget} --view compact --output json"
             .to_string(),
     ];
     if discovery_source_selected(&selected_sources, "workflow_registry_search") {
-        expand_commands.push("forge list --output json".to_string());
+        expand_commands.push("foundry list --output json".to_string());
     }
     if discovery_source_selected(&selected_sources, "project_memory_search") {
         expand_commands.push(
-            "forge memory search --workflow {workflow_id} --query \"{node_query}\" --output json"
+            "foundry memory search --workflow {workflow_id} --query \"{node_query}\" --output json"
                 .to_string(),
         );
     }
     if discovery_source_selected(&selected_sources, "mcp_servers_and_tools") {
-        expand_commands.push("forge mcp tools --output json".to_string());
+        expand_commands.push("foundry mcp tools --output json".to_string());
     }
 
     let current_node = ContextDeferredDiscoveryNode {
@@ -3379,7 +3380,7 @@ fn build_deferred_discovery_plan(
 
     let mut plan = ContextDeferredDiscoveryPlan {
         schema_version: CONTEXT_DEFERRED_DISCOVERY_SCHEMA_VERSION.to_string(),
-        state_owner: "forge_workflow_runtime".to_string(),
+        state_owner: "foundry_workflow_runtime".to_string(),
         routing_strategy: "node_scoped_lazy_discovery".to_string(),
         routing_model: "litellm_inspired_policy_router_for_context_sources".to_string(),
         global_discovery_allowed: false,
@@ -3526,15 +3527,15 @@ fn build_context_router_plan(
         not_executed: true,
         ordered_fallbacks: vec![
             "selected_route_group".to_string(),
-            "forge_context_expansion_command".to_string(),
+            "foundry_context_expansion_command".to_string(),
             "governed_memory_search".to_string(),
             "operator_authorized_global_discovery".to_string(),
         ],
-        reason: "If a selected node lacks required context, Forge plans an explicit expansion or governed search before any broad discovery.".to_string(),
+        reason: "If a selected node lacks required context, Foundry plans an explicit expansion or governed search before any broad discovery.".to_string(),
     };
     let mut plan = ContextRouterPlan {
         schema_version: CONTEXT_ROUTER_SCHEMA_VERSION.to_string(),
-        state_owner: "forge_workflow_runtime".to_string(),
+        state_owner: "foundry_workflow_runtime".to_string(),
         routing_strategy: "node_requirement_tag_routing_with_budget_fallbacks".to_string(),
         routing_model: "litellm_inspired_context_router".to_string(),
         request_scope: "current_workflow_node".to_string(),
@@ -4267,7 +4268,7 @@ fn build_personality_decision(
         "brand defaults selected because the node has no explicit persona"
     };
     let mut style_sources = BTreeSet::from([
-        "forge_operating_context".to_string(),
+        "foundry_operating_context".to_string(),
         "organization_brand_identity".to_string(),
     ]);
     if let Some(persona) = persona {
@@ -4284,7 +4285,7 @@ fn build_personality_decision(
 
     ContextPersonalityDecision {
         schema_version: PERSONALITY_DECISION_SCHEMA_VERSION.to_string(),
-        decision_owner: "forge_personality_router".to_string(),
+        decision_owner: "foundry_personality_router".to_string(),
         routing_scope: context.personality_scope.clone(),
         organization_id: context.organization.id.clone(),
         brand_id: context.brand.id.clone(),
@@ -4312,7 +4313,7 @@ fn build_company_work_decision(
 ) -> ContextCompanyWorkDecision {
     ContextCompanyWorkDecision {
         schema_version: COMPANY_WORK_DECISION_SCHEMA_VERSION.to_string(),
-        decision_owner: "forge_company_work_router".to_string(),
+        decision_owner: "foundry_company_work_router".to_string(),
         organization_id: context.organization.id.clone(),
         brand_id: context.brand.id.clone(),
         product_id: context.product.id.clone(),
@@ -4346,7 +4347,7 @@ fn build_company_work_decision(
 
 fn build_replay_manifest(input: ReplayManifestInput<'_>) -> Result<ContextReplayManifest> {
     let replay_command = ContextReplayCommand {
-        binary: "forge".to_string(),
+        binary: "foundry".to_string(),
         args: vec![
             "context".to_string(),
             "--workflow".to_string(),
@@ -4361,7 +4362,7 @@ fn build_replay_manifest(input: ReplayManifestInput<'_>) -> Result<ContextReplay
             "json".to_string(),
         ],
         requires_store_path: true,
-        reason: "replay this context route against the same Forge store and workflow revision"
+        reason: "replay this context route against the same Foundry store and workflow revision"
             .to_string(),
     };
     let shard_refs = input
@@ -4611,14 +4612,14 @@ fn execution_policy_reuse_key(policy: &ExecutionPolicySpec) -> Option<String> {
 
 fn prompt_packet_instruction_sources(persona: Option<&PersonaRoutingSpec>) -> Vec<String> {
     let mut sources = BTreeSet::from([
-        "forge_context_router".to_string(),
-        "forge_executor_policy".to_string(),
-        "forge_operating_context".to_string(),
-        "forge_brand_identity".to_string(),
-        "forge_design_system".to_string(),
-        "forge_operating_policy".to_string(),
-        "forge_personality_router".to_string(),
-        "forge_company_work_router".to_string(),
+        "foundry_context_router".to_string(),
+        "foundry_executor_policy".to_string(),
+        "foundry_operating_context".to_string(),
+        "foundry_brand_identity".to_string(),
+        "foundry_design_system".to_string(),
+        "foundry_operating_policy".to_string(),
+        "foundry_personality_router".to_string(),
+        "foundry_company_work_router".to_string(),
     ]);
 
     if let Some(persona) = persona {
@@ -5761,7 +5762,7 @@ fn persona_profile_id(mode: &str) -> String {
 }
 
 fn persona_routing_rationale(_persona: &PersonaRoutingSpec) -> String {
-    "node-scoped human-facing artifact uses explicit Codex developer/personality instructions and Paperclip soul, voice, tone and persona inputs while Forge keeps goals, validation and state authority".to_string()
+    "node-scoped human-facing artifact uses explicit Codex developer/personality instructions and Paperclip soul, voice, tone and persona inputs while Foundry keeps goals, validation and state authority".to_string()
 }
 
 fn persona_source_model_summary(model_id: &str) -> ContextPersonaSourceModelSummary {
@@ -5774,7 +5775,7 @@ fn persona_source_model_summary(model_id: &str) -> ContextPersonaSourceModelSumm
         "paperclip_soul_voice_tone_persona" => ContextPersonaSourceModelSummary {
             model_id: model_id.to_string(),
             source_kind: "soul_voice_tone_persona".to_string(),
-            summary: "Paperclip soul, voice, tone and persona inputs shape human-facing artifact style without changing Forge state authority".to_string(),
+            summary: "Paperclip soul, voice, tone and persona inputs shape human-facing artifact style without changing Foundry state authority".to_string(),
         },
         _ => ContextPersonaSourceModelSummary {
             model_id: model_id.to_string(),
@@ -5952,7 +5953,7 @@ fn build_context_memory_policy(
     };
     let default_shareability = default_memory_shareability(&allowed_scopes);
     let mut default_search_command = vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "memory".to_string(),
         "search".to_string(),
         "--query".to_string(),
@@ -5986,7 +5987,7 @@ fn build_context_memory_policy(
             "workflow:{} task:{} operating_context",
             workflow.id, task.id
         ),
-        memory_source: "forge_memory_router".to_string(),
+        memory_source: "foundry_memory_router".to_string(),
         memory_scope: context.memory_scope.clone(),
         memory_level,
         allowed_scopes,
@@ -6014,7 +6015,7 @@ fn build_context_memory_policy(
         requires_explicit_search: true,
         inline_memory_allowed: false,
         default_search_command,
-        mcp_tool: "forge.memory.search".to_string(),
+        mcp_tool: "foundry.memory.search".to_string(),
         promotion_policy:
             "processing memory must be explicitly classified before promotion to project, organization or global memory"
                 .to_string(),

@@ -9,7 +9,7 @@ use crate::mission_executor::{
     verified_mission_execution_claims, MissionExecutionClaimKind, MissionExecutionReceipt,
 };
 use crate::storage::{
-    open_configured_connection, replace_workflow_tenant_projection_on_connection, ForgeStore,
+    open_configured_connection, replace_workflow_tenant_projection_on_connection, FoundryStore,
 };
 use crate::validation::validate_workflow;
 use crate::worktree::{register_worktree, WorktreeRegisterOptions};
@@ -24,11 +24,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use uuid::Uuid;
 
-pub const SQUAD_SCHEMA_VERSION: &str = "forge.squad.v1";
-pub const MISSION_SCHEMA_VERSION: &str = "forge.mission.v1";
-pub const MISSION_SIMULATION_SCHEMA_VERSION: &str = "forge.mission.simulation.v1";
-const MISSION_EVENT_SCHEMA_VERSION: &str = "forge.mission.event.v1";
-const AGENT_HANDOFF_SCHEMA_VERSION: &str = "forge.agent_handoff.v1";
+const LEGACY_MISSION_SIGNATURE_PREFIX: &str = "forge-original:"; // foundry-brand-allow: legacy-compat
+#[cfg(test)]
+const LEGACY_MISSION_AUTHORITY: &str = "forge"; // foundry-brand-allow: legacy-compat
+#[cfg(test)]
+const LEGACY_MISSION_CONTROL_PLANE: &str = "forge-control-plane"; // foundry-brand-allow: legacy-compat
+#[cfg(test)]
+const LEGACY_MISSION_ORIGIN: &str = "forge-original"; // foundry-brand-allow: legacy-compat
+
+pub const SQUAD_SCHEMA_VERSION: &str = "foundry.squad.v1";
+pub const MISSION_SCHEMA_VERSION: &str = "foundry.mission.v1";
+pub const MISSION_SIMULATION_SCHEMA_VERSION: &str = "foundry.mission.simulation.v1";
+const MISSION_EVENT_SCHEMA_VERSION: &str = "foundry.mission.event.v1";
+const AGENT_HANDOFF_SCHEMA_VERSION: &str = "foundry.agent_handoff.v1";
 const MISSION_DRIVE_LEASE_SECONDS: i64 = 300;
 const MISSION_INBOX_LEASE_SECONDS: i64 = 300;
 const HANDOFF_PHASE_QUEUED: &str = "queued";
@@ -332,6 +340,38 @@ pub struct SquadDefinition {
     pub gates: Vec<QualityGateDefinition>,
     #[serde(default)]
     pub recipes: Vec<MissionRecipe>,
+}
+
+fn canonical_mission_authority(value: &str) -> std::borrow::Cow<'_, str> {
+    crate::brand::canonical_authority(value)
+}
+
+fn normalize_mission_agent_compatibility(agent: &mut AgentDefinition) {
+    agent.runtime = canonical_mission_authority(&agent.runtime).to_string();
+    agent.provider = canonical_mission_authority(&agent.provider).to_string();
+    for tool in &mut agent.tools {
+        *tool = canonical_mission_authority(tool).to_string();
+    }
+}
+
+fn normalize_squad_compatibility(squad: &mut SquadDefinition) {
+    squad.schema_version = crate::brand::canonical_identifier(&squad.schema_version).into_owned();
+    normalize_mission_agent_compatibility(&mut squad.orchestrator);
+    for member in &mut squad.roster {
+        normalize_mission_agent_compatibility(&mut member.agent);
+    }
+    for tool in &mut squad.dependencies.tools {
+        *tool = canonical_mission_authority(tool).to_string();
+    }
+    for server in &mut squad.dependencies.mcp_servers {
+        *server = canonical_mission_authority(server).to_string();
+    }
+    squad.distribution.origin = canonical_mission_authority(&squad.distribution.origin).to_string();
+    if let Some(signature) = squad.distribution.signature.as_mut() {
+        if let Some(suffix) = signature.strip_prefix(LEGACY_MISSION_SIGNATURE_PREFIX) {
+            *signature = format!("foundry-original:{suffix}");
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -662,8 +702,8 @@ fn restricted_orchestrator(id: &str, role: &str) -> AgentDefinition {
     AgentDefinition {
         id: id.to_string(),
         role: role.to_string(),
-        runtime: "forge-control-plane".to_string(),
-        provider: "forge".to_string(),
+        runtime: "foundry-control-plane".to_string(),
+        provider: "foundry".to_string(),
         model: "policy-only".to_string(),
         effort: "adaptive".to_string(),
         skills: vec![
@@ -699,7 +739,7 @@ fn restricted_orchestrator(id: &str, role: &str) -> AgentDefinition {
         contract: AgentContract {
             input: "mission_objective.v1".to_string(),
             output: "mission_consolidation.v1".to_string(),
-            handoff: "forge.agent_handoff.v1".to_string(),
+            handoff: "foundry.agent_handoff.v1".to_string(),
         },
         limits: AgentLimits {
             max_files_changed: 0,
@@ -734,7 +774,7 @@ fn worker_agent(id: &str, role: &str, effort: &str, skills: &[&str]) -> AgentDef
         contract: AgentContract {
             input: "implementation_task.v1".to_string(),
             output: "structured_agent_delivery.v1".to_string(),
-            handoff: "forge.agent_handoff.v1".to_string(),
+            handoff: "foundry.agent_handoff.v1".to_string(),
         },
         limits: AgentLimits {
             max_files_changed: 20,
@@ -1368,14 +1408,14 @@ fn original_squad(spec: OriginalSquadSpec) -> SquadDefinition {
         dependencies: SquadDependencySet {
             skills: dependency_skills,
             addons: Vec::new(),
-            tools: vec!["forge".to_string()],
-            mcp_servers: vec!["forge".to_string()],
+            tools: vec!["foundry".to_string()],
+            mcp_servers: vec!["foundry".to_string()],
         },
         distribution: SquadDistribution {
-            origin: "forge-original".to_string(),
+            origin: "foundry-original".to_string(),
             channel: "stable".to_string(),
             signed: true,
-            signature: Some(format!("forge-original:{}:{}", spec.id, spec.version)),
+            signature: Some(format!("foundry-original:{}:{}", spec.id, spec.version)),
             trusted: true,
             auto_update: false,
         },
@@ -1576,13 +1616,13 @@ fn software_factory_squad() -> SquadDefinition {
             ],
             addons: Vec::new(),
             tools: vec!["cargo".to_string(), "git".to_string()],
-            mcp_servers: vec!["forge".to_string()],
+            mcp_servers: vec!["foundry".to_string()],
         },
         distribution: SquadDistribution {
-            origin: "forge-original".to_string(),
+            origin: "foundry-original".to_string(),
             channel: "stable".to_string(),
             signed: true,
-            signature: Some("forge-original:software-factory:1.0.0".to_string()),
+            signature: Some("foundry-original:software-factory:1.0.0".to_string()),
             trusted: true,
             auto_update: false,
         },
@@ -1645,7 +1685,7 @@ pub fn builtin_squad_catalog() -> SquadCatalogReport {
     let mut squads = vec![software_factory_squad()];
     squads.extend(original_squad_specs().into_iter().map(original_squad));
     SquadCatalogReport {
-        schema_version: "forge.squad.catalog.v1".to_string(),
+        schema_version: "foundry.squad.catalog.v1".to_string(),
         status: "ready".to_string(),
         squads,
     }
@@ -1659,7 +1699,7 @@ fn squad_digest(squad: &SquadDefinition) -> Result<String> {
 pub fn validate_squad_definition(squad: &SquadDefinition) -> Result<SquadValidationReport> {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
-    if squad.schema_version != SQUAD_SCHEMA_VERSION {
+    if !crate::brand::identifier_matches(&squad.schema_version, SQUAD_SCHEMA_VERSION) {
         errors.push(format!(
             "unsupported squad schema {}; expected {SQUAD_SCHEMA_VERSION}",
             squad.schema_version
@@ -1705,12 +1745,13 @@ pub fn validate_squad_definition(squad: &SquadDefinition) -> Result<SquadValidat
     {
         errors.push("orchestrator cannot receive filesystem or shell allowlists".to_string());
     }
-    if orchestrator.runtime != "forge-control-plane"
-        || orchestrator.provider != "forge"
+    if canonical_mission_authority(&orchestrator.runtime) != "foundry-control-plane"
+        || canonical_mission_authority(&orchestrator.provider) != "foundry"
         || orchestrator.model != "policy-only"
     {
-        errors
-            .push("orchestrator must use the non-executing Forge policy control plane".to_string());
+        errors.push(
+            "orchestrator must use the non-executing Foundry policy control plane".to_string(),
+        );
     }
     if orchestrator.permissions.network != "deny" || orchestrator.limits.max_files_changed != 0 {
         errors.push(
@@ -1833,7 +1874,7 @@ pub fn validate_squad_definition(squad: &SquadDefinition) -> Result<SquadValidat
             errors.push(format!("gate {} must require evidence", gate.id));
         }
     }
-    if squad.distribution.origin != "forge-original"
+    if canonical_mission_authority(&squad.distribution.origin) != "foundry-original"
         && (!squad.distribution.signed
             || squad.distribution.signature.is_none()
             || !squad.distribution.trusted)
@@ -1849,7 +1890,7 @@ pub fn validate_squad_definition(squad: &SquadDefinition) -> Result<SquadValidat
     }
     let valid = errors.is_empty();
     Ok(SquadValidationReport {
-        schema_version: "forge.squad.validation.v1".to_string(),
+        schema_version: "foundry.squad.validation.v1".to_string(),
         status: if valid { "valid" } else { "invalid" }.to_string(),
         valid,
         squad_id: squad.id.clone(),
@@ -1860,7 +1901,10 @@ pub fn validate_squad_definition(squad: &SquadDefinition) -> Result<SquadValidat
     })
 }
 
-pub fn install_squad(store: &ForgeStore, squad: &SquadDefinition) -> Result<SquadInstallReport> {
+pub fn install_squad(store: &FoundryStore, squad: &SquadDefinition) -> Result<SquadInstallReport> {
+    let mut squad = squad.clone();
+    normalize_squad_compatibility(&mut squad);
+    let squad = &squad;
     let validation = validate_squad_definition(squad)?;
     if !validation.valid {
         bail!(
@@ -1871,18 +1915,30 @@ pub fn install_squad(store: &ForgeStore, squad: &SquadDefinition) -> Result<Squa
         );
     }
     let connection = open_configured_connection(store.path())?;
-    let existing: Option<String> = connection
+    let existing: Option<(String, String)> = connection
         .query_row(
-            "SELECT composition_sha256 FROM squad_definitions WHERE id = ?1 AND version = ?2",
+            "SELECT composition_sha256, data_json FROM squad_definitions WHERE id = ?1 AND version = ?2",
             params![squad.id, squad.version],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
     let status = match existing {
-        Some(existing_digest) if existing_digest == validation.composition_sha256 => {
+        Some((existing_digest, _)) if existing_digest == validation.composition_sha256 => {
             "already_installed"
         }
-        Some(_) => {
+        Some((_, existing_json))
+            if serde_json::from_str::<SquadDefinition>(&existing_json)
+                .ok()
+                .and_then(|mut existing| {
+                    normalize_squad_compatibility(&mut existing);
+                    squad_digest(&existing).ok()
+                })
+                .as_deref()
+                == Some(validation.composition_sha256.as_str()) =>
+        {
+            "already_installed"
+        }
+        Some((_, _)) => {
             bail!(
                 "squad {}@{} is immutable and already installed with different bytes; install a new version",
                 squad.id,
@@ -1909,7 +1965,7 @@ pub fn install_squad(store: &ForgeStore, squad: &SquadDefinition) -> Result<Squa
         }
     };
     Ok(SquadInstallReport {
-        schema_version: "forge.squad.install.v1".to_string(),
+        schema_version: "foundry.squad.install.v1".to_string(),
         status: status.to_string(),
         squad_id: squad.id.clone(),
         squad_version: squad.version.clone(),
@@ -1918,7 +1974,7 @@ pub fn install_squad(store: &ForgeStore, squad: &SquadDefinition) -> Result<Squa
     })
 }
 
-pub fn install_builtin_squads(store: &ForgeStore) -> Result<Vec<SquadInstallReport>> {
+pub fn install_builtin_squads(store: &FoundryStore) -> Result<Vec<SquadInstallReport>> {
     builtin_squad_catalog()
         .squads
         .iter()
@@ -1926,7 +1982,11 @@ pub fn install_builtin_squads(store: &ForgeStore) -> Result<Vec<SquadInstallRepo
         .collect()
 }
 
-pub fn load_squad(store: &ForgeStore, id: &str, version: Option<&str>) -> Result<SquadDefinition> {
+pub fn load_squad(
+    store: &FoundryStore,
+    id: &str,
+    version: Option<&str>,
+) -> Result<SquadDefinition> {
     let connection = open_configured_connection(store.path())?;
     let data_json: Option<String> = if let Some(version) = version {
         connection
@@ -1957,27 +2017,31 @@ pub fn load_squad(store: &ForgeStore, id: &str, version: Option<&str>) -> Result
             version.map(|value| format!("@{value}")).unwrap_or_default()
         )
     })?;
-    Ok(serde_json::from_str(&data_json)?)
+    let mut squad = serde_json::from_str(&data_json)?;
+    normalize_squad_compatibility(&mut squad);
+    Ok(squad)
 }
 
-pub fn list_installed_squads(store: &ForgeStore) -> Result<SquadCatalogReport> {
+pub fn list_installed_squads(store: &FoundryStore) -> Result<SquadCatalogReport> {
     let connection = open_configured_connection(store.path())?;
     let mut statement = connection
         .prepare("SELECT data_json FROM squad_definitions ORDER BY id ASC, installed_at DESC")?;
     let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
     let mut squads = Vec::new();
     for row in rows {
-        squads.push(serde_json::from_str(&row?)?);
+        let mut squad = serde_json::from_str(&row?)?;
+        normalize_squad_compatibility(&mut squad);
+        squads.push(squad);
     }
     Ok(SquadCatalogReport {
-        schema_version: "forge.squad.catalog.v1".to_string(),
+        schema_version: "foundry.squad.catalog.v1".to_string(),
         status: "ready".to_string(),
         squads,
     })
 }
 
 pub fn clone_squad(
-    store: &ForgeStore,
+    store: &FoundryStore,
     source_id: &str,
     source_version: Option<&str>,
     new_id: &str,
@@ -2002,11 +2066,13 @@ pub fn clone_squad(
 pub fn read_squad_manifest(path: &std::path::Path) -> Result<SquadDefinition> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read squad manifest {}", path.display()))?;
-    serde_json::from_str(&contents)
-        .with_context(|| format!("failed to parse squad manifest {}", path.display()))
+    let mut squad = serde_json::from_str(&contents)
+        .with_context(|| format!("failed to parse squad manifest {}", path.display()))?;
+    normalize_squad_compatibility(&mut squad);
+    Ok(squad)
 }
 
-fn ensure_mission_runtime_schema(store: &ForgeStore) -> Result<()> {
+fn ensure_mission_runtime_schema(store: &FoundryStore) -> Result<()> {
     store.with_immediate_transaction(|connection| {
         connection.execute_batch(
             r#"
@@ -2434,6 +2500,7 @@ fn persist_mission_row(connection: &rusqlite::Connection, mission: &MissionRecor
     let data_json = serde_json::to_string(mission)?;
     let current_mission_json: Option<String> = connection
         .query_row(
+            // foundry-brand-allow: legacy-compat
             "SELECT data_json FROM forge_missions WHERE id = ?1",
             [&mission.id],
             |row| row.get(0),
@@ -2444,6 +2511,7 @@ fn persist_mission_row(connection: &rusqlite::Connection, mission: &MissionRecor
         None => {
             connection.execute(
                 r#"
+                -- foundry-brand-allow: legacy-compat
                 INSERT INTO forge_missions
                     (id, workflow_id, squad_id, squad_version, status, data_json, created_at, updated_at)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -2477,6 +2545,7 @@ fn persist_mission_row(connection: &rusqlite::Connection, mission: &MissionRecor
             }
             let changed = connection.execute(
                 r#"
+                -- foundry-brand-allow: legacy-compat
                 UPDATE forge_missions
                 SET status = ?1, data_json = ?2, updated_at = ?3
                 WHERE id = ?4 AND data_json = ?5
@@ -2529,7 +2598,7 @@ fn persist_mission_checkpoint(
     Ok(())
 }
 
-fn save_mission(store: &ForgeStore, mission: &MissionRecord) -> Result<()> {
+fn save_mission(store: &FoundryStore, mission: &MissionRecord) -> Result<()> {
     ensure_mission_runtime_schema(store)?;
     store.with_immediate_transaction(|connection| persist_mission_row(connection, mission))
 }
@@ -2646,7 +2715,7 @@ fn persist_local_mission_event(
 
 #[allow(clippy::too_many_arguments)]
 fn append_correlated_event(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     kind: &str,
     status: &str,
@@ -2680,7 +2749,7 @@ fn append_correlated_event(
 }
 
 fn append_event(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     kind: &str,
     status: &str,
@@ -2711,7 +2780,7 @@ fn mission_transition_allowed(from: &MissionStatus, to: &MissionStatus) -> bool 
 }
 
 fn transition_mission(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     status: MissionStatus,
     kind: &str,
@@ -2742,7 +2811,7 @@ fn transition_mission(
 }
 
 fn start_task(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     task_id: &str,
     actor: &str,
@@ -2787,7 +2856,7 @@ fn start_task(
 }
 
 fn complete_task(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     task_id: &str,
     actor: &str,
@@ -2823,7 +2892,7 @@ fn complete_task(
 }
 
 fn reopen_task_for_repair(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     task_id: &str,
     actor: &str,
@@ -2854,7 +2923,7 @@ fn reopen_task_for_repair(
 }
 
 fn record_gate_result(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     squad: &SquadDefinition,
     gate_id: &str,
@@ -2929,7 +2998,7 @@ fn latest_required_gates_passed(mission: &MissionRecord, squad: &SquadDefinition
 }
 
 fn spawn_agent(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     member: &RosterMember,
     requested_by: &str,
@@ -3029,7 +3098,7 @@ fn spawn_agent(
 }
 
 fn terminate_agent(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     instance_id: &str,
 ) -> Result<()> {
@@ -3068,7 +3137,7 @@ fn terminate_agent(
 
 #[allow(clippy::too_many_arguments)]
 fn enqueue_handoff(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     from_agent: &str,
     to_agent: &str,
@@ -3208,7 +3277,7 @@ fn enqueue_handoff(
 
 #[allow(clippy::too_many_arguments)]
 fn add_handoff(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     from_agent: &str,
     to_agent: &str,
@@ -3255,7 +3324,7 @@ struct MissionHandoffProcessing {
 }
 
 fn load_handoff_processing(
-    store: &ForgeStore,
+    store: &FoundryStore,
     handoff_id: &str,
 ) -> Result<MissionHandoffProcessing> {
     ensure_mission_runtime_schema(store)?;
@@ -3291,7 +3360,7 @@ fn handoff_phase_rank(phase: &str) -> Result<u8> {
 }
 
 fn advance_handoff_processing(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission_id: &str,
     handoff_id: &str,
     phase: &str,
@@ -3346,7 +3415,10 @@ fn advance_handoff_processing(
     load_handoff_processing(store, handoff_id)
 }
 
-fn claim_next_handoff(store: &ForgeStore, mission_id: &str) -> Result<Option<ClaimedMissionInbox>> {
+fn claim_next_handoff(
+    store: &FoundryStore,
+    mission_id: &str,
+) -> Result<Option<ClaimedMissionInbox>> {
     ensure_mission_runtime_schema(store)?;
     let mut connection = open_configured_connection(store.path())?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -3435,7 +3507,10 @@ fn claim_next_handoff(store: &ForgeStore, mission_id: &str) -> Result<Option<Cla
     }))
 }
 
-fn renew_claimed_handoff_lease(store: &ForgeStore, claim: &mut ClaimedMissionInbox) -> Result<()> {
+fn renew_claimed_handoff_lease(
+    store: &FoundryStore,
+    claim: &mut ClaimedMissionInbox,
+) -> Result<()> {
     let mut connection = open_configured_connection(store.path())?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let expires_at = Utc::now() + Duration::seconds(MISSION_INBOX_LEASE_SECONDS);
@@ -3464,7 +3539,7 @@ fn renew_claimed_handoff_lease(store: &ForgeStore, claim: &mut ClaimedMissionInb
 }
 
 fn wake_claimed_handoff(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     claim: &ClaimedMissionInbox,
 ) -> Result<usize> {
@@ -3555,7 +3630,7 @@ fn wake_claimed_handoff(
 }
 
 fn accept_claimed_handoff(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     claim: &ClaimedMissionInbox,
     wakeup_sequence: usize,
@@ -3640,7 +3715,7 @@ fn accept_claimed_handoff(
 }
 
 fn consume_queued_handoff_for_simulation(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     expected_handoff_id: &str,
 ) -> Result<()> {
@@ -3685,7 +3760,7 @@ fn harness_for(task_id: &str, member: &RosterMember) -> HarnessResolution {
 }
 
 fn record_harness_resolution(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     instance_id: &str,
     resolution: HarnessResolution,
@@ -3706,7 +3781,7 @@ fn record_harness_resolution(
 
 #[allow(clippy::too_many_arguments)]
 fn charge_agent(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     instance_id: &str,
     task_id: &str,
@@ -3837,8 +3912,8 @@ struct MissionSimulationAudit {
 
 fn orchestrator_is_structurally_restricted(squad: &SquadDefinition) -> bool {
     let orchestrator = &squad.orchestrator;
-    orchestrator.runtime == "forge-control-plane"
-        && orchestrator.provider == "forge"
+    canonical_mission_authority(&orchestrator.runtime) == "foundry-control-plane"
+        && canonical_mission_authority(&orchestrator.provider) == "foundry"
         && orchestrator.model == "policy-only"
         && orchestrator.permissions.network == "deny"
         && orchestrator.permissions.filesystem_allow.is_empty()
@@ -4019,7 +4094,7 @@ fn repair_cycle_is_verifiable(mission: &MissionRecord, expected: bool) -> bool {
 }
 
 fn audit_mission_simulation(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission_id: &str,
     squad: &SquadDefinition,
     validation: &SquadValidationReport,
@@ -4451,7 +4526,7 @@ fn push_mission_workflow_revision(
 }
 
 pub fn start_mission(
-    store: &ForgeStore,
+    store: &FoundryStore,
     goal: &str,
     squad_id: &str,
     squad_version: Option<&str>,
@@ -4495,7 +4570,7 @@ pub fn start_mission(
                 workflow_id: Some(workflow.id.clone()),
                 task_id: None,
                 origin: "mission.start".to_string(),
-                created_by_forge: false,
+                created_by_foundry: false,
             },
         )?;
         if binding.binding.is_none() {
@@ -4556,7 +4631,7 @@ pub fn start_mission(
         Ok(mission)
     })?;
     Ok(MissionStartReport {
-        schema_version: "forge.mission.start.v1".to_string(),
+        schema_version: "foundry.mission.start.v1".to_string(),
         status: "started".to_string(),
         mission,
     })
@@ -4637,7 +4712,7 @@ fn load_runtime_inbox_by_handoff(
 }
 
 fn reconcile_handoff_materialization(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     persisted_handoff: &AgentHandoff,
 ) -> Result<String> {
@@ -4822,7 +4897,11 @@ fn reconcile_handoff_materialization(
     Ok(inbox.id)
 }
 
-fn submission_exists(store: &ForgeStore, mission_id: &str, idempotency_key: &str) -> Result<bool> {
+fn submission_exists(
+    store: &FoundryStore,
+    mission_id: &str,
+    idempotency_key: &str,
+) -> Result<bool> {
     let connection = open_configured_connection(store.path())?;
     let exists: bool = connection.query_row(
         r#"
@@ -4839,7 +4918,7 @@ fn submission_exists(store: &ForgeStore, mission_id: &str, idempotency_key: &str
 }
 
 fn existing_submission(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     submission: &MissionSubmission,
 ) -> Result<Option<MissionSubmitReport>> {
@@ -4875,7 +4954,7 @@ fn existing_submission(
     }
     let inbox_id = reconcile_handoff_materialization(store, mission, &handoff)?;
     Ok(Some(MissionSubmitReport {
-        schema_version: "forge.mission.submit.v1".to_string(),
+        schema_version: "foundry.mission.submit.v1".to_string(),
         status: "deduplicated".to_string(),
         mission_id: mission.id.clone(),
         handoff_id: handoff.id,
@@ -4887,7 +4966,7 @@ fn existing_submission(
 }
 
 fn submit_mission_inner(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission_id: &str,
     submission: MissionSubmission,
 ) -> Result<MissionSubmitReport> {
@@ -5021,7 +5100,7 @@ fn authoritative_submission_at_revision(
 }
 
 fn apply_execution_accounting(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     receipt: &MissionExecutionReceipt,
 ) -> Result<()> {
@@ -5124,7 +5203,7 @@ fn apply_execution_accounting(
 }
 
 fn submit_claimed_mission_receipt(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission_id: &str,
     submission: MissionSubmission,
     receipt: &MissionExecutionReceipt,
@@ -5200,7 +5279,7 @@ fn submit_claimed_mission_receipt(
         .map(|item| item.id.clone())
         .context("queued mission handoff has no inbox receipt")?;
     Ok(MissionSubmitReport {
-        schema_version: "forge.mission.submit.v1".to_string(),
+        schema_version: "foundry.mission.submit.v1".to_string(),
         status: "queued".to_string(),
         mission_id: mission.id,
         handoff_id,
@@ -5212,7 +5291,7 @@ fn submit_claimed_mission_receipt(
 }
 
 pub fn submit_mission(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission_id: &str,
     submission: MissionSubmission,
 ) -> Result<MissionSubmitReport> {
@@ -5254,7 +5333,7 @@ fn mark_task_unassigned(mission: &mut MissionRecord, task_id: &str) -> Result<()
 }
 
 fn create_operational_repair(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     failed_task_index: usize,
     repair_task_index: usize,
@@ -5372,7 +5451,7 @@ fn infer_persisted_handoff_outcome(
 }
 
 fn promote_ready_mission_if_possible(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
 ) -> Result<bool> {
     if mission.status == MissionStatus::Completed {
@@ -5430,7 +5509,7 @@ fn promote_ready_mission_if_possible(
 }
 
 fn process_claimed_submission(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     claim: &ClaimedMissionInbox,
 ) -> Result<String> {
@@ -5612,7 +5691,7 @@ fn process_claimed_submission(
 }
 
 fn mission_gate_definition(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &MissionRecord,
     index: usize,
 ) -> Result<QualityGateDefinition> {
@@ -5623,7 +5702,7 @@ fn mission_gate_definition(
         .with_context(|| format!("mission squad gate {index} is missing"))
 }
 
-fn pending_inbox_exists(store: &ForgeStore, mission_id: &str) -> Result<bool> {
+fn pending_inbox_exists(store: &FoundryStore, mission_id: &str) -> Result<bool> {
     ensure_mission_runtime_schema(store)?;
     let connection = open_configured_connection(store.path())?;
     let count: i64 = connection.query_row(
@@ -5634,7 +5713,7 @@ fn pending_inbox_exists(store: &ForgeStore, mission_id: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
-fn dead_letter_exists(store: &ForgeStore, mission_id: &str) -> Result<bool> {
+fn dead_letter_exists(store: &FoundryStore, mission_id: &str) -> Result<bool> {
     ensure_mission_runtime_schema(store)?;
     let connection = open_configured_connection(store.path())?;
     let count: i64 = connection.query_row(
@@ -5646,7 +5725,7 @@ fn dead_letter_exists(store: &ForgeStore, mission_id: &str) -> Result<bool> {
 }
 
 fn with_mission_drive_lease<T>(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission_id: &str,
     operation: impl FnOnce(&str) -> Result<T>,
 ) -> Result<T> {
@@ -5689,7 +5768,7 @@ fn with_mission_drive_lease<T>(
     }
 }
 
-fn renew_mission_drive_lease(store: &ForgeStore, mission_id: &str, owner: &str) -> Result<()> {
+fn renew_mission_drive_lease(store: &FoundryStore, mission_id: &str, owner: &str) -> Result<()> {
     let connection = open_configured_connection(store.path())?;
     let now = Utc::now();
     let changed = connection.execute(
@@ -5743,7 +5822,7 @@ fn awaiting_assignment_action(assignments: &[MissionAssignment]) -> &'static str
 }
 
 fn dispatch_additional_ready_assignments(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
     squad: &SquadDefinition,
 ) -> Result<Vec<MissionAssignment>> {
@@ -5841,12 +5920,12 @@ fn dispatch_additional_ready_assignments(
 }
 
 fn dispatch_mission_task(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission: &mut MissionRecord,
 ) -> Result<MissionDriveReport> {
     if pending_inbox_exists(store, &mission.id)? {
         return Ok(MissionDriveReport {
-            schema_version: "forge.mission.drive.v1".to_string(),
+            schema_version: "foundry.mission.drive.v1".to_string(),
             status: "ready".to_string(),
             action: "resume_pending_inbox".to_string(),
             mission_id: mission.id.clone(),
@@ -5870,7 +5949,7 @@ fn dispatch_mission_task(
         .count();
     if active_agents >= squad.lifecycle_policy.max_concurrent_agents && !assignments.is_empty() {
         return Ok(MissionDriveReport {
-            schema_version: "forge.mission.drive.v1".to_string(),
+            schema_version: "foundry.mission.drive.v1".to_string(),
             status: "waiting".to_string(),
             action: awaiting_assignment_action(&assignments).to_string(),
             mission_id: mission.id.clone(),
@@ -5901,7 +5980,7 @@ fn dispatch_mission_task(
     let Some(task_index) = task_index else {
         if !assignments.is_empty() {
             return Ok(MissionDriveReport {
-                schema_version: "forge.mission.drive.v1".to_string(),
+                schema_version: "foundry.mission.drive.v1".to_string(),
                 status: "waiting".to_string(),
                 action: awaiting_assignment_action(&assignments).to_string(),
                 mission_id: mission.id.clone(),
@@ -5913,7 +5992,7 @@ fn dispatch_mission_task(
             });
         }
         return Ok(MissionDriveReport {
-            schema_version: "forge.mission.drive.v1".to_string(),
+            schema_version: "foundry.mission.drive.v1".to_string(),
             status: format!("{:?}", mission.status).to_lowercase(),
             action: "no_dispatchable_task".to_string(),
             mission_id: mission.id.clone(),
@@ -5990,7 +6069,7 @@ fn dispatch_mission_task(
         "assignment_wave_created"
     };
     Ok(MissionDriveReport {
-        schema_version: "forge.mission.drive.v1".to_string(),
+        schema_version: "foundry.mission.drive.v1".to_string(),
         status: "dispatched".to_string(),
         action: action.to_string(),
         mission_id: mission.id.clone(),
@@ -6003,7 +6082,7 @@ fn dispatch_mission_task(
 }
 
 fn resume_mission_inner(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission_id: &str,
     drive_lease_owner: &str,
 ) -> Result<MissionDriveReport> {
@@ -6032,7 +6111,7 @@ fn resume_mission_inner(
             "no_pending_inbox"
         };
         return Ok(MissionDriveReport {
-            schema_version: "forge.mission.drive.v1".to_string(),
+            schema_version: "foundry.mission.drive.v1".to_string(),
             status: match action {
                 "dead_letter_blocked" => "blocked".to_string(),
                 "mission_completed" => "completed".to_string(),
@@ -6079,7 +6158,7 @@ fn resume_mission_inner(
         persisted_action
     };
     Ok(MissionDriveReport {
-        schema_version: "forge.mission.drive.v1".to_string(),
+        schema_version: "foundry.mission.drive.v1".to_string(),
         status: format!("{:?}", mission.status).to_lowercase(),
         action,
         mission_id: mission.id.clone(),
@@ -6091,13 +6170,13 @@ fn resume_mission_inner(
     })
 }
 
-pub fn resume_mission(store: &ForgeStore, mission_id: &str) -> Result<MissionDriveReport> {
+pub fn resume_mission(store: &FoundryStore, mission_id: &str) -> Result<MissionDriveReport> {
     with_mission_drive_lease(store, mission_id, |lease_owner| {
         resume_mission_inner(store, mission_id, lease_owner)
     })
 }
 
-pub fn drive_mission(store: &ForgeStore, mission_id: &str) -> Result<MissionDriveReport> {
+pub fn drive_mission(store: &FoundryStore, mission_id: &str) -> Result<MissionDriveReport> {
     with_mission_drive_lease(store, mission_id, |lease_owner| {
         renew_mission_drive_lease(store, mission_id, lease_owner)?;
         if pending_inbox_exists(store, mission_id)? || dead_letter_exists(store, mission_id)? {
@@ -6107,7 +6186,7 @@ pub fn drive_mission(store: &ForgeStore, mission_id: &str) -> Result<MissionDriv
         save_mission(store, &mission)?;
         if promote_ready_mission_if_possible(store, &mut mission)? {
             return Ok(MissionDriveReport {
-                schema_version: "forge.mission.drive.v1".to_string(),
+                schema_version: "foundry.mission.drive.v1".to_string(),
                 status: "completed".to_string(),
                 action: "mission_completed".to_string(),
                 mission_id: mission.id.clone(),
@@ -6124,7 +6203,7 @@ pub fn drive_mission(store: &ForgeStore, mission_id: &str) -> Result<MissionDriv
 }
 
 pub fn simulate_mission(
-    store: &ForgeStore,
+    store: &FoundryStore,
     goal: &str,
     squad_id: &str,
     squad_version: Option<&str>,
@@ -6134,7 +6213,7 @@ pub fn simulate_mission(
 }
 
 pub fn simulate_mission_with_worktree(
-    store: &ForgeStore,
+    store: &FoundryStore,
     goal: &str,
     squad_id: &str,
     squad_version: Option<&str>,
@@ -6176,7 +6255,7 @@ pub fn simulate_mission_with_worktree(
                 workflow_id: Some(workflow.id.clone()),
                 task_id: None,
                 origin: "mission.simulate".to_string(),
-                created_by_forge: false,
+                created_by_foundry: false,
             },
         )?;
         if binding.binding.is_none() {
@@ -6597,11 +6676,12 @@ pub fn simulate_mission_with_worktree(
     })
 }
 
-pub fn load_mission(store: &ForgeStore, id: &str) -> Result<MissionRecord> {
+pub fn load_mission(store: &FoundryStore, id: &str) -> Result<MissionRecord> {
     ensure_mission_runtime_schema(store)?;
     let connection = open_configured_connection(store.path())?;
     let data_json: Option<String> = connection
         .query_row(
+            // foundry-brand-allow: legacy-compat
             "SELECT data_json FROM forge_missions WHERE id = ?1",
             [id],
             |row| row.get(0),
@@ -6663,23 +6743,25 @@ pub fn load_mission(store: &ForgeStore, id: &str) -> Result<MissionRecord> {
     Ok(mission)
 }
 
-pub fn list_missions(store: &ForgeStore) -> Result<MissionListReport> {
+pub fn list_missions(store: &FoundryStore) -> Result<MissionListReport> {
     let connection = open_configured_connection(store.path())?;
-    let mut statement =
-        connection.prepare("SELECT data_json FROM forge_missions ORDER BY created_at DESC")?;
+    let mut statement = connection.prepare(
+        // foundry-brand-allow: legacy-compat
+        "SELECT data_json FROM forge_missions ORDER BY created_at DESC",
+    )?;
     let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
     let mut missions = Vec::new();
     for row in rows {
         missions.push(serde_json::from_str(&row?)?);
     }
     Ok(MissionListReport {
-        schema_version: "forge.mission.list.v1".to_string(),
+        schema_version: "foundry.mission.list.v1".to_string(),
         status: "ready".to_string(),
         missions,
     })
 }
 
-pub fn ensure_builtin_squad(store: &ForgeStore, id: &str) -> Result<SquadDefinition> {
+pub fn ensure_builtin_squad(store: &FoundryStore, id: &str) -> Result<SquadDefinition> {
     install_builtin_squads(store)?;
     load_squad(store, id, None).map_err(|_| anyhow!("unknown built-in squad: {id}"))
 }
@@ -6756,9 +6838,9 @@ mod tests {
                 "-C",
                 path.to_str().unwrap(),
                 "-c",
-                "user.name=Forge Mission Atomicity",
+                "user.name=Foundry Mission Atomicity",
                 "-c",
-                "user.email=forge-mission-atomicity@example.invalid",
+                "user.email=foundry-mission-atomicity@example.invalid",
                 "commit",
                 "--allow-empty",
                 "-m",
@@ -6773,7 +6855,7 @@ mod tests {
         );
     }
 
-    fn table_count(store: &ForgeStore, table: &str) -> i64 {
+    fn table_count(store: &FoundryStore, table: &str) -> i64 {
         let connection = open_configured_connection(store.path()).unwrap();
         connection
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -6783,7 +6865,7 @@ mod tests {
     }
 
     fn persisted_projection_mission(
-        store: &ForgeStore,
+        store: &FoundryStore,
         squad: &SquadDefinition,
         with_orchestrator: bool,
     ) -> MissionRecord {
@@ -7001,7 +7083,7 @@ mod tests {
     #[test]
     fn fan_out_dispatches_parallel_wave_and_holds_join_until_all_branches_are_gate_ready() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let squad = fan_out_fan_in_squad();
         let validation = validate_squad_definition(&squad).unwrap();
         assert!(validation.valid, "{:?}", validation.errors);
@@ -7138,7 +7220,7 @@ mod tests {
     #[test]
     fn atomic_event_cas_rejects_divergence_without_ghost_event_or_projection() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let squad = software_factory_squad();
         let base = persisted_projection_mission(&store, &squad, false);
         let mut accepted = base.clone();
@@ -7191,7 +7273,7 @@ mod tests {
     #[test]
     fn atomic_start_rolls_back_invalid_worktree_and_injected_commit_failure() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let missing = temp.path().join("missing-worktree");
         let _invalid = start_mission(
             &store,
@@ -7203,6 +7285,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(table_count(&store, "workflows"), 0);
         assert_eq!(table_count(&store, "worktree_states"), 0);
+        // foundry-brand-allow: legacy-compat
         assert_eq!(table_count(&store, "forge_missions"), 0);
 
         let repository = temp.path().join("repository");
@@ -7223,6 +7306,7 @@ mod tests {
         for table in [
             "workflows",
             "worktree_states",
+            // foundry-brand-allow: legacy-compat
             "forge_missions",
             "mission_agent_instances",
             "mission_runtime_checkpoints",
@@ -7237,7 +7321,7 @@ mod tests {
     #[test]
     fn atomic_agent_lifecycle_rolls_back_spawn_and_terminate_failures() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let squad = software_factory_squad();
         let mut mission = persisted_projection_mission(&store, &squad, true);
         let orchestrator_id = mission.orchestrator_instance_id.clone();
@@ -7307,9 +7391,69 @@ mod tests {
     }
 
     #[test]
+    fn legacy_builtin_squad_is_equivalent_without_rewriting_persisted_bytes() {
+        let temp = tempdir().unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
+        let canonical = software_factory_squad();
+        let mut legacy = canonical.clone();
+        legacy.schema_version = format!("{LEGACY_MISSION_AUTHORITY}.squad.v1");
+        legacy.orchestrator.runtime = LEGACY_MISSION_CONTROL_PLANE.to_string();
+        legacy.orchestrator.provider = LEGACY_MISSION_AUTHORITY.to_string();
+        legacy.dependencies.mcp_servers = vec![LEGACY_MISSION_AUTHORITY.to_string()];
+        legacy.distribution.origin = LEGACY_MISSION_ORIGIN.to_string();
+        legacy.distribution.signature = Some(format!(
+            "{LEGACY_MISSION_SIGNATURE_PREFIX}software-factory:1.0.0"
+        ));
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        let legacy_digest = squad_digest(&legacy).unwrap();
+        let connection = open_configured_connection(store.path()).unwrap();
+        connection
+            .execute(
+                r#"
+                INSERT INTO squad_definitions
+                    (id, version, name, composition_sha256, data_json, installed_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "#,
+                params![
+                    legacy.id,
+                    legacy.version,
+                    legacy.name,
+                    legacy_digest,
+                    legacy_json,
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let report = install_squad(&store, &canonical).unwrap();
+        assert_eq!(report.status, "already_installed");
+        let connection = open_configured_connection(store.path()).unwrap();
+        let persisted_json: String = connection
+            .query_row(
+                "SELECT data_json FROM squad_definitions WHERE id = ?1 AND version = ?2",
+                params![canonical.id, canonical.version],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted_json, serde_json::to_string(&legacy).unwrap());
+        drop(connection);
+
+        let loaded = load_squad(&store, &canonical.id, Some(&canonical.version)).unwrap();
+        assert_eq!(loaded.schema_version, canonical.schema_version);
+        assert_eq!(loaded.orchestrator.runtime, "foundry-control-plane");
+        assert_eq!(loaded.orchestrator.provider, "foundry");
+        assert_eq!(loaded.distribution.origin, "foundry-original");
+        assert_eq!(
+            loaded.distribution.signature,
+            canonical.distribution.signature
+        );
+    }
+
+    #[test]
     fn installed_squad_versions_are_immutable() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let squad = software_factory_squad();
         assert_eq!(install_squad(&store, &squad).unwrap().status, "installed");
         assert_eq!(
@@ -7324,7 +7468,7 @@ mod tests {
     #[test]
     fn bounded_simulation_proves_handoff_gates_and_repair() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let report = simulate_mission(
             &store,
             "Implement a production-safe Rust API",

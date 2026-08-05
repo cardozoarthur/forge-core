@@ -1,7 +1,7 @@
 use crate::artifact::hex_sha256;
 use crate::intent::{ContextIdentityRef, OperatingContextSpec};
 use crate::storage::{
-    ForgeStore, IdentityLinkWrite, IdentityMembershipWrite, StoredIdentityLinkRecord,
+    FoundryStore, IdentityLinkWrite, IdentityMembershipWrite, StoredIdentityLinkRecord,
     StoredIdentityMembershipRecord, StoredIdentityRecord, TenantIndexRecord,
 };
 use anyhow::{bail, Context, Result};
@@ -11,19 +11,19 @@ use serde_json::json;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-pub const OPERATING_CONTEXT_LOAD_SCHEMA_VERSION: &str = "forge.operating_context_load.v1";
-pub const IDENTITY_REGISTRY_SCHEMA_VERSION: &str = "forge.identity_registry.v1";
-pub const IDENTITY_MEMBERSHIP_SCHEMA_VERSION: &str = "forge.identity_memberships.v1";
-pub const IDENTITY_MEMBERSHIP_UPDATE_SCHEMA_VERSION: &str = "forge.identity_membership_update.v1";
-pub const IDENTITY_LINK_SCHEMA_VERSION: &str = "forge.identity_link.v1";
-pub const IDENTITY_LINKS_SCHEMA_VERSION: &str = "forge.identity_links.v1";
-pub const IDENTITY_RESOLVE_SCHEMA_VERSION: &str = "forge.identity_resolve.v1";
-pub const IDENTITY_SYNC_SCHEMA_VERSION: &str = "forge.identity_sync.v1";
-pub const TENANT_INDEX_SCHEMA_VERSION: &str = "forge.tenant_index.v1";
-pub const TENANT_AUDIT_SCHEMA_VERSION: &str = "forge.tenant_audit.v1";
-pub const TENANT_POLICY_SCHEMA_VERSION: &str = "forge.tenant_policy.v1";
+pub const OPERATING_CONTEXT_LOAD_SCHEMA_VERSION: &str = "foundry.operating_context_load.v1";
+pub const IDENTITY_REGISTRY_SCHEMA_VERSION: &str = "foundry.identity_registry.v1";
+pub const IDENTITY_MEMBERSHIP_SCHEMA_VERSION: &str = "foundry.identity_memberships.v1";
+pub const IDENTITY_MEMBERSHIP_UPDATE_SCHEMA_VERSION: &str = "foundry.identity_membership_update.v1";
+pub const IDENTITY_LINK_SCHEMA_VERSION: &str = "foundry.identity_link.v1";
+pub const IDENTITY_LINKS_SCHEMA_VERSION: &str = "foundry.identity_links.v1";
+pub const IDENTITY_RESOLVE_SCHEMA_VERSION: &str = "foundry.identity_resolve.v1";
+pub const IDENTITY_SYNC_SCHEMA_VERSION: &str = "foundry.identity_sync.v1";
+pub const TENANT_INDEX_SCHEMA_VERSION: &str = "foundry.tenant_index.v1";
+pub const TENANT_AUDIT_SCHEMA_VERSION: &str = "foundry.tenant_audit.v1";
+pub const TENANT_POLICY_SCHEMA_VERSION: &str = "foundry.tenant_policy.v1";
 pub const IDENTITY_MEMBERSHIP_PERMISSION_SCHEMA_VERSION: &str =
-    "forge.identity_membership_permissions.v1";
+    "foundry.identity_membership_permissions.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OperatingContextLoadReport {
@@ -275,7 +275,7 @@ pub fn load_project_operating_context(project_root: &Path) -> Result<OperatingCo
 }
 
 pub fn list_identity_registry(
-    store: &ForgeStore,
+    store: &FoundryStore,
     scope: Option<&str>,
     id: Option<&str>,
 ) -> Result<IdentityRegistryReport> {
@@ -293,7 +293,7 @@ pub fn list_identity_registry(
 }
 
 pub fn list_identity_memberships(
-    store: &ForgeStore,
+    store: &FoundryStore,
     subject_scope: Option<&str>,
     subject_id: Option<&str>,
     organization_id: Option<&str>,
@@ -322,7 +322,7 @@ pub fn list_identity_memberships(
 }
 
 pub fn update_identity_membership(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: IdentityMembershipUpdateInput,
 ) -> Result<IdentityMembershipUpdateReport> {
     let records = store.list_identity_memberships(
@@ -478,7 +478,7 @@ pub fn update_identity_membership(
     })
 }
 
-pub fn link_identity(store: &ForgeStore, input: IdentityLinkInput) -> Result<IdentityLinkReport> {
+pub fn link_identity(store: &FoundryStore, input: IdentityLinkInput) -> Result<IdentityLinkReport> {
     let left_scope = normalize_required_identity_part("left_scope", &input.left_scope)?;
     let left_id = normalize_required_identity_part("left_id", &input.left_id)?;
     let right_scope = normalize_required_identity_part("right_scope", &input.right_scope)?;
@@ -489,7 +489,7 @@ pub fn link_identity(store: &ForgeStore, input: IdentityLinkInput) -> Result<Ide
     let link_type = normalize_link_type(&input.link_type);
     let source = input.source.trim();
     let source = if source.is_empty() {
-        "forge_cli"
+        "foundry_cli"
     } else {
         source
     };
@@ -558,7 +558,10 @@ pub fn link_identity(store: &ForgeStore, input: IdentityLinkInput) -> Result<Ide
     })
 }
 
-pub fn unlink_identity(store: &ForgeStore, input: IdentityLinkInput) -> Result<IdentityLinkReport> {
+pub fn unlink_identity(
+    store: &FoundryStore,
+    input: IdentityLinkInput,
+) -> Result<IdentityLinkReport> {
     let left_scope = normalize_required_identity_part("left_scope", &input.left_scope)?;
     let left_id = normalize_required_identity_part("left_id", &input.left_id)?;
     let right_scope = normalize_required_identity_part("right_scope", &input.right_scope)?;
@@ -568,7 +571,7 @@ pub fn unlink_identity(store: &ForgeStore, input: IdentityLinkInput) -> Result<I
     }
     let source = input.source.trim();
     let source = if source.is_empty() {
-        "forge_cli"
+        "foundry_cli"
     } else {
         source
     };
@@ -609,7 +612,7 @@ pub fn unlink_identity(store: &ForgeStore, input: IdentityLinkInput) -> Result<I
 }
 
 pub fn list_identity_links(
-    store: &ForgeStore,
+    store: &FoundryStore,
     scope: Option<&str>,
     id: Option<&str>,
     status: Option<&str>,
@@ -628,7 +631,7 @@ pub fn list_identity_links(
 }
 
 pub fn resolve_identity(
-    store: &ForgeStore,
+    store: &FoundryStore,
     scope: &str,
     id: &str,
 ) -> Result<IdentityResolveReport> {
@@ -684,7 +687,7 @@ pub fn resolve_identity(
 }
 
 pub fn sync_project_operating_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
 ) -> Result<IdentitySyncReport> {
     let context = inspect_project_operating_context(project_root)?;
@@ -745,7 +748,7 @@ pub fn sync_project_operating_context(
 }
 
 pub fn list_tenant_index(
-    store: &ForgeStore,
+    store: &FoundryStore,
     resource_type: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -771,7 +774,7 @@ pub fn list_tenant_index(
     })
 }
 
-pub fn audit_tenant_index(store: &ForgeStore) -> Result<TenantAuditReport> {
+pub fn audit_tenant_index(store: &FoundryStore) -> Result<TenantAuditReport> {
     let mut expected = Vec::new();
     for workflow in store.load_workflows()? {
         expected.push((
@@ -853,7 +856,7 @@ pub fn audit_tenant_index(store: &ForgeStore) -> Result<TenantAuditReport> {
 }
 
 pub fn evaluate_tenant_policy(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     mode: &str,
 ) -> Result<TenantPolicyReport> {
@@ -861,7 +864,7 @@ pub fn evaluate_tenant_policy(
 }
 
 pub fn evaluate_tenant_policy_for_action(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     mode: &str,
     action: &str,
@@ -1082,7 +1085,7 @@ pub fn evaluate_tenant_policy_for_action(
 }
 
 pub fn ensure_operating_context_policy(
-    store: &ForgeStore,
+    store: &FoundryStore,
     context: &OperatingContextSpec,
     action: &str,
 ) -> Result<()> {
@@ -1139,7 +1142,7 @@ pub fn ensure_operating_context_policy(
     Ok(())
 }
 
-pub fn ensure_workflow_policy(store: &ForgeStore, workflow_id: &str, action: &str) -> Result<()> {
+pub fn ensure_workflow_policy(store: &FoundryStore, workflow_id: &str, action: &str) -> Result<()> {
     let workflow = store.load_workflow(workflow_id)?;
     if workflow.intent.operating_context.tenant_policy_mode != "enforce" {
         return Ok(());
@@ -1174,7 +1177,7 @@ pub fn inspect_project_operating_context(
             project_root: project_root.display().to_string(),
             context: OperatingContextSpec::default(),
             warnings: vec![
-                "No .forge/operating-context.yaml, .yml or .json file was found".to_string(),
+                "No .foundry/operating-context.yaml, .yml or .json file was found".to_string(),
             ],
         });
     };
@@ -1279,7 +1282,7 @@ fn identity_link_view_from_record(record: StoredIdentityLinkRecord) -> IdentityL
 }
 
 fn identity_alias_view_for_key(
-    store: &ForgeStore,
+    store: &FoundryStore,
     scope: &str,
     id: &str,
 ) -> Result<IdentityAliasView> {
@@ -1311,7 +1314,7 @@ fn identity_alias_view_for_key(
 }
 
 fn identity_registry_view_for_key(
-    store: &ForgeStore,
+    store: &FoundryStore,
     scope: &str,
     id: &str,
 ) -> Result<IdentityRegistryView> {
@@ -1324,7 +1327,7 @@ fn identity_registry_view_for_key(
 }
 
 fn ensure_identity_record_for_link(
-    store: &ForgeStore,
+    store: &FoundryStore,
     scope: &str,
     id: &str,
     source: &str,
@@ -1357,7 +1360,7 @@ fn ensure_identity_record_for_link(
 }
 
 fn resolved_identity_keys(
-    store: &ForgeStore,
+    store: &FoundryStore,
     scope: &str,
     id: &str,
 ) -> Result<Vec<(String, String)>> {
@@ -1382,7 +1385,7 @@ fn resolved_identity_keys(
 }
 
 fn list_active_memberships_for_resolved_identity(
-    store: &ForgeStore,
+    store: &FoundryStore,
     subject_scope: &str,
     subject_id: &str,
     organization_id: &str,
@@ -1551,7 +1554,7 @@ fn tenant_index_view_from_record(record: TenantIndexRecord) -> TenantIndexView {
 }
 
 fn expected_resources_for_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
 ) -> Result<Vec<(String, String)>> {
     let workflow = store.load_workflow(workflow_id)?;
@@ -1792,14 +1795,14 @@ fn json_string_array(data: &serde_json::Value, key: &str) -> Vec<String> {
 }
 
 fn find_operating_context_file(project_root: &Path) -> Option<PathBuf> {
-    [
-        ".forge/operating-context.yaml",
-        ".forge/operating-context.yml",
-        ".forge/operating-context.json",
-    ]
-    .into_iter()
-    .map(|relative| project_root.join(relative))
-    .find(|path| path.is_file())
+    crate::brand::find_project_config_for_read(
+        project_root,
+        &[
+            "operating-context.yaml",
+            "operating-context.yml",
+            "operating-context.json",
+        ],
+    )
 }
 
 fn nested_operating_context_value(value: &serde_yaml::Value) -> Option<serde_yaml::Value> {

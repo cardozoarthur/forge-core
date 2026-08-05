@@ -1,5 +1,5 @@
 use crate::identity::ensure_workflow_policy;
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -38,7 +38,7 @@ pub struct TaskCheckpointRequest<'a> {
 }
 
 pub fn record_task_checkpoint(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: TaskCheckpointRequest<'_>,
 ) -> Result<TaskCheckpointReport> {
     ensure_workflow_policy(store, request.workflow_id, "task checkpoint")?;
@@ -94,7 +94,7 @@ pub fn record_task_checkpoint(
 }
 
 pub fn load_workflow_checkpoints(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
 ) -> Result<Vec<TaskCheckpoint>> {
     store
@@ -106,7 +106,7 @@ pub fn load_workflow_checkpoints(
 }
 
 pub fn load_latest_task_checkpoint(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
 ) -> Result<Option<TaskCheckpoint>> {

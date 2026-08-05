@@ -21,7 +21,7 @@ use crate::graph::{
 };
 use crate::identity::ensure_workflow_policy;
 use crate::lease::{acquire_task_lease, TaskLease};
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use crate::worktree::{
     bound_worktree_context, resolve_effective_project_root, WorktreeContextReport,
 };
@@ -31,9 +31,9 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "forge.executor_handoff.v9";
-pub const EXECUTOR_HANDOFF_COMPACT_SCHEMA_VERSION: &str = "forge.executor_handoff.compact.v1";
-const PERSONA_HANDOFF_SCHEMA_VERSION: &str = "forge.persona_handoff.v2";
+pub const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "foundry.executor_handoff.v9";
+pub const EXECUTOR_HANDOFF_COMPACT_SCHEMA_VERSION: &str = "foundry.executor_handoff.compact.v1";
+const PERSONA_HANDOFF_SCHEMA_VERSION: &str = "foundry.persona_handoff.v2";
 const COMPACT_HANDOFF_ID_BYTE_LIMIT: usize = 128;
 const COMPACT_HANDOFF_TEXT_BYTE_LIMIT: usize = 256;
 const COMPACT_HANDOFF_FALLBACK_EXECUTOR_LIMIT: usize = 4;
@@ -246,7 +246,7 @@ pub struct ExecutorCapacityDecision {
 }
 
 pub fn build_task_handoff(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     selected_executor: &str,
@@ -266,7 +266,7 @@ pub fn build_task_handoff(
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_task_handoff_response_with_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     selected_executor: &str,
@@ -316,7 +316,7 @@ pub fn build_task_handoff_response_with_project(
 }
 
 pub fn build_predecessor_handoff_plans(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &crate::graph::Workflow,
     task_id: &str,
     budget: usize,
@@ -524,7 +524,7 @@ impl TaskHandoffCompactReport {
 }
 
 pub fn build_task_handoff_with_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     selected_executor: &str,
@@ -817,7 +817,7 @@ impl ExecutorHandoffPacket {
 }
 
 fn resolve_auto_executor_model_decision(
-    store: &ForgeStore,
+    store: &FoundryStore,
     task: &AtomicTask,
     budget: usize,
 ) -> Result<ExecutorModelDecisionReport> {
@@ -873,7 +873,7 @@ fn task_model_decision_difficulty(task: &AtomicTask) -> &'static str {
 }
 
 fn build_executor_capacity_decision(
-    store: &ForgeStore,
+    store: &FoundryStore,
     selected_executor: &str,
     task_executor: &str,
 ) -> Result<ExecutorCapacityDecision> {
@@ -901,7 +901,7 @@ fn build_executor_capacity_decision(
         };
     if !policy_failures.is_empty() {
         return Ok(ExecutorCapacityDecision {
-            schema_version: "forge.executor_capacity_decision.v1".to_string(),
+            schema_version: "foundry.executor_capacity_decision.v1".to_string(),
             selected_executor,
             task_executor: task_executor.to_string(),
             decision: "stop".to_string(),
@@ -913,7 +913,7 @@ fn build_executor_capacity_decision(
             fallback_executors,
             stop_execution: true,
             reason: format!(
-                "executor policy blocks handoff: {}; run `forge sync executors` and explicitly authorize the canonical executor before acquiring a lease",
+                "executor policy blocks handoff: {}; run `foundry sync executors` and explicitly authorize the canonical executor before acquiring a lease",
                 policy_failures.join(", ")
             ),
         });
@@ -924,7 +924,7 @@ fn build_executor_capacity_decision(
     }) {
         let has_fallback = !fallback_executors.is_empty();
         return Ok(ExecutorCapacityDecision {
-            schema_version: "forge.executor_capacity_decision.v1".to_string(),
+            schema_version: "foundry.executor_capacity_decision.v1".to_string(),
             selected_executor: selected_executor.clone(),
             task_executor: task_executor.to_string(),
             decision: if has_fallback { "fallback" } else { "stop" }.to_string(),
@@ -950,7 +950,7 @@ fn build_executor_capacity_decision(
     }
 
     Ok(ExecutorCapacityDecision {
-        schema_version: "forge.executor_capacity_decision.v1".to_string(),
+        schema_version: "foundry.executor_capacity_decision.v1".to_string(),
         selected_executor,
         task_executor: task_executor.to_string(),
         decision: "use".to_string(),
@@ -1101,13 +1101,13 @@ mod tests {
     use super::build_predecessor_handoff_plans;
     use crate::graph::{self, ExecutorKind, TaskStatus, ValidationRule};
     use crate::intent::parse_intent;
-    use crate::storage::ForgeStore;
+    use crate::storage::FoundryStore;
     use tempfile::tempdir;
 
     #[test]
     fn predecessor_handoff_plans_only_prepare_bounded_pending_frontier() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let mut workflow = graph::create_workflow(parse_intent(
             "Prepare only the bounded actionable predecessor frontier",
         ));

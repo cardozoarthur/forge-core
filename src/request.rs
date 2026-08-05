@@ -36,7 +36,7 @@ use crate::registry::{
     attach_reuse_candidates_as_child_subflows, find_reuse_candidates, WorkflowReuseCandidate,
 };
 use crate::security::sanitize_workflow_secrets_for_storage;
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use crate::teamwork_fan_in::{current_teamwork_fan_in_status, TEAMWORK_GIT_FAN_IN_VALIDATION_RULE};
 use crate::workflow::{
     prepare_workflow_artifact_attach, record_prepared_workflow_artifact, ArtifactAttachReport,
@@ -805,7 +805,7 @@ impl From<SelfEvolutionSelectedExecutorArtifact> for RequestExecutorPolicyCandid
 }
 
 pub fn start_pm_session(
-    store: &ForgeStore,
+    store: &FoundryStore,
     objective: &str,
     origin: &str,
 ) -> Result<RequestStartReport> {
@@ -940,20 +940,20 @@ fn build_request_start_idempotency_attempt(
         )
     })?;
     let project_context = serde_json::json!({
-        "schema_version": "forge.request_start_project_context.v1",
+        "schema_version": "foundry.request_start_project_context.v1",
         "project_root": canonical_project_root,
     });
     let project_context_bytes = serde_json::to_vec(&project_context)?;
     let project_context_sha256 = hex_sha256(&project_context_bytes);
     let request_fingerprint = match parallel_team {
         Some(parallel_team) => serde_json::json!({
-            "schema_version": "forge.request_start_fingerprint.v2",
+            "schema_version": "foundry.request_start_fingerprint.v2",
             "goal": goal,
             "project_context_sha256": project_context_sha256,
             "parallel_team": semantic_parallel_team_fingerprint(parallel_team),
         }),
         None => serde_json::json!({
-            "schema_version": "forge.request_start_fingerprint.v1",
+            "schema_version": "foundry.request_start_fingerprint.v1",
             "goal": goal,
             "project_context_sha256": project_context_sha256,
         }),
@@ -962,7 +962,7 @@ fn build_request_start_idempotency_attempt(
     Ok(RequestStartIdempotencyAttempt {
         origin: normalized_origin.to_string(),
         key_sha256: hex_sha256(
-            format!("forge.request_start_idempotency_key.v1\0{normalized_key}").as_bytes(),
+            format!("foundry.request_start_idempotency_key.v1\0{normalized_key}").as_bytes(),
         ),
         request_fingerprint_sha256: hex_sha256(&serde_json::to_vec(&request_fingerprint)?),
         project_context_sha256,
@@ -973,14 +973,14 @@ fn semantic_parallel_team_fingerprint(parallel_team: &CoreParallelTeamSpec) -> s
     let mut lanes = parallel_team.lanes.clone();
     lanes.sort_by(|left, right| left.id.cmp(&right.id));
     serde_json::json!({
-        "schema_version": "forge.request_start_parallel_team_fingerprint.v1",
+        "schema_version": "foundry.request_start_parallel_team_fingerprint.v1",
         "lanes": lanes,
         "max_parallel_agents": parallel_team.max_parallel_agents,
     })
 }
 
 fn find_idempotent_request_start(
-    store: &ForgeStore,
+    store: &FoundryStore,
     attempt: &RequestStartIdempotencyAttempt,
 ) -> Result<Option<(RunRecord, RequestStartIdempotencyMetadata)>> {
     let mut replay = None;
@@ -1013,7 +1013,10 @@ fn find_idempotent_request_start(
         let metadata: RequestStartIdempotencyMetadata =
             serde_json::from_value(metadata_value.clone())
                 .context("failed to decode matching request start idempotency metadata")?;
-        if metadata.schema_version != "forge.request_start_idempotency.v1" {
+        if !crate::brand::identifier_matches(
+            &metadata.schema_version,
+            "foundry.request_start_idempotency.v1",
+        ) {
             anyhow::bail!(
                 "unsupported request start idempotency metadata schema: {}",
                 metadata.schema_version
@@ -1061,7 +1064,7 @@ fn replay_request_start_candidates(
 }
 
 pub fn start_async_request(
-    store: &ForgeStore,
+    store: &FoundryStore,
     goal: &str,
     origin: &str,
 ) -> Result<RequestStartReport> {
@@ -1069,7 +1072,7 @@ pub fn start_async_request(
 }
 
 pub fn start_async_request_with_idempotency(
-    store: &ForgeStore,
+    store: &FoundryStore,
     goal: &str,
     origin: &str,
     idempotency_key: Option<&str>,
@@ -1084,7 +1087,7 @@ pub fn start_async_request_with_idempotency(
 }
 
 pub fn start_async_request_with_idempotency_and_parallel_team(
-    store: &ForgeStore,
+    store: &FoundryStore,
     goal: &str,
     origin: &str,
     idempotency_key: Option<&str>,
@@ -1102,7 +1105,7 @@ pub fn start_async_request_with_idempotency_and_parallel_team(
 }
 
 pub fn start_async_request_with_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     goal: &str,
     origin: &str,
     project_root: &Path,
@@ -1111,7 +1114,7 @@ pub fn start_async_request_with_project(
 }
 
 pub fn start_async_request_with_project_and_idempotency(
-    store: &ForgeStore,
+    store: &FoundryStore,
     goal: &str,
     origin: &str,
     project_root: &Path,
@@ -1128,7 +1131,7 @@ pub fn start_async_request_with_project_and_idempotency(
 }
 
 pub fn start_async_request_with_project_idempotency_and_parallel_team(
-    store: &ForgeStore,
+    store: &FoundryStore,
     goal: &str,
     origin: &str,
     project_root: &Path,
@@ -1185,7 +1188,7 @@ pub fn start_async_request_with_project_idempotency_and_parallel_team(
         let mut run = create_run_record(&workflow, origin, "accepted");
         if let Some(attempt) = idempotency_attempt.as_ref() {
             run.request_start_idempotency = Some(RequestStartIdempotencyMetadata {
-                schema_version: "forge.request_start_idempotency.v1".to_string(),
+                schema_version: "foundry.request_start_idempotency.v1".to_string(),
                 origin: attempt.origin.clone(),
                 key_sha256: attempt.key_sha256.clone(),
                 request_fingerprint_sha256: attempt.request_fingerprint_sha256.clone(),
@@ -1292,18 +1295,18 @@ fn build_flow_resolution_report(
     };
     let decision_summary = match decision {
         "create_new_flow_with_reused_child_subflows" => format!(
-            "Forge searched existing flows, created a request-specific workflow, and attached {attached_subflows} reusable child subflow(s)."
+            "Foundry searched existing flows, created a request-specific workflow, and attached {attached_subflows} reusable child subflow(s)."
         ),
         "create_new_flow_without_attachable_reuse" => format!(
-            "Forge searched existing flows and found {} candidate(s), but none were attachable under lifecycle and validation policy; a new workflow was created.",
+            "Foundry searched existing flows and found {} candidate(s), but none were attachable under lifecycle and validation policy; a new workflow was created.",
             reuse_candidates.len()
         ),
-        _ => "Forge searched existing flows and found no reusable match; a new workflow was created."
+        _ => "Foundry searched existing flows and found no reusable match; a new workflow was created."
             .to_string(),
     };
 
     FlowResolutionReport {
-        schema_version: "forge.flow_resolution.v1".to_string(),
+        schema_version: "foundry.flow_resolution.v1".to_string(),
         searched_existing_flows: true,
         decision: decision.to_string(),
         decision_summary,
@@ -1348,7 +1351,7 @@ pub fn create_run_record(workflow: &Workflow, origin: &str, status: &str) -> Run
     }
 }
 
-pub fn save_run_record(store: &ForgeStore, run: &RunRecord) -> Result<()> {
+pub fn save_run_record(store: &FoundryStore, run: &RunRecord) -> Result<()> {
     store.insert_run(
         &run.run_id,
         &run.workflow_id,
@@ -1357,7 +1360,7 @@ pub fn save_run_record(store: &ForgeStore, run: &RunRecord) -> Result<()> {
     )
 }
 
-pub(crate) fn update_run_record(store: &ForgeStore, run: &RunRecord) -> Result<()> {
+pub(crate) fn update_run_record(store: &FoundryStore, run: &RunRecord) -> Result<()> {
     store.save_run(
         &run.run_id,
         &run.workflow_id,
@@ -1490,7 +1493,7 @@ fn ensure_request_supervisor_lease_is_recoverable(
 }
 
 pub fn update_run_status(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     status: &str,
     origin: &str,
@@ -1562,7 +1565,7 @@ pub fn update_run_status(
 }
 
 pub(crate) fn update_run_and_workflow_status(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     status: &str,
     origin: &str,
@@ -1627,7 +1630,7 @@ pub(crate) fn update_run_and_workflow_status(
 }
 
 pub(crate) fn mark_run_needs_attention(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run: &RunRecord,
     workflow: &Workflow,
     supervisor_fence: Option<&RequestSupervisorFence>,
@@ -1691,7 +1694,7 @@ pub(crate) fn mark_run_needs_attention(
 }
 
 fn mark_run_needs_attention_for_terminal_outcome(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run: &RunRecord,
     workflow: &Workflow,
     supervisor_fence: Option<&RequestSupervisorFence>,
@@ -1712,7 +1715,7 @@ fn mark_run_needs_attention_for_terminal_outcome(
 }
 
 fn mark_run_blocked(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run: &RunRecord,
     workflow: &Workflow,
     checkpoints: &[TaskCheckpoint],
@@ -1800,7 +1803,7 @@ fn ensure_request_mutation_is_active(
 }
 
 fn load_current_request_snapshot(
-    store: &ForgeStore,
+    store: &FoundryStore,
     expected_run: &RunRecord,
     expected_workflow: &Workflow,
     action: &str,
@@ -1820,7 +1823,7 @@ fn load_current_request_snapshot(
 }
 
 fn load_current_request_snapshot_for_completion(
-    store: &ForgeStore,
+    store: &FoundryStore,
     expected_run: &RunRecord,
     expected_workflow: &Workflow,
     action: &str,
@@ -1867,7 +1870,7 @@ fn load_current_request_snapshot_for_completion(
 }
 
 fn ensure_request_checkpoints_match(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     expected_checkpoints: &[TaskCheckpoint],
     action: &str,
@@ -1882,7 +1885,7 @@ fn ensure_request_checkpoints_match(
 }
 
 pub fn heartbeat_request(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     executor: &str,
     summary: &str,
@@ -1905,7 +1908,7 @@ pub fn heartbeat_request(
 
 #[allow(clippy::too_many_arguments)]
 fn heartbeat_request_with_expected_snapshot(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     executor: &str,
     summary: &str,
@@ -1987,7 +1990,7 @@ fn heartbeat_request_with_expected_snapshot(
 }
 
 pub fn drive_request(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     executor: &str,
     ttl_seconds: u64,
@@ -2006,7 +2009,7 @@ pub fn drive_request(
 }
 
 pub fn drive_request_with_context_budget(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     executor: &str,
     ttl_seconds: u64,
@@ -2027,7 +2030,7 @@ pub fn drive_request_with_context_budget(
 
 #[allow(clippy::too_many_arguments)]
 fn drive_request_with_options(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     executor: &str,
     ttl_seconds: u64,
@@ -2070,7 +2073,7 @@ fn drive_request_with_options(
             _ => "Request is failed; no context refresh or heartbeat is allowed.",
         };
         return Ok(RequestDriveReport {
-            schema_version: "forge.request_drive.v1".to_string(),
+            schema_version: "foundry.request_drive.v1".to_string(),
             status: terminal_status.to_string(),
             action: "none".to_string(),
             run_id: run.run_id.clone(),
@@ -2105,7 +2108,7 @@ fn drive_request_with_options(
             store,
             run_id,
             executor,
-            "forge drive evaluating next runnable action",
+            "foundry drive evaluating next runnable action",
             ttl_seconds,
             None,
             origin,
@@ -2121,7 +2124,7 @@ fn drive_request_with_options(
             REWORK_HANDOFF_CONTEXT_BUDGET,
         );
         return Ok(RequestDriveReport {
-            schema_version: "forge.request_drive.v1".to_string(),
+            schema_version: "foundry.request_drive.v1".to_string(),
             status: "rework_required".to_string(),
             action: "rework_task".to_string(),
             run_id: run.run_id,
@@ -2169,7 +2172,7 @@ fn drive_request_with_options(
             attention_reason,
         )?;
         let activity = build_run_activity_with_store(store, &attention_run);
-        let mut next_command = forge_command_prefix(store);
+        let mut next_command = foundry_command_prefix(store);
         next_command.extend([
             "workflow".to_string(),
             "update-goal".to_string(),
@@ -2183,7 +2186,7 @@ fn drive_request_with_options(
             "json".to_string(),
         ]);
         return Ok(RequestDriveReport {
-            schema_version: "forge.request_drive.v1".to_string(),
+            schema_version: "foundry.request_drive.v1".to_string(),
             status: "blocked".to_string(),
             action: outcome_status.action.clone(),
             run_id: run.run_id,
@@ -2254,7 +2257,7 @@ fn drive_request_with_options(
                     store.record_event(&workflow.id, "completion_audit_required", &event_data)
                 })?;
                 return Ok(RequestDriveReport {
-                    schema_version: "forge.request_drive.v1".to_string(),
+                    schema_version: "foundry.request_drive.v1".to_string(),
                     status: "completion_audit_required".to_string(),
                     action: "attach_final_completion_audit".to_string(),
                     run_id: run.run_id.clone(),
@@ -2283,7 +2286,7 @@ fn drive_request_with_options(
 
     if task_summary.completed == task_summary.total && task_summary.total > 0 && !finalize_delivery
     {
-        let mut next_command = forge_command_prefix(store);
+        let mut next_command = foundry_command_prefix(store);
         next_command.extend([
             "request".to_string(),
             "drive".to_string(),
@@ -2299,7 +2302,7 @@ fn drive_request_with_options(
             "json".to_string(),
         ]);
         return Ok(RequestDriveReport {
-            schema_version: "forge.request_drive.v1".to_string(),
+            schema_version: "foundry.request_drive.v1".to_string(),
             status: "completion_ready".to_string(),
             action: "finalize_request".to_string(),
             run_id: run.run_id.clone(),
@@ -2401,7 +2404,7 @@ fn drive_request_with_options(
             "All workflow tasks are completed.".to_string()
         };
         return Ok(RequestDriveReport {
-            schema_version: "forge.request_drive.v1".to_string(),
+            schema_version: "foundry.request_drive.v1".to_string(),
             status: "complete".to_string(),
             action: "none".to_string(),
             run_id: completed_run.run_id,
@@ -2433,7 +2436,7 @@ fn drive_request_with_options(
                 store,
                 run_id,
                 executor,
-                "forge drive selected a runnable handoff",
+                "foundry drive selected a runnable handoff",
                 ttl_seconds,
                 None,
                 origin,
@@ -2535,7 +2538,7 @@ fn drive_request_with_options(
             })
             .collect::<Vec<_>>();
         let next_command = parallel_next_commands.first().cloned().unwrap_or_else(|| {
-            let mut command = forge_command_prefix(store);
+            let mut command = foundry_command_prefix(store);
             command.extend([
                 "request".to_string(),
                 "status".to_string(),
@@ -2569,7 +2572,7 @@ fn drive_request_with_options(
             )
         };
         return Ok(RequestDriveReport {
-            schema_version: "forge.request_drive.v1".to_string(),
+            schema_version: "foundry.request_drive.v1".to_string(),
             status: if assigned_count == 0 {
                 "dispatch_blocked".to_string()
             } else {
@@ -2619,7 +2622,7 @@ fn drive_request_with_options(
         .find_map(|task| task.next_commands.first())
         .cloned()
         .unwrap_or_else(|| {
-            let mut command = forge_command_prefix(store);
+            let mut command = foundry_command_prefix(store);
             command.extend([
                 "request".to_string(),
                 "status".to_string(),
@@ -2641,7 +2644,7 @@ fn drive_request_with_options(
     )?;
 
     Ok(RequestDriveReport {
-        schema_version: "forge.request_drive.v1".to_string(),
+        schema_version: "foundry.request_drive.v1".to_string(),
         status: "blocked".to_string(),
         action: "wait_or_repair_dependencies".to_string(),
         run_id: blocked_run.run_id.clone(),
@@ -2667,7 +2670,7 @@ fn drive_request_with_options(
 }
 
 pub fn step_request(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     executor: &str,
     ttl_seconds: u64,
@@ -2677,7 +2680,7 @@ pub fn step_request(
 }
 
 pub(crate) fn step_request_with_supervisor_fence(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     executor: &str,
     ttl_seconds: u64,
@@ -2697,7 +2700,7 @@ pub(crate) fn step_request_with_supervisor_fence(
 
 #[allow(clippy::too_many_arguments)]
 fn step_request_with_options(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     executor: &str,
     ttl_seconds: u64,
@@ -2724,7 +2727,7 @@ fn step_request_with_options(
         let action = drive_before.action.clone();
         let reason = drive_before.reason.clone();
         return Ok(RequestStepReport {
-            schema_version: "forge.request_step.v1".to_string(),
+            schema_version: "foundry.request_step.v1".to_string(),
             status,
             action,
             run_id: run.run_id,
@@ -2755,7 +2758,7 @@ fn step_request_with_options(
         })?;
 
     Ok(RequestStepReport {
-        schema_version: "forge.request_step.v1".to_string(),
+        schema_version: "foundry.request_step.v1".to_string(),
         status: "handoff_required".to_string(),
         action: "start_handoff".to_string(),
         run_id: run.run_id,
@@ -2778,7 +2781,7 @@ fn step_request_with_options(
 }
 
 fn request_task_handoff_ready_for_completion(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     task_id: &str,
     context_budget: Option<usize>,
@@ -2905,7 +2908,7 @@ fn worktree_claim_identity_unchanged(
 }
 
 fn ensure_caller_attested_workspace_claim_unchanged(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     task: &AtomicTask,
     lease: &TaskLease,
@@ -2921,7 +2924,7 @@ fn ensure_caller_attested_workspace_claim_unchanged(
 }
 
 fn observed_executor_runtime_receipt(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     task: &AtomicTask,
     lease: &TaskLease,
@@ -3090,7 +3093,7 @@ fn observed_executor_runtime_receipt(
 }
 
 pub fn complete_ready_task(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     input: RequestTaskCompletionInput<'_>,
 ) -> Result<RequestTaskCompletionReport> {
@@ -3142,7 +3145,7 @@ pub fn complete_ready_task(
         .cloned()
     else {
         return Ok(RequestTaskCompletionReport {
-            schema_version: "forge.request_task_completion.v1".to_string(),
+            schema_version: "foundry.request_task_completion.v1".to_string(),
             status: "not_ready".to_string(),
             action: "drive_request".to_string(),
             run_id: run.run_id,
@@ -3168,7 +3171,7 @@ pub fn complete_ready_task(
             .map(|task| task.task_id.clone())
             .collect::<Vec<_>>();
         return Ok(RequestTaskCompletionReport {
-            schema_version: "forge.request_task_completion.v1".to_string(),
+            schema_version: "foundry.request_task_completion.v1".to_string(),
             status: "not_ready".to_string(),
             action: "drive_request".to_string(),
             run_id: run.run_id,
@@ -3364,7 +3367,7 @@ pub fn complete_ready_task(
         Some(evidence_exit_code),
     );
     let response_payload = serde_json::json!({
-        "schema_version": "forge.executor_response.v1",
+        "schema_version": "foundry.executor_response.v1",
         "task_id": task.id,
         "status": "completed",
         "artifacts": response_artifacts,
@@ -3408,7 +3411,7 @@ pub fn complete_ready_task(
     };
 
     Ok(RequestTaskCompletionReport {
-        schema_version: "forge.request_task_completion.v1".to_string(),
+        schema_version: "foundry.request_task_completion.v1".to_string(),
         status: if validation.accepted {
             "completed".to_string()
         } else {
@@ -3430,7 +3433,7 @@ pub fn complete_ready_task(
         validation: Some(validation),
         drive_before,
         drive_after,
-        reason: "Forge recorded caller-attested executor evidence correlated to an active lease; it did not directly observe execution. It generated a replayable trace, validated the response, and drove the run forward.".to_string(),
+        reason: "Foundry recorded caller-attested executor evidence correlated to an active lease; it did not directly observe execution. It generated a replayable trace, validated the response, and drove the run forward.".to_string(),
         updated_at: Utc::now(),
     })
 }
@@ -3477,7 +3480,7 @@ enum FinalDeliveryCommitVisibility {
 }
 
 impl PreparedFinalDeliveryPackage {
-    fn revalidate_snapshot(&self, store: &ForgeStore) -> Result<()> {
+    fn revalidate_snapshot(&self, store: &FoundryStore) -> Result<()> {
         let current = store.load_workflow(&self.workflow_id)?;
         let current_stamp = final_delivery_workflow_stamp(&current);
         if current_stamp != self.expected_workflow {
@@ -3508,7 +3511,7 @@ impl PreparedFinalDeliveryPackage {
         Ok(())
     }
 
-    fn commit(&self, store: &ForgeStore) -> Result<RequestFinalDeliveryPackageReport> {
+    fn commit(&self, store: &FoundryStore) -> Result<RequestFinalDeliveryPackageReport> {
         self.promote_files()?;
         let json_artifact =
             record_prepared_workflow_artifact(store, &self.workflow_id, &self.json.prepared)?;
@@ -3528,7 +3531,7 @@ impl PreparedFinalDeliveryPackage {
         )?;
 
         Ok(RequestFinalDeliveryPackageReport {
-            schema_version: "forge.request_final_delivery_package.v1".to_string(),
+            schema_version: "foundry.request_final_delivery_package.v1".to_string(),
             status: "final_delivery_package_created".to_string(),
             action: self.action.clone(),
             run_id: self.run_id.clone(),
@@ -3545,7 +3548,7 @@ impl PreparedFinalDeliveryPackage {
         })
     }
 
-    fn commit_visibility(&self, store: &ForgeStore) -> Result<FinalDeliveryCommitVisibility> {
+    fn commit_visibility(&self, store: &FoundryStore) -> Result<FinalDeliveryCommitVisibility> {
         let workflow = store.load_workflow(&self.workflow_id)?;
         let json_present = workflow
             .artifacts
@@ -3588,7 +3591,7 @@ impl PreparedFinalDeliveryPackage {
 
     fn finish_transaction(
         &self,
-        store: &ForgeStore,
+        store: &FoundryStore,
         result: Result<RequestFinalDeliveryPackageReport>,
     ) -> Result<RequestFinalDeliveryPackageReport> {
         match result {
@@ -3624,7 +3627,7 @@ impl PreparedFinalDeliveryPackage {
 }
 
 pub fn create_final_delivery_package(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     origin: &str,
 ) -> Result<RequestFinalDeliveryPackageReport> {
@@ -3639,7 +3642,7 @@ pub fn create_final_delivery_package(
 }
 
 fn prepare_final_delivery_package(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run: &RunRecord,
     workflow: &Workflow,
     expected_workflow: &Workflow,
@@ -3758,7 +3761,7 @@ fn prepare_final_delivery_package(
             &base_dir,
             &recovery_manifest_relative_path,
             &serde_json::json!({
-                "schema_version": "forge.request_final_delivery_staging.v1",
+                "schema_version": "foundry.request_final_delivery_staging.v1",
                 "run_id": &run.run_id,
                 "workflow_id": &workflow.id,
                 "generated_at": generated_at,
@@ -3869,7 +3872,7 @@ fn remove_directory_if_present(path: &Path) -> Result<()> {
 }
 
 pub fn ensure_final_audit(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     executor: &str,
     origin: &str,
@@ -3879,7 +3882,7 @@ pub fn ensure_final_audit(
     let updated_at = Utc::now();
     let Some(block_reason) = final_completion_audit_block_reason(store, &workflow)? else {
         return Ok(RequestFinalAuditReport {
-            schema_version: "forge.request_final_audit.v1".to_string(),
+            schema_version: "foundry.request_final_audit.v1".to_string(),
             status: "final_audit_satisfied".to_string(),
             action: "none".to_string(),
             workflow_id: workflow.id.clone(),
@@ -3901,7 +3904,7 @@ pub fn ensure_final_audit(
         && !final_completion_audit_dependency_ids_completed(&workflow, &audit_dependency_ids)
     {
         return Ok(RequestFinalAuditReport {
-            schema_version: "forge.request_final_audit.v1".to_string(),
+            schema_version: "foundry.request_final_audit.v1".to_string(),
             status: "final_audit_waiting_for_workflow_completion".to_string(),
             action: "continue_workflow".to_string(),
             workflow_id: workflow.id.clone(),
@@ -3971,7 +3974,7 @@ pub fn ensure_final_audit(
     };
 
     Ok(RequestFinalAuditReport {
-        schema_version: "forge.request_final_audit.v1".to_string(),
+        schema_version: "foundry.request_final_audit.v1".to_string(),
         status: status.to_string(),
         action: action.to_string(),
         workflow_id: active_workflow.id.clone(),
@@ -4040,7 +4043,7 @@ struct FinalDeliveryPackageContext<'a> {
 
 fn build_final_delivery_payload(context: &FinalDeliveryPackageContext<'_>) -> serde_json::Value {
     serde_json::json!({
-        "schema_version": "forge.final_delivery_package.v1",
+        "schema_version": "foundry.final_delivery_package.v1",
         "status": context.readiness,
         "reason": context.reason,
         "generated_at": context.generated_at,
@@ -4220,7 +4223,7 @@ fn write_text_artifact(base_dir: &Path, relative_path: &str, content: &str) -> R
 }
 
 struct ExecutionTracePayloadInput<'a> {
-    store: &'a ForgeStore,
+    store: &'a FoundryStore,
     workflow: &'a Workflow,
     task: &'a AtomicTask,
     handoff_task: &'a RequestDriveTask,
@@ -4249,12 +4252,12 @@ fn completion_execution_receipt_payload(
     let execution_observed = observed_runtime.is_some();
     serde_json::json!({
         "evidence_source": if execution_observed {
-            "forge_executor_runtime"
+            "foundry_executor_runtime"
         } else {
             "caller_attested"
         },
         "attestation_source": if execution_observed {
-            "forge_runtime"
+            "foundry_runtime"
         } else {
             "caller"
         },
@@ -4279,7 +4282,7 @@ fn build_execution_trace_payload(input: ExecutionTracePayloadInput<'_>) -> serde
     let handoff_task = input.handoff_task;
     let completion = input.completion;
     let drive_before = input.drive_before;
-    let mut status_command = forge_command_prefix(input.store);
+    let mut status_command = foundry_command_prefix(input.store);
     status_command.extend([
         "request".to_string(),
         "status".to_string(),
@@ -4288,7 +4291,7 @@ fn build_execution_trace_payload(input: ExecutionTracePayloadInput<'_>) -> serde
         "--output".to_string(),
         "json".to_string(),
     ]);
-    let mut drive_command = forge_command_prefix(input.store);
+    let mut drive_command = foundry_command_prefix(input.store);
     drive_command.extend([
         "request".to_string(),
         "drive".to_string(),
@@ -4309,7 +4312,7 @@ fn build_execution_trace_payload(input: ExecutionTracePayloadInput<'_>) -> serde
         completion.evidence_exit_code,
     );
     serde_json::json!({
-        "schema_version": "forge.execution_trace.v1",
+        "schema_version": "foundry.execution_trace.v1",
         "run_id": input.run_id,
         "workflow_id": workflow.id,
         "workflow_revision": workflow.revisions.last().map(|revision| revision.revision).unwrap_or(0),
@@ -4357,13 +4360,13 @@ fn build_execution_trace_payload(input: ExecutionTracePayloadInput<'_>) -> serde
         "completion_policy": {
             "uses_executor_response_validation": true,
             "trace_is_replayable": true,
-            "forge_promotes_only_after_validation": true
+            "foundry_promotes_only_after_validation": true
         }
     })
 }
 
 fn latest_open_rework(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
 ) -> Result<Option<RequestDriveRework>> {
     let events = store.load_workflow_events(&workflow.id)?;
@@ -4420,7 +4423,7 @@ fn latest_open_rework(
     Ok(None)
 }
 
-fn active_task_lease_ids(store: &ForgeStore, workflow: &Workflow) -> Result<BTreeSet<String>> {
+fn active_task_lease_ids(store: &FoundryStore, workflow: &Workflow) -> Result<BTreeSet<String>> {
     let now = Utc::now();
     let mut active = BTreeSet::new();
     for task in workflow
@@ -4445,7 +4448,7 @@ fn active_task_lease_ids(store: &ForgeStore, workflow: &Workflow) -> Result<BTre
 }
 
 fn ready_handoff_tasks(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     handoff_tasks: &[ContextHandoffTask],
 ) -> Result<Vec<RequestDriveTask>> {
@@ -4489,7 +4492,7 @@ fn ready_handoff_tasks(
 }
 
 fn request_context_frontier_task_ids(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
 ) -> Result<Vec<String>> {
     let active_lease_task_ids = active_task_lease_ids(store, workflow)?;
@@ -4589,7 +4592,7 @@ fn task_requires_dependency_git_fan_in(task: &AtomicTask) -> bool {
 }
 
 fn task_git_fan_in_routing_block(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task: &AtomicTask,
 ) -> Option<TaskExecutorRoutingBlock> {
@@ -4609,7 +4612,7 @@ fn task_git_fan_in_routing_block(
             Some(TaskExecutorRoutingBlock {
                 status: "deferred_git_fan_in_required".to_string(),
                 reason: format!(
-                    "task {} requires a current successful dependency Git fan-in receipt before executor dispatch: {}; run `forge worktree integrate-dependencies --workflow {} --task {} --allow-repository-mutation --approved-by <operator> --reason <reason> --output json`",
+                    "task {} requires a current successful dependency Git fan-in receipt before executor dispatch: {}; run `foundry worktree integrate-dependencies --workflow {} --task {} --allow-repository-mutation --approved-by <operator> --reason <reason> --output json`",
                     task.id, status.reason, workflow_id, task.id
                 ),
                 blocking_refs,
@@ -4870,7 +4873,7 @@ struct FilesystemCapacity {
 
 #[allow(clippy::too_many_arguments)]
 fn build_dispatch_frontier(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     ready_tasks: &[RequestDriveTask],
     handoff_tasks: &[ContextHandoffTask],
@@ -4894,7 +4897,7 @@ fn build_dispatch_frontier(
 
 #[allow(clippy::too_many_arguments)]
 fn build_dispatch_frontier_with_snapshot(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     ready_tasks: &[RequestDriveTask],
     handoff_tasks: &[ContextHandoffTask],
@@ -4984,7 +4987,7 @@ fn build_dispatch_frontier_with_snapshot(
         }
     }
     // A blocked legacy/stale lease is not assignable, but it still consumes host capacity until
-    // release or expiry because Forge cannot prove that no process is using it.
+    // release or expiry because Foundry cannot prove that no process is using it.
     let existing_active_leases = existing_leases.len() + existing_lease_blocks.len();
     let effective_frontier_limit = configured_limit
         .max(existing_active_leases)
@@ -5416,7 +5419,7 @@ fn build_dispatch_frontier_with_snapshot(
     }
 
     let wave = ExecutionWave {
-        schema_version: "forge.execution_wave.v1".to_string(),
+        schema_version: "foundry.execution_wave.v1".to_string(),
         wave_id: format!("wave_{}", Uuid::new_v4().simple()),
         workflow_id: workflow.id.clone(),
         workflow_revision: workflow_revision(workflow),
@@ -5433,7 +5436,7 @@ fn build_dispatch_frontier_with_snapshot(
         "single_handoff_acquired"
     };
     Ok(DispatchFrontier {
-        schema_version: "forge.dispatch_frontier.v1".to_string(),
+        schema_version: "foundry.dispatch_frontier.v1".to_string(),
         status: status.to_string(),
         max_parallel_tasks: configured_limit,
         admission,
@@ -5473,7 +5476,7 @@ fn workflow_revision(workflow: &Workflow) -> u64 {
 }
 
 fn load_dispatch_acquisition(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     lease_id: &str,
@@ -5501,7 +5504,7 @@ fn load_dispatch_acquisition(
 }
 
 fn quota_parallel_limit(
-    store: &ForgeStore,
+    store: &FoundryStore,
     selected_executor: &str,
     requested: usize,
 ) -> Result<(usize, String, String)> {
@@ -5583,9 +5586,9 @@ fn quota_text_blocks(remaining_quota: &str, rate_limit_risk: &str) -> bool {
             .any(|needle| risk.contains(needle))
 }
 
-fn read_host_resource_snapshot(store: &ForgeStore) -> HostResourceSnapshot {
+fn read_host_resource_snapshot(store: &FoundryStore) -> HostResourceSnapshot {
     #[cfg(debug_assertions)]
-    if let Ok(value) = std::env::var("FORGE_TEST_HOST_RESOURCE_SNAPSHOT_JSON") {
+    if let Ok(value) = crate::brand::env_var("FOUNDRY_TEST_HOST_RESOURCE_SNAPSHOT_JSON") {
         if let Ok(snapshot) = serde_json::from_str::<HostResourceSnapshot>(&value) {
             return snapshot;
         }
@@ -5727,7 +5730,7 @@ fn filesystem_capacity(_path: &Path) -> Option<FilesystemCapacity> {
 }
 
 fn build_request_context_frontier(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     budget: usize,
     checkpoints: &[TaskCheckpoint],
@@ -5780,7 +5783,7 @@ fn build_request_context_frontier(
 }
 
 fn worktree_project_roots(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
 ) -> Result<BTreeMap<String, PathBuf>> {
     let task_ids = workflow
@@ -5792,7 +5795,7 @@ fn worktree_project_roots(
 }
 
 fn worktree_project_roots_for_task_ids(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     task_ids: &[String],
 ) -> Result<BTreeMap<String, PathBuf>> {
@@ -5811,14 +5814,14 @@ fn worktree_project_roots_for_task_ids(
 }
 
 fn handoff_command(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     executor: &str,
     ttl_seconds: u64,
     budget: usize,
 ) -> Vec<String> {
-    let mut command = forge_command_prefix(store);
+    let mut command = foundry_command_prefix(store);
     command.extend([
         "task".to_string(),
         "handoff".to_string(),
@@ -5841,13 +5844,13 @@ fn handoff_command(
 }
 
 fn context_repair_command(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     budget: usize,
     project_root: Option<&Path>,
 ) -> Vec<String> {
-    let mut command = forge_command_prefix(store);
+    let mut command = foundry_command_prefix(store);
     command.extend([
         "context".to_string(),
         "--workflow".to_string(),
@@ -5874,7 +5877,7 @@ fn context_repair_command(
 }
 
 fn drive_blocked_tasks(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     handoff_tasks: &[ContextHandoffTask],
     project_roots: &BTreeMap<String, PathBuf>,
@@ -5996,7 +5999,7 @@ fn request_task_status(status: &TaskStatus) -> &'static str {
 }
 
 pub fn switch_request_executor(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     input: RequestExecutorSwitchInput,
 ) -> Result<RequestExecutorSwitchReport> {
@@ -6025,7 +6028,7 @@ pub fn switch_request_executor(
                 user_directives_remain_authoritative: true,
             };
             let executor_switch = ExecutorSwitchRecord {
-                schema_version: "forge.executor_switch.v1".to_string(),
+                schema_version: "foundry.executor_switch.v1".to_string(),
                 from_executor: previous_executor.clone(),
                 to_executor: input.executor.clone(),
                 from_pid: previous_pid,
@@ -6057,7 +6060,7 @@ pub fn switch_request_executor(
                 &run.workflow_id,
                 "async_request_executor_switched",
                 &serde_json::json!({
-                    "schema_version": "forge.request_executor_switch.v1",
+                    "schema_version": "foundry.request_executor_switch.v1",
                     "run_id": run.run_id,
                     "workflow_id": run.workflow_id,
                     "origin": input.origin.clone(),
@@ -6099,7 +6102,7 @@ pub fn switch_request_executor(
 
     Ok(RequestExecutorSwitchReport {
         status: run.status,
-        schema_version: "forge.request_executor_switch.v1".to_string(),
+        schema_version: "foundry.request_executor_switch.v1".to_string(),
         run_id: run.run_id,
         workflow_id: run.workflow_id,
         previous_status,
@@ -6107,8 +6110,8 @@ pub fn switch_request_executor(
         previous_executor,
         new_executor: input.executor,
         brain_switch_policy: BrainSwitchPolicyReport {
-            schema_version: "forge.brain_switch_policy.v1".to_string(),
-            orchestrator_brain: "forge".to_string(),
+            schema_version: "foundry.brain_switch_policy.v1".to_string(),
+            orchestrator_brain: "foundry".to_string(),
             switch_scope: "workflow_run_execution_brain".to_string(),
             can_switch_without_stopping_workflow: true,
             preserves_run_id: executor_switch.continuity_policy.preserve_run_id,
@@ -6119,7 +6122,7 @@ pub fn switch_request_executor(
                 .user_directives_remain_authoritative,
             node_brain_routing_source: "workflow.tasks[].node_brain_routing".to_string(),
             node_brain_routing_mutation_command: {
-                let mut command = forge_command_prefix(store);
+                let mut command = foundry_command_prefix(store);
                 command.extend([
                     "workflow".to_string(),
                     "update-node-brain".to_string(),
@@ -6172,12 +6175,12 @@ fn build_run_activity_at(run: &RunRecord, now: DateTime<Utc>) -> RunActivity {
     build_run_activity_at_optional_store(None, run, now)
 }
 
-fn build_run_activity_with_store(store: &ForgeStore, run: &RunRecord) -> RunActivity {
+fn build_run_activity_with_store(store: &FoundryStore, run: &RunRecord) -> RunActivity {
     build_run_activity_at_with_store(store, run, Utc::now())
 }
 
 fn build_run_activity_at_with_store(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run: &RunRecord,
     now: DateTime<Utc>,
 ) -> RunActivity {
@@ -6185,7 +6188,7 @@ fn build_run_activity_at_with_store(
 }
 
 fn build_run_activity_at_optional_store(
-    store: Option<&ForgeStore>,
+    store: Option<&FoundryStore>,
     run: &RunRecord,
     now: DateTime<Utc>,
 ) -> RunActivity {
@@ -6220,7 +6223,7 @@ fn build_run_activity_at_optional_store(
     };
     let recovery = recovery_recommendation(store, run, heartbeat_status);
     RunActivity {
-        schema_version: "forge.run_activity.v1".to_string(),
+        schema_version: "foundry.run_activity.v1".to_string(),
         active,
         heartbeat_status: heartbeat_status.to_string(),
         process_status: process_status.to_string(),
@@ -6254,14 +6257,14 @@ fn process_alive(pid: u32) -> Option<bool> {
 }
 
 fn recovery_recommendation(
-    store: Option<&ForgeStore>,
+    store: Option<&FoundryStore>,
     run: &RunRecord,
     heartbeat_status: &str,
 ) -> RunRecoveryRecommendation {
     match heartbeat_status {
         "stale" => {
             let command = store.map_or_else(Vec::new, |store| {
-                let mut command = forge_command_prefix(store);
+                let mut command = foundry_command_prefix(store);
                 command.extend([
                     "request".to_string(),
                     "recover-stale".to_string(),
@@ -6271,10 +6274,10 @@ fn recovery_recommendation(
                 command
             });
             RunRecoveryRecommendation {
-                schema_version: "forge.run_recovery_recommendation.v1".to_string(),
+                schema_version: "foundry.run_recovery_recommendation.v1".to_string(),
                 action: "mark_needs_attention".to_string(),
                 target_status: "needs_attention".to_string(),
-                reason: "Heartbeat is stale; Forge should stop presenting this run as active and require resume, cancel or inspect before more executor work.".to_string(),
+                reason: "Heartbeat is stale; Foundry should stop presenting this run as active and require resume, cancel or inspect before more executor work.".to_string(),
                 confidence: 0.91,
                 requires_human_approval: false,
                 command,
@@ -6282,7 +6285,7 @@ fn recovery_recommendation(
         }
         "needs_attention" => {
             let command = store.map_or_else(Vec::new, |store| {
-                let mut command = forge_command_prefix(store);
+                let mut command = foundry_command_prefix(store);
                 command.extend([
                     "request".to_string(),
                     "status".to_string(),
@@ -6292,7 +6295,7 @@ fn recovery_recommendation(
                 command
             });
             RunRecoveryRecommendation {
-                schema_version: "forge.run_recovery_recommendation.v1".to_string(),
+                schema_version: "foundry.run_recovery_recommendation.v1".to_string(),
                 action: "resume_cancel_or_inspect".to_string(),
                 target_status: "needs_attention".to_string(),
                 reason: "Run already needs attention; preserve lineage while a human or executor chooses resume, cancel or inspect.".to_string(),
@@ -6302,7 +6305,7 @@ fn recovery_recommendation(
             }
         }
         _ => RunRecoveryRecommendation {
-            schema_version: "forge.run_recovery_recommendation.v1".to_string(),
+            schema_version: "foundry.run_recovery_recommendation.v1".to_string(),
             action: "none".to_string(),
             target_status: run.status.clone(),
             reason: "No stale heartbeat recovery is required for the current run state."
@@ -6314,17 +6317,21 @@ fn recovery_recommendation(
     }
 }
 
-pub fn load_run_record(store: &ForgeStore, run_id: &str) -> Result<RunRecord> {
+pub fn load_run_record(store: &FoundryStore, run_id: &str) -> Result<RunRecord> {
     Ok(serde_json::from_value(store.load_run(run_id)?)?)
 }
 
-fn load_run_record_for_action(store: &ForgeStore, run_id: &str, action: &str) -> Result<RunRecord> {
+fn load_run_record_for_action(
+    store: &FoundryStore,
+    run_id: &str,
+    action: &str,
+) -> Result<RunRecord> {
     let run = load_run_record(store, run_id)?;
     ensure_workflow_policy(store, &run.workflow_id, action)?;
     Ok(run)
 }
 
-pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestStatusReport> {
+pub fn load_request_status(store: &FoundryStore, run_id: &str) -> Result<RequestStatusReport> {
     let run = load_run_record_for_action(store, run_id, "request status")?;
     let workflow = store.load_workflow(&run.workflow_id)?;
     let task_summary = summarize_tasks(&workflow);
@@ -6373,7 +6380,10 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
     })
 }
 
-fn request_outcome_status(store: &ForgeStore, workflow: &Workflow) -> Result<OutcomeStatusReport> {
+fn request_outcome_status(
+    store: &FoundryStore,
+    workflow: &Workflow,
+) -> Result<OutcomeStatusReport> {
     let final_completion_audit_block_reason = final_completion_audit_block_reason(store, workflow)?;
     let evidence_deliverables = load_addon_user_outcome_evidence(store, workflow);
     Ok(assess_workflow_outcome_with_evidence(
@@ -6385,7 +6395,7 @@ fn request_outcome_status(store: &ForgeStore, workflow: &Workflow) -> Result<Out
 }
 
 fn load_addon_user_outcome_evidence(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
 ) -> Vec<OutcomeEvidenceDeliverable> {
     let mut evidence = Vec::new();
@@ -6518,7 +6528,7 @@ fn handoff_context_budget_for_task(workflow: &Workflow, task_id: &str) -> usize 
 }
 
 fn save_workflow_revision_event_if_snapshot(
-    store: &ForgeStore,
+    store: &FoundryStore,
     expected_run: Option<&RunRecord>,
     expected_workflow: &Workflow,
     updated_workflow: &Workflow,
@@ -6562,7 +6572,7 @@ fn save_workflow_revision_event_if_snapshot(
 }
 
 fn ensure_final_completion_audit_task(
-    store: &ForgeStore,
+    store: &FoundryStore,
     expected_run: Option<&RunRecord>,
     workflow: &Workflow,
     origin: &str,
@@ -6633,7 +6643,7 @@ fn ensure_final_completion_audit_task(
     let task_id = format!("task-{:03}", updated.tasks.len() + 1);
     let dependency_ids = expected_dependency_ids;
     let dependency_refs: Vec<&str> = dependency_ids.iter().map(String::as_str).collect();
-    let mut audit_validation_command = forge_command_prefix(store);
+    let mut audit_validation_command = foundry_command_prefix(store);
     audit_validation_command.extend([
         "workflow".to_string(),
         "attach-artifact".to_string(),
@@ -6646,7 +6656,7 @@ fn ensure_final_completion_audit_task(
         "--output".to_string(),
         "json".to_string(),
     ]);
-    let audit_validation_command = render_forge_command(&audit_validation_command);
+    let audit_validation_command = render_foundry_command(&audit_validation_command);
     let mut audit_task = task(
         &task_id,
         "Audit final completion criteria",
@@ -6663,11 +6673,11 @@ fn ensure_final_completion_audit_task(
             expected: "Attach a JSON final completion audit with status passed, goal_fully_satisfied true, non-empty evidence and no open_items or missing_criteria."
                 .to_string(),
         }],
-        "a Forge-attached final_completion_audit JSON artifact or a needs_retry response listing the exact missing final criteria",
+        "a Foundry-attached final_completion_audit JSON artifact or a needs_retry response listing the exact missing final criteria",
         (ExecutorKind::Ai, 0.35),
     );
     audit_task.goal = format!(
-        "Audit the explicit final criteria before completion. {block_reason} Inspect Forge artifacts and the target repositories. If any final criterion lacks evidence, return needs_retry with exact missing work; only attach `{FINAL_COMPLETION_AUDIT_KIND}` when every criterion is proven."
+        "Audit the explicit final criteria before completion. {block_reason} Inspect Foundry artifacts and the target repositories. If any final criterion lacks evidence, return needs_retry with exact missing work; only attach `{FINAL_COMPLETION_AUDIT_KIND}` when every criterion is proven."
     );
     audit_task.version = required_task_version;
     updated.tasks.push(audit_task);
@@ -6796,13 +6806,13 @@ fn is_final_completion_audit_task(task: &AtomicTask) -> bool {
 }
 
 fn final_completion_audit_handoff_command(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     executor: &str,
     budget: usize,
 ) -> Vec<String> {
-    let mut command = forge_command_prefix(store);
+    let mut command = foundry_command_prefix(store);
     command.extend([
         "task".to_string(),
         "handoff".to_string(),
@@ -6823,11 +6833,11 @@ fn final_completion_audit_handoff_command(
 }
 
 fn final_completion_audit_attach_command(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     origin: &str,
 ) -> Vec<String> {
-    let mut command = forge_command_prefix(store);
+    let mut command = foundry_command_prefix(store);
     command.extend([
         "workflow".to_string(),
         "attach-artifact".to_string(),
@@ -6845,7 +6855,7 @@ fn final_completion_audit_attach_command(
     command
 }
 
-fn forge_command_prefix(store: &ForgeStore) -> Vec<String> {
+fn foundry_command_prefix(store: &FoundryStore) -> Vec<String> {
     let store_path = if store.path().is_absolute() {
         store.path().to_path_buf()
     } else {
@@ -6854,13 +6864,13 @@ fn forge_command_prefix(store: &ForgeStore) -> Vec<String> {
             .unwrap_or_else(|_| store.path().to_path_buf())
     };
     vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "--store".to_string(),
         store_path.display().to_string(),
     ]
 }
 
-fn render_forge_command(command: &[String]) -> String {
+fn render_foundry_command(command: &[String]) -> String {
     command
         .iter()
         .map(|argument| shell_quote_command_argument(argument))
@@ -6885,7 +6895,7 @@ fn shell_quote_command_argument(argument: &str) -> String {
 }
 
 pub(crate) fn final_completion_audit_block_reason(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
 ) -> Result<Option<String>> {
     if !workflow_requires_final_completion_audit(workflow) {
@@ -7018,7 +7028,10 @@ pub struct RequestCancelReport {
     pub cancelled_at: DateTime<Utc>,
 }
 
-pub fn list_requests(store: &ForgeStore, status_filter: Option<&str>) -> Result<RequestListReport> {
+pub fn list_requests(
+    store: &FoundryStore,
+    status_filter: Option<&str>,
+) -> Result<RequestListReport> {
     let records = store.load_runs()?;
     let mut runs: Vec<RequestListRow> = records
         .iter()
@@ -7070,14 +7083,14 @@ pub fn list_requests(store: &ForgeStore, status_filter: Option<&str>) -> Result<
     }
     Ok(RequestListReport {
         status: "loaded".to_string(),
-        schema_version: "forge.request_list.v1".to_string(),
+        schema_version: "foundry.request_list.v1".to_string(),
         total,
         runs,
     })
 }
 
 pub fn cancel_request(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     origin: &str,
 ) -> Result<RequestCancelReport> {
@@ -7138,7 +7151,7 @@ pub fn cancel_request(
 }
 
 pub fn resume_async_request(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     origin: &str,
 ) -> Result<RequestResumeReport> {
@@ -7175,7 +7188,7 @@ pub fn resume_async_request(
 }
 
 pub fn recover_stale_request(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     origin: &str,
 ) -> Result<RequestStaleRecoveryReport> {
@@ -7229,14 +7242,14 @@ pub fn recover_stale_request(
         })?;
     let activity = build_run_activity_at_with_store(store, &run, updated_at);
     let recovery = RunRecoveryRecommendation {
-        schema_version: "forge.run_recovery_recommendation.v1".to_string(),
+        schema_version: "foundry.run_recovery_recommendation.v1".to_string(),
         action: "resume_cancel_or_inspect".to_string(),
         target_status: "needs_attention".to_string(),
-        reason: "Heartbeat is stale; Forge moved the run to needs_attention so a human or executor can resume, cancel or inspect without losing lineage.".to_string(),
+        reason: "Heartbeat is stale; Foundry moved the run to needs_attention so a human or executor can resume, cancel or inspect without losing lineage.".to_string(),
         confidence: 0.93,
         requires_human_approval: false,
         command: {
-            let mut command = forge_command_prefix(store);
+            let mut command = foundry_command_prefix(store);
             command.extend([
             "request".to_string(),
             "status".to_string(),
@@ -7249,7 +7262,7 @@ pub fn recover_stale_request(
 
     Ok(RequestStaleRecoveryReport {
         status: run.status,
-        schema_version: "forge.request_stale_recovery.v1".to_string(),
+        schema_version: "foundry.request_stale_recovery.v1".to_string(),
         run_id: run.run_id,
         workflow_id: run.workflow_id,
         previous_status,
@@ -7262,29 +7275,29 @@ pub fn recover_stale_request(
 }
 
 fn build_agent_handoff_contract(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run: &RunRecord,
     flow_resolution: FlowResolutionReport,
 ) -> AgentHandoffContract {
     AgentHandoffContract {
-        schema_version: "forge.agent_handoff_contract.v1".to_string(),
+        schema_version: "foundry.agent_handoff_contract.v1".to_string(),
         run_id: run.run_id.clone(),
         workflow_id: run.workflow_id.clone(),
         origin: run.origin.clone(),
         flow_resolution,
         policy: AgentHandoffPolicy {
-            execution_authority: "forge".to_string(),
+            execution_authority: "foundry".to_string(),
             async_run: true,
-            source_of_truth: "forge_sqlite_workflow_state".to_string(),
+            source_of_truth: "foundry_sqlite_workflow_state".to_string(),
             executor_policy_required: true,
             validation_before_promotion: true,
             user_directives_remain_authoritative: true,
             executor_hot_swap_supported: true,
         },
         allowed_context: AgentAllowedContext {
-            tool: "forge.context.request".to_string(),
+            tool: "foundry.context.request".to_string(),
             command: {
-                let mut command = forge_command_prefix(store);
+                let mut command = foundry_command_prefix(store);
                 command.extend([
                     "context".to_string(),
                     "--workflow".to_string(),
@@ -7314,9 +7327,9 @@ fn build_agent_handoff_contract(
         ],
         artifact_refs: Vec::new(),
         status_poll: AgentStatusPoll {
-            tool: "forge.run.status".to_string(),
+            tool: "foundry.run.status".to_string(),
             command: {
-                let mut command = forge_command_prefix(store);
+                let mut command = foundry_command_prefix(store);
                 command.extend([
                     "request".to_string(),
                     "status".to_string(),
@@ -7358,7 +7371,7 @@ fn summarize_tasks(workflow: &Workflow) -> TaskStatusSummary {
 }
 
 fn load_latest_validation_evidence(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
 ) -> Result<Option<ValidationEvidenceSummary>> {
     let artifacts = list_workflow_artifacts(&store.base_dir(), workflow_id)?;
@@ -7388,7 +7401,7 @@ fn load_latest_validation_evidence(
 }
 
 fn load_latest_executor_policy_summary(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
 ) -> Result<Option<RequestExecutorPolicySummary>> {
     let artifacts = list_workflow_artifacts(&store.base_dir(), workflow_id)?;
@@ -7405,7 +7418,7 @@ fn load_latest_executor_policy_summary(
     let policy = payload.executor_policy;
 
     Ok(Some(RequestExecutorPolicySummary {
-        schema_version: "forge.request_executor_policy_summary.v1".to_string(),
+        schema_version: "foundry.request_executor_policy_summary.v1".to_string(),
         artifact_path: artifact.path,
         artifact_sha256: artifact.sha256,
         cycle: payload.cycle,
@@ -7479,10 +7492,13 @@ mod status_fence_tests {
             &[
                 "config",
                 "user.email",
-                "forge-request-tests@example.invalid",
+                "foundry-request-tests@example.invalid",
             ],
         );
-        git(repository, &["config", "user.name", "Forge Request Tests"]);
+        git(
+            repository,
+            &["config", "user.name", "Foundry Request Tests"],
+        );
         fs::write(repository.join("README.md"), "request worktree fixture\n").unwrap();
         git(repository, &["add", "README.md"]);
         git(
@@ -7499,7 +7515,7 @@ mod status_fence_tests {
     }
 
     fn bind_distinct_task_worktree(
-        store: &ForgeStore,
+        store: &FoundryStore,
         repository: &Path,
         worktree_root: &Path,
         branch: &str,
@@ -7545,7 +7561,7 @@ mod status_fence_tests {
     #[test]
     fn observed_runtime_worktree_claim_allows_only_the_receipted_head_advance() {
         let leased = WorktreeMutationClaim {
-            schema_version: "forge.worktree.mutation_claim.v1".to_string(),
+            schema_version: "foundry.worktree.mutation_claim.v1".to_string(),
             mode: "exclusive_mutation".to_string(),
             worktree_id: "task-worktree".to_string(),
             worktree_identity_sha256: "identity".to_string(),
@@ -7579,7 +7595,7 @@ mod status_fence_tests {
         ));
     }
 
-    fn save_ready_executor(store: &ForgeStore, id: &str) {
+    fn save_ready_executor(store: &FoundryStore, id: &str) {
         store
             .save_executor_state(
                 id,
@@ -7593,8 +7609,8 @@ mod status_fence_tests {
                     "config_evidence": ["test"],
                     "non_interactive_ready": true,
                     "probe_evidence": ["test"],
-                    "forge_first_ready": false,
-                    "forge_first_entrypoint": null,
+                    "foundry_first_ready": false,
+                    "foundry_first_entrypoint": null,
                     "harness_status": null,
                     "allowed": true,
                     "decision_source": "test",
@@ -7629,7 +7645,7 @@ mod status_fence_tests {
     #[test]
     fn fresh_quota_counts_an_existing_lease_before_admitting_remaining_capacity() {
         let temporary = tempfile::tempdir().unwrap();
-        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temporary.path().join("foundry.sqlite")).unwrap();
         save_ready_executor(&store, "external-worker");
         let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
             "Count active executor leases against fresh parallel quota",
@@ -7709,7 +7725,7 @@ mod status_fence_tests {
             brain_id: Some(brain.to_string()),
             role: format!("{brain}-worker"),
             parallel_group: "healthy-eight-way-wave".to_string(),
-            state_owner: "forge".to_string(),
+            state_owner: "foundry".to_string(),
         }];
         task.node_brain_routing.max_parallel_agents = 1;
         task
@@ -7720,7 +7736,7 @@ mod status_fence_tests {
         let temporary = tempfile::tempdir().unwrap();
         let repository = temporary.path().join("repository");
         initialize_repository(&repository);
-        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temporary.path().join("foundry.sqlite")).unwrap();
         save_ready_executor(&store, "agy");
         save_ready_executor(&store, "codex");
         let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
@@ -7868,7 +7884,7 @@ mod status_fence_tests {
     #[test]
     fn agentic_tasks_without_task_worktrees_are_deferred_without_new_leases() {
         let temporary = tempfile::tempdir().unwrap();
-        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temporary.path().join("foundry.sqlite")).unwrap();
         save_ready_executor(&store, "agy");
         save_ready_executor(&store, "codex");
         let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
@@ -7936,7 +7952,7 @@ mod status_fence_tests {
         let temporary = tempfile::tempdir().unwrap();
         let repository = temporary.path().join("repository");
         initialize_repository(&repository);
-        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temporary.path().join("foundry.sqlite")).unwrap();
         save_ready_executor(&store, "agy");
         save_ready_executor(&store, "codex");
         let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
@@ -8007,7 +8023,7 @@ mod status_fence_tests {
     #[test]
     fn deterministic_command_dispatch_does_not_require_an_agent_worktree() {
         let temporary = tempfile::tempdir().unwrap();
-        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temporary.path().join("foundry.sqlite")).unwrap();
         save_ready_executor(&store, "codex");
         let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
             "Preserve deterministic dispatch",
@@ -8051,7 +8067,7 @@ mod status_fence_tests {
     #[test]
     fn atomic_run_and_workflow_status_update_rejects_live_lease_without_mutation() {
         let temporary = tempfile::tempdir().unwrap();
-        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temporary.path().join("foundry.sqlite")).unwrap();
         let workflow =
             crate::graph::create_workflow(crate::intent::parse_intent("Fence terminal status"));
         store.save_workflow(&workflow).unwrap();
@@ -8087,7 +8103,7 @@ mod status_fence_tests {
     #[test]
     fn terminal_delivery_revalidates_a_supervisor_lease_that_expires_during_preparation() {
         let temporary = tempfile::tempdir().unwrap();
-        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temporary.path().join("foundry.sqlite")).unwrap();
         let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
             "Complete a bounded supervised delivery",
         ));
@@ -8117,7 +8133,7 @@ mod status_fence_tests {
         let error = drive_request_with_options(
             &store,
             &run.run_id,
-            "forge-request-supervisor",
+            "foundry-request-supervisor",
             1,
             "test",
             None,
@@ -8158,7 +8174,7 @@ mod status_fence_tests {
     #[test]
     fn internal_attention_and_blocked_transitions_reject_an_unfenced_live_lease() {
         let temporary = tempfile::tempdir().unwrap();
-        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temporary.path().join("foundry.sqlite")).unwrap();
         let workflow = crate::graph::create_workflow(crate::intent::parse_intent(
             "Preserve a live supervisor lease",
         ));
@@ -8210,7 +8226,7 @@ mod status_fence_tests {
     #[test]
     fn terminal_delivery_revalidates_after_publication_before_transaction_commit() {
         let temporary = tempfile::tempdir().unwrap();
-        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temporary.path().join("foundry.sqlite")).unwrap();
         let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
             "Complete a fenced delivery atomically",
         ));
@@ -8240,7 +8256,7 @@ mod status_fence_tests {
         let error = drive_request_with_options(
             &store,
             &run.run_id,
-            "forge-request-supervisor",
+            "foundry-request-supervisor",
             1,
             "test",
             None,

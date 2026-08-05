@@ -1,7 +1,7 @@
 use crate::artifact::hex_sha256;
 use crate::cli_integration::{inspect_cli_harness_shim_status, CliShimStatusOptions};
 use crate::intent::OperatingContextSpec;
-use crate::storage::{ForgeStore, GlobalEventWrite};
+use crate::storage::{FoundryStore, GlobalEventWrite};
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -37,10 +37,10 @@ pub struct ExecutorState {
     pub non_interactive_ready: bool,
     #[serde(default)]
     pub probe_evidence: Vec<String>,
-    #[serde(default)]
-    pub forge_first_ready: bool,
-    #[serde(default)]
-    pub forge_first_entrypoint: Option<Vec<String>>,
+    #[serde(default, alias = "forge_first_ready")] // foundry-brand-allow: legacy-compat
+    pub foundry_first_ready: bool,
+    #[serde(default, alias = "forge_first_entrypoint")] // foundry-brand-allow: legacy-compat
+    pub foundry_first_entrypoint: Option<Vec<String>>,
     #[serde(default)]
     pub harness_status: Option<ExecutorHarnessStatus>,
     pub allowed: bool,
@@ -55,7 +55,8 @@ pub struct ExecutorHarnessStatus {
     pub shim_dir: String,
     pub shim_path: String,
     pub path_precedence: String,
-    pub forge_owned: bool,
+    #[serde(alias = "forge_owned")] // foundry-brand-allow: legacy-compat
+    pub foundry_owned: bool,
     pub executable: bool,
     pub would_recurse: bool,
     pub real_command: Option<String>,
@@ -100,7 +101,7 @@ pub struct BrainRouterReport {
     pub selected_brain: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_decision: Option<ExecutorModelDecisionReport>,
-    pub forge_controlled_surfaces: Vec<String>,
+    pub foundry_controlled_surfaces: Vec<String>,
     pub brain_owned_surfaces: Vec<String>,
     pub brains: Vec<BrainCandidate>,
     pub shell_sessions: Vec<BrainShellSessionSpec>,
@@ -124,8 +125,8 @@ pub struct BrainCandidate {
     pub configured: bool,
     pub allowed: bool,
     pub non_interactive_ready: bool,
-    pub forge_first_ready: bool,
-    pub forge_first_entrypoint: Option<Vec<String>>,
+    pub foundry_first_ready: bool,
+    pub foundry_first_entrypoint: Option<Vec<String>>,
     pub harness_status: Option<ExecutorHarnessStatus>,
     pub shell_entrypoints: Vec<Vec<String>>,
     pub reason: String,
@@ -138,8 +139,8 @@ pub struct BrainShellSessionSpec {
     pub entry_command: Vec<String>,
     pub attachable: bool,
     pub launch_mode: String,
-    pub forge_first_ready: bool,
-    pub forge_first_entrypoint: Option<Vec<String>>,
+    pub foundry_first_ready: bool,
+    pub foundry_first_entrypoint: Option<Vec<String>>,
     pub role: String,
     pub state_boundary: String,
     pub safety_note: String,
@@ -170,8 +171,8 @@ pub struct ShellLaunchPlan {
     pub entry_command: Vec<String>,
     pub attachable: bool,
     pub launch_mode: String,
-    pub forge_first_ready: bool,
-    pub forge_first_entrypoint: Option<Vec<String>>,
+    pub foundry_first_ready: bool,
+    pub foundry_first_entrypoint: Option<Vec<String>>,
     pub harness_status: Option<ExecutorHarnessStatus>,
     pub prompt_packet_gate_policy: ShellPromptPacketGatePolicy,
     pub dry_run: bool,
@@ -219,12 +220,12 @@ fn prompt_packet_required_gates() -> Vec<String> {
 
 fn shell_prompt_packet_gate_policy() -> ShellPromptPacketGatePolicy {
     ShellPromptPacketGatePolicy {
-        schema_version: "forge.shell.prompt_packet_gate_policy.v1".to_string(),
-        context_source: "forge_context_packet".to_string(),
+        schema_version: "foundry.shell.prompt_packet_gate_policy.v1".to_string(),
+        context_source: "foundry_context_packet".to_string(),
         required_gates: prompt_packet_required_gates(),
         policy: "verify_prompt_packet_required_gates_before_brain_launch".to_string(),
         reason:
-            "Forge-first brain shells must receive bounded prompt packets with organization, personality and company-work decisions before execution."
+            "Foundry-first brain shells must receive bounded prompt packets with organization, personality and company-work decisions before execution."
                 .to_string(),
     }
 }
@@ -325,7 +326,7 @@ pub struct BrainProviderSessionSummary {
     pub configured: bool,
     pub allowed: bool,
     pub non_interactive_ready: bool,
-    pub forge_first_ready: bool,
+    pub foundry_first_ready: bool,
     pub session_count: usize,
     pub ready_session_count: usize,
     pub recorded_plan_count: usize,
@@ -342,7 +343,7 @@ pub struct BrainSessionState {
     pub entry_command: Vec<String>,
     pub attachable: bool,
     pub launch_mode: String,
-    pub forge_first_ready: bool,
+    pub foundry_first_ready: bool,
     pub state_boundary: String,
     pub lifecycle_policy: BrainSessionLifecyclePolicy,
     pub recorded_plan_count: usize,
@@ -654,7 +655,7 @@ pub fn canonical_executor_id(id: &str) -> String {
     let normalized = id.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "antigravity" | "antigravity-cli" | "agy-cli" => "agy".to_string(),
-        _ => normalized,
+        _ => crate::brand::canonical_authority(&normalized).into_owned(),
     }
 }
 
@@ -692,7 +693,7 @@ const EXECUTORS: &[ExecutorDefinition] = &[
 ];
 
 pub fn sync_executors(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: ExecutorSyncOptions,
 ) -> Result<ExecutorSyncReport> {
     let previous = load_previous_states(store)?;
@@ -723,7 +724,7 @@ pub fn sync_executors(
     Ok(report)
 }
 
-pub fn load_executors(store: &ForgeStore) -> Result<ExecutorSyncReport> {
+pub fn load_executors(store: &FoundryStore) -> Result<ExecutorSyncReport> {
     let states = store
         .load_executor_states()?
         .into_iter()
@@ -735,7 +736,7 @@ pub fn load_executors(store: &ForgeStore) -> Result<ExecutorSyncReport> {
 }
 
 pub fn decide_executor_model_for_task(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: ExecutorModelDecisionOptions,
 ) -> Result<ExecutorModelDecisionReport> {
     let sync_report = load_executors(store)?;
@@ -773,12 +774,12 @@ fn executor_model_decision_from_policy(
     let configured_decider = options
         .configured_decider
         .clone()
-        .or_else(|| env::var("FORGE_EXECUTOR_DECIDER").ok())
+        .or_else(|| crate::brand::env_var("FOUNDRY_EXECUTOR_DECIDER").ok())
         .unwrap_or_else(|| "codex:default".to_string());
     let mut decision_engine = if local_decider_available {
         ExecutorModelDecisionEngine {
             mode: "local_ollama_decider".to_string(),
-            decider: env::var("FORGE_LOCAL_DECIDER_MODEL")
+            decider: crate::brand::env_var("FOUNDRY_LOCAL_DECIDER_MODEL")
                 .unwrap_or_else(|_| "ollama:qwen3:14b".to_string()),
             local_decider_available,
             fallback_decider: configured_decider,
@@ -833,7 +834,7 @@ fn executor_model_decision_from_policy(
     }
 
     ExecutorModelDecisionReport {
-        schema_version: "forge.executor_model_decision.v1".to_string(),
+        schema_version: "foundry.executor_model_decision.v1".to_string(),
         status: if selected.is_some() {
             "selected".to_string()
         } else {
@@ -976,7 +977,7 @@ fn invoke_model_decider(
         ));
     }
 
-    let Ok(command) = env::var("FORGE_EXECUTOR_DECIDER_CMD") else {
+    let Ok(command) = crate::brand::env_var("FOUNDRY_EXECUTOR_DECIDER_CMD") else {
         return Some(ModelDeciderOutcome {
             invoked: false,
             status: "not_configured".to_string(),
@@ -1003,7 +1004,7 @@ fn run_model_decider_command(
     prompt: &str,
     candidates: &[ExecutorModelDecisionCandidate],
 ) -> ModelDeciderOutcome {
-    let timeout = Duration::from_millis(env_u64("FORGE_EXECUTOR_DECIDER_TIMEOUT_MS", 2_000));
+    let timeout = Duration::from_millis(env_u64("FOUNDRY_EXECUTOR_DECIDER_TIMEOUT_MS", 2_000));
     let mut child = match Command::new(path)
         .args(args)
         .stdin(Stdio::piped())
@@ -1167,7 +1168,7 @@ fn build_model_decider_prompt(
         })
         .collect::<Vec<_>>();
     serde_json::json!({
-        "instruction": "Choose one eligible executor/model for this Forge task. Return only JSON: {\"executor\":\"...\",\"model\":\"...\",\"reason\":\"...\"}.",
+        "instruction": "Choose one eligible executor/model for this Foundry task. Return only JSON: {\"executor\":\"...\",\"model\":\"...\",\"reason\":\"...\"}.",
         "task": options.task,
         "task_class": options.task_class,
         "difficulty": options.difficulty,
@@ -1295,22 +1296,22 @@ fn env_cost_override(executor: &str, model: &str, direction: &str) -> Option<f64
     let executor_key = env_key_fragment(executor);
     let model_key = env_key_fragment(model);
     [
-        format!("FORGE_COST_{executor_key}_{direction}_USD_PER_MILLION"),
-        format!("FORGE_COST_{model_key}_{direction}_USD_PER_MILLION"),
+        format!("FOUNDRY_COST_{executor_key}_{direction}_USD_PER_MILLION"),
+        format!("FOUNDRY_COST_{model_key}_{direction}_USD_PER_MILLION"),
     ]
     .into_iter()
-    .find_map(|key| env::var(key).ok()?.parse::<f64>().ok())
+    .find_map(|key| crate::brand::env_var(key).ok()?.parse::<f64>().ok())
 }
 
 fn env_score_override(executor: &str, model: &str) -> Option<f64> {
     let executor_key = env_key_fragment(executor);
     let model_key = env_key_fragment(model);
     [
-        format!("FORGE_BENCHMARK_{executor_key}_SCORE"),
-        format!("FORGE_BENCHMARK_{model_key}_SCORE"),
+        format!("FOUNDRY_BENCHMARK_{executor_key}_SCORE"),
+        format!("FOUNDRY_BENCHMARK_{model_key}_SCORE"),
     ]
     .into_iter()
-    .find_map(|key| env::var(key).ok()?.parse::<f64>().ok())
+    .find_map(|key| crate::brand::env_var(key).ok()?.parse::<f64>().ok())
 }
 
 fn env_key_fragment(value: &str) -> String {
@@ -1432,7 +1433,7 @@ fn round_money(value: f64) -> f64 {
 }
 
 pub fn import_ai_limits_observations(
-    store: &ForgeStore,
+    store: &FoundryStore,
     ai_limits_cmd: &Path,
     timeout_ms: u64,
 ) -> Result<ExecutorQuotaAiLimitsImportReport> {
@@ -1485,7 +1486,7 @@ pub fn import_ai_limits_observations(
     }
 
     let report = ExecutorQuotaAiLimitsImportReport {
-        schema_version: "forge.executor_quota_ai_limits_import.v1".to_string(),
+        schema_version: "foundry.executor_quota_ai_limits_import.v1".to_string(),
         status: "ai_limits_imported".to_string(),
         source_command: ai_limits_cmd.display().to_string(),
         generated_at,
@@ -1656,7 +1657,7 @@ fn build_report(
     status: &str,
     home: &Path,
     mut executors: Vec<ExecutorState>,
-    store: &ForgeStore,
+    store: &FoundryStore,
 ) -> ExecutorSyncReport {
     executors.sort_by(|left, right| left.id.cmp(&right.id));
     let usable = executors
@@ -1719,12 +1720,12 @@ fn probe_executor(
         probe_evidence.extend(probe.evidence);
     }
     let harness_status = probe_executor_harness(definition.id, home, shim_dirs);
-    let forge_first_ready = harness_status
+    let foundry_first_ready = harness_status
         .as_ref()
         .is_some_and(|status| status.status == "shim_status_ready" && !status.would_recurse);
-    let forge_first_entrypoint = harness_status
+    let foundry_first_entrypoint = harness_status
         .as_ref()
-        .filter(|_| forge_first_ready)
+        .filter(|_| foundry_first_ready)
         .map(|status| vec![status.shim_path.clone()]);
     if let Some(status) = &harness_status {
         probe_evidence.extend(status.evidence.clone());
@@ -1740,8 +1741,8 @@ fn probe_executor(
         config_evidence,
         non_interactive_ready,
         probe_evidence,
-        forge_first_ready,
-        forge_first_entrypoint,
+        foundry_first_ready,
+        foundry_first_entrypoint,
         harness_status,
         allowed: false,
         decision_source: "unavailable".to_string(),
@@ -1758,7 +1759,7 @@ fn probe_executor_harness(
     for dir in explicit_shim_dirs {
         candidates.push((dir.clone(), true));
     }
-    let default_dir = home.join(".forge/bin");
+    let default_dir = home.join(".foundry/bin");
     if !candidates
         .iter()
         .any(|(dir, _)| same_path_or_display(dir, &default_dir))
@@ -1778,12 +1779,12 @@ fn probe_executor_harness(
             continue;
         }
         let harness = ExecutorHarnessStatus {
-            schema_version: "forge.executor_harness_status.v1".to_string(),
+            schema_version: "foundry.executor_harness_status.v1".to_string(),
             status: report.status.clone(),
             shim_dir: report.shim_dir.clone(),
             shim_path: report.shim_path.clone(),
             path_precedence: report.path_precedence.clone(),
-            forge_owned: report.forge_owned,
+            foundry_owned: report.foundry_owned,
             executable: report.executable,
             would_recurse: report.would_recurse,
             real_command: report.real_command.clone(),
@@ -1791,7 +1792,7 @@ fn probe_executor_harness(
             evidence: vec![
                 format!("harness_status:{}", report.status),
                 format!("path_precedence:{}", report.path_precedence),
-                format!("forge_owned:{}", report.forge_owned),
+                format!("foundry_owned:{}", report.foundry_owned),
                 format!("would_recurse:{}", report.would_recurse),
             ],
         };
@@ -1864,9 +1865,11 @@ fn probe_model_availability(id: &str, path: &Path) -> (bool, Vec<String>) {
     match id {
         "gemini" => {
             // Check if GEMINI_API_KEY is set first as it's the strongest indicator of auth
-            if env::var_os("GEMINI_API_KEY").is_some() || env::var_os("GOOGLE_API_KEY").is_some() {
+            if crate::brand::env_var_os("GEMINI_API_KEY").is_some()
+                || crate::brand::env_var_os("GOOGLE_API_KEY").is_some()
+            {
                 evidence.push("Gemini auth detected in environment".to_string());
-                if let Ok(model) = std::env::var("GEMINI_MODEL") {
+                if let Ok(model) = crate::brand::env_var("GEMINI_MODEL") {
                     evidence.push(format!("GEMINI_MODEL is set to {} in environment", model));
                 } else {
                     evidence.push("GEMINI_MODEL not set; using gemini-2.0-flash-exp for low-latency non-interactive validation".to_string());
@@ -1988,7 +1991,7 @@ fn probe_model_availability(id: &str, path: &Path) -> (bool, Vec<String>) {
 
 fn agy_model_probe_timeout() -> Duration {
     #[cfg(debug_assertions)]
-    if let Ok(value) = env::var("FORGE_TEST_AGY_MODEL_PROBE_TIMEOUT_MS") {
+    if let Ok(value) = crate::brand::env_var("FOUNDRY_TEST_AGY_MODEL_PROBE_TIMEOUT_MS") {
         if let Ok(milliseconds) = value.parse::<u64>() {
             return Duration::from_millis(milliseconds.max(25));
         }
@@ -2164,7 +2167,7 @@ fn apply_decision(
 
 fn prompt_for_executor(state: &ExecutorState) -> Result<bool> {
     print!(
-        "Allow Forge to use {} ({}) as an execution engine on this machine? [y/N] ",
+        "Allow Foundry to use {} ({}) as an execution engine on this machine? [y/N] ",
         state.display_name, state.command
     );
     io::stdout().flush()?;
@@ -2174,7 +2177,7 @@ fn prompt_for_executor(state: &ExecutorState) -> Result<bool> {
     Ok(matches!(normalized.as_str(), "y" | "yes" | "s" | "sim"))
 }
 
-fn load_previous_states(store: &ForgeStore) -> Result<BTreeMap<String, ExecutorState>> {
+fn load_previous_states(store: &FoundryStore) -> Result<BTreeMap<String, ExecutorState>> {
     let states = store
         .load_executor_states()?
         .into_iter()
@@ -2247,7 +2250,7 @@ fn find_executable(command: &str, executor_paths: &[PathBuf]) -> Option<PathBuf>
 
 fn candidate_dirs(executor_paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs = executor_paths.to_vec();
-    if let Some(paths) = env::var_os("PATH") {
+    if let Some(paths) = crate::brand::env_var_os("PATH") {
         dirs.extend(env::split_paths(&paths));
     }
     dirs
@@ -2288,25 +2291,25 @@ fn config_evidence(id: &str, home: &Path) -> Vec<String> {
 
     match id {
         "gemini" => {
-            if env::var_os("GEMINI_API_KEY").is_some() {
+            if crate::brand::env_var_os("GEMINI_API_KEY").is_some() {
                 evidence.push("env:GEMINI_API_KEY".to_string());
             }
-            if env::var_os("GOOGLE_API_KEY").is_some() {
+            if crate::brand::env_var_os("GOOGLE_API_KEY").is_some() {
                 evidence.push("env:GOOGLE_API_KEY".to_string());
             }
         }
         "claude" => {
-            if env::var_os("ANTHROPIC_API_KEY").is_some() {
+            if crate::brand::env_var_os("ANTHROPIC_API_KEY").is_some() {
                 evidence.push("env:ANTHROPIC_API_KEY".to_string());
             }
         }
         "ollama" => {
-            if env::var_os("OLLAMA_HOST").is_some() {
+            if crate::brand::env_var_os("OLLAMA_HOST").is_some() {
                 evidence.push("env:OLLAMA_HOST".to_string());
             }
         }
         "agy" | "antigravity" => {
-            if env::var_os("ANTIGRAVITY_API_KEY").is_some() {
+            if crate::brand::env_var_os("ANTIGRAVITY_API_KEY").is_some() {
                 evidence.push("env:ANTIGRAVITY_API_KEY".to_string());
             }
         }
@@ -2322,7 +2325,7 @@ fn config_candidates(id: &str, home: &Path) -> Vec<PathBuf> {
         "opencode" => vec![
             home.join(".config/opencode"),
             home.join(".opencode"),
-            home.join(".agents/skills/forge-core/SKILL.md"),
+            home.join(".agents/skills/foundry-core/SKILL.md"),
         ],
         "gemini" => vec![
             home.join(".gemini/settings.json"),
@@ -2348,15 +2351,15 @@ fn build_integrations(executors: &[ExecutorState]) -> Vec<ExecutorIntegration> {
     let mut integrations = Vec::new();
     integrations.push(ExecutorIntegration {
         id: "codex_primary_brain".to_string(),
-        from: "forge".to_string(),
+        from: "foundry".to_string(),
         to: "codex".to_string(),
         kind: "primary_brain_motor".to_string(),
         enabled: codex_allowed,
         reason: if codex_allowed {
-            "Codex is installed, configured and authorized; Forge routes primary brain work through Codex first."
+            "Codex is installed, configured and authorized; Foundry routes primary brain work through Codex first."
                 .to_string()
         } else {
-            "Codex is not yet ready, so Forge cannot use it as the primary brain." .to_string()
+            "Codex is not yet ready, so Foundry cannot use it as the primary brain." .to_string()
         },
     });
 
@@ -2367,7 +2370,7 @@ fn build_integrations(executors: &[ExecutorState]) -> Vec<ExecutorIntegration> {
         kind: "delegated_cli_executor".to_string(),
         enabled: agy_allowed && codex_allowed,
         reason: if agy_allowed && codex_allowed {
-            "agy and Codex are both available; Forge may route bounded tasks through either executor and keep Codex as the primary motor."
+            "agy and Codex are both available; Foundry may route bounded tasks through either executor and keep Codex as the primary motor."
                 .to_string()
         } else {
             "requires agy and Codex to be installed, configured and human-authorized".to_string()
@@ -2381,7 +2384,7 @@ fn build_integrations(executors: &[ExecutorState]) -> Vec<ExecutorIntegration> {
         kind: "delegated_cli_executor".to_string(),
         enabled: opencode_allowed && codex_allowed,
         reason: if opencode_allowed && codex_allowed {
-            "OpenCode and Codex are both authorized; Forge may route bounded tasks through OpenCode while Codex remains the primary brain."
+            "OpenCode and Codex are both authorized; Foundry may route bounded tasks through OpenCode while Codex remains the primary brain."
                 .to_string()
         } else {
             "requires OpenCode and Codex to be installed, configured and human-authorized".to_string()
@@ -2434,7 +2437,7 @@ fn build_brain_router(
     let mut safety_gates = vec![
         "sync_executors_before_handoff".to_string(),
         "human_authorization_for_external_cli_use".to_string(),
-        "forge_context_packet_required_before_ai_handoff".to_string(),
+        "foundry_context_packet_required_before_ai_handoff".to_string(),
     ];
     safety_gates.extend(prompt_packet_required_gates());
     safety_gates.extend([
@@ -2443,27 +2446,27 @@ fn build_brain_router(
     ]);
 
     BrainRouterReport {
-        schema_version: "forge.brain_router.v1".to_string(),
-        controller: "forge".to_string(),
+        schema_version: "foundry.brain_router.v1".to_string(),
+        controller: "foundry".to_string(),
         controller_role: "orchestration_control_plane".to_string(),
-        orchestrator_brain: "forge".to_string(),
+        orchestrator_brain: "foundry".to_string(),
         brain_role: "replaceable_execution_brain".to_string(),
         node_brain_role: "per_node_agentic_execution_brain".to_string(),
         routing_principle:
-            "Forge owns memory, skills, MCP routing, context, workflow state, shell/session lifecycle, permissions, cost policy and validation; external CLIs only execute bounded brain work."
+            "Foundry owns memory, skills, MCP routing, context, workflow state, shell/session lifecycle, permissions, cost policy and validation; external CLIs only execute bounded brain work."
                 .to_string(),
         node_brain_routing_policy:
-            "Each AI or mixed workflow node may declare its own Forge-owned node_brain_routing contract with one or more agent slots, different brains per slot, and multiple agents on the same brain."
+            "Each AI or mixed workflow node may declare its own Foundry-owned node_brain_routing contract with one or more agent slots, different brains per slot, and multiple agents on the same brain."
                 .to_string(),
         parallel_agent_policy:
-            "Forge may lease and run independent AI node agent slots in parallel when dependencies, context budgets, quota and validation gates allow it."
+            "Foundry may lease and run independent AI node agent slots in parallel when dependencies, context budgets, quota and validation gates allow it."
                 .to_string(),
         hot_swap_policy:
-            "A workflow run can switch the active execution brain through forge request switch-executor without changing run id, workflow id, checkpoints or user directives. One AI/mixed workflow node can mutate its own node_brain_routing through forge workflow update-node-brain while the workflow remains active."
+            "A workflow run can switch the active execution brain through foundry request switch-executor without changing run id, workflow id, checkpoints or user directives. One AI/mixed workflow node can mutate its own node_brain_routing through foundry workflow update-node-brain while the workflow remains active."
                 .to_string(),
         selected_brain,
         model_decision: Some(model_decision),
-        forge_controlled_surfaces: vec![
+        foundry_controlled_surfaces: vec![
             "workflow_graph".to_string(),
             "memory".to_string(),
             "skills".to_string(),
@@ -2480,7 +2483,7 @@ fn build_brain_router(
         brain_owned_surfaces: vec![
             "reasoning_for_assigned_task".to_string(),
             "bounded_code_or_text_proposals".to_string(),
-            "child_process_execution_when_authorized_by_forge".to_string(),
+            "child_process_execution_when_authorized_by_foundry".to_string(),
         ],
         shell_sessions: brain_shell_sessions(&brains),
         safety_gates,
@@ -2518,22 +2521,22 @@ fn preferred_brain_id(executors: &[ExecutorState]) -> Option<String> {
 
 fn default_brain_router_model_decision_options() -> ExecutorModelDecisionOptions {
     ExecutorModelDecisionOptions {
-        task: env::var("FORGE_EXECUTOR_DEFAULT_TASK").unwrap_or_else(|_| {
-            "Default Forge executor selection for routine workflow planning, validation and handoff"
+        task: crate::brand::env_var("FOUNDRY_EXECUTOR_DEFAULT_TASK").unwrap_or_else(|_| {
+            "Default Foundry executor selection for routine workflow planning, validation and handoff"
                 .to_string()
         }),
-        task_class: env::var("FORGE_EXECUTOR_DEFAULT_TASK_CLASS")
+        task_class: crate::brand::env_var("FOUNDRY_EXECUTOR_DEFAULT_TASK_CLASS")
             .unwrap_or_else(|_| "deterministic_validation_file_inspection_reporting".to_string()),
-        difficulty: env::var("FORGE_EXECUTOR_DEFAULT_DIFFICULTY")
+        difficulty: crate::brand::env_var("FOUNDRY_EXECUTOR_DEFAULT_DIFFICULTY")
             .unwrap_or_else(|_| "low".to_string()),
-        expected_input_tokens: env_u64("FORGE_EXECUTOR_DEFAULT_INPUT_TOKENS", 1200),
-        expected_output_tokens: env_u64("FORGE_EXECUTOR_DEFAULT_OUTPUT_TOKENS", 300),
-        configured_decider: env::var("FORGE_EXECUTOR_DECIDER").ok(),
+        expected_input_tokens: env_u64("FOUNDRY_EXECUTOR_DEFAULT_INPUT_TOKENS", 1200),
+        expected_output_tokens: env_u64("FOUNDRY_EXECUTOR_DEFAULT_OUTPUT_TOKENS", 300),
+        configured_decider: crate::brand::env_var("FOUNDRY_EXECUTOR_DECIDER").ok(),
     }
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
-    env::var(key)
+    crate::brand::env_var(key)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
@@ -2557,14 +2560,14 @@ fn brain_candidate(executor: &ExecutorState) -> BrainCandidate {
     };
     let reason = match status {
         "ready" => {
-            "installed, configured, human-authorized and Forge-validated execution path is available"
+            "installed, configured, human-authorized and Foundry-validated execution path is available"
         }
         "interactive_or_auth_blocked" => {
-            "installed/configured/authorized, but Forge has not validated a non-interactive or Forge-first execution path"
+            "installed/configured/authorized, but Foundry has not validated a non-interactive or Foundry-first execution path"
         }
         "not_installed" => "command is not available on PATH or configured executor paths",
-        "not_configured" => "Forge did not find CLI configuration or required environment evidence",
-        "not_authorized" => "human authorization is required before Forge may use this brain adapter",
+        "not_configured" => "Foundry did not find CLI configuration or required environment evidence",
+        "not_authorized" => "human authorization is required before Foundry may use this brain adapter",
         _ => "brain adapter state is unknown",
     };
 
@@ -2575,17 +2578,17 @@ fn brain_candidate(executor: &ExecutorState) -> BrainCandidate {
         status: status.to_string(),
         execution_mode: brain_execution_mode(&executor.id).to_string(),
         session_role: "execution_brain_adapter".to_string(),
-        persistent_state_owner: "forge".to_string(),
-        context_source: "forge_context_packet".to_string(),
-        memory_source: "forge_memory_router".to_string(),
-        skills_source: "forge_skill_router".to_string(),
-        mcp_source: "forge_mcp_router".to_string(),
+        persistent_state_owner: "foundry".to_string(),
+        context_source: "foundry_context_packet".to_string(),
+        memory_source: "foundry_memory_router".to_string(),
+        skills_source: "foundry_skill_router".to_string(),
+        mcp_source: "foundry_mcp_router".to_string(),
         installed: executor.installed,
         configured: executor.configured,
         allowed: executor.allowed,
         non_interactive_ready: executor.non_interactive_ready,
-        forge_first_ready: executor.forge_first_ready,
-        forge_first_entrypoint: executor.forge_first_entrypoint.clone(),
+        foundry_first_ready: executor.foundry_first_ready,
+        foundry_first_entrypoint: executor.foundry_first_entrypoint.clone(),
         harness_status: executor.harness_status.clone(),
         shell_entrypoints: brain_shell_entrypoints(executor),
         reason: reason.to_string(),
@@ -2603,9 +2606,9 @@ fn brain_execution_mode(id: &str) -> &'static str {
 fn brain_shell_entrypoints(executor: &ExecutorState) -> Vec<Vec<String>> {
     let mut entrypoints = Vec::new();
     if let Some(entrypoint) = executor
-        .forge_first_entrypoint
+        .foundry_first_entrypoint
         .as_ref()
-        .filter(|_| executor.forge_first_ready)
+        .filter(|_| executor.foundry_first_ready)
     {
         entrypoints.push(entrypoint.clone());
     }
@@ -2655,18 +2658,18 @@ fn brain_shell_entrypoints(executor: &ExecutorState) -> Vec<Vec<String>> {
 
 fn brain_shell_sessions(brains: &[BrainCandidate]) -> Vec<BrainShellSessionSpec> {
     let mut sessions = vec![BrainShellSessionSpec {
-        id: "forge-tui".to_string(),
-        brain_id: "forge".to_string(),
-        entry_command: vec!["forge".to_string()],
+        id: "foundry-tui".to_string(),
+        brain_id: "foundry".to_string(),
+        entry_command: vec!["foundry".to_string()],
         attachable: true,
-        launch_mode: "forge_control_tui".to_string(),
-        forge_first_ready: true,
-        forge_first_entrypoint: Some(vec!["forge".to_string()]),
+        launch_mode: "foundry_control_tui".to_string(),
+        foundry_first_ready: true,
+        foundry_first_entrypoint: Some(vec!["foundry".to_string()]),
         role: "primary_control_tui".to_string(),
-        state_boundary: "Forge owns workflow state, memory, skills, MCP routing and shell lifecycle."
+        state_boundary: "Foundry owns workflow state, memory, skills, MCP routing and shell lifecycle."
             .to_string(),
         safety_note:
-            "Use this as the default human operation surface; external brains should be launched from Forge-controlled handoffs."
+            "Use this as the default human operation surface; external brains should be launched from Foundry-controlled handoffs."
                 .to_string(),
     }];
 
@@ -2677,20 +2680,20 @@ fn brain_shell_sessions(brains: &[BrainCandidate]) -> Vec<BrainShellSessionSpec>
                 brain_id: brain.id.clone(),
                 entry_command: entry_command.clone(),
                 attachable: brain.status == "ready",
-                launch_mode: if brain.forge_first_ready {
-                    "forge_first_harness"
+                launch_mode: if brain.foundry_first_ready {
+                    "foundry_first_harness"
                 } else {
                     "native_cli"
                 }
                 .to_string(),
-                forge_first_ready: brain.forge_first_ready,
-                forge_first_entrypoint: brain.forge_first_entrypoint.clone(),
+                foundry_first_ready: brain.foundry_first_ready,
+                foundry_first_entrypoint: brain.foundry_first_entrypoint.clone(),
                 role: "execution_brain_shell".to_string(),
                 state_boundary:
-                    "External CLI session is an execution surface only; Forge remains the source of truth for memory, skills, MCPs, context and workflow lineage."
+                    "External CLI session is an execution surface only; Foundry remains the source of truth for memory, skills, MCPs, context and workflow lineage."
                         .to_string(),
                 safety_note:
-                    "Open directly only for inspection/debugging; production handoff should go through Forge permissions, context packets and validation gates."
+                    "Open directly only for inspection/debugging; production handoff should go through Foundry permissions, context packets and validation gates."
                         .to_string(),
             });
         }
@@ -2742,8 +2745,8 @@ pub fn build_shell_launch_plan(
                 entry_command: session.entry_command.clone(),
                 attachable: session.attachable,
                 launch_mode: session.launch_mode.clone(),
-                forge_first_ready: session.forge_first_ready,
-                forge_first_entrypoint: session.forge_first_entrypoint.clone(),
+                foundry_first_ready: session.foundry_first_ready,
+                foundry_first_entrypoint: session.foundry_first_entrypoint.clone(),
                 harness_status: harness_status.clone(),
                 prompt_packet_gate_policy: shell_prompt_packet_gate_policy(),
                 dry_run: true,
@@ -2772,7 +2775,7 @@ pub fn build_shell_launch_plan(
     };
 
     ShellLaunchPlanReport {
-        schema_version: "forge.shell_launch_plan.v1".to_string(),
+        schema_version: "foundry.shell_launch_plan.v1".to_string(),
         status: status.to_string(),
         controller: router.controller.clone(),
         executor_filter: normalized_filter,
@@ -2787,7 +2790,7 @@ pub fn build_shell_launch_plan(
         next_actions: vec![
             "Sync executors after PATH, credential or shim changes before trusting a shell plan."
                 .to_string(),
-            "Acquire a Forge task handoff before using an external brain for production work."
+            "Acquire a Foundry task handoff before using an external brain for production work."
                 .to_string(),
             "Record validation or final-audit evidence before claiming task completion."
                 .to_string(),
@@ -2796,14 +2799,14 @@ pub fn build_shell_launch_plan(
 }
 
 pub fn record_shell_session_plan(
-    store: &ForgeStore,
+    store: &FoundryStore,
     router: &BrainRouterReport,
     options: ShellLaunchPlanOptions,
     origin: &str,
 ) -> Result<ShellSessionReceipt> {
     let launch_plan = build_shell_launch_plan(router, options);
     let data = serde_json::json!({
-        "schema_version": "forge.shell_session_event.v1",
+        "schema_version": "foundry.shell_session_event.v1",
         "status": "shell_session_plan_recorded",
         "run_id": launch_plan.run_id,
         "task_id": launch_plan.task_id,
@@ -2818,7 +2821,7 @@ pub fn record_shell_session_plan(
     );
     let tenant_context = shell_session_tenant_context(store, launch_plan.workflow_id.as_deref())?;
     let global_event_id = store.record_global_event(GlobalEventWrite {
-        source: "forge_shell",
+        source: "foundry_shell",
         source_id: &source_id,
         workflow_id: launch_plan.workflow_id.as_deref(),
         kind: "shell_launch_planned",
@@ -2829,9 +2832,9 @@ pub fn record_shell_session_plan(
     })?;
 
     Ok(ShellSessionReceipt {
-        schema_version: "forge.shell_session_receipt.v1".to_string(),
+        schema_version: "foundry.shell_session_receipt.v1".to_string(),
         status: "shell_session_plan_recorded".to_string(),
-        source: "forge_shell".to_string(),
+        source: "foundry_shell".to_string(),
         source_id,
         global_event_id,
         kind: "shell_launch_planned".to_string(),
@@ -2845,7 +2848,7 @@ pub fn record_shell_session_plan(
 }
 
 pub fn record_brain_session_lifecycle(
-    store: &ForgeStore,
+    store: &FoundryStore,
     router: &BrainRouterReport,
     options: BrainSessionLifecycleOptions<'_>,
 ) -> Result<BrainSessionLifecycleReceipt> {
@@ -2854,7 +2857,7 @@ pub fn record_brain_session_lifecycle(
         .shell_sessions
         .iter()
         .find(|session| session.id == options.session_id)
-        .ok_or_else(|| anyhow::anyhow!("unknown Forge shell session: {}", options.session_id))?;
+        .ok_or_else(|| anyhow::anyhow!("unknown Foundry shell session: {}", options.session_id))?;
     let previous_events = brain_session_lifecycle_events(store, &session.id)?;
     let previous_state = previous_events
         .first()
@@ -2873,7 +2876,7 @@ pub fn record_brain_session_lifecycle(
     }
     let lifecycle_sequence = previous_events.len() + 1;
     let data = serde_json::json!({
-        "schema_version": "forge.brain_session_lifecycle_event.v1",
+        "schema_version": "foundry.brain_session_lifecycle_event.v1",
         "status": "brain_session_lifecycle_recorded",
         "session_id": session.id,
         "provider_id": session.brain_id,
@@ -2894,7 +2897,7 @@ pub fn record_brain_session_lifecycle(
     );
     let tenant_context = shell_session_tenant_context(store, options.workflow_id)?;
     let global_event_id = store.record_global_event(GlobalEventWrite {
-        source: "forge_session",
+        source: "foundry_session",
         source_id: &source_id,
         workflow_id: options.workflow_id,
         kind: "brain_session_lifecycle",
@@ -2905,9 +2908,9 @@ pub fn record_brain_session_lifecycle(
     })?;
 
     Ok(BrainSessionLifecycleReceipt {
-        schema_version: "forge.brain_session_lifecycle.v1".to_string(),
+        schema_version: "foundry.brain_session_lifecycle.v1".to_string(),
         status: "brain_session_lifecycle_recorded".to_string(),
-        source: "forge_session".to_string(),
+        source: "foundry_session".to_string(),
         source_id,
         global_event_id,
         kind: "brain_session_lifecycle".to_string(),
@@ -2928,14 +2931,14 @@ pub fn record_brain_session_lifecycle(
 }
 
 pub fn build_brain_sessions_report(
-    store: &ForgeStore,
+    store: &FoundryStore,
     router: &BrainRouterReport,
 ) -> Result<BrainSessionsReport> {
     build_brain_sessions_report_with_options(store, router, BrainSessionsReportOptions::default())
 }
 
 pub fn build_brain_sessions_report_with_options(
-    store: &ForgeStore,
+    store: &FoundryStore,
     router: &BrainRouterReport,
     options: BrainSessionsReportOptions,
 ) -> Result<BrainSessionsReport> {
@@ -2946,8 +2949,8 @@ pub fn build_brain_sessions_report_with_options(
         .load_global_events()?
         .into_iter()
         .filter(|event| {
-            (event.source == "forge_shell" && event.kind == "shell_launch_planned")
-                || (event.source == "forge_session" && event.kind == "brain_session_lifecycle")
+            (event.source == "foundry_shell" && event.kind == "shell_launch_planned")
+                || (event.source == "foundry_session" && event.kind == "brain_session_lifecycle")
         })
         .map(brain_session_event_summary)
         .collect::<Vec<_>>();
@@ -3014,7 +3017,7 @@ pub fn build_brain_sessions_report_with_options(
     };
 
     Ok(BrainSessionsReport {
-        schema_version: "forge.brain_sessions.v1".to_string(),
+        schema_version: "foundry.brain_sessions.v1".to_string(),
         status: status.to_string(),
         controller: router.controller.clone(),
         selected_provider_id: router.selected_brain.clone(),
@@ -3035,20 +3038,20 @@ pub fn build_brain_sessions_report_with_options(
         recent_events: visible_events.into_iter().take(20).collect(),
         safety_gates: router.safety_gates.clone(),
         next_actions: vec![
-            "Use forge shells --record-session before handing a shell to a human or external brain."
+            "Use foundry shells --record-session before handing a shell to a human or external brain."
                 .to_string(),
-            "Use forge sessions lifecycle --session <id> --state opened|attached|closed to keep shell lifecycle auditable."
+            "Use foundry sessions lifecycle --session <id> --state opened|attached|closed to keep shell lifecycle auditable."
                 .to_string(),
-            "Use forge request switch-executor to hot-swap an active run provider without losing workflow lineage."
+            "Use foundry request switch-executor to hot-swap an active run provider without losing workflow lineage."
                 .to_string(),
-            "Use forge workflow update-node-brain to change provider routing for one AI or mixed node while the workflow remains active."
+            "Use foundry workflow update-node-brain to change provider routing for one AI or mixed node while the workflow remains active."
                 .to_string(),
         ],
     })
 }
 
 pub fn build_brain_session_history_report(
-    store: &ForgeStore,
+    store: &FoundryStore,
     router: &BrainRouterReport,
     session_id: &str,
 ) -> Result<BrainSessionHistoryReport> {
@@ -3056,7 +3059,7 @@ pub fn build_brain_session_history_report(
         .shell_sessions
         .iter()
         .find(|session| session.id == session_id)
-        .ok_or_else(|| anyhow::anyhow!("unknown Forge shell session: {session_id}"))?;
+        .ok_or_else(|| anyhow::anyhow!("unknown Foundry shell session: {session_id}"))?;
     let brain = router
         .brains
         .iter()
@@ -3065,8 +3068,8 @@ pub fn build_brain_session_history_report(
         .load_global_events()?
         .into_iter()
         .filter(|event| {
-            (event.source == "forge_shell" && event.kind == "shell_launch_planned")
-                || (event.source == "forge_session" && event.kind == "brain_session_lifecycle")
+            (event.source == "foundry_shell" && event.kind == "shell_launch_planned")
+                || (event.source == "foundry_session" && event.kind == "brain_session_lifecycle")
         })
         .map(brain_session_event_summary)
         .filter(|event| event.session_ids.iter().any(|id| id == session_id))
@@ -3089,14 +3092,14 @@ pub fn build_brain_session_history_report(
     let status = if events.is_empty() { "empty" } else { "loaded" };
 
     Ok(BrainSessionHistoryReport {
-        schema_version: "forge.brain_session_history.v1".to_string(),
+        schema_version: "foundry.brain_session_history.v1".to_string(),
         status: status.to_string(),
         controller: router.controller.clone(),
         session_id: session.id.clone(),
         provider_id: session.brain_id.clone(),
         provider_kind: brain
             .map(|candidate| candidate.execution_mode.clone())
-            .unwrap_or_else(|| "forge_control_plane".to_string()),
+            .unwrap_or_else(|| "foundry_control_plane".to_string()),
         readiness: shell_session_readiness(session, brain).to_string(),
         current_state: current_state.clone(),
         lifecycle_policy: brain_session_lifecycle_policy(&session.id, &current_state),
@@ -3110,9 +3113,9 @@ pub fn build_brain_session_history_report(
         next_actions: vec![
             "Use lifecycle_policy.next_lifecycle_commands for the next audited state change."
                 .to_string(),
-            "Use forge sessions --provider <id> --state <state> when an operator needs a lane view."
+            "Use foundry sessions --provider <id> --state <state> when an operator needs a lane view."
                 .to_string(),
-            "Use forge shells --record-session before handing a fresh shell to an external brain."
+            "Use foundry shells --record-session before handing a fresh shell to an external brain."
                 .to_string(),
         ],
     })
@@ -3202,13 +3205,15 @@ fn normalize_brain_session_filter_state(value: Option<String>) -> Result<Option<
 }
 
 fn brain_session_lifecycle_events(
-    store: &ForgeStore,
+    store: &FoundryStore,
     session_id: &str,
 ) -> Result<Vec<BrainSessionEventSummary>> {
     let mut events = store
         .load_global_events()?
         .into_iter()
-        .filter(|event| event.source == "forge_session" && event.kind == "brain_session_lifecycle")
+        .filter(|event| {
+            event.source == "foundry_session" && event.kind == "brain_session_lifecycle"
+        })
         .map(brain_session_event_summary)
         .filter(|event| event.session_ids.iter().any(|id| id == session_id))
         .collect::<Vec<_>>();
@@ -3245,7 +3250,7 @@ fn brain_session_lifecycle_transition(
     };
 
     BrainSessionLifecycleTransition {
-        schema_version: "forge.brain_session_transition_policy.v1".to_string(),
+        schema_version: "foundry.brain_session_transition_policy.v1".to_string(),
         previous_state: previous_state.to_string(),
         next_state: next_state.to_string(),
         transition_kind: transition_kind.to_string(),
@@ -3253,7 +3258,7 @@ fn brain_session_lifecycle_transition(
         reason,
         next_lifecycle_commands: lifecycle_transition_commands(session_id, &allowed_next_states),
         allowed_next_states,
-        policy: "forge_owned_ordered_shell_lifecycle".to_string(),
+        policy: "foundry_owned_ordered_shell_lifecycle".to_string(),
         execution: "audit_only_no_child_process".to_string(),
     }
 }
@@ -3267,11 +3272,11 @@ fn brain_session_lifecycle_policy(
         .map(str::to_string)
         .collect::<Vec<_>>();
     BrainSessionLifecyclePolicy {
-        schema_version: "forge.brain_session_transition_policy.v1".to_string(),
+        schema_version: "foundry.brain_session_transition_policy.v1".to_string(),
         current_state: current_state.to_string(),
         next_lifecycle_commands: lifecycle_transition_commands(session_id, &allowed_next_states),
         allowed_next_states,
-        policy: "forge_owned_ordered_shell_lifecycle".to_string(),
+        policy: "foundry_owned_ordered_shell_lifecycle".to_string(),
         execution: "audit_only_no_child_process".to_string(),
     }
 }
@@ -3294,7 +3299,7 @@ fn lifecycle_transition_commands(session_id: &str, states: &[String]) -> Vec<Vec
         .iter()
         .map(|state| {
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "sessions".to_string(),
                 "lifecycle".to_string(),
                 "--session".to_string(),
@@ -3340,12 +3345,12 @@ fn brain_session_state(
         provider_id: session.brain_id.clone(),
         provider_kind: brain
             .map(|candidate| candidate.execution_mode.clone())
-            .unwrap_or_else(|| "forge_control_plane".to_string()),
+            .unwrap_or_else(|| "foundry_control_plane".to_string()),
         readiness,
         entry_command: session.entry_command.clone(),
         attachable: session.attachable,
         launch_mode: session.launch_mode.clone(),
-        forge_first_ready: session.forge_first_ready,
+        foundry_first_ready: session.foundry_first_ready,
         state_boundary: session.state_boundary.clone(),
         lifecycle_policy: brain_session_lifecycle_policy(&session.id, &lifecycle_state),
         recorded_plan_count: planned_events.len(),
@@ -3369,7 +3374,7 @@ fn brain_provider_session_summaries(
     sessions: &[BrainSessionState],
 ) -> Vec<BrainProviderSessionSummary> {
     let mut providers = Vec::new();
-    providers.push(forge_provider_session_summary(router, sessions));
+    providers.push(foundry_provider_session_summary(router, sessions));
     providers.extend(router.brains.iter().map(|brain| {
         let provider_sessions = sessions
             .iter()
@@ -3385,7 +3390,7 @@ fn brain_provider_session_summaries(
             configured: brain.configured,
             allowed: brain.allowed,
             non_interactive_ready: brain.non_interactive_ready,
-            forge_first_ready: brain.forge_first_ready,
+            foundry_first_ready: brain.foundry_first_ready,
             session_count: provider_sessions.len(),
             ready_session_count: provider_sessions
                 .iter()
@@ -3405,25 +3410,25 @@ fn brain_provider_session_summaries(
     providers
 }
 
-fn forge_provider_session_summary(
+fn foundry_provider_session_summary(
     router: &BrainRouterReport,
     sessions: &[BrainSessionState],
 ) -> BrainProviderSessionSummary {
     let provider_sessions = sessions
         .iter()
-        .filter(|session| session.provider_id == "forge")
+        .filter(|session| session.provider_id == "foundry")
         .collect::<Vec<_>>();
     BrainProviderSessionSummary {
-        provider_id: "forge".to_string(),
-        display_name: "Forge Control Plane".to_string(),
-        provider_kind: "forge_control_plane".to_string(),
+        provider_id: "foundry".to_string(),
+        display_name: "Foundry Control Plane".to_string(),
+        provider_kind: "foundry_control_plane".to_string(),
         status: "ready".to_string(),
-        selected: router.selected_brain.as_deref() == Some("forge"),
+        selected: router.selected_brain.as_deref() == Some("foundry"),
         installed: true,
         configured: true,
         allowed: true,
         non_interactive_ready: true,
-        forge_first_ready: true,
+        foundry_first_ready: true,
         session_count: provider_sessions.len(),
         ready_session_count: provider_sessions
             .iter()
@@ -3437,12 +3442,12 @@ fn forge_provider_session_summary(
             .iter()
             .map(|session| session.session_id.clone())
             .collect(),
-        reason: "Forge owns orchestration, workflow state, context, memory, skills, MCP routing and shell lifecycle.".to_string(),
+        reason: "Foundry owns orchestration, workflow state, context, memory, skills, MCP routing and shell lifecycle.".to_string(),
     }
 }
 
 fn shell_session_tenant_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
 ) -> Result<serde_json::Value> {
     if let Some(workflow_id) = workflow_id {
@@ -3457,7 +3462,7 @@ fn shell_session_readiness(
     session: &BrainShellSessionSpec,
     brain: Option<&BrainCandidate>,
 ) -> &'static str {
-    if session.brain_id == "forge" {
+    if session.brain_id == "foundry" {
         return "ready";
     }
     let Some(brain) = brain else {
@@ -3466,7 +3471,7 @@ fn shell_session_readiness(
     if !brain.installed {
         return "not_installed";
     }
-    if session.forge_first_ready {
+    if session.foundry_first_ready {
         return "ready";
     }
     if session.attachable && brain.status == "ready" {
@@ -3484,7 +3489,7 @@ fn shell_preflight_commands(
     let mut commands = Vec::new();
     if let Some(harness_status) = harness_status {
         commands.push(vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "harness".to_string(),
             "shim-status".to_string(),
             "--shim-dir".to_string(),
@@ -3496,7 +3501,7 @@ fn shell_preflight_commands(
         ]);
     }
     commands.push(vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "brains".to_string(),
         "--output".to_string(),
         "json".to_string(),
@@ -3506,9 +3511,9 @@ fn shell_preflight_commands(
     }
     if let Some(handoff_command) = handoff_command {
         commands.push(handoff_command.clone());
-    } else if session.brain_id != "forge" {
+    } else if session.brain_id != "foundry" {
         commands.push(vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "task".to_string(),
             "handoff".to_string(),
             "--workflow".to_string(),
@@ -3533,7 +3538,7 @@ fn shell_context_command(
     let workflow_id = options.workflow_id.as_ref()?;
     let task_id = options.task_id.as_ref()?;
     Some(vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "context".to_string(),
         "--workflow".to_string(),
         workflow_id.clone(),
@@ -3555,13 +3560,13 @@ fn shell_handoff_command(
     context_budget: usize,
     ttl_seconds: u64,
 ) -> Option<Vec<String>> {
-    if session.brain_id == "forge" {
+    if session.brain_id == "foundry" {
         return None;
     }
     let workflow_id = options.workflow_id.as_ref()?;
     let task_id = options.task_id.as_ref()?;
     Some(vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "task".to_string(),
         "handoff".to_string(),
         "--workflow".to_string(),
@@ -3586,12 +3591,12 @@ fn shell_heartbeat_command(
     options: &ShellLaunchPlanOptions,
     ttl_seconds: u64,
 ) -> Option<Vec<String>> {
-    if session.brain_id == "forge" {
+    if session.brain_id == "foundry" {
         return None;
     }
     let run_id = options.run_id.as_ref()?;
     Some(vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "request".to_string(),
         "heartbeat".to_string(),
         "--run".to_string(),
@@ -3603,7 +3608,7 @@ fn shell_heartbeat_command(
         "--ttl-seconds".to_string(),
         ttl_seconds.to_string(),
         "--origin".to_string(),
-        "forge_shell".to_string(),
+        "foundry_shell".to_string(),
         "--output".to_string(),
         "json".to_string(),
     ])
@@ -3615,7 +3620,7 @@ fn brain_session_operation_plan(
     lifecycle_state: &str,
     last_plan_event: Option<&BrainSessionEventSummary>,
 ) -> BrainSessionOperationPlan {
-    let external_brain = session.brain_id != "forge";
+    let external_brain = session.brain_id != "foundry";
     let context = brain_session_context_command(last_plan_event, 1200);
     let handoff = brain_session_handoff_command(session, last_plan_event, 1200, 900);
     let heartbeat = brain_session_heartbeat_command(session, last_plan_event, 900);
@@ -3655,13 +3660,13 @@ fn brain_session_operation_plan(
     }
     if matches!(readiness, "needs_sync_or_authorization" | "not_installed") {
         warnings.push(
-            "Provider is not ready for Forge-controlled shell operation; sync executors and resolve authorization or installation first."
+            "Provider is not ready for Foundry-controlled shell operation; sync executors and resolve authorization or installation first."
                 .to_string(),
         );
     }
 
     BrainSessionOperationPlan {
-        schema_version: "forge.brain_session_operation_plan.v1".to_string(),
+        schema_version: "foundry.brain_session_operation_plan.v1".to_string(),
         status: status.to_string(),
         session_id: session.id.clone(),
         provider_id: session.brain_id.clone(),
@@ -3688,7 +3693,7 @@ fn brain_session_operation_plan(
         notes: vec![
             "Operation plan is read-only and gives TUI/MCP clients the next safe session controls without launching child CLIs."
                 .to_string(),
-            "External brains remain execution resources; Forge owns context, handoff, heartbeat, lifecycle and validation gates."
+            "External brains remain execution resources; Foundry owns context, handoff, heartbeat, lifecycle and validation gates."
                 .to_string(),
         ],
     }
@@ -3700,8 +3705,8 @@ fn brain_session_recommended_action(
     lifecycle_state: &str,
     last_plan_event: Option<&BrainSessionEventSummary>,
 ) -> String {
-    if session.brain_id == "forge" {
-        return "open_forge_control_surface".to_string();
+    if session.brain_id == "foundry" {
+        return "open_foundry_control_surface".to_string();
     }
     if matches!(readiness, "needs_sync_or_authorization" | "not_installed") {
         return "sync_or_authorize_provider".to_string();
@@ -3721,7 +3726,7 @@ fn brain_session_recommended_action(
 
 fn brain_session_history_command(session_id: &str) -> Vec<String> {
     vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "sessions".to_string(),
         "history".to_string(),
         "--session".to_string(),
@@ -3736,7 +3741,7 @@ fn brain_session_launch_plan_command(
     last_plan_event: Option<&BrainSessionEventSummary>,
 ) -> Vec<String> {
     let mut command = vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "shells".to_string(),
         "--executor".to_string(),
         session.brain_id.clone(),
@@ -3751,7 +3756,7 @@ fn brain_session_record_plan_command(
     last_plan_event: Option<&BrainSessionEventSummary>,
 ) -> Vec<String> {
     let mut command = vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "shells".to_string(),
         "--executor".to_string(),
         session.brain_id.clone(),
@@ -3760,7 +3765,7 @@ fn brain_session_record_plan_command(
     command.extend([
         "--record-session".to_string(),
         "--origin".to_string(),
-        "forge_cli".to_string(),
+        "foundry_cli".to_string(),
         "--output".to_string(),
         "json".to_string(),
     ]);
@@ -3773,7 +3778,7 @@ fn brain_session_lifecycle_command(
     last_plan_event: Option<&BrainSessionEventSummary>,
 ) -> Option<Vec<String>> {
     let mut command = vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "sessions".to_string(),
         "lifecycle".to_string(),
         "--session".to_string(),
@@ -3784,7 +3789,7 @@ fn brain_session_lifecycle_command(
     append_shell_lineage_args(&mut command, last_plan_event, true);
     command.extend([
         "--origin".to_string(),
-        "forge_cli".to_string(),
+        "foundry_cli".to_string(),
         "--output".to_string(),
         "json".to_string(),
     ]);
@@ -3799,7 +3804,7 @@ fn brain_session_context_command(
     let workflow_id = event.workflow_id.as_ref()?;
     let task_id = event.task_id.as_ref()?;
     Some(vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "context".to_string(),
         "--workflow".to_string(),
         workflow_id.clone(),
@@ -3821,14 +3826,14 @@ fn brain_session_handoff_command(
     context_budget: usize,
     ttl_seconds: u64,
 ) -> Option<Vec<String>> {
-    if session.brain_id == "forge" {
+    if session.brain_id == "foundry" {
         return None;
     }
     let event = last_plan_event?;
     let workflow_id = event.workflow_id.as_ref()?;
     let task_id = event.task_id.as_ref()?;
     Some(vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "task".to_string(),
         "handoff".to_string(),
         "--workflow".to_string(),
@@ -3853,13 +3858,13 @@ fn brain_session_heartbeat_command(
     last_plan_event: Option<&BrainSessionEventSummary>,
     ttl_seconds: u64,
 ) -> Option<Vec<String>> {
-    if session.brain_id == "forge" {
+    if session.brain_id == "foundry" {
         return None;
     }
     let event = last_plan_event?;
     let run_id = event.run_id.as_ref()?;
     Some(vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "request".to_string(),
         "heartbeat".to_string(),
         "--run".to_string(),
@@ -3871,7 +3876,7 @@ fn brain_session_heartbeat_command(
         "--ttl-seconds".to_string(),
         ttl_seconds.to_string(),
         "--origin".to_string(),
-        "forge_shell".to_string(),
+        "foundry_shell".to_string(),
         "--output".to_string(),
         "json".to_string(),
     ])
@@ -3900,26 +3905,27 @@ fn append_shell_lineage_args(
 }
 
 fn shell_next_actions(session: &BrainShellSessionSpec) -> Vec<String> {
-    if session.brain_id == "forge" {
+    if session.brain_id == "foundry" {
         return vec![
-            "Start the Forge TUI when the operator needs the primary control surface.".to_string(),
+            "Start the Foundry TUI when the operator needs the primary control surface."
+                .to_string(),
         ];
     }
     vec![
-        "Run the entry_command only after Forge has prepared a workflow/task context packet and recorded the handoff lease."
+        "Run the entry_command only after Foundry has prepared a workflow/task context packet and recorded the handoff lease."
             .to_string(),
-        "Prefer Forge harness execution receipts for non-interactive commands that need audit lineage."
+        "Prefer Foundry harness execution receipts for non-interactive commands that need audit lineage."
             .to_string(),
     ]
 }
 
 fn build_quota_policy(
     executors: &[ExecutorState],
-    store: &ForgeStore,
+    store: &FoundryStore,
 ) -> ExecutorQuotaPolicyReport {
     let observations = load_quota_observations(store);
-    let opencode_free_model = env::var("OPENCODE_FREE_MODEL").ok();
-    let opencode_model = env::var("OPENCODE_MODEL").ok();
+    let opencode_free_model = crate::brand::env_var("OPENCODE_FREE_MODEL").ok();
+    let opencode_model = crate::brand::env_var("OPENCODE_MODEL").ok();
 
     let mut candidates = vec![
         quota_candidate(
@@ -3996,7 +4002,7 @@ fn build_quota_policy(
             "legacy_executor_not_for_new_routes",
             "high",
             99,
-            "Gemini CLI is a legacy executor and is not an active Forge route; use Codex or agy.",
+            "Gemini CLI is a legacy executor and is not an active Foundry route; use Codex or agy.",
         ),
         quota_candidate(
             executors,
@@ -4066,7 +4072,7 @@ fn build_quota_policy(
         if candidate.executor == "gemini" {
             candidate.selection_status = "skipped_legacy_invalidated".to_string();
             candidate.reason =
-                "Gemini CLI is a legacy executor and is not an active Forge route; use Codex or agy."
+                "Gemini CLI is a legacy executor and is not an active Foundry route; use Codex or agy."
                     .to_string();
         }
     }
@@ -4075,7 +4081,7 @@ fn build_quota_policy(
     let selection_trace = executor_selection_trace(&candidates);
 
     ExecutorQuotaPolicyReport {
-        schema_version: "forge.executor_quota_policy.v1".to_string(),
+        schema_version: "foundry.executor_quota_policy.v1".to_string(),
         selection_principle:
             "maximize useful progress under expected value, quota, cost, latency, quality and fallback risk constraints"
                 .to_string(),
@@ -4132,7 +4138,7 @@ fn executor_selection_trace(
             };
 
             ExecutorSelectionTrace {
-                schema_version: "forge.executor_selection_trace.v1".to_string(),
+                schema_version: "foundry.executor_selection_trace.v1".to_string(),
                 executor: candidate.executor.clone(),
                 provider: candidate.provider.clone(),
                 model: candidate.model.clone(),
@@ -4350,7 +4356,7 @@ fn quota_candidate(
     }
 }
 
-fn load_quota_observations(store: &ForgeStore) -> Vec<ExecutorQuotaObservation> {
+fn load_quota_observations(store: &FoundryStore) -> Vec<ExecutorQuotaObservation> {
     store
         .load_executor_quotas()
         .unwrap_or_default()
@@ -4406,7 +4412,7 @@ fn executor_has_authorized_runtime_path(executor: &ExecutorState) -> bool {
         && executor.installed
         && executor.configured
         && (executor.non_interactive_ready
-            || (executor.forge_first_ready && executor.forge_first_entrypoint.is_some()))
+            || (executor.foundry_first_ready && executor.foundry_first_entrypoint.is_some()))
 }
 
 #[cfg(test)]
@@ -4416,9 +4422,18 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn legacy_foundry_executor_authority_is_normalized() {
+        assert_eq!(
+            canonical_executor_id("forge"), // foundry-brand-allow: legacy-compat
+            "foundry"
+        );
+        assert_eq!(canonical_executor_id("Foundry"), "foundry");
+    }
+
+    #[test]
     fn executor_report_surfaces_persisted_quota_observations() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
 
         let codex_state = ExecutorState {
             id: "codex".to_string(),
@@ -4430,8 +4445,8 @@ mod tests {
             config_evidence: vec!["test-config".to_string()],
             non_interactive_ready: true,
             probe_evidence: vec!["smoke test passed".to_string()],
-            forge_first_ready: false,
-            forge_first_entrypoint: None,
+            foundry_first_ready: false,
+            foundry_first_entrypoint: None,
             harness_status: None,
             allowed: true,
             decision_source: "human_allow".to_string(),
@@ -4487,7 +4502,7 @@ mod tests {
     #[test]
     fn executor_report_excludes_interactive_hang_risk_from_usable() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
 
         let gemini_state = ExecutorState {
             id: "gemini".to_string(),
@@ -4501,8 +4516,8 @@ mod tests {
             probe_evidence: vec![
                 "non-interactive smoke test `--version` timed out after 2000ms".to_string(),
             ],
-            forge_first_ready: false,
-            forge_first_entrypoint: None,
+            foundry_first_ready: false,
+            foundry_first_entrypoint: None,
             harness_status: None,
             allowed: true,
             decision_source: "human_allow".to_string(),
@@ -4544,7 +4559,7 @@ mod tests {
     #[test]
     fn executor_report_deduplicates_repair_goals_for_one_executor() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
 
         let opencode_state = ExecutorState {
             id: "opencode".to_string(),
@@ -4559,8 +4574,8 @@ mod tests {
                 "failed to list opencode models; non-interactive provider/model readiness is not validated"
                     .to_string(),
             ],
-            forge_first_ready: false,
-            forge_first_entrypoint: None,
+            foundry_first_ready: false,
+            foundry_first_entrypoint: None,
             harness_status: None,
             allowed: true,
             decision_source: "human_allow".to_string(),
@@ -4582,9 +4597,9 @@ mod tests {
     }
 
     #[test]
-    fn forge_first_ready_codex_and_agy_remain_usable_brains() {
+    fn foundry_first_ready_codex_and_agy_remain_usable_brains() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
 
         for (id, display_name, command) in [
             ("codex", "Codex CLI", "codex"),
@@ -4600,9 +4615,9 @@ mod tests {
                 config_evidence: vec![format!("{id} config found")],
                 non_interactive_ready: false,
                 probe_evidence: vec![format!("{id} raw probe needs interactive shell")],
-                forge_first_ready: true,
-                forge_first_entrypoint: Some(vec![
-                    "forge".to_string(),
+                foundry_first_ready: true,
+                foundry_first_entrypoint: Some(vec![
+                    "foundry".to_string(),
                     "harness".to_string(),
                     "exec".to_string(),
                     "--executor".to_string(),
@@ -4660,7 +4675,7 @@ mod tests {
     #[test]
     fn shell_launch_plan_only_marks_authorized_codex_and_agy_attachable() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
 
         for (id, display_name, command, allowed) in [
             ("codex", "Codex CLI", "codex", true),
@@ -4682,8 +4697,8 @@ mod tests {
                 config_evidence: vec![format!("{id} config found")],
                 non_interactive_ready: true,
                 probe_evidence: vec![format!("{id} non-interactive smoke passed")],
-                forge_first_ready: false,
-                forge_first_entrypoint: None,
+                foundry_first_ready: false,
+                foundry_first_entrypoint: None,
                 harness_status: None,
                 allowed,
                 decision_source: if allowed {

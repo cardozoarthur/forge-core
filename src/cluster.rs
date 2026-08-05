@@ -3,23 +3,23 @@ use crate::context::ContextReplayShardRef;
 use crate::graph::{ArtifactRecord, AtomicTask, ExecutorKind};
 use crate::handoff::{build_task_handoff, TaskHandoffReport};
 use crate::lease::TaskLease;
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-const CLUSTER_NODE_SCHEMA_VERSION: &str = "forge.cluster_node.v1";
-const CLUSTER_REGISTRY_SCHEMA_VERSION: &str = "forge.cluster_registry.v2";
-const CLUSTER_NODE_SCHEDULING_SCHEMA_VERSION: &str = "forge.cluster_node_scheduling.v1";
-const CLUSTER_PLACEMENT_SCHEMA_VERSION: &str = "forge.cluster_placement.v1";
+const CLUSTER_NODE_SCHEMA_VERSION: &str = "foundry.cluster_node.v1";
+const CLUSTER_REGISTRY_SCHEMA_VERSION: &str = "foundry.cluster_registry.v2";
+const CLUSTER_NODE_SCHEDULING_SCHEMA_VERSION: &str = "foundry.cluster_node_scheduling.v1";
+const CLUSTER_PLACEMENT_SCHEMA_VERSION: &str = "foundry.cluster_placement.v1";
 const CLUSTER_PLACEMENT_REQUIREMENTS_SCHEMA_VERSION: &str =
-    "forge.cluster_placement_requirements.v3";
-const CLUSTER_PLACEMENT_POLICY_SCHEMA_VERSION: &str = "forge.cluster_placement_policy.v1";
-const CLUSTER_TASK_HANDOFF_SCHEMA_VERSION: &str = "forge.cluster_task_handoff.v1";
-const CLUSTER_SYNC_MANIFEST_SCHEMA_VERSION: &str = "forge.cluster_sync_manifest.v1";
-const CLUSTER_NODE_LEASE_SCHEMA_VERSION: &str = "forge.cluster_node_lease.v1";
-const CLUSTER_NODE_LEASE_REGISTRY_SCHEMA_VERSION: &str = "forge.cluster_node_lease_registry.v1";
+    "foundry.cluster_placement_requirements.v3";
+const CLUSTER_PLACEMENT_POLICY_SCHEMA_VERSION: &str = "foundry.cluster_placement_policy.v1";
+const CLUSTER_TASK_HANDOFF_SCHEMA_VERSION: &str = "foundry.cluster_task_handoff.v1";
+const CLUSTER_SYNC_MANIFEST_SCHEMA_VERSION: &str = "foundry.cluster_sync_manifest.v1";
+const CLUSTER_NODE_LEASE_SCHEMA_VERSION: &str = "foundry.cluster_node_lease.v1";
+const CLUSTER_NODE_LEASE_REGISTRY_SCHEMA_VERSION: &str = "foundry.cluster_node_lease_registry.v1";
 
 #[derive(Debug, Clone)]
 pub struct ClusterNodeInput {
@@ -282,7 +282,7 @@ pub struct ClusterNodeLeaseRegistryReport {
 }
 
 pub fn register_cluster_node(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: ClusterNodeInput,
 ) -> Result<ClusterRegisterReport> {
     let node_id = input.node_id.trim();
@@ -318,7 +318,7 @@ pub fn register_cluster_node(
     })
 }
 
-pub fn list_cluster_nodes(store: &ForgeStore) -> Result<ClusterRegistryReport> {
+pub fn list_cluster_nodes(store: &FoundryStore) -> Result<ClusterRegistryReport> {
     let nodes = load_cluster_nodes(store)?;
     let lease_pressure = load_cluster_lease_pressure(store)?;
     let scheduling = nodes
@@ -342,7 +342,7 @@ pub fn list_cluster_nodes(store: &ForgeStore) -> Result<ClusterRegistryReport> {
 }
 
 pub fn list_cluster_node_leases(
-    store: &ForgeStore,
+    store: &FoundryStore,
     node_id: Option<&str>,
 ) -> Result<ClusterNodeLeaseRegistryReport> {
     let node_filter = node_id
@@ -425,7 +425,7 @@ pub fn list_cluster_node_leases(
 }
 
 pub fn place_task_on_cluster(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
 ) -> Result<ClusterPlacementReport> {
@@ -498,7 +498,7 @@ pub fn place_task_on_cluster(
 }
 
 pub fn build_cluster_task_handoff(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     budget: usize,
@@ -749,7 +749,7 @@ fn sync_manifest_sha256(manifest: &ClusterSyncManifest) -> String {
     )
 }
 
-fn load_cluster_nodes(store: &ForgeStore) -> Result<Vec<ClusterNode>> {
+fn load_cluster_nodes(store: &FoundryStore) -> Result<Vec<ClusterNode>> {
     store
         .load_cluster_nodes()?
         .into_iter()
@@ -926,7 +926,7 @@ fn placement_score(
         - (active_lease_count as i64 * 10_000)
 }
 
-fn load_active_cluster_lease_counts(store: &ForgeStore) -> Result<BTreeMap<String, usize>> {
+fn load_active_cluster_lease_counts(store: &FoundryStore) -> Result<BTreeMap<String, usize>> {
     Ok(load_cluster_lease_pressure(store)?
         .into_iter()
         .map(|(node_id, pressure)| (node_id, pressure.active_lease_count))
@@ -940,7 +940,7 @@ struct ClusterLeasePressure {
 }
 
 fn load_cluster_lease_pressure(
-    store: &ForgeStore,
+    store: &FoundryStore,
 ) -> Result<BTreeMap<String, ClusterLeasePressure>> {
     let leases = store
         .load_task_leases()?

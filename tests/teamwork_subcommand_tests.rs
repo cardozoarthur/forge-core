@@ -2,16 +2,16 @@ use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::tempdir;
 
-fn forge() -> Command {
-    Command::cargo_bin("forge").expect("forge binary should build")
+fn foundry() -> Command {
+    Command::cargo_bin("foundry").expect("foundry binary should build")
 }
 
 #[test]
 fn test_teamwork_subcommand_basic() {
     let temp = tempdir().unwrap();
-    let store_path = temp.path().join("forge.sqlite");
+    let store_path = temp.path().join("foundry.sqlite");
 
-    let output = forge()
+    let output = foundry()
         .arg("--store")
         .arg(&store_path)
         .args([
@@ -52,9 +52,9 @@ fn test_teamwork_subcommand_basic() {
 #[test]
 fn test_teamwork_subcommand_detached() {
     let temp = tempdir().unwrap();
-    let store_path = temp.path().join("forge.sqlite");
+    let store_path = temp.path().join("foundry.sqlite");
 
-    let output = forge()
+    let output = foundry()
         .arg("--store")
         .arg(&store_path)
         .args([

@@ -4,6 +4,25 @@ use crate::graph::{
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+const CANONICAL_CORE_AUTHORITY: &str = "foundry_core";
+const LEGACY_CORE_AUTHORITY: &str = "forge_core"; // foundry-brand-allow: legacy-compat
+const CANONICAL_PERSONA_INSTRUCTION_SOURCE: &str = "foundry_personality_soul_routing_v1";
+const LEGACY_PERSONA_INSTRUCTION_SOURCE: &str = "forge_personality_soul_routing_v1"; // foundry-brand-allow: legacy-compat
+
+fn canonical_core_authority(value: &str) -> &str {
+    match value {
+        LEGACY_CORE_AUTHORITY => CANONICAL_CORE_AUTHORITY,
+        _ => value,
+    }
+}
+
+fn canonical_persona_instruction_source(value: &str) -> &str {
+    match value {
+        LEGACY_PERSONA_INSTRUCTION_SOURCE => CANONICAL_PERSONA_INSTRUCTION_SOURCE,
+        _ => value,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FailedRule {
     pub task_id: String,
@@ -31,9 +50,9 @@ pub fn validate_workflow_structure(workflow: &Workflow) -> Vec<FailedRule> {
     let mut failed_rules = Vec::new();
     let policy = &workflow.core_orchestration;
     let mut policy_violations = Vec::new();
-    if policy.authority != "forge_core" {
+    if canonical_core_authority(&policy.authority) != CANONICAL_CORE_AUTHORITY {
         policy_violations.push(format!(
-            "authority must be forge_core, found {}",
+            "authority must be {CANONICAL_CORE_AUTHORITY}, found {}",
             policy.authority
         ));
     }
@@ -408,8 +427,12 @@ fn persona_routing_violations(persona: &PersonaRoutingSpec) -> Vec<String> {
     if persona.scope != "node" {
         violations.push("persona routing must be node-scoped".to_string());
     }
-    if persona.instruction_source != "forge_personality_soul_routing_v1" {
-        violations.push("instruction source must be forge_personality_soul_routing_v1".to_string());
+    if canonical_persona_instruction_source(&persona.instruction_source)
+        != CANONICAL_PERSONA_INSTRUCTION_SOURCE
+    {
+        violations.push(format!(
+            "instruction source must be {CANONICAL_PERSONA_INSTRUCTION_SOURCE}"
+        ));
     }
     if persona.voice.trim().is_empty() {
         violations.push("voice must be explicit".to_string());
@@ -504,6 +527,91 @@ mod tests {
         create_workflow(intent)
     }
 
+    fn validation_ready_workflow() -> Workflow {
+        let mut workflow = test_workflow();
+        for task in &mut workflow.tasks {
+            task.status = TaskStatus::Completed;
+            task.work_item.goal_validation.definitively_ready = true;
+            task.active_impediments.clear();
+        }
+        workflow
+    }
+
+    fn persona_fixture(instruction_source: &str) -> PersonaRoutingSpec {
+        PersonaRoutingSpec {
+            mode: "legacy_fixture".to_string(),
+            scope: "node".to_string(),
+            instruction_source: instruction_source.to_string(),
+            voice: "direct and auditable".to_string(),
+            tone: "evidence-bound".to_string(),
+            validation_gate: "persona_routing_required".to_string(),
+            source_models: vec![
+                "codex_developer_personality_instructions".to_string(),
+                "paperclip_soul_voice_tone_persona".to_string(),
+            ],
+            auditable: true,
+        }
+    }
+
+    #[test]
+    fn validation_accepts_legacy_05_core_authority_fixture() {
+        let mut workflow = validation_ready_workflow();
+        workflow.core_orchestration.authority = LEGACY_CORE_AUTHORITY.to_string();
+
+        let report = validate_workflow(&workflow);
+
+        assert!(report.promotable, "{:#?}", report.failed_rules);
+        assert_eq!(
+            CoreOrchestrationSpec::default().authority,
+            CANONICAL_CORE_AUTHORITY
+        );
+    }
+
+    #[test]
+    fn validation_rejects_unknown_core_authority_fixture() {
+        let mut workflow = validation_ready_workflow();
+        workflow.core_orchestration.authority = "external_core".to_string();
+
+        let report = validate_workflow(&workflow);
+
+        assert!(!report.promotable);
+        assert!(report.failed_rules.iter().any(|failure| {
+            failure.kind == "core_orchestration"
+                && failure.message.contains("authority must be foundry_core")
+                && failure.message.contains("external_core")
+        }));
+    }
+
+    #[test]
+    fn validation_accepts_legacy_05_persona_instruction_source_fixture() {
+        let mut workflow = validation_ready_workflow();
+        workflow.tasks[0].persona = Some(persona_fixture(LEGACY_PERSONA_INSTRUCTION_SOURCE));
+
+        let report = validate_workflow(&workflow);
+
+        assert!(report.promotable, "{:#?}", report.failed_rules);
+        assert_eq!(
+            persona_fixture(CANONICAL_PERSONA_INSTRUCTION_SOURCE).instruction_source,
+            CANONICAL_PERSONA_INSTRUCTION_SOURCE
+        );
+    }
+
+    #[test]
+    fn validation_rejects_unknown_persona_instruction_source_fixture() {
+        let mut workflow = validation_ready_workflow();
+        workflow.tasks[0].persona = Some(persona_fixture("external_persona_router_v1"));
+
+        let report = validate_workflow(&workflow);
+
+        assert!(!report.promotable);
+        assert!(report.failed_rules.iter().any(|failure| {
+            failure.kind == "persona_routing"
+                && failure
+                    .message
+                    .contains("instruction source must be foundry_personality_soul_routing_v1")
+        }));
+    }
+
     #[test]
     fn version_boundary_returns_task_id_version_map() {
         let wf = test_workflow();
@@ -557,7 +665,7 @@ mod tests {
                 item_type: "execution_story".to_string(),
                 backlog_state: "ready".to_string(),
                 priority: "p1".to_string(),
-                owner_role: "forge_runtime".to_string(),
+                owner_role: "foundry_runtime".to_string(),
                 parent_id: None,
                 subtasks: vec![],
                 impediments: vec![],

@@ -1,10 +1,9 @@
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
-use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const AWS_OPS_COMMAND_SCHEMA: &str = "forge.aws_ops.command.v1";
+pub const AWS_OPS_COMMAND_SCHEMA: &str = "foundry.aws_ops.command.v1";
 
 const DEFAULT_AWS_OPS_RELATIVE_BIN: &str = "plugins/aws-ops/scripts/aws-ops";
 const DEFAULT_AWS_OPS_RELATIVE_CONTRACT: &str =
@@ -30,41 +29,41 @@ pub fn resolve_aws_ops_bin(explicit: Option<&Path>) -> PathBuf {
     if let Some(path) = explicit {
         return path.to_path_buf();
     }
-    if let Ok(path) = env::var("FORGE_AWS_OPS_BIN") {
+    if let Ok(path) = crate::brand::env_var("FOUNDRY_AWS_OPS_BIN") {
         if !path.trim().is_empty() {
             return PathBuf::from(path);
         }
     }
-    if let Ok(path) = env::var("AWS_OPS_BIN") {
+    if let Ok(path) = crate::brand::env_var("AWS_OPS_BIN") {
         if !path.trim().is_empty() {
             return PathBuf::from(path);
         }
     }
-    if let Ok(home) = env::var("HOME") {
+    if let Ok(home) = crate::brand::env_var("HOME") {
         return PathBuf::from(home).join(DEFAULT_AWS_OPS_RELATIVE_BIN);
     }
     PathBuf::from("aws-ops")
 }
 
 pub fn default_aws_vault_contract() -> PathBuf {
-    if let Ok(path) = env::var("FORGE_AWS_VAULT_CONTRACT") {
+    if let Ok(path) = crate::brand::env_var("FOUNDRY_AWS_VAULT_CONTRACT") {
         if !path.trim().is_empty() {
             return PathBuf::from(path);
         }
     }
-    if let Ok(home) = env::var("HOME") {
+    if let Ok(home) = crate::brand::env_var("HOME") {
         return PathBuf::from(home).join(DEFAULT_AWS_OPS_RELATIVE_CONTRACT);
     }
     PathBuf::from(DEFAULT_AWS_OPS_RELATIVE_CONTRACT)
 }
 
 pub fn default_aws_vault_data() -> PathBuf {
-    if let Ok(path) = env::var("FORGE_AWS_VAULT_DATA") {
+    if let Ok(path) = crate::brand::env_var("FOUNDRY_AWS_VAULT_DATA") {
         if !path.trim().is_empty() {
             return PathBuf::from(path);
         }
     }
-    if let Ok(home) = env::var("HOME") {
+    if let Ok(home) = crate::brand::env_var("HOME") {
         return PathBuf::from(home).join(DEFAULT_AWS_OPS_RELATIVE_DATA);
     }
     PathBuf::from(DEFAULT_AWS_OPS_RELATIVE_DATA)
@@ -117,7 +116,7 @@ pub fn run_raw(
     aws_args: &[String],
 ) -> Result<AwsOpsCommandReport> {
     if aws_args.is_empty() {
-        bail!("forge aws raw requires AWS CLI arguments after --");
+        bail!("foundry aws raw requires AWS CLI arguments after --");
     }
     let mut extra_args = Vec::new();
     if allow_mutation {

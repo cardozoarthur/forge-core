@@ -43,7 +43,7 @@ pub fn send_telegram_report(
                     report_content
                         .lines()
                         .next()
-                        .unwrap_or("Forge Self-Evolution Report")
+                        .unwrap_or("Foundry Self-Evolution Report")
                 ),
             ])
             .output();

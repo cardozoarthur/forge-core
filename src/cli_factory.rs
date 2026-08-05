@@ -1,10 +1,10 @@
 use crate::graph::{create_workflow, Workflow};
 use crate::intent::{IntentSpec, WorkflowModeSpec};
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
-const CLI_FACTORY_CREATION_SCHEMA_VERSION: &str = "forge.cli_factory.creation_plan.v1";
+const CLI_FACTORY_CREATION_SCHEMA_VERSION: &str = "foundry.cli_factory.creation_plan.v1";
 
 #[derive(Debug, Clone)]
 pub struct CliFactoryCreateInput {
@@ -109,7 +109,7 @@ pub struct CliFactoryBenchmarkInspiration {
 }
 
 pub fn create_cli_factory_plan(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: CliFactoryCreateInput,
 ) -> Result<CliFactoryCreationPlan> {
     let name = normalize_cli_name(&input.name)?;
@@ -144,7 +144,7 @@ fn cli_factory_intent(name: &str, goal: &str, source: &str) -> IntentSpec {
     IntentSpec {
         goal: format!("Create workflow-backed CLI {name}: {goal}"),
         constraints: vec![
-            "Forge workflow runtime owns state, checkpoints, approvals and validation".to_string(),
+            "Foundry workflow runtime owns state, checkpoints, approvals and validation".to_string(),
             "Generated CLI code must be an Addon/runtime contract, not an external orchestration authority".to_string(),
             "CLI and MCP surfaces must be generated from the same workflow-backed contract".to_string(),
             "Local-first persistence must use SQLite where practical".to_string(),
@@ -157,7 +157,7 @@ fn cli_factory_intent(name: &str, goal: &str, source: &str) -> IntentSpec {
             "Verification pipeline with scorecard, dogfood, proof and smoke checks".to_string(),
         ],
         risks: vec![
-            "generated_cli_bypasses_forge_runtime".to_string(),
+            "generated_cli_bypasses_foundry_runtime".to_string(),
             "api_auth_or_schema_discovery_incomplete".to_string(),
             "compound_commands_without_local_store".to_string(),
         ],
@@ -180,17 +180,17 @@ fn cli_factory_creation_plan(
     requested_commands: Vec<String>,
     compound_commands: Vec<String>,
 ) -> CliFactoryCreationPlan {
-    let binary_name = format!("{name}-forge-cli");
-    let mcp_server_name = format!("{name}-forge-mcp");
-    let skill_name = format!("{name}-forge-skill");
-    let addon_id = format!("forge.addon.generated_cli.{name}");
+    let binary_name = format!("{name}-foundry-cli");
+    let mcp_server_name = format!("{name}-foundry-mcp");
+    let skill_name = format!("{name}-foundry-skill");
+    let addon_id = format!("foundry.addon.generated_cli.{name}");
     let capability_id = format!("{name}_workflow_backed_cli");
     let contract_id = format!("{name}.cli.workflow_executor");
     let permission_id = format!("{name}.cli.execute");
     CliFactoryCreationPlan {
         schema_version: CLI_FACTORY_CREATION_SCHEMA_VERSION.to_string(),
         status: "cli_creation_workflow_created".to_string(),
-        state_owner: "forge_workflow_runtime".to_string(),
+        state_owner: "foundry_workflow_runtime".to_string(),
         workflow_id: workflow.id.clone(),
         workflow_created: true,
         files_written: false,
@@ -203,10 +203,10 @@ fn cli_factory_creation_plan(
             source,
         },
         workflow_contract: CliFactoryWorkflowContract {
-            schema_version: "forge.cli_factory.workflow_contract.v1".to_string(),
-            engine: "forge_workflow_runtime".to_string(),
+            schema_version: "foundry.cli_factory.workflow_contract.v1".to_string(),
+            engine: "foundry_workflow_runtime".to_string(),
             workflow_kind: "cli_factory_workflow".to_string(),
-            state_owner: "forge_workflow_runtime".to_string(),
+            state_owner: "foundry_workflow_runtime".to_string(),
             runtime_boundary: "generated_cli_is_addon_runtime_contract".to_string(),
             not_executed: true,
         },
@@ -216,7 +216,7 @@ fn cli_factory_creation_plan(
             runtime_contracts: vec![CliFactoryRuntimeContract {
                 contract_id,
                 contract_type: "cli_workflow_executor".to_string(),
-                executor: "forge_workflow_runtime".to_string(),
+                executor: "foundry_workflow_runtime".to_string(),
                 permission_id,
             }],
         },

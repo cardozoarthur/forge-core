@@ -3,13 +3,13 @@ use crate::request::{
     step_request_with_supervisor_fence, update_run_record, RequestDriveReport, RequestListRow,
     RequestStepReport, RequestSupervisorFence,
 };
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
-pub const REQUEST_SUPERVISOR_SCHEMA_VERSION: &str = "forge.request_supervisor.v1";
+pub const REQUEST_SUPERVISOR_SCHEMA_VERSION: &str = "foundry.request_supervisor.v1";
 pub const DEFAULT_REQUEST_SUPERVISOR_TTL_SECONDS: u64 = 300;
 pub const DEFAULT_REQUEST_SUPERVISOR_MAX_STEPS_PER_RUN: usize = 1;
 pub const MAX_REQUEST_SUPERVISOR_STEPS_PER_RUN: usize = 16;
@@ -33,8 +33,8 @@ pub struct RequestSupervisorOptions {
 impl Default for RequestSupervisorOptions {
     fn default() -> Self {
         Self::new(
-            "forge-request-supervisor",
-            "forge-request-supervisor",
+            "foundry-request-supervisor",
+            "foundry-request-supervisor",
             DEFAULT_REQUEST_SUPERVISOR_TTL_SECONDS,
             DEFAULT_REQUEST_SUPERVISOR_MAX_STEPS_PER_RUN,
         )
@@ -132,7 +132,7 @@ pub struct RequestSupervisorAttentionReason {
 impl RequestSupervisorAttentionReason {
     fn from_step_report(source: &'static str, status: &str, action: &str, reason: &str) -> Self {
         Self {
-            schema_version: "forge.request_supervisor_attention_reason.v1".to_string(),
+            schema_version: "foundry.request_supervisor_attention_reason.v1".to_string(),
             source: source.to_string(),
             status: status.to_string(),
             action: action.to_string(),
@@ -175,7 +175,7 @@ pub struct RequestSupervisorReport {
 }
 
 pub fn supervise_requests_once(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: &RequestSupervisorOptions,
 ) -> Result<RequestSupervisorReport> {
     options.validate()?;
@@ -216,7 +216,7 @@ pub fn supervise_requests_once(
 }
 
 pub fn supervise_request_once(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     options: &RequestSupervisorOptions,
 ) -> Result<RequestSupervisorRunResult> {
@@ -230,7 +230,7 @@ pub fn supervise_request_once(
 }
 
 fn supervise_run_once(
-    store: &ForgeStore,
+    store: &FoundryStore,
     listed_run: &RequestListRow,
     options: &RequestSupervisorOptions,
 ) -> Result<RequestSupervisorRunResult> {
@@ -283,7 +283,7 @@ fn supervise_run_once(
                 options,
                 "running_executor_not_owned",
                 "inspect_executor_ownership",
-                "Running request has no active lease owned by this supervisor; Forge requires inspection instead of implicit takeover.",
+                "Running request has no active lease owned by this supervisor; Foundry requires inspection instead of implicit takeover.",
             );
         }
     } else if !matches!(listed_run.status.as_str(), "accepted" | "resumed") {
@@ -298,7 +298,7 @@ fn supervise_run_once(
 }
 
 fn recover_stale_result(
-    store: &ForgeStore,
+    store: &FoundryStore,
     listed_run: &RequestListRow,
     options: &RequestSupervisorOptions,
 ) -> Result<RequestSupervisorRunResult> {
@@ -321,7 +321,7 @@ fn recover_stale_result(
 }
 
 fn advance_eligible_run(
-    store: &ForgeStore,
+    store: &FoundryStore,
     listed_run: &RequestListRow,
     options: &RequestSupervisorOptions,
 ) -> Result<RequestSupervisorRunResult> {
@@ -459,7 +459,7 @@ enum SupervisorLeaseClaim {
 }
 
 fn claim_and_step_request(
-    store: &ForgeStore,
+    store: &FoundryStore,
     run_id: &str,
     options: &RequestSupervisorOptions,
 ) -> Result<SupervisorStepAttempt> {
@@ -525,7 +525,7 @@ fn claim_and_step_request(
             && run.supervisor_instance_id.is_none()
         {
             return Ok(SupervisorLeaseClaim::Unsafe(
-                "Running request has no supervisor identity or heartbeat; Forge requires reconciliation instead of implicit takeover.".to_string(),
+                "Running request has no supervisor identity or heartbeat; Foundry requires reconciliation instead of implicit takeover.".to_string(),
             ));
         }
         if let Some(owner) = run.supervisor_instance_id.as_deref() {
@@ -537,7 +537,7 @@ fn claim_and_step_request(
             }
             if owner != options.instance_id && run.status == "running" {
                 return Ok(SupervisorLeaseClaim::Unsafe(format!(
-                    "Request supervisor lease for instance {owner} is no longer live and no stale heartbeat transition is available; Forge requires reconciliation before instance {} can advance the run.",
+                    "Request supervisor lease for instance {owner} is no longer live and no stale heartbeat transition is available; Foundry requires reconciliation before instance {} can advance the run.",
                     options.instance_id
                 )));
             }
@@ -567,7 +567,7 @@ fn claim_and_step_request(
                 &run.workflow_id,
                 "async_request_supervisor_lease_acquired",
                 &serde_json::json!({
-                    "schema_version": "forge.request_supervisor_lease.v1",
+                    "schema_version": "foundry.request_supervisor_lease.v1",
                     "run_id": run.run_id,
                     "executor": options.executor,
                     "instance_id": options.instance_id,
@@ -689,7 +689,7 @@ fn boundary_from_fields(
 }
 
 fn park_after_step(
-    store: &ForgeStore,
+    store: &FoundryStore,
     listed_run: &RequestListRow,
     options: &RequestSupervisorOptions,
     supervisor_fence: Option<&RequestSupervisorFence>,
@@ -728,7 +728,7 @@ fn park_after_step(
 }
 
 fn park_unsafe_running_state(
-    store: &ForgeStore,
+    store: &FoundryStore,
     listed_run: &RequestListRow,
     options: &RequestSupervisorOptions,
     status: &str,
@@ -749,7 +749,7 @@ fn park_unsafe_running_state(
 }
 
 fn observed_step_result(
-    store: &ForgeStore,
+    store: &FoundryStore,
     listed_run: &RequestListRow,
     outcome: RequestSupervisorRunOutcome,
     steps_attempted: usize,
@@ -802,7 +802,7 @@ fn skipped_result(
 }
 
 fn failed_result(
-    store: &ForgeStore,
+    store: &FoundryStore,
     listed_run: &RequestListRow,
     error: anyhow::Error,
 ) -> RequestSupervisorRunResult {
@@ -810,7 +810,7 @@ fn failed_result(
 }
 
 fn failed_result_with_progress(
-    store: &ForgeStore,
+    store: &FoundryStore,
     listed_run: &RequestListRow,
     error: anyhow::Error,
     steps_attempted: usize,
@@ -886,7 +886,7 @@ mod lease_epoch_tests {
     #[test]
     fn same_instance_reacquires_an_expired_lease_with_a_new_fencing_token() {
         let temporary = tempfile::tempdir().unwrap();
-        let store = ForgeStore::open(temporary.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temporary.path().join("foundry.sqlite")).unwrap();
         let mut workflow =
             graph::create_workflow(parse_intent("Reacquire an expired supervisor lease"));
         workflow.tasks = vec![graph::task(
@@ -905,7 +905,7 @@ mod lease_epoch_tests {
         run.supervisor_fencing_token = 7;
         save_run_record(&store, &run).unwrap();
         let options = RequestSupervisorOptions {
-            executor: "forge-request-supervisor".to_string(),
+            executor: "foundry-request-supervisor".to_string(),
             origin: "test".to_string(),
             instance_id: "same-supervisor".to_string(),
             ttl_seconds: 120,

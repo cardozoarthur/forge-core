@@ -1,12 +1,12 @@
 [package]
-name = "forge-core"
-version = "0.5.3"
+name = "foundry-core"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.94.1"
 license = "MIT"
 description = "High-performance AI-native workflow runtime for validated atomic execution graphs."
-repository = "https://github.com/cardozoarthur/forge-core"
-homepage = "https://github.com/cardozoarthur/forge-core"
+repository = "https://github.com/cardozoarthur/foundry-core"
+homepage = "https://github.com/cardozoarthur/foundry-core"
 readme = "README.md"
 keywords = ["workflow", "orchestration", "automation", "runtime", "cli"]
 categories = ["command-line-utilities", "development-tools"]
@@ -20,19 +20,28 @@ include = [
     "/SECURITY.md",
     "/deny.toml",
     "/rust-toolchain.toml",
-  "/docs/production-single-host.md",
-  "/docs/release-security.md",
+    "/docs/production-single-host.md",
+    "/docs/release-security.md",
     "/examples/**",
     "/installer/**",
     "/packaging/**",
+    "/scripts/**",
     "/skills/**",
     "/src/**",
     "/tests/**",
 ]
 
+[lib]
+name = "foundry_core"
+path = "src/lib.rs"
+
 [[bin]]
-name = "forge"
+name = "foundry"
 path = "src/main.rs"
+
+[[bin]]
+name = "forge" # foundry-brand-allow: legacy-compat
+path = "src/bin/forge.rs" # foundry-brand-allow: legacy-compat
 
 [dependencies]
 anyhow = "1.0"

@@ -6,7 +6,7 @@ use crate::intent::parse_intent;
 use crate::request::{
     create_run_record, heartbeat_request, save_run_record, update_run_and_workflow_status,
 };
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -19,10 +19,10 @@ use std::time::Instant;
 const OPENCODE_TIMEOUT_SECONDS: u64 = 180;
 const EXECUTOR_TIMEOUT_SECONDS: u64 = 180;
 
-const SELF_EVOLUTION_PROMPT_PACKET_VERSION: &str = "forge.self_evolution.prompt.v2";
-const SELF_EVOLUTION_VALIDATION_REPORT_VERSION: &str = "forge.self_evolution.validation.v1";
+const SELF_EVOLUTION_PROMPT_PACKET_VERSION: &str = "foundry.self_evolution.prompt.v2";
+const SELF_EVOLUTION_VALIDATION_REPORT_VERSION: &str = "foundry.self_evolution.validation.v1";
 const BASE_SELF_EVOLUTION_GOAL: &str =
-    "Improve Forge Core autonomously with bounded executor cycles, validation gates, artifacts and changelog";
+    "Improve Foundry Core autonomously with bounded executor cycles, validation gates, artifacts and changelog";
 const GH_AUTH_TIMEOUT_SECONDS: &str = "20";
 const GIT_PUSH_TIMEOUT_SECONDS: &str = "300";
 const VALIDATION_COMMANDS: [&str; 4] = [
@@ -324,7 +324,7 @@ pub struct SelfUpdateReport {
 impl SelfEvolutionPublicationReport {
     fn empty() -> Self {
         Self {
-            schema_version: "forge.self_evolution.publication.v1".to_string(),
+            schema_version: "foundry.self_evolution.publication.v1".to_string(),
             last_push_commit: None,
             last_push_at: None,
             push_due: false,
@@ -417,7 +417,7 @@ impl SelfEvolutionPublicationReport {
 impl SelfEvolutionPublicationAiSynthesis {
     fn deterministic_not_due() -> Self {
         Self {
-            schema_version: "forge.self_evolution.publication_ai_synthesis.v1".to_string(),
+            schema_version: "foundry.self_evolution.publication_ai_synthesis.v1".to_string(),
             status: "not_due".to_string(),
             provider: None,
             model: None,
@@ -428,11 +428,11 @@ impl SelfEvolutionPublicationAiSynthesis {
 
     fn deterministic_fallback(reason: &str) -> Self {
         Self {
-            schema_version: "forge.self_evolution.publication_ai_synthesis.v1".to_string(),
+            schema_version: "foundry.self_evolution.publication_ai_synthesis.v1".to_string(),
             status: "deterministic_fallback".to_string(),
             provider: None,
             model: None,
-            reason: "native AI-assisted publication synthesis is not yet wired to a validated Forge executor node".to_string(),
+            reason: "native AI-assisted publication synthesis is not yet wired to a validated Foundry executor node".to_string(),
             fallback_reason: Some(reason.to_string()),
         }
     }
@@ -445,14 +445,14 @@ fn build_publication_markdown_report(
     previous_commit_range: Option<&str>,
 ) -> Result<PublicationMarkdownReport> {
     let mut output = String::new();
-    output.push_str("# Forge Self-Evolution 2-Hour Publication Report\n\n");
+    output.push_str("# Foundry Self-Evolution 2-Hour Publication Report\n\n");
 
     let range = match last_push_commit {
         Some(commit) => format!("{commit}..HEAD"),
         None => "HEAD".to_string(),
     };
     let ai_synthesis = SelfEvolutionPublicationAiSynthesis::deterministic_fallback(
-        "AI report generation is required by the native goal, but this increment only has a deterministic bridge; Forge records the fallback instead of hiding it.",
+        "AI report generation is required by the native goal, but this increment only has a deterministic bridge; Foundry records the fallback instead of hiding it.",
     );
 
     output.push_str("## What was worked on since the last push\n\n");
@@ -463,7 +463,7 @@ fn build_publication_markdown_report(
     output.push_str("```\n\n");
 
     output.push_str("## AI synthesis metadata\n\n");
-    output.push_str("- Schema: `forge.self_evolution.publication_ai_synthesis.v1`\n");
+    output.push_str("- Schema: `foundry.self_evolution.publication_ai_synthesis.v1`\n");
     output.push_str(&format!("- Status: `{}`\n", ai_synthesis.status));
     output.push_str("- Provider/model: `none` / `none`\n");
     output.push_str(&format!("- Reason: {}\n", ai_synthesis.reason));
@@ -485,13 +485,13 @@ fn build_publication_markdown_report(
     output.push_str(&format!("- Current commit range: `{range}`\n\n"));
 
     output.push_str("## How it was worked on\n\n");
-    output.push_str("Forge self-evolution executed a bounded validated increment, recorded executor/model policy evidence, and kept deterministic validation separate from quota-bound reasoning.\n\n");
+    output.push_str("Foundry self-evolution executed a bounded validated increment, recorded executor/model policy evidence, and kept deterministic validation separate from quota-bound reasoning.\n\n");
 
     output.push_str("## Validation and push status\n\n");
     output.push_str("- Validation status: recorded by the current cycle validation artifact before publication.\n");
     output.push_str("- Push status: publication is due when at least 7200 seconds elapsed since the previous push evidence.\n\n");
 
-    output.push_str("## Current Forge run/workflow state\n\n");
+    output.push_str("## Current Foundry run/workflow state\n\n");
     output.push_str("- The live run id and workflow id are recorded in the cycle JSON report and Telegram publication payload.\n\n");
 
     output.push_str("## Remaining uncommitted work\n\n");
@@ -547,13 +547,13 @@ struct SelfEvolutionPromptPacket {
     decision_gate: SelfDecisionGateReport,
     internal_loop: SelfEvolutionLoopReport,
     validation_commands: Vec<String>,
-    /// Structured breakdown of forge 0.5 capabilities detected in the goal text,
+    /// Structured breakdown of foundry 0.5 capabilities detected in the goal text,
     /// each with a prioritised maturity target.
-    capability_analysis: Vec<ForgeCapability>,
+    capability_analysis: Vec<FoundryCapability>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ForgeCapability {
+struct FoundryCapability {
     name: String,
     priority: String,
     present_in_goal: bool,
@@ -561,7 +561,7 @@ struct ForgeCapability {
     guidance: String,
 }
 
-fn analyze_goal_capabilities(goal: &str) -> Vec<ForgeCapability> {
+fn analyze_goal_capabilities(goal: &str) -> Vec<FoundryCapability> {
     let normalized = goal.to_ascii_lowercase();
     // Each capability has a keyword set, priority, and human-readable guidance.
     // Priority reflects how close we are to 0.5: "critical" means a 0.5 blocker,
@@ -574,9 +574,9 @@ fn analyze_goal_capabilities(goal: &str) -> Vec<ForgeCapability> {
             "Complete cron+loop+schedule for reliable periodic and continuous workflows in production.",
         ),
         (
-            "interactive forge CLI",
+            "interactive foundry CLI",
             "critical",
-            "interactive forge cli, no-argument interactive, tui, home_screen, slash_command, conversational",
+            "interactive foundry cli, no-argument interactive, tui, home_screen, slash_command, conversational",
             "Ship the full terminal interactive mode with slash commands, conversational routing, and workflow retention decisions.",
         ),
         (
@@ -677,7 +677,7 @@ fn analyze_goal_capabilities(goal: &str) -> Vec<ForgeCapability> {
                     name
                 )
             };
-            ForgeCapability {
+            FoundryCapability {
                 name: name.to_string(),
                 priority: priority.to_string(),
                 present_in_goal: present,
@@ -766,7 +766,7 @@ impl SelfOperatingMode {
 impl SelfOverheadLedger {
     fn empty(mode: &SelfOperatingMode) -> Self {
         Self {
-            schema_version: "forge.self_evolution.overhead_ledger.v1".to_string(),
+            schema_version: "foundry.self_evolution.overhead_ledger.v1".to_string(),
             operating_mode: mode.as_str().to_string(),
             cycle_count: 0,
             prompt_bytes: 0,
@@ -787,7 +787,7 @@ impl SelfOverheadLedger {
     ) -> Self {
         let estimated_prompt_tokens = estimate_tokens(prompt_bytes);
         Self {
-            schema_version: "forge.self_evolution.overhead_ledger.v1".to_string(),
+            schema_version: "foundry.self_evolution.overhead_ledger.v1".to_string(),
             operating_mode: mode.as_str().to_string(),
             cycle_count: 1,
             prompt_bytes,
@@ -842,7 +842,7 @@ impl SelfDecisionGateReport {
         };
 
         Self {
-            schema_version: "forge.self_evolution.decision_gate.v1".to_string(),
+            schema_version: "foundry.self_evolution.decision_gate.v1".to_string(),
             operating_mode: mode.as_str().to_string(),
             mode_boundary: mode.boundary().to_string(),
             decision: decision.to_string(),
@@ -855,7 +855,7 @@ impl SelfDecisionGateReport {
     }
 }
 
-pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result<SelfRunReport> {
+pub fn run_self_evolution(store: &FoundryStore, options: SelfRunOptions) -> Result<SelfRunReport> {
     let operating_mode = SelfOperatingMode::parse(&options.mode)?;
     let stop_at = DateTime::parse_from_rfc3339(&options.until)
         .with_context(|| format!("invalid --until value: {}", options.until))?;
@@ -907,7 +907,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         bail!("Self-evolution workflow has loop_count == 0. The planned workflow must include persisted loop_control tasks.");
     }
 
-    let mut run = create_run_record(&workflow, "forge_cli", "planned");
+    let mut run = create_run_record(&workflow, "foundry_cli", "planned");
     run.executor_fallbacks = executor_fallbacks.clone();
     store.save_workflow(&workflow)?;
     save_run_record(store, &run)?;
@@ -1022,7 +1022,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                 &format!("Self-evolution cycle {cycle}: preparing"),
                 300,
                 std::process::id().into(),
-                "forge_cli",
+                "foundry_cli",
             )?;
             let execution = match execute_cycle_with_fallback(
                 store,
@@ -1035,7 +1035,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                 Ok(execution) => execution,
                 Err(e) => {
                     let _ =
-                        update_run_and_workflow_status(store, &run.run_id, "failed", "forge_cli");
+                        update_run_and_workflow_status(store, &run.run_id, "failed", "foundry_cli");
                     return Err(e.context(format!("executor cycle {cycle} failed")));
                 }
             };
@@ -1059,7 +1059,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                 &format!("Self-evolution cycle {cycle}: {cycle_workflow_status}"),
                 300,
                 std::process::id().into(),
-                "forge_cli",
+                "foundry_cli",
             )?;
             if validation_passed {
                 self_update = run_self_update(&options.repo, &options)?;
@@ -1093,8 +1093,8 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
 
             if options.push && publication.push_due && public_project_update.status == "completed" {
                 if let (Ok(token), Ok(chat_id)) = (
-                    std::env::var("TELEGRAM_TOKEN"),
-                    std::env::var("TELEGRAM_CHAT_ID"),
+                    crate::brand::env_var("TELEGRAM_TOKEN"),
+                    crate::brand::env_var("TELEGRAM_CHAT_ID"),
                 ) {
                     if let Some(ref report_content) = publication.report_since_last_push {
                         // Persist the publication report as an artifact before sending
@@ -1178,7 +1178,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
     let has_failures = cycle_reports.iter().any(|r| !r.validation_passed);
     if !options.dry_run {
         let final_status = if has_failures { "failed" } else { "completed" };
-        update_run_and_workflow_status(store, &run.run_id, final_status, "forge_cli")?;
+        update_run_and_workflow_status(store, &run.run_id, final_status, "foundry_cli")?;
     }
 
     let publication = cycle_reports
@@ -1461,7 +1461,7 @@ fn ensure_self_evolution_loop_control(workflow: &mut Workflow) {
 
 fn self_evolution_loop_spec() -> LoopSpec {
     LoopSpec {
-        schema_version: "forge.loop.v1".to_string(),
+        schema_version: "foundry.loop.v1".to_string(),
         kind: "while_until".to_string(),
         items: vec!["product_evolution_goal".to_string()],
         max_iterations: None,
@@ -1470,7 +1470,7 @@ fn self_evolution_loop_spec() -> LoopSpec {
                 .to_string(),
         ),
         backoff_policy: None,
-        subflow_mode: "ordinary_forge_workflow".to_string(),
+        subflow_mode: "ordinary_foundry_workflow".to_string(),
         stop_policy: "human_pause_stop_or_revisioned_mutation".to_string(),
         state: "active".to_string(),
     }
@@ -1540,9 +1540,9 @@ fn persist_self_evolution_loop_state(
         "autonomous_v0_5_priority_selection".to_string()
     };
     let rationale = if source == "human_goal" {
-        "A fresh human goal outranks generic self-evolution guidance and preserves Forge as the source of truth for runtime steering.".to_string()
+        "A fresh human goal outranks generic self-evolution guidance and preserves Foundry as the source of truth for runtime steering.".to_string()
     } else {
-        "This improves the product and business outcome by making Forge easier to adopt for product managers and founders before deeper runtime automation, while preserving validation evidence and low implementation leverage risk.".to_string()
+        "This improves the product and business outcome by making Foundry easier to adopt for product managers and founders before deeper runtime automation, while preserving validation evidence and low implementation leverage risk.".to_string()
     };
     let alternatives = vec![
         "Add durable decision artifacts before the PM/TUI entry point".to_string(),
@@ -1573,7 +1573,7 @@ fn persist_self_evolution_loop_state(
         trade_offs: trade_offs.clone(),
         success_metrics: success_metrics.clone(),
         backlog_mutation: format!("Prioritize next self-evolution goal: {selected_goal}"),
-        author: "forge_self_evolution".to_string(),
+        author: "foundry_self_evolution".to_string(),
         status: "approved".to_string(),
         revision,
         created_at: Utc::now(),
@@ -1583,7 +1583,7 @@ fn persist_self_evolution_loop_state(
     });
     workflow.revisions.push(WorkflowRevision {
         revision,
-        origin: "forge_self_evolution".to_string(),
+        origin: "foundry_self_evolution".to_string(),
         change_type: "self_evolution_next_goal_decision".to_string(),
         summary: format!(
             "selected next self-evolution goal `{selected_goal}` with product/business rationale"
@@ -1592,15 +1592,15 @@ fn persist_self_evolution_loop_state(
     });
 
     Ok(SelfEvolutionLoopReport {
-        schema_version: "forge.self_evolution.loop.v1".to_string(),
+        schema_version: "foundry.self_evolution.loop.v1".to_string(),
         loop_count,
         loop_task_id,
         loop_control_kind,
-        execution_shape: "ordinary_forge_workflow_internal_recurring_loop".to_string(),
+        execution_shape: "ordinary_foundry_workflow_internal_recurring_loop".to_string(),
         sleep_seconds,
         sleep_policy: "rest_between_iterations".to_string(),
         next_goal_decision: SelfNextGoalDecisionReport {
-            schema_version: "forge.self_evolution.next_goal_decision.v1".to_string(),
+            schema_version: "foundry.self_evolution.next_goal_decision.v1".to_string(),
             decision_id,
             selected_goal,
             source,
@@ -1614,7 +1614,7 @@ fn persist_self_evolution_loop_state(
     })
 }
 
-fn load_persisted_self_evolution_goal(store: &ForgeStore) -> Result<Option<String>> {
+fn load_persisted_self_evolution_goal(store: &FoundryStore) -> Result<Option<String>> {
     let workflows = store.load_workflows()?;
     Ok(workflows
         .into_iter()
@@ -1652,9 +1652,9 @@ fn terminal_goal_contract_satisfied(goal: &str) -> bool {
     let normalized = goal.to_ascii_lowercase();
     let explicit_continuation = normalized.contains("do not stop")
         || normalized.contains("continue until")
-        || normalized.contains("forge 0.5")
+        || normalized.contains("foundry 0.5")
         || normalized.contains("creative runtime")
-        || normalized.contains("first-class no-argument interactive forge cli")
+        || normalized.contains("first-class no-argument interactive foundry cli")
         || normalized.contains("live human+ai collaboration")
         || normalized.contains("version-boundary");
     if explicit_continuation {
@@ -1693,12 +1693,12 @@ fn expected_value_score(goal: &str) -> u32 {
         "bounded executor",
     ];
     let strategic_terms = [
-        "forge 0.5",
+        "foundry 0.5",
         "mcp",
         "skill",
         "agent integration",
         "creative runtime",
-        "interactive forge cli",
+        "interactive foundry cli",
         "no-argument interactive",
         "slash command",
         "slash-command",
@@ -1749,26 +1749,26 @@ fn bloat_score(goal: &str) -> u32 {
 }
 
 fn render_prompt(packet: &SelfEvolutionPromptPacket) -> String {
-    let is_forge_core_goal = packet
+    let is_foundry_core_goal = packet
         .workflow_goal
         .to_ascii_lowercase()
-        .contains("forge core");
-    let strategic_guidance = if is_forge_core_goal {
-        "- Improve Forge Core itself in a small, validated, production-quality increment.\n- The persisted Forge workflow goal above is runtime state. If a human updates that goal with `forge workflow update-goal`, future self-evolution cycles must honor it before generic guidance.\n- Prefer structural improvements over cosmetic changes.\n- Good candidates: async run records, task leases, executor adapter contracts, prompt packet versioning, runtime mutation propagation, changelog/report quality, validation gates.\n- Strategic runtime goals now include workflow listing, terminal inspection, recursive subflows, infinite subflows, scale-to-zero lifecycle state and flow composition/reuse.\n- Prefer increments that move toward `forge list` for running and non-running workflows, `forge inspect` for terminal DAG/subflow visualization, and a workflow registry that can reuse compatible existing flows as child subflows before creating new work.\n- Prioritize the Context Routing Engine: compress, summarize, select, version and shard the minimum correct context for each executor to reduce irrelevant context, redundant reasoning and cost.\n- Add file-first scoped memory: global, project and processing memory; semantic search by snippet and line range; public/internal/private visibility; global/project/manager/thread/non-shareable sharing; customer suggestions can become manager_shared without becoming public.\n- Add company operating discipline: every customer request needs product, technical, financial, administrative, marketing, communication and delivery consideration at a size-appropriate depth.\n- Add Personality/Soul Routing for human-facing artifacts: inspect how Codex handles developer/personality instructions and how Paperclip models soul, voice, tone or persona, then allow specific workflow moments to switch persona mode explicitly, scoped to the node, auditable in lineage and validation-gated.\n- Preserve deterministic + AI hybrid graph semantics: AI tasks, deterministic code tasks, waits, cron, approvals, validation, rollback and deployment should coexist in the same graph.\n- Improve long-running cognition: pause/resume, async continuation, durable execution, checkpointing, partial retry and resumable context.\n- Add execution policy that can choose no-AI deterministic nodes for repeated or frequent work, including local Python or Node.js code nodes, instead of spending model calls."
+        .contains("foundry core");
+    let strategic_guidance = if is_foundry_core_goal {
+        "- Improve Foundry Core itself in a small, validated, production-quality increment.\n- The persisted Foundry workflow goal above is runtime state. If a human updates that goal with `foundry workflow update-goal`, future self-evolution cycles must honor it before generic guidance.\n- Prefer structural improvements over cosmetic changes.\n- Good candidates: async run records, task leases, executor adapter contracts, prompt packet versioning, runtime mutation propagation, changelog/report quality, validation gates.\n- Strategic runtime goals now include workflow listing, terminal inspection, recursive subflows, infinite subflows, scale-to-zero lifecycle state and flow composition/reuse.\n- Prefer increments that move toward `foundry list` for running and non-running workflows, `foundry inspect` for terminal DAG/subflow visualization, and a workflow registry that can reuse compatible existing flows as child subflows before creating new work.\n- Prioritize the Context Routing Engine: compress, summarize, select, version and shard the minimum correct context for each executor to reduce irrelevant context, redundant reasoning and cost.\n- Add file-first scoped memory: global, project and processing memory; semantic search by snippet and line range; public/internal/private visibility; global/project/manager/thread/non-shareable sharing; customer suggestions can become manager_shared without becoming public.\n- Add company operating discipline: every customer request needs product, technical, financial, administrative, marketing, communication and delivery consideration at a size-appropriate depth.\n- Add Personality/Soul Routing for human-facing artifacts: inspect how Codex handles developer/personality instructions and how Paperclip models soul, voice, tone or persona, then allow specific workflow moments to switch persona mode explicitly, scoped to the node, auditable in lineage and validation-gated.\n- Preserve deterministic + AI hybrid graph semantics: AI tasks, deterministic code tasks, waits, cron, approvals, validation, rollback and deployment should coexist in the same graph.\n- Improve long-running cognition: pause/resume, async continuation, durable execution, checkpointing, partial retry and resumable context.\n- Add execution policy that can choose no-AI deterministic nodes for repeated or frequent work, including local Python or Node.js code nodes, instead of spending model calls."
     } else {
-        "- Improve the target repository named in this prompt, not Forge Core itself.\n- Treat the persisted workflow goal above as authoritative over generic Forge guidance.\n- Keep changes scoped to the target repository and current project objective.\n- Prefer small, validated increments with clear artifact evidence.\n- If the goal asks for a migration, preserve the current working baseline and add parity tests before replacing behavior.\n- Keep workflow state portable when possible by writing resumable project manifests under a versionable `.forge/project-state/` folder while leaving local databases, logs and executor scratch files ignored."
+        "- Improve the target repository named in this prompt, not Foundry Core itself.\n- Treat the persisted workflow goal above as authoritative over generic Foundry guidance.\n- Keep changes scoped to the target repository and current project objective.\n- Prefer small, validated increments with clear artifact evidence.\n- If the goal asks for a migration, preserve the current working baseline and add parity tests before replacing behavior.\n- Keep workflow state portable when possible by writing resumable project manifests under a versionable `.foundry/project-state/` folder while leaving local databases, logs and executor scratch files ignored."
     };
-    let scope_rule = if is_forge_core_goal {
-        "- Keep changes scoped to Forge Core.\n- After validation passes, update the local Forge installation with `cargo install --path . --force`."
+    let scope_rule = if is_foundry_core_goal {
+        "- Keep changes scoped to Foundry Core.\n- After validation passes, update the local Foundry installation with `cargo install --path . --force`."
     } else {
-        "- Keep changes scoped to the target repository.\n- Do not run Forge Core self-update unless explicitly configured for this project."
+        "- Keep changes scoped to the target repository.\n- Do not run Foundry Core self-update unless explicitly configured for this project."
     };
     format!(
-        r#"# Forge Self-Run Cycle
+        r#"# Foundry Self-Run Cycle
 
 Prompt packet version: `{}`
 
-You are executing Forge self-evolution cycle {}.
+You are executing Foundry self-evolution cycle {}.
 
 Run id: `{}`
 Workflow id: `{}`
@@ -1776,7 +1776,7 @@ Executor: `{}`
 Executor fallback chain: `{}`
 Stop date: `{}`
 
-Persisted Forge workflow goal (authoritative):
+Persisted Foundry workflow goal (authoritative):
 {}
 
 Initial workflow goal:
@@ -1828,7 +1828,7 @@ Constraints:
 - Run the required validation commands listed in this prompt packet.
 - If validation fails, fix or report the blocker without pretending the cycle completed.
 - Generate or update a strong changelog/report artifact when the version behavior changes.
-- Codex/OpenCode should treat Forge as the source of truth: update goals/artifacts through Forge CLI if runtime state changes.
+- Codex/OpenCode should treat Foundry as the source of truth: update goals/artifacts through Foundry CLI if runtime state changes.
 - Publish validated commits through the GitHub CLI contract: `gh auth token`, `git remote get-url origin`, then `git push`.
 
 Required validation commands:
@@ -1883,7 +1883,7 @@ Return a concise final report with:
 fn render_cycle_markdown_report(report: &SelfCycleReport) -> String {
     let mut output = String::new();
     output.push_str(&format!(
-        "# Forge self-evolution cycle {}\n\n",
+        "# Foundry self-evolution cycle {}\n\n",
         report.cycle
     ));
     output.push_str(&format!("- Status: {}\n", report.status));
@@ -2119,7 +2119,7 @@ fn write_text_artifact(base_dir: &Path, relative_path: &str, content: &str) -> R
 }
 
 fn select_executor_strategies(
-    store: &ForgeStore,
+    store: &FoundryStore,
     primary_executor: &str,
     fallback_executors: &[String],
     previous_reports: &[SelfCycleReport],
@@ -2199,7 +2199,7 @@ fn apply_executor_state_to_candidate(
             } else if !state.allowed {
                 candidate.selection_status = "eligible_not_allowed".to_string();
                 candidate.reason = format!(
-                    "{} is installed and configured but not human-authorized for Forge use.",
+                    "{} is installed and configured but not human-authorized for Foundry use.",
                     state.display_name
                 );
             } else if !state.non_interactive_ready {
@@ -2216,7 +2216,7 @@ fn apply_executor_state_to_candidate(
         None => {
             candidate.selection_status = "skipped_unknown_executor".to_string();
             candidate.reason = format!(
-                "Executor {} is not registered in Forge system.",
+                "Executor {} is not registered in Foundry system.",
                 candidate.executor
             );
         }
@@ -2224,7 +2224,7 @@ fn apply_executor_state_to_candidate(
 }
 
 fn build_executor_policy(
-    store: &ForgeStore,
+    store: &FoundryStore,
     primary_executor: &str,
     fallback_executors: &[String],
     previous_reports: &[SelfCycleReport],
@@ -2392,7 +2392,7 @@ fn build_executor_policy(
     }
 
     SelfExecutorPolicyReport {
-        schema_version: "forge.self_evolution.executor_policy.v1".to_string(),
+        schema_version: "foundry.self_evolution.executor_policy.v1".to_string(),
         selection_principle:
             "maximize useful progress under expected value, quota, cost, latency, quality and fallback risk constraints"
                 .to_string(),
@@ -2459,7 +2459,7 @@ fn self_executor_selection_trace(
             };
 
             SelfExecutorSelectionTrace {
-                schema_version: "forge.executor_selection_trace.v1".to_string(),
+                schema_version: "foundry.executor_selection_trace.v1".to_string(),
                 executor: candidate.executor.clone(),
                 provider: candidate.provider.clone(),
                 model: candidate.model.clone(),
@@ -2574,7 +2574,7 @@ fn opencode_free_non_local_candidate(
     chain: &[String],
     states: &[crate::executor::ExecutorState],
 ) -> SelfExecutorPolicyCandidate {
-    let model = std::env::var("OPENCODE_FREE_MODEL")
+    let model = crate::brand::env_var("OPENCODE_FREE_MODEL")
         .ok()
         .or_else(|| Some("google/gemini-2.5-pro".to_string()));
     let provider = model
@@ -2613,7 +2613,7 @@ fn gemini_non_local_candidate(
     chain: &[String],
     states: &[crate::executor::ExecutorState],
 ) -> SelfExecutorPolicyCandidate {
-    let model = std::env::var("GEMINI_MODEL")
+    let model = crate::brand::env_var("GEMINI_MODEL")
         .ok()
         .or_else(|| Some("gemini-2.5-pro".to_string()));
     let mut candidate = SelfExecutorPolicyCandidate {
@@ -2633,7 +2633,7 @@ fn gemini_non_local_candidate(
         non_interactive_requirement: "Gemini CLI must not wait for approval, model selection or auth prompts.".to_string(),
         selection_tier: quota_aware_selection_tier(chain, "gemini", 9),
         selection_status: "skipped_legacy_invalidated".to_string(),
-        reason: "Gemini CLI is a legacy executor and is not an active Forge self-evolution route; use Codex or agy.".to_string(),
+        reason: "Gemini CLI is a legacy executor and is not an active Foundry self-evolution route; use Codex or agy.".to_string(),
         business_value_score: 90,
         capability_evidence: vec![
             "Supports --approval-mode yolo".to_string(),
@@ -2680,7 +2680,7 @@ fn agy_non_local_candidate(
     chain: &[String],
     states: &[crate::executor::ExecutorState],
 ) -> SelfExecutorPolicyCandidate {
-    let model = std::env::var("ANTIGRAVITY_MODEL")
+    let model = crate::brand::env_var("ANTIGRAVITY_MODEL")
         .ok()
         .or_else(|| Some("agy-default".to_string()));
     let mut candidate = SelfExecutorPolicyCandidate {
@@ -2718,15 +2718,15 @@ fn opencode_paid_non_local_candidate(
     chain: &[String],
     states: &[crate::executor::ExecutorState],
 ) -> SelfExecutorPolicyCandidate {
-    let model = std::env::var("OPENCODE_MODEL")
+    let model = crate::brand::env_var("OPENCODE_MODEL")
         .ok()
         .or_else(|| {
-            std::env::var("ANTHROPIC_API_KEY")
+            crate::brand::env_var("ANTHROPIC_API_KEY")
                 .ok()
                 .map(|_| "anthropic/claude-3-7-sonnet-20250219".to_string())
         })
         .or_else(|| {
-            std::env::var("OPENAI_API_KEY")
+            crate::brand::env_var("OPENAI_API_KEY")
                 .ok()
                 .map(|_| "openai/gpt-4o".to_string())
         });
@@ -2775,7 +2775,7 @@ fn opencode_local_candidate(
         executor: "opencode".to_string(),
         provider: "ollama".to_string(),
         model: Some(
-            std::env::var("OPENCODE_LOCAL_MODEL")
+            crate::brand::env_var("OPENCODE_LOCAL_MODEL")
                 .unwrap_or_else(|_| "ollama/qwen3:14b".to_string()),
         ),
         local_vs_non_local: "local".to_string(),
@@ -2803,7 +2803,7 @@ fn opencode_local_candidate(
 }
 
 fn execute_cycle_with_fallback(
-    store: &ForgeStore,
+    store: &FoundryStore,
     repo: &Path,
     primary_executor: &str,
     fallback_executors: &[String],
@@ -2896,7 +2896,7 @@ fn execute_cycle(repo: &Path, strategy: &SelfExecutorStrategy, prompt: &str) -> 
                     "--sandbox",
                     "workspace-write",
                     "--output-last-message",
-                    ".forge/last-codex-self-evolution.md",
+                    ".foundry/last-codex-self-evolution.md",
                     prompt,
                 ],
                 repo,
@@ -2917,7 +2917,7 @@ fn execute_cycle(repo: &Path, strategy: &SelfExecutorStrategy, prompt: &str) -> 
                 "--dir".to_string(),
                 repo.to_str().unwrap_or(".").to_string(),
                 "--title".to_string(),
-                "Forge self evolution".to_string(),
+                "Foundry self evolution".to_string(),
                 "--dangerously-skip-permissions".to_string(),
             ];
 
@@ -2964,10 +2964,10 @@ fn execute_cycle(repo: &Path, strategy: &SelfExecutorStrategy, prompt: &str) -> 
 
             let output =
                 execute_command_capture("gemini", &args_ref, repo, Some(EXECUTOR_TIMEOUT_SECONDS))?;
-            fs::create_dir_all(repo.join(".forge"))?;
+            fs::create_dir_all(repo.join(".foundry"))?;
             let response = String::from_utf8_lossy(&output.stdout);
             fs::write(
-                repo.join(".forge/last-gemini-self-evolution.md"),
+                repo.join(".foundry/last-gemini-self-evolution.md"),
                 response.as_bytes(),
             )?;
             if output.status.success() {
@@ -2987,10 +2987,10 @@ fn execute_cycle(repo: &Path, strategy: &SelfExecutorStrategy, prompt: &str) -> 
                 repo,
                 Some(EXECUTOR_TIMEOUT_SECONDS),
             )?;
-            fs::create_dir_all(repo.join(".forge"))?;
+            fs::create_dir_all(repo.join(".foundry"))?;
             let response = String::from_utf8_lossy(&output.stdout);
             fs::write(
-                repo.join(".forge/last-agy-self-evolution.md"),
+                repo.join(".foundry/last-agy-self-evolution.md"),
                 response.as_bytes(),
             )?;
             if output.status.success() {
@@ -3067,7 +3067,7 @@ fn command_available(command: &str) -> bool {
         return fs::metadata(command).is_ok_and(|meta| meta.is_file());
     }
 
-    if let Some(path) = std::env::var_os("PATH") {
+    if let Some(path) = crate::brand::env_var_os("PATH") {
         return std::env::split_paths(&path).any(|dir| {
             let candidate = dir.join(command);
             candidate.exists()
@@ -3217,7 +3217,7 @@ fn publish_public_project_with_gh(repo: &Path) -> Result<PublicProjectUpdateRepo
     let remote_url = run_git(repo, &["remote", "get-url", "origin"])
         .context("failed to inspect git origin before public project update")?;
     run_program(repo, "timeout", &[GIT_PUSH_TIMEOUT_SECONDS, "git", "push"])
-        .context("failed to push validated Forge update")?;
+        .context("failed to push validated Foundry update")?;
     Ok(PublicProjectUpdateReport::completed(
         remote_url.trim().to_string(),
     ))
@@ -3276,13 +3276,13 @@ fn semantic_self_evolution_commit_message(cycle: u32, staged_status: &str) -> (S
     } else if has_self_evolution {
         "fix: strengthen self-evolution cycle governance".to_string()
     } else if has_cli {
-        "feat: improve Forge product CLI workflow".to_string()
+        "feat: improve Foundry product CLI workflow".to_string()
     } else if has_reports {
         "docs: improve self-evolution reporting artifacts".to_string()
     } else if has_tests {
-        "test: cover Forge self-evolution behavior".to_string()
+        "test: cover Foundry self-evolution behavior".to_string()
     } else {
-        "chore: update Forge runtime behavior".to_string()
+        "chore: update Foundry runtime behavior".to_string()
     };
 
     let changed_summary = if changed_files.is_empty() {
@@ -3297,9 +3297,9 @@ fn semantic_self_evolution_commit_message(cycle: u32, staged_status: &str) -> (S
     } else if has_self_evolution {
         "v0.5 impact: improves the recurring self-evolution workflow so validated increments carry clearer lineage and governance."
     } else if has_cli {
-        "v0.5 impact: moves Forge toward a stronger product/PM command surface for human-guided workflow creation."
+        "v0.5 impact: moves Foundry toward a stronger product/PM command surface for human-guided workflow creation."
     } else {
-        "v0.5 impact: keeps Forge's runtime evolution tied to validated product and business outcomes."
+        "v0.5 impact: keeps Foundry's runtime evolution tied to validated product and business outcomes."
     };
     let body = format!("Cycle: {cycle}\n{validation_summary}\n{changed_summary}\n{impact}");
 
@@ -3395,23 +3395,23 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
 
-    fn test_store() -> (tempfile::TempDir, ForgeStore) {
+    fn test_store() -> (tempfile::TempDir, FoundryStore) {
         let temp = tempfile::tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         (temp, store)
     }
 
     fn test_internal_loop_report() -> SelfEvolutionLoopReport {
         SelfEvolutionLoopReport {
-            schema_version: "forge.self_evolution.loop.v1".to_string(),
+            schema_version: "foundry.self_evolution.loop.v1".to_string(),
             loop_count: 1,
             loop_task_id: "task-loop".to_string(),
             loop_control_kind: "while_until".to_string(),
-            execution_shape: "ordinary_forge_workflow_internal_recurring_loop".to_string(),
+            execution_shape: "ordinary_foundry_workflow_internal_recurring_loop".to_string(),
             sleep_seconds: 180,
             sleep_policy: "rest_between_iterations".to_string(),
             next_goal_decision: SelfNextGoalDecisionReport {
-                schema_version: "forge.self_evolution.next_goal_decision.v1".to_string(),
+                schema_version: "foundry.self_evolution.next_goal_decision.v1".to_string(),
                 decision_id: "decision-test".to_string(),
                 selected_goal: "Make the Product/PM CLI-TUI the main entry point.".to_string(),
                 source: "autonomous_v0_5_priority_selection".to_string(),
@@ -3487,7 +3487,7 @@ mod tests {
         let ledger = SelfOverheadLedger::empty(&SelfOperatingMode::Balanced);
         assert_eq!(
             ledger.schema_version,
-            "forge.self_evolution.overhead_ledger.v1"
+            "foundry.self_evolution.overhead_ledger.v1"
         );
         assert_eq!(ledger.operating_mode, "balanced");
         assert_eq!(ledger.cycle_count, 0);
@@ -3677,13 +3677,13 @@ mod tests {
             "do not stop and validated lean/balanced/strict mode boundary"
         ));
         assert!(!terminal_goal_contract_satisfied(
-            "continue until forge 0.5 and measurable overhead ledger"
+            "continue until foundry 0.5 and measurable overhead ledger"
         ));
         assert!(!terminal_goal_contract_satisfied(
-            "forge 0.5 creative runtime"
+            "foundry 0.5 creative runtime"
         ));
         assert!(!terminal_goal_contract_satisfied(
-            "first-class no-argument interactive forge cli"
+            "first-class no-argument interactive foundry cli"
         ));
         assert!(!terminal_goal_contract_satisfied(
             "live human+ai collaboration"
@@ -3710,7 +3710,7 @@ mod tests {
         let basic = expected_value_score("validation throughput");
         assert!(basic >= 4);
         let strategic =
-            expected_value_score("forge 0.5 mcp skill creative runtime interactive forge cli");
+            expected_value_score("foundry 0.5 mcp skill creative runtime interactive foundry cli");
         assert!(strategic > basic);
     }
 
@@ -3735,7 +3735,7 @@ mod tests {
     #[test]
     fn test_decision_gate_evaluate_run_cycle() {
         let mode = SelfOperatingMode::Lean;
-        let goal = "forge 0.5 creative runtime with validation and artifact delivery";
+        let goal = "foundry 0.5 creative runtime with validation and artifact delivery";
         let gate = SelfDecisionGateReport::evaluate(goal, &mode);
         assert!(!gate.stop_loop);
         assert!(!gate.terminal_goal_reached);
@@ -3775,14 +3775,14 @@ mod tests {
     #[test]
     fn test_analyze_goal_capabilities_detects_critical() {
         let goal =
-            "cron schedule interactive forge cli creative runtime whiteboard scan_due next_run_at";
+            "cron schedule interactive foundry cli creative runtime whiteboard scan_due next_run_at";
         let caps = analyze_goal_capabilities(goal);
         let cron = caps.iter().find(|c| c.name == "cron / schedule").unwrap();
         assert!(cron.present_in_goal);
         assert_eq!(cron.priority, "critical");
         let interactive = caps
             .iter()
-            .find(|c| c.name == "interactive forge CLI")
+            .find(|c| c.name == "interactive foundry CLI")
             .unwrap();
         assert!(interactive.present_in_goal);
         assert_eq!(interactive.priority, "critical");
@@ -3876,7 +3876,7 @@ mod tests {
         let (subject, body) = semantic_self_evolution_commit_message(7, "M\tsrc/self_evolve.rs\n");
 
         assert_eq!(subject, "fix: strengthen self-evolution cycle governance");
-        assert_ne!(subject, "chore: forge self evolution cycle 7");
+        assert_ne!(subject, "chore: foundry self evolution cycle 7");
         assert!(body.contains("clearer lineage and governance"));
     }
 
@@ -3964,8 +3964,8 @@ mod tests {
                 config_evidence: vec!["test opencode config".to_string()],
                 non_interactive_ready: true,
                 probe_evidence: vec!["test opencode probe passed".to_string()],
-                forge_first_ready: false,
-                forge_first_entrypoint: None,
+                foundry_first_ready: false,
+                foundry_first_entrypoint: None,
                 harness_status: None,
                 allowed: true,
                 decision_source: "human_allow".to_string(),
@@ -3981,8 +3981,8 @@ mod tests {
                 config_evidence: vec!["test codex config".to_string()],
                 non_interactive_ready: true,
                 probe_evidence: vec!["test codex probe passed".to_string()],
-                forge_first_ready: false,
-                forge_first_entrypoint: None,
+                foundry_first_ready: false,
+                foundry_first_entrypoint: None,
                 harness_status: None,
                 allowed: true,
                 decision_source: "human_allow".to_string(),
@@ -4039,7 +4039,7 @@ mod tests {
 
     #[test]
     fn test_render_capability_breakdown_empty_is_empty() {
-        let caps: Vec<ForgeCapability> = Vec::new();
+        let caps: Vec<FoundryCapability> = Vec::new();
         let packet = SelfEvolutionPromptPacket {
             version: "v2".to_string(),
             cycle: 1,
@@ -4144,8 +4144,8 @@ mod tests {
                 config_evidence: vec!["test opencode config".to_string()],
                 non_interactive_ready: false,
                 probe_evidence: vec!["test opencode probe timed out".to_string()],
-                forge_first_ready: false,
-                forge_first_entrypoint: None,
+                foundry_first_ready: false,
+                foundry_first_entrypoint: None,
                 harness_status: None,
                 allowed: true,
                 decision_source: "human_allow".to_string(),
@@ -4161,8 +4161,8 @@ mod tests {
                 config_evidence: vec!["test gemini config".to_string()],
                 non_interactive_ready: true,
                 probe_evidence: vec!["test gemini probe passed".to_string()],
-                forge_first_ready: false,
-                forge_first_entrypoint: None,
+                foundry_first_ready: false,
+                foundry_first_entrypoint: None,
                 harness_status: None,
                 allowed: false,
                 decision_source: "pending_human_approval".to_string(),
@@ -4178,8 +4178,8 @@ mod tests {
                 config_evidence: vec!["test codex config".to_string()],
                 non_interactive_ready: true,
                 probe_evidence: vec!["test codex probe passed".to_string()],
-                forge_first_ready: false,
-                forge_first_entrypoint: None,
+                foundry_first_ready: false,
+                foundry_first_entrypoint: None,
                 harness_status: None,
                 allowed: true,
                 decision_source: "human_allow".to_string(),
@@ -4333,8 +4333,8 @@ mod tests {
             config_evidence: vec!["test".to_string()],
             non_interactive_ready: true,
             probe_evidence: vec!["ready".to_string()],
-            forge_first_ready: false,
-            forge_first_entrypoint: None,
+            foundry_first_ready: false,
+            foundry_first_entrypoint: None,
             harness_status: None,
             allowed: true,
             decision_source: "human_allow".to_string(),
@@ -4354,8 +4354,8 @@ mod tests {
             config_evidence: vec!["test".to_string()],
             non_interactive_ready: true,
             probe_evidence: vec!["ready".to_string()],
-            forge_first_ready: false,
-            forge_first_entrypoint: None,
+            foundry_first_ready: false,
+            foundry_first_entrypoint: None,
             harness_status: None,
             allowed: true,
             decision_source: "human_allow".to_string(),
@@ -4391,9 +4391,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path();
         run_program(repo, "git", &["init"]).unwrap();
-        run_program(repo, "git", &["config", "user.email", "forge@example.test"]).unwrap();
-        run_program(repo, "git", &["config", "user.name", "Forge Test"]).unwrap();
-        fs::write(repo.join("README.md"), "# Forge\n").unwrap();
+        run_program(
+            repo,
+            "git",
+            &["config", "user.email", "foundry@example.test"],
+        )
+        .unwrap();
+        run_program(repo, "git", &["config", "user.name", "Foundry Test"]).unwrap();
+        fs::write(repo.join("README.md"), "# Foundry\n").unwrap();
         run_program(repo, "git", &["add", "."]).unwrap();
         run_program(repo, "git", &["commit", "-m", "initial"]).unwrap();
 
@@ -4408,7 +4413,7 @@ mod tests {
         assert_eq!(report.current_commit_range, "HEAD");
         assert_eq!(
             report.ai_synthesis.schema_version,
-            "forge.self_evolution.publication_ai_synthesis.v1"
+            "foundry.self_evolution.publication_ai_synthesis.v1"
         );
         assert_eq!(report.ai_synthesis.status, "deterministic_fallback");
         assert_eq!(report.ai_synthesis.provider, None);

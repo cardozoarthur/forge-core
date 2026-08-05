@@ -354,7 +354,7 @@ pub fn parse_intent_with_catalog_and_context(
         push_deliverable_once(&mut deliverables, "n8n primitive research catalog");
         push_deliverable_once(
             &mut deliverables,
-            "Forge primitive promotion recommendation",
+            "Foundry primitive promotion recommendation",
         );
     }
     if requires_hackathon_factory(&lower) {
@@ -401,7 +401,7 @@ pub fn parse_intent_with_catalog_and_context(
     ];
 
     if lower.contains("n8n") {
-        risks.push("external workflow concepts must not be copied blindly or promoted without Forge validation value".to_string());
+        risks.push("external workflow concepts must not be copied blindly or promoted without Foundry validation value".to_string());
         unknowns.push(
             "current n8n source and documentation must be checked during research execution"
                 .to_string(),
@@ -426,7 +426,7 @@ pub fn parse_intent_with_catalog_and_context(
         unknowns.push("team size, skills and available implementation time must be confirmed before build scope is locked".to_string());
     }
     if requires_daily_goal_research(&lower) {
-        risks.push("recurring research must remain Forge-owned instead of becoming an ad hoc terminal loop".to_string());
+        risks.push("recurring research must remain Foundry-owned instead of becoming an ad hoc terminal loop".to_string());
         risks.push("Telegram delivery records must not expose raw secrets".to_string());
         unknowns.push(
             "live DuckDuckGo and Playwright page availability can vary per daily run".to_string(),
@@ -450,13 +450,14 @@ pub fn parse_intent_with_catalog_and_context(
         constraints.push("PDF and explanation artifact delivered to Telegram".to_string());
     }
     if requires_daily_goal_research(&lower) {
-        constraints.push("cron and loop semantics remain native Forge graph state".to_string());
+        constraints.push("cron and loop semantics remain native Foundry graph state".to_string());
         constraints.push("deterministic code handles stable repeated work".to_string());
         constraints.push("AI is reserved for judgment and summarization".to_string());
     }
     if requires_visual_workspace(&lower) {
         constraints.push(
-            "visual artifacts remain Forge-owned workflow state before external export".to_string(),
+            "visual artifacts remain Foundry-owned workflow state before external export"
+                .to_string(),
         );
         constraints
             .push("human and AI collaboration events are auditable in the workflow".to_string());
@@ -715,15 +716,15 @@ fn requires_visual_workspace(lower_goal: &str) -> bool {
 }
 
 fn intent_schema_version() -> String {
-    "forge.intent.v2".to_string()
+    "foundry.intent.v2".to_string()
 }
 
 fn event_policy_schema_version() -> String {
-    "forge.event_policy.v1".to_string()
+    "foundry.event_policy.v1".to_string()
 }
 
 fn operating_context_schema_version() -> String {
-    "forge.operating_context.v1".to_string()
+    "foundry.operating_context.v1".to_string()
 }
 
 fn default_workflow_kind() -> String {
@@ -763,11 +764,11 @@ fn default_brand_tone() -> String {
 }
 
 fn default_design_token_source() -> String {
-    "forge_tokens".to_string()
+    "foundry_tokens".to_string()
 }
 
 fn default_component_source() -> String {
-    "forge_components".to_string()
+    "foundry_components".to_string()
 }
 
 fn default_data_classification() -> String {

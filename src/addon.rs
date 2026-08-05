@@ -16,7 +16,7 @@ use crate::multimodal::{
 };
 use crate::storage::{
     AddonMarketplacePackageWrite, AddonPermissionAuthorizationWrite, AddonTrustKeyWrite,
-    ForgeStore, RuntimeContractDispatchWrite, RuntimeWorkerWrite, StoredAddonCapabilityRecord,
+    FoundryStore, RuntimeContractDispatchWrite, RuntimeWorkerWrite, StoredAddonCapabilityRecord,
     StoredAddonCapabilityWrite, StoredAddonMarketplacePackageRecord,
     StoredAddonPermissionAuthorizationRecord, StoredAddonRecord, StoredAddonTrustKeyRecord,
     StoredGlobalEventRecord, StoredRuntimeContractDispatchRecord, StoredRuntimeWorkerRecord,
@@ -42,25 +42,25 @@ use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-pub const ADDON_CATALOG_SCHEMA_VERSION: &str = "forge.addon_catalog.v1";
-pub const CAPABILITY_RESOLUTION_SCHEMA_VERSION: &str = "forge.capability_resolution.v1";
-pub const CAPABILITY_DISCOVERY_PLAN_SCHEMA_VERSION: &str = "forge.capability_discovery_plan.v1";
-pub const ADDON_VALIDATION_SCHEMA_VERSION: &str = "forge.addon_validation.v1";
+pub const ADDON_CATALOG_SCHEMA_VERSION: &str = "foundry.addon_catalog.v1";
+pub const CAPABILITY_RESOLUTION_SCHEMA_VERSION: &str = "foundry.capability_resolution.v1";
+pub const CAPABILITY_DISCOVERY_PLAN_SCHEMA_VERSION: &str = "foundry.capability_discovery_plan.v1";
+pub const ADDON_VALIDATION_SCHEMA_VERSION: &str = "foundry.addon_validation.v1";
 pub const ADDON_VALIDATOR_OUTCOME_APPLICATION_SCHEMA_VERSION: &str =
-    "forge.addon_validator_outcome_application.v1";
-pub const INSTALLED_ADDONS_SCHEMA_VERSION: &str = "forge.installed_addons.v1";
-pub const ADDON_LIFECYCLE_SCHEMA_VERSION: &str = "forge.addon_lifecycle.v1";
+    "foundry.addon_validator_outcome_application.v1";
+pub const INSTALLED_ADDONS_SCHEMA_VERSION: &str = "foundry.installed_addons.v1";
+pub const ADDON_LIFECYCLE_SCHEMA_VERSION: &str = "foundry.addon_lifecycle.v1";
 pub const ADDON_LIFECYCLE_OPERATION_PLAN_SCHEMA_VERSION: &str =
-    "forge.addon_lifecycle_operation_plan.v1";
-pub const ADDON_LIFECYCLE_PLAN_SCHEMA_VERSION: &str = "forge.addon_lifecycle_plan.v1";
-pub const ADDON_CAPABILITY_INDEX_SCHEMA_VERSION: &str = "forge.addon_capability_index.v1";
-pub const ADDON_EVENT_ADAPTERS_SCHEMA_VERSION: &str = "forge.addon_event_adapters.v1";
-pub const ADDON_EVENT_EXTENSIONS_SCHEMA_VERSION: &str = "forge.addon_event_extensions.v1";
-pub const ADDON_OBSERVABILITY_SCHEMA_VERSION: &str = "forge.addon_observability.v1";
-pub const ADDON_RUNTIME_CONTRACTS_SCHEMA_VERSION: &str = "forge.addon_runtime_contracts.v1";
-pub const ADDON_PLANNER_REGISTRY_SCHEMA_VERSION: &str = "forge.addon_planner_registry.v1";
+    "foundry.addon_lifecycle_operation_plan.v1";
+pub const ADDON_LIFECYCLE_PLAN_SCHEMA_VERSION: &str = "foundry.addon_lifecycle_plan.v1";
+pub const ADDON_CAPABILITY_INDEX_SCHEMA_VERSION: &str = "foundry.addon_capability_index.v1";
+pub const ADDON_EVENT_ADAPTERS_SCHEMA_VERSION: &str = "foundry.addon_event_adapters.v1";
+pub const ADDON_EVENT_EXTENSIONS_SCHEMA_VERSION: &str = "foundry.addon_event_extensions.v1";
+pub const ADDON_OBSERVABILITY_SCHEMA_VERSION: &str = "foundry.addon_observability.v1";
+pub const ADDON_RUNTIME_CONTRACTS_SCHEMA_VERSION: &str = "foundry.addon_runtime_contracts.v1";
+pub const ADDON_PLANNER_REGISTRY_SCHEMA_VERSION: &str = "foundry.addon_planner_registry.v1";
 const LOCAL_PROCESS_MAX_OUTPUT_BYTES_DEFAULT: usize = 64 * 1024;
-const FORGE_PRODUCTION_MODE_ENV: &str = "FORGE_PRODUCTION_MODE";
+const FOUNDRY_PRODUCTION_MODE_ENV: &str = "FOUNDRY_PRODUCTION_MODE";
 
 type CapabilitySuggestionAction = (
     String,
@@ -276,48 +276,48 @@ struct AddonMigrationTaskInput<'a> {
     human_required: bool,
 }
 pub const ADDON_RUNTIME_CONTRACT_POLICY_SCHEMA_VERSION: &str =
-    "forge.addon_runtime_contract_policy.v1";
+    "foundry.addon_runtime_contract_policy.v1";
 pub const ADDON_RUNTIME_CONTRACT_DISPATCH_SCHEMA_VERSION: &str =
-    "forge.addon_runtime_contract_dispatch.v1";
+    "foundry.addon_runtime_contract_dispatch.v1";
 pub const ADDON_PLANNER_DISPATCH_INPUT_SCHEMA_VERSION: &str =
-    "forge.addon_planner_dispatch_input.v1";
+    "foundry.addon_planner_dispatch_input.v1";
 pub const ADDON_PLANNING_STRATEGY_EXECUTION_SCHEMA_VERSION: &str =
-    "forge.addon_planning_strategy_execution.v1";
+    "foundry.addon_planning_strategy_execution.v1";
 pub const ADDON_PLANNING_STRATEGY_RESULT_SCHEMA_VERSION: &str =
-    "forge.addon_planning_strategy_result.v1";
+    "foundry.addon_planning_strategy_result.v1";
 pub const ADDON_VALIDATOR_DISPATCH_INPUT_SCHEMA_VERSION: &str =
-    "forge.addon_validator_dispatch_input.v1";
-pub const ADDON_VALIDATOR_EXECUTION_SCHEMA_VERSION: &str = "forge.addon_validator_execution.v1";
-pub const ADDON_VALIDATOR_RESULT_SCHEMA_VERSION: &str = "forge.addon_validator_result.v1";
+    "foundry.addon_validator_dispatch_input.v1";
+pub const ADDON_VALIDATOR_EXECUTION_SCHEMA_VERSION: &str = "foundry.addon_validator_execution.v1";
+pub const ADDON_VALIDATOR_RESULT_SCHEMA_VERSION: &str = "foundry.addon_validator_result.v1";
 pub const ADDON_VALIDATOR_RESULT_VALIDATION_SCHEMA_VERSION: &str =
-    "forge.addon_validator_result_validation.v1";
+    "foundry.addon_validator_result_validation.v1";
 pub const ADDON_EXECUTOR_DISPATCH_INPUT_SCHEMA_VERSION: &str =
-    "forge.addon_executor_dispatch_input.v1";
-pub const ADDON_EXECUTOR_EXECUTION_SCHEMA_VERSION: &str = "forge.addon_executor_execution.v1";
-pub const ADDON_EXECUTOR_RESULT_SCHEMA_VERSION: &str = "forge.addon_executor_result.v1";
+    "foundry.addon_executor_dispatch_input.v1";
+pub const ADDON_EXECUTOR_EXECUTION_SCHEMA_VERSION: &str = "foundry.addon_executor_execution.v1";
+pub const ADDON_EXECUTOR_RESULT_SCHEMA_VERSION: &str = "foundry.addon_executor_result.v1";
 pub const ADDON_EXECUTOR_RESULT_VALIDATION_SCHEMA_VERSION: &str =
-    "forge.addon_executor_result_validation.v1";
+    "foundry.addon_executor_result_validation.v1";
 pub const ADDON_HANDOFF_DISPATCH_INPUT_SCHEMA_VERSION: &str =
-    "forge.addon_handoff_dispatch_input.v1";
-pub const ADDON_HANDOFF_EXECUTION_SCHEMA_VERSION: &str = "forge.addon_handoff_execution.v1";
-pub const ADDON_HANDOFF_RESULT_SCHEMA_VERSION: &str = "forge.addon_handoff_result.v1";
+    "foundry.addon_handoff_dispatch_input.v1";
+pub const ADDON_HANDOFF_EXECUTION_SCHEMA_VERSION: &str = "foundry.addon_handoff_execution.v1";
+pub const ADDON_HANDOFF_RESULT_SCHEMA_VERSION: &str = "foundry.addon_handoff_result.v1";
 pub const ADDON_HANDOFF_RESULT_VALIDATION_SCHEMA_VERSION: &str =
-    "forge.addon_handoff_result_validation.v1";
-pub const ADDON_RUNTIME_WORKERS_SCHEMA_VERSION: &str = "forge.addon_runtime_workers.v1";
-pub const ADDON_VIEWS_SCHEMA_VERSION: &str = "forge.addon_views.v1";
-pub const ADDON_PACKAGE_SCHEMA_VERSION: &str = "forge.addon_package.v1";
-pub const ADDON_MARKETPLACE_SCHEMA_VERSION: &str = "forge.addon_marketplace.v1";
-pub const ADDON_PACKAGE_FETCH_SCHEMA_VERSION: &str = "forge.addon_package_fetch.v1";
-pub const ADDON_REGISTRY_SYNC_SCHEMA_VERSION: &str = "forge.addon_registry_sync.v1";
-pub const ADDON_PACKAGE_LOCK_SCHEMA_VERSION: &str = "forge.addon_package_lock.v1";
+    "foundry.addon_handoff_result_validation.v1";
+pub const ADDON_RUNTIME_WORKERS_SCHEMA_VERSION: &str = "foundry.addon_runtime_workers.v1";
+pub const ADDON_VIEWS_SCHEMA_VERSION: &str = "foundry.addon_views.v1";
+pub const ADDON_PACKAGE_SCHEMA_VERSION: &str = "foundry.addon_package.v1";
+pub const ADDON_MARKETPLACE_SCHEMA_VERSION: &str = "foundry.addon_marketplace.v1";
+pub const ADDON_PACKAGE_FETCH_SCHEMA_VERSION: &str = "foundry.addon_package_fetch.v1";
+pub const ADDON_REGISTRY_SYNC_SCHEMA_VERSION: &str = "foundry.addon_registry_sync.v1";
+pub const ADDON_PACKAGE_LOCK_SCHEMA_VERSION: &str = "foundry.addon_package_lock.v1";
 pub const ADDON_PACKAGE_LOCK_ENFORCEMENT_SCHEMA_VERSION: &str =
-    "forge.addon_package_lock_enforcement.v1";
-pub const ADDON_TRUST_STORE_SCHEMA_VERSION: &str = "forge.addon_trust_store.v1";
-pub const ADDON_PACKAGE_POLICY_SCHEMA_VERSION: &str = "forge.addon_package_policy.v1";
-pub const ADDON_PACKAGE_INSTALL_SCHEMA_VERSION: &str = "forge.addon_package_install.v1";
-pub const ADDON_MIGRATION_WORKFLOW_SCHEMA_VERSION: &str = "forge.addon_migration_workflow.v1";
+    "foundry.addon_package_lock_enforcement.v1";
+pub const ADDON_TRUST_STORE_SCHEMA_VERSION: &str = "foundry.addon_trust_store.v1";
+pub const ADDON_PACKAGE_POLICY_SCHEMA_VERSION: &str = "foundry.addon_package_policy.v1";
+pub const ADDON_PACKAGE_INSTALL_SCHEMA_VERSION: &str = "foundry.addon_package_install.v1";
+pub const ADDON_MIGRATION_WORKFLOW_SCHEMA_VERSION: &str = "foundry.addon_migration_workflow.v1";
 pub const ADDON_PERMISSION_AUTHORIZATIONS_SCHEMA_VERSION: &str =
-    "forge.addon_permission_authorizations.v1";
+    "foundry.addon_permission_authorizations.v1";
 
 pub const CAP_WORKFLOW_RUNTIME: &str = "workflow_runtime";
 pub const CAP_DYNAMIC_WORKFLOW: &str = "dynamic_workflow";
@@ -1443,8 +1443,8 @@ pub struct IntegrationDeclaration {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AddonCompatibility {
-    #[serde(default)]
-    pub forge_version_req: String,
+    #[serde(default, alias = "forge_version_req")] // foundry-brand-allow: legacy-compat
+    pub foundry_version_req: String,
     #[serde(default)]
     pub api_versions: Vec<String>,
     #[serde(default)]
@@ -1927,7 +1927,8 @@ pub struct AddonPackageSummary {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AddonCompatibilitySummary {
-    pub forge_version_req: String,
+    #[serde(alias = "forge_version_req")] // foundry-brand-allow: legacy-compat
+    pub foundry_version_req: String,
     pub api_versions: Vec<String>,
     pub runtimes: Vec<String>,
     pub features: Vec<String>,
@@ -2401,7 +2402,7 @@ pub fn load_addon_catalog(addon_dirs: &[PathBuf]) -> Result<AddonCatalog> {
 }
 
 pub fn load_addon_catalog_from_store(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_dirs: &[PathBuf],
 ) -> Result<AddonCatalog> {
     load_addon_catalog_with_records(
@@ -2414,16 +2415,18 @@ pub fn load_addon_catalog_from_store(
 pub fn load_addon_manifest_from_path(path: &Path) -> Result<AddonManifest> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read addon manifest {}", path.display()))?;
-    if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+    let mut manifest = if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
         serde_json::from_str(&content)
             .with_context(|| format!("invalid addon JSON manifest {}", path.display()))
     } else {
         serde_yaml::from_str(&content)
             .with_context(|| format!("invalid addon YAML manifest {}", path.display()))
-    }
+    }?;
+    normalize_addon_manifest_compatibility(&mut manifest);
+    Ok(manifest)
 }
 
-pub fn list_installed_addons(store: &ForgeStore) -> Result<InstalledAddonListReport> {
+pub fn list_installed_addons(store: &FoundryStore) -> Result<InstalledAddonListReport> {
     let addons = store
         .list_installed_addons()?
         .into_iter()
@@ -2438,7 +2441,7 @@ pub fn list_installed_addons(store: &ForgeStore) -> Result<InstalledAddonListRep
 }
 
 pub fn list_addon_capability_index(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_id: Option<&str>,
     capability_id: Option<&str>,
     lifecycle: Option<&str>,
@@ -2611,7 +2614,7 @@ fn addon_event_extension_registry(
 }
 
 pub fn addon_observability_report(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     addon_id: Option<&str>,
     lifecycle: Option<&str>,
@@ -2829,7 +2832,7 @@ pub fn evaluate_addon_runtime_contract_policy(
 }
 
 pub fn enqueue_addon_runtime_contract_dispatch(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     addon_id: Option<&str>,
     contract_id: &str,
@@ -2863,7 +2866,7 @@ pub fn enqueue_addon_runtime_contract_dispatch(
         "blocked"
     };
     let data = serde_json::json!({
-        "dispatch_contract": "forge.addon_runtime_contract_dispatch.v1",
+        "dispatch_contract": "foundry.addon_runtime_contract_dispatch.v1",
         "source": source,
         "dry_run": dry_run,
         "policy_status": policy_entry.status,
@@ -2918,7 +2921,7 @@ pub fn enqueue_addon_runtime_contract_dispatch(
 }
 
 pub fn enqueue_addon_planner_dispatch(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     input: AddonPlannerDispatchInput<'_>,
 ) -> Result<AddonRuntimeContractDispatchReport> {
@@ -2981,7 +2984,7 @@ pub fn enqueue_addon_planner_dispatch(
 }
 
 pub fn enqueue_addon_validator_dispatch(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     input: AddonValidatorDispatchInput<'_>,
 ) -> Result<AddonRuntimeContractDispatchReport> {
@@ -3045,7 +3048,7 @@ pub fn enqueue_addon_validator_dispatch(
         },
         "context": {
             "provided_context": input.context,
-            "validation_policy": "Addon validators are advisory until consumed by a Forge validation gate or operator-controlled workflow step",
+            "validation_policy": "Addon validators are advisory until consumed by a Foundry validation gate or operator-controlled workflow step",
         },
         "requested_at": Utc::now().to_rfc3339(),
     });
@@ -3061,7 +3064,7 @@ pub fn enqueue_addon_validator_dispatch(
 }
 
 pub fn enqueue_addon_executor_dispatch(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     input: AddonExecutorDispatchInput<'_>,
 ) -> Result<AddonRuntimeContractDispatchReport> {
@@ -3122,7 +3125,7 @@ pub fn enqueue_addon_executor_dispatch(
 }
 
 pub fn enqueue_addon_handoff_dispatch(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     input: AddonHandoffDispatchInput<'_>,
 ) -> Result<AddonRuntimeContractDispatchReport> {
@@ -3183,7 +3186,7 @@ pub fn enqueue_addon_handoff_dispatch(
 }
 
 pub fn execute_addon_planning_strategy(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     input: AddonPlanningStrategyInput<'_>,
 ) -> Result<AddonPlanningStrategyExecutionReport> {
@@ -3295,7 +3298,7 @@ pub fn execute_addon_planning_strategy(
 }
 
 pub fn execute_addon_validator(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     input: AddonValidatorExecutionInput<'_>,
 ) -> Result<AddonValidatorExecutionReport> {
@@ -3390,7 +3393,7 @@ pub fn execute_addon_validator(
 }
 
 pub fn apply_addon_validator_outcome(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: AddonValidatorOutcomeApplyInput<'_>,
 ) -> Result<AddonValidatorOutcomeApplicationReport> {
     let dispatch_id = required_validator_outcome_text(input.dispatch_id, "dispatch id")?;
@@ -3519,7 +3522,7 @@ pub fn apply_addon_validator_outcome(
         "passed" => (
             "addon_validator_outcome_evidence_recorded",
             "record_evidence",
-            "continue normal Forge validation; this evidence does not auto-promote the task",
+            "continue normal Foundry validation; this evidence does not auto-promote the task",
         ),
         "failed" => (
             "addon_validator_outcome_rework_required",
@@ -3573,7 +3576,7 @@ struct AddonValidatorOutcomeEffect {
 
 #[allow(clippy::too_many_arguments)]
 fn apply_validator_outcome_effect(
-    store: &ForgeStore,
+    store: &FoundryStore,
     dispatch_id: &str,
     contract_id: &str,
     subject: &str,
@@ -3681,7 +3684,7 @@ fn apply_validator_outcome_effect(
 }
 
 fn record_validator_passed_evidence(
-    store: &ForgeStore,
+    store: &FoundryStore,
     dispatch_id: &str,
     contract_id: &str,
     workflow_id: &str,
@@ -3775,7 +3778,7 @@ fn recover_validator_outcome_effect(
 }
 
 fn existing_validator_outcome_application(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     dispatch_id: &str,
     task_id: &str,
@@ -3834,7 +3837,7 @@ fn compact_validator_feedback(value: &str, fallback: &str) -> String {
 }
 
 pub fn execute_addon_executor(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     input: AddonExecutorExecutionInput<'_>,
 ) -> Result<AddonExecutorExecutionReport> {
@@ -3937,7 +3940,7 @@ pub fn execute_addon_executor(
 }
 
 struct AddonExecutorPromotionInput<'a> {
-    store: &'a ForgeStore,
+    store: &'a FoundryStore,
     workflow_id: Option<&'a str>,
     task_ref: &'a str,
     contract_id: &'a str,
@@ -4009,7 +4012,7 @@ fn addon_executor_promotion_not_promoted(
     note: &str,
 ) -> AddonExecutorPromotionReport {
     AddonExecutorPromotionReport {
-        schema_version: "forge.addon_executor_result_promotion.v1".to_string(),
+        schema_version: "foundry.addon_executor_result_promotion.v1".to_string(),
         status: "addon_executor_result_not_promoted".to_string(),
         workflow_id: workflow_id.to_string(),
         task_ref: task_ref.to_string(),
@@ -4026,7 +4029,7 @@ fn addon_executor_promotion_not_promoted(
 }
 
 fn promote_addon_executor_result_to_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_ref: &str,
     contract_id: &str,
@@ -4062,7 +4065,7 @@ fn promote_addon_executor_result_to_workflow(
             addon_promotion_slug(source_id)
         );
         let payload = serde_json::json!({
-            "schema_version": "forge.addon_executor_promoted_artifact.v1",
+            "schema_version": "foundry.addon_executor_promoted_artifact.v1",
             "workflow_id": workflow_id,
             "task_ref": task_ref,
             "contract_id": contract_id,
@@ -4143,7 +4146,7 @@ fn promote_addon_executor_result_to_workflow(
     }
 
     Ok(AddonExecutorPromotionReport {
-        schema_version: "forge.addon_executor_result_promotion.v1".to_string(),
+        schema_version: "foundry.addon_executor_result_promotion.v1".to_string(),
         status: "addon_executor_result_promoted".to_string(),
         workflow_id: workflow_id.to_string(),
         task_ref: task_ref.to_string(),
@@ -4208,7 +4211,7 @@ fn addon_promotion_slug(value: &str) -> String {
 }
 
 pub fn execute_addon_handoff(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     input: AddonHandoffExecutionInput<'_>,
 ) -> Result<AddonHandoffExecutionReport> {
@@ -4331,7 +4334,7 @@ fn addon_planner_dispatch_context(
     Ok(serde_json::json!({
         "provided_context": context,
         "core_reference": {
-            "schema_version": "forge.addon_planning_strategy_core_reference.v1",
+            "schema_version": "foundry.addon_planning_strategy_core_reference.v1",
             "workflow_id": core_workflow.id,
             "intent": core_workflow.intent,
             "task_count": core_tasks.len(),
@@ -4486,7 +4489,9 @@ fn validate_addon_validator_result(
         .get("schema_version")
         .and_then(|value| value.as_str())
         .unwrap_or("");
-    if !schema_version.is_empty() && schema_version != ADDON_VALIDATOR_RESULT_SCHEMA_VERSION {
+    if !schema_version.is_empty()
+        && !crate::brand::identifier_matches(schema_version, ADDON_VALIDATOR_RESULT_SCHEMA_VERSION)
+    {
         schema_issues.push(format!(
             "validator result schema_version should be {}",
             ADDON_VALIDATOR_RESULT_SCHEMA_VERSION
@@ -4589,7 +4594,9 @@ fn validate_addon_executor_result(
         .get("schema_version")
         .and_then(|value| value.as_str())
         .unwrap_or("");
-    if !schema_version.is_empty() && schema_version != ADDON_EXECUTOR_RESULT_SCHEMA_VERSION {
+    if !schema_version.is_empty()
+        && !crate::brand::identifier_matches(schema_version, ADDON_EXECUTOR_RESULT_SCHEMA_VERSION)
+    {
         schema_issues.push(format!(
             "executor result schema_version should be {}",
             ADDON_EXECUTOR_RESULT_SCHEMA_VERSION
@@ -4701,7 +4708,9 @@ fn validate_addon_handoff_result(
         .get("schema_version")
         .and_then(|value| value.as_str())
         .unwrap_or("");
-    if !schema_version.is_empty() && schema_version != ADDON_HANDOFF_RESULT_SCHEMA_VERSION {
+    if !schema_version.is_empty()
+        && !crate::brand::identifier_matches(schema_version, ADDON_HANDOFF_RESULT_SCHEMA_VERSION)
+    {
         schema_issues.push(format!(
             "handoff result schema_version should be {}",
             ADDON_HANDOFF_RESULT_SCHEMA_VERSION
@@ -5039,7 +5048,7 @@ fn compare_addon_planning_strategy_to_core(
         );
     }
     Ok(AddonPlanningStrategyEquivalence {
-        schema_version: "forge.addon_planning_strategy_equivalence.v1".to_string(),
+        schema_version: "foundry.addon_planning_strategy_equivalence.v1".to_string(),
         status: status.to_string(),
         replacement_ready,
         core_task_count: core_tasks.len(),
@@ -5128,7 +5137,7 @@ fn addon_handoff_execution_report(
 }
 
 pub fn list_addon_runtime_contract_dispatches(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_id: Option<&str>,
     contract_id: Option<&str>,
     status: Option<&str>,
@@ -5147,7 +5156,7 @@ pub fn list_addon_runtime_contract_dispatches(
 }
 
 pub fn run_addon_runtime_contract_dispatch_worker(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     status: Option<&str>,
     limit: usize,
@@ -5196,7 +5205,7 @@ pub fn run_addon_runtime_contract_dispatch_worker(
 }
 
 pub fn register_addon_runtime_worker(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: AddonRuntimeWorkerRegistrationInput<'_>,
 ) -> Result<AddonRuntimeWorkerReport> {
     let worker_id = input.worker_id;
@@ -5259,7 +5268,7 @@ pub fn register_addon_runtime_worker(
 }
 
 pub fn list_addon_runtime_workers(
-    store: &ForgeStore,
+    store: &FoundryStore,
     runtime: Option<&str>,
     status: Option<&str>,
     trust_level: Option<&str>,
@@ -5327,7 +5336,7 @@ fn annotate_runtime_worker_entry_rotation_block(
     requested_data: &serde_json::Value,
 ) {
     let policy = serde_json::json!({
-        "schema_version": "forge.addon_runtime_worker_rotation_policy.v1",
+        "schema_version": "foundry.addon_runtime_worker_rotation_policy.v1",
         "status": "blocked_missing_approval",
         "reason": "signed or trusted runtime worker identity changed without explicit rotation approval",
         "current": {
@@ -5358,7 +5367,7 @@ fn annotate_runtime_worker_rotation(
     status: &str,
 ) -> Result<()> {
     let policy = serde_json::json!({
-        "schema_version": "forge.addon_runtime_worker_rotation_policy.v1",
+        "schema_version": "foundry.addon_runtime_worker_rotation_policy.v1",
         "status": status,
         "approved_by": approved_by,
         "reason": reason.unwrap_or("").trim(),
@@ -5402,7 +5411,7 @@ fn set_runtime_worker_rotation_policy(data: &mut serde_json::Value, policy: serd
 }
 
 pub fn run_addon_runtime_contract_dispatch(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     dispatch_id: &str,
     worker: &str,
@@ -5473,8 +5482,8 @@ pub fn run_addon_runtime_contract_dispatch(
 
     if policy_entry.contract_type != entry.contract_type
         || policy_entry.capability_id != entry.capability_id
-        || policy_entry.runtime != entry.runtime
-        || policy_entry.entrypoint != entry.entrypoint
+        || !addon_runtime_identifiers_match(&policy_entry.runtime, &entry.runtime)
+        || !addon_entrypoint_identifiers_match(&policy_entry.entrypoint, &entry.entrypoint)
     {
         return update_runtime_dispatch_entry(
             store,
@@ -5493,7 +5502,7 @@ pub fn run_addon_runtime_contract_dispatch(
         );
     }
 
-    if entry.runtime == "forge_core_builtin" {
+    if addon_runtime_is_core_builtin(&entry.runtime) {
         match execute_builtin_runtime_contract(&entry) {
             Ok(Some(output)) => {
                 return update_runtime_dispatch_entry(
@@ -5507,7 +5516,7 @@ pub fn run_addon_runtime_contract_dispatch(
                         dry_run,
                         outcome: serde_json::json!({
                             "outcome": "completed",
-                            "runtime": "forge_core_builtin",
+                            "runtime": "foundry_core_builtin",
                             "output": output,
                         }),
                     },
@@ -5527,7 +5536,7 @@ pub fn run_addon_runtime_contract_dispatch(
                         dry_run,
                         outcome: serde_json::json!({
                             "outcome": "builtin_execution_failed",
-                            "runtime": "forge_core_builtin",
+                            "runtime": "foundry_core_builtin",
                             "entrypoint": entrypoint,
                             "reason": error.to_string(),
                         }),
@@ -5547,7 +5556,7 @@ pub fn run_addon_runtime_contract_dispatch(
                 dry_run,
                 outcome: serde_json::json!({
                     "outcome": "unsupported_builtin_entrypoint",
-                    "runtime": "forge_core_builtin",
+                    "runtime": "foundry_core_builtin",
                     "entrypoint": entrypoint,
                 }),
             },
@@ -5577,14 +5586,14 @@ pub fn run_addon_runtime_contract_dispatch(
                 "entrypoint": entrypoint,
                 "eligible_worker_count": eligible_worker_count,
                 "eligible_workers": eligible_workers,
-                "reason": "Forge Core records the dispatch but does not execute external runtime code inline",
+                "reason": "Foundry Core records the dispatch but does not execute external runtime code inline",
             }),
         },
     )
 }
 
 pub fn execute_addon_runtime_contract_dispatch(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     dispatch_id: &str,
     worker_id: &str,
@@ -5736,7 +5745,7 @@ pub fn execute_addon_runtime_contract_dispatch(
 }
 
 pub fn claim_addon_runtime_contract_dispatch(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     dispatch_id: &str,
     worker_id: &str,
@@ -5846,7 +5855,7 @@ pub fn claim_addon_runtime_contract_dispatch(
 }
 
 pub fn complete_addon_runtime_contract_dispatch(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     input: AddonRuntimeContractCompletionInput<'_>,
 ) -> Result<AddonRuntimeContractDispatchReport> {
@@ -6113,7 +6122,7 @@ pub fn list_addon_views(
 }
 
 pub fn list_addon_permission_authorizations(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_id: Option<&str>,
     permission_id: Option<&str>,
     status: Option<&str>,
@@ -6132,7 +6141,7 @@ pub fn list_addon_permission_authorizations(
 }
 
 pub fn authorize_addon_permission(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_id: &str,
     permission_id: &str,
     risk: &str,
@@ -6162,7 +6171,7 @@ pub fn authorize_addon_permission(
 }
 
 pub fn revoke_addon_permission(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_id: &str,
     permission_id: &str,
     approved_by: &str,
@@ -6191,7 +6200,7 @@ pub fn revoke_addon_permission(
 }
 
 pub fn install_addon(
-    store: &ForgeStore,
+    store: &FoundryStore,
     manifest_path: &Path,
     addon_dirs: &[PathBuf],
 ) -> Result<AddonLifecycleReport> {
@@ -6204,7 +6213,7 @@ pub fn install_addon(
     ensure_candidate_migration_against_installed(store, &manifest)?;
     ensure_addon_permissions_authorized(store, &manifest)?;
     let migration_workflow =
-        create_candidate_migration_workflow_if_needed(store, &manifest, "install", "forge_cli")?;
+        create_candidate_migration_workflow_if_needed(store, &manifest, "install", "foundry_cli")?;
     store.save_installed_addon(
         &manifest.id,
         "enabled",
@@ -6225,7 +6234,7 @@ pub fn install_addon(
 }
 
 pub fn plan_addon_lifecycle(
-    store: &ForgeStore,
+    store: &FoundryStore,
     action: &str,
     addon_id: Option<&str>,
     manifest_path: Option<&Path>,
@@ -6313,7 +6322,7 @@ pub fn plan_addon_lifecycle(
 }
 
 pub fn package_addon(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: AddonPackageInput<'_>,
 ) -> Result<AddonPackageReport> {
     let mut manifest = load_addon_manifest_from_path(input.manifest_path)?;
@@ -6375,15 +6384,15 @@ pub fn package_addon(
             source: manifest.source.clone(),
             update_strategy: "manual_install_upgrade_downgrade".to_string(),
             install_command: format!(
-                "forge addons install --manifest {} --output json",
+                "foundry addons install --manifest {} --output json",
                 input.manifest_path.display()
             ),
             upgrade_command: format!(
-                "forge addons upgrade --manifest {} --output json",
+                "foundry addons upgrade --manifest {} --output json",
                 input.manifest_path.display()
             ),
             downgrade_command: format!(
-                "forge addons downgrade --manifest {} --output json",
+                "foundry addons downgrade --manifest {} --output json",
                 input.manifest_path.display()
             ),
         },
@@ -6419,7 +6428,7 @@ pub fn package_addon(
 }
 
 pub fn trust_addon_package_key(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: AddonTrustKeyInput<'_>,
 ) -> Result<AddonTrustKeyChangeReport> {
     let repository = input.repository.trim();
@@ -6481,7 +6490,7 @@ pub fn trust_addon_package_key(
 }
 
 pub fn list_addon_trust_store(
-    store: &ForgeStore,
+    store: &FoundryStore,
     repository: Option<&str>,
     channel: Option<&str>,
     public_key: Option<&str>,
@@ -6509,7 +6518,7 @@ pub fn list_addon_trust_store(
 }
 
 pub fn evaluate_addon_package_policy(
-    store: &ForgeStore,
+    store: &FoundryStore,
     package: &AddonPackageReport,
     package_sha256: Option<&str>,
 ) -> Result<AddonPackagePolicyReport> {
@@ -6518,7 +6527,7 @@ pub fn evaluate_addon_package_policy(
     let package_sha256 = package_sha256.unwrap_or("").trim().to_string();
     let mut issues = Vec::new();
 
-    if package.schema_version != ADDON_PACKAGE_SCHEMA_VERSION {
+    if !crate::brand::identifier_matches(&package.schema_version, ADDON_PACKAGE_SCHEMA_VERSION) {
         issues.push(format!(
             "unsupported_package_schema:{}",
             package.schema_version
@@ -6642,7 +6651,7 @@ pub fn evaluate_addon_package_policy(
 }
 
 pub fn publish_addon_package(
-    store: &ForgeStore,
+    store: &FoundryStore,
     package_path: &Path,
     source: &str,
 ) -> Result<AddonMarketplacePublishReport> {
@@ -6689,7 +6698,7 @@ pub fn publish_addon_package(
 }
 
 pub fn list_addon_marketplace(
-    store: &ForgeStore,
+    store: &FoundryStore,
     repository: Option<&str>,
     channel: Option<&str>,
     addon_id: Option<&str>,
@@ -6723,7 +6732,7 @@ pub fn list_addon_marketplace(
 }
 
 pub fn create_addon_package_lock(
-    store: &ForgeStore,
+    store: &FoundryStore,
     repository: Option<&str>,
     channel: Option<&str>,
     addon_id: Option<&str>,
@@ -6777,7 +6786,7 @@ pub fn create_addon_package_lock(
 }
 
 pub fn fetch_addon_package(
-    store: &ForgeStore,
+    store: &FoundryStore,
     source: &str,
     cache_dir: Option<&Path>,
     expected_sha256: Option<&str>,
@@ -6870,7 +6879,7 @@ pub fn fetch_addon_package(
 }
 
 pub fn sync_addon_package_registry(
-    store: &ForgeStore,
+    store: &FoundryStore,
     source: &str,
     cache_dir: Option<&Path>,
     allow_remote: bool,
@@ -6938,7 +6947,7 @@ pub fn sync_addon_package_registry(
 }
 
 pub fn create_addon_migration_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     from_manifest_path: &Path,
     to_manifest_path: &Path,
     action: &str,
@@ -6954,7 +6963,7 @@ pub fn create_addon_migration_workflow(
 }
 
 pub fn install_addon_package(
-    store: &ForgeStore,
+    store: &FoundryStore,
     package_path: &Path,
     addon_dirs: &[PathBuf],
     lock_path: Option<&Path>,
@@ -7007,7 +7016,7 @@ pub fn install_addon_package(
         store,
         &manifest,
         "install_package",
-        "forge_cli",
+        "foundry_cli",
     )?;
     store.save_installed_addon(
         &manifest.id,
@@ -7050,7 +7059,7 @@ pub fn install_addon_package(
 }
 
 pub fn upgrade_addon(
-    store: &ForgeStore,
+    store: &FoundryStore,
     manifest_path: &Path,
     addon_dirs: &[PathBuf],
 ) -> Result<AddonLifecycleReport> {
@@ -7065,7 +7074,7 @@ pub fn upgrade_addon(
 }
 
 pub fn downgrade_addon(
-    store: &ForgeStore,
+    store: &FoundryStore,
     manifest_path: &Path,
     addon_dirs: &[PathBuf],
 ) -> Result<AddonLifecycleReport> {
@@ -7080,7 +7089,7 @@ pub fn downgrade_addon(
 }
 
 pub fn enable_addon(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_id: &str,
     addon_dirs: &[PathBuf],
 ) -> Result<AddonLifecycleReport> {
@@ -7088,7 +7097,7 @@ pub fn enable_addon(
 }
 
 pub fn disable_addon(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_id: &str,
     addon_dirs: &[PathBuf],
 ) -> Result<AddonLifecycleReport> {
@@ -7098,7 +7107,7 @@ pub fn disable_addon(
 }
 
 pub fn uninstall_addon(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_id: &str,
     addon_dirs: &[PathBuf],
 ) -> Result<AddonLifecycleReport> {
@@ -7165,7 +7174,7 @@ pub fn resolve_goal_capabilities(goal: &str, catalog: &AddonCatalog) -> Capabili
                 &mut seen,
                 addon,
                 capability,
-                "capacidade universal requerida por qualquer workflow Forge".to_string(),
+                "capacidade universal requerida por qualquer workflow Foundry".to_string(),
                 Vec::new(),
             );
         }
@@ -7258,7 +7267,7 @@ pub fn resolve_goal_capabilities(goal: &str, catalog: &AddonCatalog) -> Capabili
 }
 
 pub fn resolve_goal_capabilities_with_store(
-    store: &ForgeStore,
+    store: &FoundryStore,
     goal: &str,
     catalog: &AddonCatalog,
 ) -> Result<CapabilityResolutionReport> {
@@ -7268,7 +7277,7 @@ pub fn resolve_goal_capabilities_with_store(
 }
 
 pub fn resolve_goal_capabilities_with_registry_sync(
-    store: &ForgeStore,
+    store: &FoundryStore,
     goal: &str,
     catalog: &AddonCatalog,
     input: CapabilityRegistrySyncInput<'_>,
@@ -7416,7 +7425,24 @@ pub fn validate_addon_catalog(catalog: &AddonCatalog) -> AddonCatalogValidationR
 }
 
 pub fn default_addon_dirs() -> Vec<PathBuf> {
-    vec![PathBuf::from(".forge/addons"), PathBuf::from("addons")]
+    default_addon_dirs_under(Path::new(""))
+}
+
+fn default_addon_dirs_under(project_root: &Path) -> Vec<PathBuf> {
+    let canonical = project_root
+        .join(crate::brand::DEFAULT_STATE_DIRECTORY)
+        .join("addons");
+    let legacy = project_root
+        .join(crate::brand::LEGACY_STATE_DIRECTORY)
+        .join("addons");
+    let state_dir = if canonical.exists() {
+        canonical
+    } else if legacy.exists() {
+        legacy
+    } else {
+        canonical
+    };
+    vec![state_dir, project_root.join("addons")]
 }
 
 fn load_addon_catalog_with_records(
@@ -7454,7 +7480,7 @@ fn load_addon_catalog_with_records(
 }
 
 fn validate_candidate_catalog(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_dirs: &[PathBuf],
     candidate: Option<AddonManifest>,
 ) -> Result<AddonCatalogValidationReport> {
@@ -7519,7 +7545,7 @@ fn addon_package_summary(manifest: &AddonManifest) -> AddonPackageSummary {
 
 fn addon_compatibility_summary(compatibility: &AddonCompatibility) -> AddonCompatibilitySummary {
     AddonCompatibilitySummary {
-        forge_version_req: compatibility.forge_version_req.clone(),
+        foundry_version_req: compatibility.foundry_version_req.clone(),
         api_versions: compatibility.api_versions.clone(),
         runtimes: compatibility.runtimes.clone(),
         features: compatibility.features.clone(),
@@ -7623,7 +7649,7 @@ fn addon_trust_key_entry_from_record(
 }
 
 fn addon_marketplace_entry_from_record(
-    store: &ForgeStore,
+    store: &FoundryStore,
     record: StoredAddonMarketplacePackageRecord,
 ) -> Result<AddonMarketplacePackageEntry> {
     let package: AddonPackageReport = serde_json::from_value(record.package)?;
@@ -7663,7 +7689,7 @@ fn load_addon_package_lock_from_path(path: &Path) -> Result<(AddonPackageLockRep
     let lock = serde_json::from_slice::<AddonPackageLockReport>(&bytes)
         .or_else(|_| serde_yaml::from_slice::<AddonPackageLockReport>(&bytes))
         .with_context(|| format!("failed to parse addon package lock {}", path.display()))?;
-    if lock.schema_version != ADDON_PACKAGE_LOCK_SCHEMA_VERSION {
+    if !crate::brand::identifier_matches(&lock.schema_version, ADDON_PACKAGE_LOCK_SCHEMA_VERSION) {
         bail!(
             "unsupported addon package lock schema: {}",
             lock.schema_version
@@ -7820,7 +7846,7 @@ enum AddonVersionChange {
 }
 
 fn change_installed_addon_version(
-    store: &ForgeStore,
+    store: &FoundryStore,
     manifest_path: &Path,
     addon_dirs: &[PathBuf],
     change: AddonVersionChange,
@@ -7876,7 +7902,7 @@ fn change_installed_addon_version(
         &previous_manifest,
         &manifest,
         action,
-        "forge_cli",
+        "foundry_cli",
     )?;
     store.save_installed_addon(
         &manifest.id,
@@ -7899,7 +7925,7 @@ fn change_installed_addon_version(
 }
 
 fn update_addon_lifecycle(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_id: &str,
     lifecycle: &str,
     addon_dirs: &[PathBuf],
@@ -7927,7 +7953,7 @@ fn update_addon_lifecycle(
 }
 
 fn lifecycle_report(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_dirs: &[PathBuf],
     addon_id: &str,
     status: &str,
@@ -8007,7 +8033,7 @@ struct AddonLifecyclePlanInputs {
 }
 
 fn lifecycle_plan_manifests_and_apply_command(
-    store: &ForgeStore,
+    store: &FoundryStore,
     action: &str,
     addon_id: Option<&str>,
     manifest_path: Option<&Path>,
@@ -8025,7 +8051,7 @@ fn lifecycle_plan_manifests_and_apply_command(
                 previous_manifest: previous,
                 current_manifest: Some(candidate),
                 apply_command: vec![
-                    "forge".to_string(),
+                    "foundry".to_string(),
                     "addons".to_string(),
                     "install".to_string(),
                     "--manifest".to_string(),
@@ -8033,7 +8059,7 @@ fn lifecycle_plan_manifests_and_apply_command(
                     "--output".to_string(),
                     "json".to_string(),
                 ],
-                mcp_tool: "forge.addons.install".to_string(),
+                mcp_tool: "foundry.addons.install".to_string(),
                 preflight_issues: Vec::new(),
             })
         }
@@ -8064,7 +8090,7 @@ fn lifecycle_plan_manifests_and_apply_command(
                 previous_manifest: previous,
                 current_manifest: Some(candidate),
                 apply_command: vec![
-                    "forge".to_string(),
+                    "foundry".to_string(),
                     "addons".to_string(),
                     "install-package".to_string(),
                     "--package".to_string(),
@@ -8072,7 +8098,7 @@ fn lifecycle_plan_manifests_and_apply_command(
                     "--output".to_string(),
                     "json".to_string(),
                 ],
-                mcp_tool: "forge.addons.install_package".to_string(),
+                mcp_tool: "foundry.addons.install_package".to_string(),
                 preflight_issues,
             })
         }
@@ -8090,7 +8116,7 @@ fn lifecycle_plan_manifests_and_apply_command(
                 previous_manifest: Some(previous),
                 current_manifest: Some(current),
                 apply_command: vec![
-                    "forge".to_string(),
+                    "foundry".to_string(),
                     "addons".to_string(),
                     action.replace('_', "-"),
                     "--manifest".to_string(),
@@ -8098,7 +8124,7 @@ fn lifecycle_plan_manifests_and_apply_command(
                     "--output".to_string(),
                     "json".to_string(),
                 ],
-                mcp_tool: format!("forge.addons.{action}"),
+                mcp_tool: format!("foundry.addons.{action}"),
                 preflight_issues: Vec::new(),
             })
         }
@@ -8118,14 +8144,14 @@ fn lifecycle_plan_manifests_and_apply_command(
                 previous_manifest: Some(previous),
                 current_manifest: Some(current),
                 apply_command: vec![
-                    "forge".to_string(),
+                    "foundry".to_string(),
                     "addons".to_string(),
                     action.to_string(),
                     addon_id.to_string(),
                     "--output".to_string(),
                     "json".to_string(),
                 ],
-                mcp_tool: format!("forge.addons.{action}"),
+                mcp_tool: format!("foundry.addons.{action}"),
                 preflight_issues: Vec::new(),
             })
         }
@@ -8138,14 +8164,14 @@ fn lifecycle_plan_manifests_and_apply_command(
                 previous_manifest: Some(previous),
                 current_manifest: None,
                 apply_command: vec![
-                    "forge".to_string(),
+                    "foundry".to_string(),
                     "addons".to_string(),
                     "uninstall".to_string(),
                     addon_id.to_string(),
                     "--output".to_string(),
                     "json".to_string(),
                 ],
-                mcp_tool: "forge.addons.uninstall".to_string(),
+                mcp_tool: "foundry.addons.uninstall".to_string(),
                 preflight_issues: Vec::new(),
             })
         }
@@ -8154,7 +8180,7 @@ fn lifecycle_plan_manifests_and_apply_command(
 }
 
 fn candidate_lifecycle_catalog(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_dirs: &[PathBuf],
     current_manifest: Option<&AddonManifest>,
     addon_id: &str,
@@ -8168,7 +8194,7 @@ fn candidate_lifecycle_catalog(
 }
 
 fn collect_lifecycle_plan_issues(
-    store: &ForgeStore,
+    store: &FoundryStore,
     action: &str,
     previous_manifest: Option<&AddonManifest>,
     current_manifest: Option<&AddonManifest>,
@@ -8301,14 +8327,14 @@ fn addon_lifecycle_operation_plan(
     );
     let commands = AddonLifecycleCommandPlan {
         validate: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "addons".to_string(),
             "validate".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
         inspect: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "addons".to_string(),
             "installed".to_string(),
             "--output".to_string(),
@@ -8317,7 +8343,7 @@ fn addon_lifecycle_operation_plan(
         rollback: rollback_command,
         post_change_checks: vec![
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "addons".to_string(),
                 "capabilities".to_string(),
                 "--addon".to_string(),
@@ -8326,7 +8352,7 @@ fn addon_lifecycle_operation_plan(
                 "json".to_string(),
             ],
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "addons".to_string(),
                 "validate".to_string(),
                 "--output".to_string(),
@@ -8443,7 +8469,7 @@ fn addon_lifecycle_impact(
 }
 
 fn load_optional_installed_manifest(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_id: &str,
 ) -> Result<Option<AddonManifest>> {
     match store.load_installed_addon(addon_id) {
@@ -8539,7 +8565,7 @@ fn addon_lifecycle_rollback_command(
 ) -> Vec<String> {
     match action {
         "install" | "install_package" => vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "addons".to_string(),
             "uninstall".to_string(),
             addon_id.to_string(),
@@ -8547,7 +8573,7 @@ fn addon_lifecycle_rollback_command(
             "json".to_string(),
         ],
         "enable" => vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "addons".to_string(),
             "disable".to_string(),
             addon_id.to_string(),
@@ -8555,7 +8581,7 @@ fn addon_lifecycle_rollback_command(
             "json".to_string(),
         ],
         "disable" => vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "addons".to_string(),
             "enable".to_string(),
             addon_id.to_string(),
@@ -8575,7 +8601,7 @@ fn version_change_rollback_command(
     let manifest_path = manifest_source_path(previous_manifest)
         .unwrap_or_else(|| "<previous-manifest.yaml>".to_string());
     vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "addons".to_string(),
         addon_lifecycle_rollback_action(action),
         "--manifest".to_string(),
@@ -8589,7 +8615,7 @@ fn reinstall_rollback_command(previous_manifest: Option<&AddonManifest>) -> Vec<
     let manifest_path = manifest_source_path(previous_manifest)
         .unwrap_or_else(|| "<previous-manifest.yaml>".to_string());
     vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "addons".to_string(),
         "install".to_string(),
         "--manifest".to_string(),
@@ -8669,6 +8695,7 @@ fn addon_lifecycle_safety_reason(
 fn installed_manifest_from_record(record: &StoredAddonRecord) -> Result<AddonManifest> {
     let mut manifest: AddonManifest = serde_json::from_value(record.manifest.clone())
         .with_context(|| format!("invalid installed addon manifest {}", record.id))?;
+    normalize_addon_manifest_compatibility(&mut manifest);
     manifest.lifecycle = record.status.clone();
     manifest.source = record.source.clone();
     Ok(manifest)
@@ -8688,7 +8715,7 @@ fn installed_view_from_record(record: StoredAddonRecord) -> Result<InstalledAddo
     })
 }
 
-fn sync_installed_addon_capability_index(store: &ForgeStore) -> Result<()> {
+fn sync_installed_addon_capability_index(store: &FoundryStore) -> Result<()> {
     let catalog = load_addon_catalog_from_store(store, &default_addon_dirs())?;
     for manifest in catalog.addons {
         let lifecycle = authorized_lifecycle_for_manifest(store, &manifest, &manifest.lifecycle)?;
@@ -8698,7 +8725,7 @@ fn sync_installed_addon_capability_index(store: &ForgeStore) -> Result<()> {
 }
 
 fn materialize_installed_addon_capabilities(
-    store: &ForgeStore,
+    store: &FoundryStore,
     manifest: &AddonManifest,
     lifecycle: &str,
 ) -> Result<()> {
@@ -8741,7 +8768,7 @@ fn capability_index_view_from_record(
 }
 
 fn addon_permission_authorization_change_report(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_id: &str,
     permission_id: &str,
     status: &str,
@@ -8859,7 +8886,7 @@ fn planner_registration_from_policy_entry(
 }
 
 fn planner_registration_source(entry: &AddonRuntimeContractPolicyEntry) -> String {
-    if entry.runtime == "forge_core_builtin" && entry.entrypoint.starts_with("planner:") {
+    if addon_runtime_is_core_builtin(&entry.runtime) && entry.entrypoint.starts_with("planner:") {
         "internal_first_party_builder".to_string()
     } else {
         "addon_runtime_contract".to_string()
@@ -8867,8 +8894,8 @@ fn planner_registration_source(entry: &AddonRuntimeContractPolicyEntry) -> Strin
 }
 
 fn planner_registration_reason(entry: &AddonRuntimeContractPolicyEntry) -> String {
-    if entry.runtime == "forge_core_builtin" && entry.entrypoint.starts_with("planner:") {
-        "planner is currently implemented by Forge Core but declared as an Addon runtime contract"
+    if addon_runtime_is_core_builtin(&entry.runtime) && entry.entrypoint.starts_with("planner:") {
+        "planner is currently implemented by Foundry Core but declared as an Addon runtime contract"
             .to_string()
     } else if entry.dispatch_allowed {
         "planner is registered as an Addon runtime contract and can be dispatched through the runtime ledger".to_string()
@@ -8885,7 +8912,7 @@ fn planner_registration_actions(
         return (
             vec![
                 vec![
-                    "forge".to_string(),
+                    "foundry".to_string(),
                     "addons".to_string(),
                     "resolve".to_string(),
                     "--goal".to_string(),
@@ -8894,7 +8921,7 @@ fn planner_registration_actions(
                     "json".to_string(),
                 ],
                 vec![
-                    "forge".to_string(),
+                    "foundry".to_string(),
                     "plan".to_string(),
                     "--goal".to_string(),
                     "<goal>".to_string(),
@@ -8902,12 +8929,12 @@ fn planner_registration_actions(
                     "json".to_string(),
                 ],
             ],
-            vec!["forge.addons.resolve".to_string()],
+            vec!["foundry.addons.resolve".to_string()],
         );
     }
 
     let mut commands = vec![vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "addons".to_string(),
         "contract-policy".to_string(),
         "--addon".to_string(),
@@ -8917,10 +8944,10 @@ fn planner_registration_actions(
         "--output".to_string(),
         "json".to_string(),
     ]];
-    let mut mcp_tools = vec!["forge.addons.contract_policy".to_string()];
+    let mut mcp_tools = vec!["foundry.addons.contract_policy".to_string()];
     if entry.dispatch_allowed {
         commands.push(vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "addons".to_string(),
             "dispatch-planner".to_string(),
             "--addon".to_string(),
@@ -8932,7 +8959,7 @@ fn planner_registration_actions(
             "--output".to_string(),
             "json".to_string(),
         ]);
-        mcp_tools.push("forge.addons.dispatch_planner".to_string());
+        mcp_tools.push("foundry.addons.dispatch_planner".to_string());
     }
     (commands, mcp_tools)
 }
@@ -8959,7 +8986,7 @@ fn stored_runtime_dispatch_entry(
 }
 
 fn load_runtime_dispatch_entry(
-    store: &ForgeStore,
+    store: &FoundryStore,
     dispatch_id: &str,
 ) -> Result<AddonRuntimeContractDispatchEntry> {
     let record = store
@@ -9229,7 +9256,7 @@ fn local_process_worker_environment(data: &serde_json::Value) -> Result<Vec<(Str
     for name in names {
         validate_local_process_env_name(name)?;
         if seen.insert(name.to_string()) {
-            if let Ok(value) = env::var(name) {
+            if let Ok(value) = crate::brand::env_var(name) {
                 environment.push((name.to_string(), value));
             }
         }
@@ -9265,7 +9292,7 @@ fn validate_local_process_env_name(name: &str) -> Result<()> {
 }
 
 fn addon_production_mode_enabled() -> bool {
-    env::var(FORGE_PRODUCTION_MODE_ENV)
+    crate::brand::env_var(FOUNDRY_PRODUCTION_MODE_ENV)
         .map(|value| {
             matches!(
                 value.trim().to_ascii_lowercase().as_str(),
@@ -9477,7 +9504,7 @@ fn build_external_api_worker_auth_headers(
                 .auth
                 .signature_header
                 .clone()
-                .unwrap_or_else(|| "X-Forge-Worker-Signature".to_string());
+                .unwrap_or_else(|| "X-Foundry-Worker-Signature".to_string());
             let signature = format!(
                 "sha256={}",
                 hex_encode(&hmac_sha256(secret.as_bytes(), body))
@@ -9495,7 +9522,7 @@ fn resolve_external_api_worker_secret(config: &ExternalApiWorkerAuthConfig) -> R
     let secret_env = config.secret_env.as_deref().context(
         "external_api worker auth requires secret_env, hmac_secret_env or credential_vault",
     )?;
-    let secret = env::var(secret_env)
+    let secret = crate::brand::env_var(secret_env)
         .with_context(|| format!("external_api worker secret env `{secret_env}` is not set"))?;
     if secret.is_empty() {
         bail!("external_api worker secret env `{secret_env}` is empty");
@@ -9606,7 +9633,7 @@ fn runtime_worker_request(
     entry: &AddonRuntimeContractDispatchEntry,
 ) -> serde_json::Value {
     serde_json::json!({
-        "schema_version": "forge.addon_runtime_worker_request.v1",
+        "schema_version": "foundry.addon_runtime_worker_request.v1",
         "dispatch_id": entry.id,
         "worker_id": worker.id,
         "runtime": entry.runtime,
@@ -9861,7 +9888,7 @@ fn sanitize_local_process_output(
         redaction_count = redaction_count.saturating_add(detected_secrets);
     }
     if output.truncated {
-        text.push_str("\n[forge output truncated at configured byte limit]");
+        text.push_str("\n[foundry output truncated at configured byte limit]");
     }
     (text, redaction_count)
 }
@@ -10115,7 +10142,7 @@ fn post_external_api_worker_json(
         .collect::<Result<Vec<_>>>()?
         .join("");
     let header = format!(
-        "POST {} HTTP/1.1\r\nHost: {}:{}\r\nUser-Agent: forge-core/external-api-worker\r\nContent-Type: application/json\r\nAccept: application/json\r\n{extra_headers}Connection: close\r\nContent-Length: {}\r\n\r\n",
+        "POST {} HTTP/1.1\r\nHost: {}:{}\r\nUser-Agent: foundry-core/external-api-worker\r\nContent-Type: application/json\r\nAccept: application/json\r\n{extra_headers}Connection: close\r\nContent-Length: {}\r\n\r\n",
         config.path,
         config.host,
         config.port,
@@ -10158,7 +10185,7 @@ fn post_external_api_worker_https_curl(
     request_bytes: &[u8],
     extra_headers: &[(String, String)],
 ) -> Result<ExternalApiHttpResponse> {
-    let simulated = env::var("FORGE_EXTERNAL_API_WORKER_HTTPS_MODE")
+    let simulated = crate::brand::env_var("FOUNDRY_EXTERNAL_API_WORKER_HTTPS_MODE")
         .map(|value| value.eq_ignore_ascii_case("simulate"))
         .unwrap_or(false);
     if simulated {
@@ -10172,7 +10199,7 @@ fn post_external_api_worker_https_curl(
                 "secret_source": config.auth.secret_source.as_str(),
             },
             "attestation": {
-                "schema_version": "forge.addon_runtime_worker_attestation.v1",
+                "schema_version": "foundry.addon_runtime_worker_attestation.v1",
                 "execution_mode": "external_api",
                 "endpoint_scheme": "https",
                 "simulated": true,
@@ -10210,7 +10237,7 @@ fn post_external_api_worker_https_curl(
         "POST",
         &config.endpoint,
         "-H",
-        "User-Agent: forge-core/external-api-worker",
+        "User-Agent: foundry-core/external-api-worker",
         "-H",
         "Content-Type: application/json",
         "-H",
@@ -10350,7 +10377,7 @@ fn external_api_attestation(
     input: ExternalApiAttestationInput<'_>,
 ) -> serde_json::Value {
     serde_json::json!({
-        "schema_version": "forge.addon_runtime_worker_attestation.v1",
+        "schema_version": "foundry.addon_runtime_worker_attestation.v1",
         "outcome": input.outcome,
         "worker_id": worker.id,
         "runtime": worker.runtime,
@@ -10385,7 +10412,7 @@ fn local_process_attestation(
     outcome: &str,
 ) -> serde_json::Value {
     serde_json::json!({
-        "schema_version": "forge.addon_runtime_worker_attestation.v1",
+        "schema_version": "foundry.addon_runtime_worker_attestation.v1",
         "outcome": outcome,
         "worker_id": worker.id,
         "runtime": worker.runtime,
@@ -10661,7 +10688,7 @@ fn external_completion_signature_payload(
     attestation_sha256: &str,
 ) -> String {
     format!(
-        "forge.addon_runtime_contract_completion.v1\ndispatch_id={dispatch_id}\nworker_id={worker_id}\nstatus={completion_status}\nresult_sha256={result_sha256}\nattestation_sha256={attestation_sha256}"
+        "foundry.addon_runtime_contract_completion.v1\ndispatch_id={dispatch_id}\nworker_id={worker_id}\nstatus={completion_status}\nresult_sha256={result_sha256}\nattestation_sha256={attestation_sha256}"
     )
 }
 
@@ -10699,24 +10726,25 @@ fn hex_nibble(byte: u8) -> Result<u8> {
 fn execute_builtin_runtime_contract(
     entry: &AddonRuntimeContractDispatchEntry,
 ) -> Result<Option<serde_json::Value>> {
-    match entry.entrypoint.as_str() {
-        "builtin:echo" | "forge_core.echo" => Ok(Some(serde_json::json!({
-            "kind": "forge_core_builtin_echo",
+    let entrypoint = canonical_addon_entrypoint(&entry.entrypoint);
+    match entrypoint.as_str() {
+        "builtin:echo" | "foundry_core.echo" => Ok(Some(serde_json::json!({
+            "kind": "foundry_core_builtin_echo",
             "dispatch_id": entry.id.clone(),
             "addon_id": entry.addon_id.clone(),
             "contract_id": entry.contract_id.clone(),
             "capability_id": entry.capability_id.clone(),
             "input": entry.input.clone(),
         }))),
-        "builtin:ack" | "forge_core.ack" => Ok(Some(serde_json::json!({
-            "kind": "forge_core_builtin_ack",
+        "builtin:ack" | "foundry_core.ack" => Ok(Some(serde_json::json!({
+            "kind": "foundry_core_builtin_ack",
             "dispatch_id": entry.id.clone(),
             "addon_id": entry.addon_id.clone(),
             "contract_id": entry.contract_id.clone(),
             "capability_id": entry.capability_id.clone(),
             "accepted": true,
         }))),
-        "forge.multimodal.runtime_benchmark" => {
+        "foundry.multimodal.runtime_benchmark" => {
             Ok(Some(execute_builtin_multimodal_runtime_benchmark(entry)?))
         }
         _ => Ok(None),
@@ -10747,7 +10775,7 @@ fn execute_builtin_multimodal_runtime_benchmark(
         connected_runtime,
     })?;
     Ok(serde_json::json!({
-        "kind": "forge_multimodal_runtime_benchmark",
+        "kind": "foundry_multimodal_runtime_benchmark",
         "dispatch_id": entry.id.clone(),
         "addon_id": entry.addon_id.clone(),
         "contract_id": entry.contract_id.clone(),
@@ -10778,7 +10806,7 @@ fn optional_dispatch_input_bool(input: &serde_json::Value, field: &str) -> Optio
 }
 
 fn update_runtime_dispatch_entry(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mut entry: AddonRuntimeContractDispatchEntry,
     input: RuntimeDispatchUpdateInput<'_>,
 ) -> Result<AddonRuntimeContractDispatchReport> {
@@ -10900,7 +10928,7 @@ fn dispatch_report(
 }
 
 fn addon_observability_entry(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon: &AddonManifest,
     dispatch_limit: usize,
     runtime_events: &[StoredGlobalEventRecord],
@@ -11154,7 +11182,7 @@ fn addon_dispatch_observability(
         match dispatch.status.as_str() {
             "queued" => {
                 summary.queued_count += 1;
-                if dispatch.runtime == "forge_core_builtin" {
+                if addon_runtime_is_core_builtin(&dispatch.runtime) {
                     summary.queued_builtin_count += 1;
                 } else {
                     summary.queued_external_runtime_count += 1;
@@ -11687,7 +11715,10 @@ fn validate_addon_reference_field(
     ));
 }
 
-fn ensure_addon_permissions_authorized(store: &ForgeStore, manifest: &AddonManifest) -> Result<()> {
+fn ensure_addon_permissions_authorized(
+    store: &FoundryStore,
+    manifest: &AddonManifest,
+) -> Result<()> {
     let missing = missing_required_permission_authorizations(store, manifest)?;
     if missing.is_empty() {
         return Ok(());
@@ -11700,7 +11731,7 @@ fn ensure_addon_permissions_authorized(store: &ForgeStore, manifest: &AddonManif
 }
 
 fn authorized_lifecycle_for_manifest(
-    store: &ForgeStore,
+    store: &FoundryStore,
     manifest: &AddonManifest,
     lifecycle: &str,
 ) -> Result<String> {
@@ -11715,7 +11746,7 @@ fn authorized_lifecycle_for_manifest(
 }
 
 fn missing_required_permission_authorizations(
-    store: &ForgeStore,
+    store: &FoundryStore,
     manifest: &AddonManifest,
 ) -> Result<Vec<String>> {
     if manifest.permissions.is_empty() {
@@ -11840,7 +11871,7 @@ fn blocked_capability(
         .filter(|permission| permission.requires_human_approval)
         .map(|permission| {
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "addons".to_string(),
                 "authorize-permission".to_string(),
                 "--addon".to_string(),
@@ -11868,7 +11899,7 @@ fn blocked_capability(
         workflow_extensions: capability.workflow_extensions.clone(),
         required_permissions,
         authorization_commands,
-        mcp_tools: vec!["forge.addons.authorize_permission".to_string()],
+        mcp_tools: vec!["foundry.addons.authorize_permission".to_string()],
     }
 }
 
@@ -12058,14 +12089,14 @@ fn missing_capability_discovery_step(
         ),
         commands: vec![
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "addons".to_string(),
                 "catalog".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "addons".to_string(),
                 "marketplace".to_string(),
                 "--status".to_string(),
@@ -12075,8 +12106,8 @@ fn missing_capability_discovery_step(
             ],
         ],
         mcp_tools: vec![
-            "forge.addons.catalog".to_string(),
-            "forge.addons.marketplace".to_string(),
+            "foundry.addons.catalog".to_string(),
+            "foundry.addons.marketplace".to_string(),
         ],
         permission_ids: Vec::new(),
         mutates_state: false,
@@ -12108,7 +12139,7 @@ fn capability_discovery_action_requires_approval(suggestion: &CapabilitySuggesti
 }
 
 fn append_marketplace_capability_suggestions(
-    store: &ForgeStore,
+    store: &FoundryStore,
     report: &mut CapabilityResolutionReport,
 ) -> Result<()> {
     if report.missing_capabilities.is_empty() {
@@ -12189,7 +12220,7 @@ fn marketplace_capability_suggestion(
     let mut commands = Vec::new();
     if let Some(package_path) = &install_package {
         commands.push(vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "addons".to_string(),
             "install-package".to_string(),
             "--package".to_string(),
@@ -12200,7 +12231,7 @@ fn marketplace_capability_suggestion(
     }
     if let Some(package_source) = &fetch_package {
         let mut command = vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "addons".to_string(),
             "fetch-package".to_string(),
             "--source".to_string(),
@@ -12218,7 +12249,7 @@ fn marketplace_capability_suggestion(
         commands.push(command);
     }
     commands.push(vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "addons".to_string(),
         "marketplace".to_string(),
         "--repository".to_string(),
@@ -12282,12 +12313,12 @@ fn marketplace_fetch_package_source(entry: &AddonMarketplacePackageEntry) -> Opt
 }
 
 fn marketplace_suggestion_mcp_tools(can_install: bool, can_fetch: bool) -> Vec<String> {
-    let mut tools = vec!["forge.addons.marketplace".to_string()];
+    let mut tools = vec!["foundry.addons.marketplace".to_string()];
     if can_fetch {
-        tools.push("forge.addons.fetch_package".to_string());
+        tools.push("foundry.addons.fetch_package".to_string());
     }
     if can_install {
-        tools.push("forge.addons.install_package".to_string());
+        tools.push("foundry.addons.install_package".to_string());
     }
     tools
 }
@@ -12420,14 +12451,14 @@ fn capability_suggestion_action(
                 capability.id, addon.id, missing.required_by
             ),
             vec![vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "addons".to_string(),
                 "enable".to_string(),
                 addon.id.clone(),
                 "--output".to_string(),
                 "json".to_string(),
             ]],
-            vec!["forge.addons.enable".to_string()],
+            vec!["foundry.addons.enable".to_string()],
             permission_ids,
         );
     }
@@ -12435,7 +12466,7 @@ fn capability_suggestion_action(
         let mut commands = Vec::new();
         for permission_id in &permission_ids {
             commands.push(vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "addons".to_string(),
                 "authorize-permission".to_string(),
                 "--addon".to_string(),
@@ -12456,7 +12487,7 @@ fn capability_suggestion_action(
                 capability.id, addon.id
             ),
             commands,
-            vec!["forge.addons.authorize_permission".to_string()],
+            vec!["foundry.addons.authorize_permission".to_string()],
             permission_ids,
         );
     }
@@ -12469,7 +12500,7 @@ fn capability_suggestion_action(
                 capability.id, addon.id
             ),
             Vec::new(),
-            vec!["forge.addons.resolve".to_string()],
+            vec!["foundry.addons.resolve".to_string()],
             permission_ids,
         );
     }
@@ -12481,7 +12512,7 @@ fn capability_suggestion_action(
             capability.id, addon.id, addon.lifecycle
         ),
         vec![vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "addons".to_string(),
             "install".to_string(),
             "--manifest".to_string(),
@@ -12489,7 +12520,7 @@ fn capability_suggestion_action(
             "--output".to_string(),
             "json".to_string(),
         ]],
-        vec!["forge.addons.install".to_string()],
+        vec!["foundry.addons.install".to_string()],
         permission_ids,
     )
 }
@@ -12667,16 +12698,19 @@ fn extend_unique(target: &mut Vec<String>, values: Vec<String>) {
 
 fn validate_addon_compatibility(addon: &AddonManifest, issues: &mut Vec<AddonValidationIssue>) {
     let compatibility = &addon.compatibility;
-    if !compatibility.forge_version_req.trim().is_empty()
-        && !addon_version_req_satisfied(&compatibility.forge_version_req, env!("CARGO_PKG_VERSION"))
+    if !compatibility.foundry_version_req.trim().is_empty()
+        && !addon_version_req_satisfied(
+            &compatibility.foundry_version_req,
+            env!("CARGO_PKG_VERSION"),
+        )
     {
         issues.push(validation_issue(
             "error",
-            "unsupported_forge_version_requirement",
+            "unsupported_foundry_version_requirement",
             &addon.id,
             &format!(
-                "addon requires Forge version `{}` but current version is {}",
-                compatibility.forge_version_req,
+                "addon requires Foundry version `{}` but current version is {}",
+                compatibility.foundry_version_req,
                 env!("CARGO_PKG_VERSION")
             ),
         ));
@@ -12684,12 +12718,15 @@ fn validate_addon_compatibility(addon: &AddonManifest, issues: &mut Vec<AddonVal
 
     let supported_apis = supported_addon_api_versions();
     for api_version in &compatibility.api_versions {
-        if !supported_apis.contains(api_version.as_str()) {
+        if !supported_apis
+            .iter()
+            .any(|supported| crate::brand::identifier_matches(api_version, supported))
+        {
             issues.push(validation_issue(
                 "error",
                 "unsupported_addon_api_version",
                 &format!("{}:{api_version}", addon.id),
-                "addon declares an API version this Forge build does not support",
+                "addon declares an API version this Foundry build does not support",
             ));
         }
     }
@@ -12701,7 +12738,7 @@ fn validate_addon_compatibility(addon: &AddonManifest, issues: &mut Vec<AddonVal
                 "error",
                 "unsupported_addon_feature",
                 &format!("{}:{feature}", addon.id),
-                "addon declares a required feature this Forge build does not support",
+                "addon declares a required feature this Foundry build does not support",
             ));
         }
     }
@@ -12718,7 +12755,7 @@ fn validate_addon_compatibility(addon: &AddonManifest, issues: &mut Vec<AddonVal
                 "error",
                 "unsupported_addon_runtime",
                 &format!("{}:{runtime}", addon.id),
-                "addon declares a runtime this Forge build cannot route",
+                "addon declares a runtime this Foundry build cannot route",
             ));
         }
     }
@@ -12738,7 +12775,9 @@ fn validate_addon_compatibility(addon: &AddonManifest, issues: &mut Vec<AddonVal
         }
         if !declared_runtimes.is_empty()
             && !contract.runtime.trim().is_empty()
-            && !declared_runtimes.contains(contract.runtime.as_str())
+            && !declared_runtimes
+                .iter()
+                .any(|runtime| addon_runtime_identifiers_match(runtime, &contract.runtime))
         {
             issues.push(validation_issue(
                 "error",
@@ -12796,7 +12835,7 @@ fn validate_addon_compatibility(addon: &AddonManifest, issues: &mut Vec<AddonVal
 
 fn supported_addon_api_versions() -> BTreeSet<&'static str> {
     [
-        "forge.addon_manifest.v1",
+        "foundry.addon_manifest.v1",
         ADDON_CATALOG_SCHEMA_VERSION,
         ADDON_PACKAGE_SCHEMA_VERSION,
         ADDON_RUNTIME_CONTRACTS_SCHEMA_VERSION,
@@ -12825,9 +12864,56 @@ fn supported_addon_features() -> BTreeSet<&'static str> {
 }
 
 fn supported_addon_runtimes() -> BTreeSet<&'static str> {
-    ["forge_core_builtin", "wasm", "external_api"]
-        .into_iter()
-        .collect()
+    [
+        "foundry_core_builtin",
+        "forge_core_builtin", // foundry-brand-allow: legacy-compat
+        "wasm",
+        "external_api",
+    ]
+    .into_iter()
+    .collect()
+}
+
+pub fn addon_runtime_is_core_builtin(runtime: &str) -> bool {
+    matches!(
+        runtime,
+        "foundry_core_builtin" | "forge_core_builtin" // foundry-brand-allow: legacy-compat
+    )
+}
+
+fn canonical_addon_entrypoint(entrypoint: &str) -> String {
+    // foundry-brand-allow: legacy-compat
+    if let Some(suffix) = entrypoint.strip_prefix("forge_core.") {
+        return format!("foundry_core.{suffix}");
+    }
+    crate::brand::canonical_identifier(entrypoint).into_owned()
+}
+
+fn normalize_addon_manifest_compatibility(manifest: &mut AddonManifest) {
+    manifest.schema_version =
+        crate::brand::canonical_identifier(&manifest.schema_version).into_owned();
+    for api_version in &mut manifest.compatibility.api_versions {
+        *api_version = crate::brand::canonical_identifier(api_version).into_owned();
+    }
+    for runtime in &mut manifest.compatibility.runtimes {
+        if addon_runtime_is_core_builtin(runtime) {
+            *runtime = "foundry_core_builtin".to_string();
+        }
+    }
+    for contract in &mut manifest.runtime_contracts {
+        if addon_runtime_is_core_builtin(&contract.runtime) {
+            contract.runtime = "foundry_core_builtin".to_string();
+        }
+        contract.entrypoint = canonical_addon_entrypoint(&contract.entrypoint);
+    }
+}
+
+fn addon_entrypoint_identifiers_match(left: &str, right: &str) -> bool {
+    canonical_addon_entrypoint(left) == canonical_addon_entrypoint(right)
+}
+
+fn addon_runtime_identifiers_match(left: &str, right: &str) -> bool {
+    left == right || (addon_runtime_is_core_builtin(left) && addon_runtime_is_core_builtin(right))
 }
 
 fn current_platform_tags() -> BTreeSet<String> {
@@ -12889,7 +12975,7 @@ fn required_addon_migration_plan<'a>(
 }
 
 fn ensure_candidate_migration_against_installed(
-    store: &ForgeStore,
+    store: &FoundryStore,
     candidate: &AddonManifest,
 ) -> Result<()> {
     match store.load_installed_addon(&candidate.id) {
@@ -12903,7 +12989,7 @@ fn ensure_candidate_migration_against_installed(
 }
 
 fn create_candidate_migration_workflow_if_needed(
-    store: &ForgeStore,
+    store: &FoundryStore,
     candidate: &AddonManifest,
     action: &str,
     origin: &str,
@@ -12921,7 +13007,7 @@ fn create_candidate_migration_workflow_if_needed(
 }
 
 fn create_version_change_migration_workflow_if_needed(
-    store: &ForgeStore,
+    store: &FoundryStore,
     previous: &AddonManifest,
     candidate: &AddonManifest,
     action: &str,
@@ -12937,7 +13023,7 @@ fn create_version_change_migration_workflow_if_needed(
 }
 
 fn create_and_save_addon_migration_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     previous: &AddonManifest,
     candidate: &AddonManifest,
     action: &str,
@@ -13301,11 +13387,12 @@ fn is_manifest_file(path: &Path) -> bool {
 fn core_kernel_addon() -> AddonManifest {
     AddonManifest {
         schema_version: addon_manifest_schema_version(),
-        id: "forge.core.kernel".to_string(),
-        name: "Forge Core Kernel".to_string(),
+        id: "foundry.core.kernel".to_string(),
+        name: "Foundry Core Kernel".to_string(),
         version: "0.1.0".to_string(),
-        description: "Capacidades universais do runtime Forge, sem domínio operacional específico."
-            .to_string(),
+        description:
+            "Capacidades universais do runtime Foundry, sem domínio operacional específico."
+                .to_string(),
         lifecycle: "enabled".to_string(),
         source: "builtin".to_string(),
         dependencies: Vec::new(),
@@ -13396,8 +13483,8 @@ fn core_kernel_addon() -> AddonManifest {
         event_triggers: Vec::new(),
         event_listeners: Vec::new(),
         event_adapters: vec![event_adapter(
-            "forge.core.event_inbox",
-            "forge_inbox",
+            "foundry.core.event_inbox",
+            "foundry_inbox",
             "ingress",
             &["api", "webhook", "cron", "manual"],
             &[
@@ -13408,13 +13495,13 @@ fn core_kernel_addon() -> AddonManifest {
                 "resume_workflow",
                 "complete_workflow",
             ],
-            &["forge.inbound_event"],
-            "forge.event_ingest.v1",
-            "forge_policy",
+            &["foundry.inbound_event"],
+            "foundry.event_ingest.v1",
+            "foundry_policy",
         )],
         context_providers: vec![context_provider(
-            "forge.core.operating_context",
-            "forge_core_context_router",
+            "foundry.core.operating_context",
+            "foundry_core_context_router",
             &["global", "organization", "project", "processing"],
             &[
                 "operating_context",
@@ -13424,7 +13511,7 @@ fn core_kernel_addon() -> AddonManifest {
             ],
         )],
         memory_providers: vec![memory_provider(
-            "forge.core.file_memory",
+            "foundry.core.file_memory",
             "file_first_markdown",
             &["global", "organization", "project", "processing"],
             &[
@@ -13457,10 +13544,10 @@ fn workflow_automation_addon() -> AddonManifest {
     capability.workflow_extensions = vec!["n8n_primitive_research".to_string()];
     capability.deliverables = vec![
         "n8n primitive research catalog".to_string(),
-        "Forge primitive promotion recommendation".to_string(),
+        "Foundry primitive promotion recommendation".to_string(),
     ];
     capability.risks = vec![
-        "external workflow concepts must not be copied blindly or promoted without Forge validation value".to_string(),
+        "external workflow concepts must not be copied blindly or promoted without Foundry validation value".to_string(),
     ];
     capability.unknowns = vec![
         "current n8n source and documentation must be checked during research execution"
@@ -13468,7 +13555,7 @@ fn workflow_automation_addon() -> AddonManifest {
     ];
     AddonManifest {
         schema_version: addon_manifest_schema_version(),
-        id: "forge.addon.workflow_automation".to_string(),
+        id: "foundry.addon.workflow_automation".to_string(),
         name: "Workflow Automation Addon".to_string(),
         version: "0.1.0".to_string(),
         description:
@@ -13485,7 +13572,7 @@ fn workflow_automation_addon() -> AddonManifest {
             "planning_strategy",
             CAP_WORKFLOW_AUTOMATION_RESEARCH,
             "n8n_primitive_research",
-            "forge_core_builtin",
+            "foundry_core_builtin",
             "planner:n8n_primitive_research",
             &["goal", "capability_resolution", "operating_context"],
             &["workflow_tasks", "validation_rules"],
@@ -13525,7 +13612,7 @@ fn visual_workspace_addon() -> AddonManifest {
     );
     capability.workflow_extensions = vec!["creative_workspace".to_string()];
     capability.constraints = vec![
-        "visual artifacts remain Forge-owned workflow state before external export".to_string(),
+        "visual artifacts remain Foundry-owned workflow state before external export".to_string(),
         "human and AI collaboration events are auditable in the workflow".to_string(),
     ];
     capability.deliverables = vec![
@@ -13535,11 +13622,11 @@ fn visual_workspace_addon() -> AddonManifest {
     ];
     AddonManifest {
         schema_version: addon_manifest_schema_version(),
-        id: "forge.addon.visual_workspace".to_string(),
+        id: "foundry.addon.visual_workspace".to_string(),
         name: "Visual Workspace Addon".to_string(),
         version: "0.1.0".to_string(),
         description:
-            "Whiteboards, tokens, componentes, fluxos e artefatos visuais controlados pelo Forge."
+            "Whiteboards, tokens, componentes, fluxos e artefatos visuais controlados pelo Foundry."
                 .to_string(),
         lifecycle: "enabled".to_string(),
         source: "builtin_compat".to_string(),
@@ -13552,7 +13639,7 @@ fn visual_workspace_addon() -> AddonManifest {
             "planning_strategy",
             CAP_VISUAL_WORKSPACE,
             "creative_workspace",
-            "forge_core_builtin",
+            "foundry_core_builtin",
             "planner:creative_workspace",
             &["goal", "capability_resolution", "design_system"],
             &["visual_artifact_tasks", "collaboration_events"],
@@ -13563,7 +13650,7 @@ fn visual_workspace_addon() -> AddonManifest {
             title: "Visual Workspace".to_string(),
             surface: "ops_console".to_string(),
             view_type: "dashboard".to_string(),
-            component: "forge.ops.visual_workspace".to_string(),
+            component: "foundry.ops.visual_workspace".to_string(),
             route: "/ops/visual-workspace".to_string(),
             layout: AddonViewLayout {
                 zone: "main".to_string(),
@@ -13574,7 +13661,7 @@ fn visual_workspace_addon() -> AddonManifest {
             },
             data_bindings: vec![AddonViewDataBinding {
                 id: "visual_artifacts".to_string(),
-                source: "forge.ops.snapshot.visual_workflows".to_string(),
+                source: "foundry.ops.snapshot.visual_workflows".to_string(),
                 query: "workflow.visual_artifacts".to_string(),
                 scope: "workflow".to_string(),
                 refresh_seconds: 5,
@@ -13642,7 +13729,7 @@ fn software_development_addon() -> AddonManifest {
     capability.constraints = vec![
         "software-specific behavior stays in this Addon, not in the universal Core kernel"
             .to_string(),
-        "current runtime delegates to Forge Core builtin patch commands for compatibility"
+        "current runtime delegates to Foundry Core builtin patch commands for compatibility"
             .to_string(),
         "human approval gates are enforced at patch operation level".to_string(),
     ];
@@ -13657,8 +13744,8 @@ fn software_development_addon() -> AddonManifest {
         "executor",
         CAP_SOURCE_CODE_PATCH_LIFECYCLE,
         "source_code_patch_lifecycle",
-        "forge_core_builtin",
-        "forge.patch.lifecycle",
+        "foundry_core_builtin",
+        "foundry.patch.lifecycle",
         &[
             "workflow_id",
             "task_id",
@@ -13678,8 +13765,8 @@ fn software_development_addon() -> AddonManifest {
         &["source_code.patch"],
     );
     patch_executor.constraints = vec![
-        "run forge patch plan before bounded source edits".to_string(),
-        "run forge patch review and forge patch diff before apply approval".to_string(),
+        "run foundry patch plan before bounded source edits".to_string(),
+        "run foundry patch review and foundry patch diff before apply approval".to_string(),
         "record rollback proposal before explicit restore execution".to_string(),
     ];
 
@@ -13692,12 +13779,12 @@ fn software_development_addon() -> AddonManifest {
     );
     props.insert(
         "operation_contract".to_string(),
-        serde_json::json!("forge.interactive.patch_operation_plan.v1"),
+        serde_json::json!("foundry.interactive.patch_operation_plan.v1"),
     );
 
     AddonManifest {
         schema_version: addon_manifest_schema_version(),
-        id: "forge.addon.software_development".to_string(),
+        id: "foundry.addon.software_development".to_string(),
         name: "Software Development Addon".to_string(),
         version: "0.1.0".to_string(),
         description:
@@ -13715,12 +13802,12 @@ fn software_development_addon() -> AddonManifest {
             requires_human_approval: false,
             tools: vec![
                 "git".to_string(),
-                "forge.patch.plan".to_string(),
-                "forge.patch.review".to_string(),
-                "forge.patch.diff".to_string(),
-                "forge.patch.apply".to_string(),
-                "forge.patch.revert".to_string(),
-                "forge.patch.restore".to_string(),
+                "foundry.patch.plan".to_string(),
+                "foundry.patch.review".to_string(),
+                "foundry.patch.diff".to_string(),
+                "foundry.patch.apply".to_string(),
+                "foundry.patch.revert".to_string(),
+                "foundry.patch.restore".to_string(),
             ],
             resources: vec![
                 "repository.source".to_string(),
@@ -13749,7 +13836,7 @@ fn software_development_addon() -> AddonManifest {
             title: "Software Patch Workbench".to_string(),
             surface: "tui".to_string(),
             view_type: "workbench".to_string(),
-            component: "forge.interactive.patch_workbench".to_string(),
+            component: "foundry.interactive.patch_workbench".to_string(),
             route: "/interactive/patch-workbench".to_string(),
             layout: AddonViewLayout {
                 zone: "main".to_string(),
@@ -13760,7 +13847,7 @@ fn software_development_addon() -> AddonManifest {
             },
             data_bindings: vec![AddonViewDataBinding {
                 id: "patch_workbench".to_string(),
-                source: "forge.interactive.patch_workbench".to_string(),
+                source: "foundry.interactive.patch_workbench".to_string(),
                 query: "dashboard.patch_workbench_panel".to_string(),
                 scope: "repository".to_string(),
                 refresh_seconds: 2,
@@ -13770,8 +13857,8 @@ fn software_development_addon() -> AddonManifest {
                 patch_workbench_action(
                     "patch.plan",
                     "Plan patch",
-                    "Create a bounded Forge patch plan artifact before file edits.",
-                    "forge patch plan",
+                    "Create a bounded Foundry patch plan artifact before file edits.",
+                    "foundry patch plan",
                     false,
                     true,
                     "medium",
@@ -13794,7 +13881,7 @@ fn software_development_addon() -> AddonManifest {
                     "patch.review",
                     "Review patch",
                     "Persist current diff/status/check evidence before an apply approval.",
-                    "forge patch review",
+                    "foundry patch review",
                     false,
                     true,
                     "medium",
@@ -13815,7 +13902,7 @@ fn software_development_addon() -> AddonManifest {
                     "patch.diff",
                     "Inspect patch diff",
                     "Open read-only multi-file diff navigation from the Addon workbench action.",
-                    "forge patch diff",
+                    "foundry patch diff",
                     false,
                     false,
                     "low",
@@ -13836,7 +13923,7 @@ fn software_development_addon() -> AddonManifest {
                     "patch.apply",
                     "Apply patch",
                     "Record applied file snapshots and validation evidence after approved edits.",
-                    "forge patch apply",
+                    "foundry patch apply",
                     true,
                     true,
                     "high",
@@ -13857,7 +13944,7 @@ fn software_development_addon() -> AddonManifest {
                     "patch.restore",
                     "Restore files",
                     "Execute an explicitly approved patch restore path.",
-                    "forge patch restore",
+                    "foundry patch restore",
                     true,
                     true,
                     "high",
@@ -13952,7 +14039,7 @@ fn multimodal_runtime_addon() -> AddonManifest {
         "installs, devices, filesystem and network access remain blocked by default".to_string(),
     ];
     capability.risks = vec![
-        "model execution can access sensitive media unless scoped through Forge guard policy"
+        "model execution can access sensitive media unless scoped through Foundry guard policy"
             .to_string(),
         "production readiness requires validated installed or connected model/runtime benchmark evidence before promotion"
             .to_string(),
@@ -13972,8 +14059,8 @@ fn multimodal_runtime_addon() -> AddonManifest {
         "executor",
         CAP_MULTIMODAL_RUNTIME,
         "multimodal_runtime_benchmark",
-        "forge_core_builtin",
-        "forge.multimodal.runtime_benchmark",
+        "foundry_core_builtin",
+        "foundry.multimodal.runtime_benchmark",
         &[
             "project_root",
             "capability_id",
@@ -13989,7 +14076,7 @@ fn multimodal_runtime_addon() -> AddonManifest {
         &["multimodal.runtime_benchmark"],
     );
     runtime_benchmark.constraints = vec![
-        "require approved .forge/multimodal.json or explicit experimental flag".to_string(),
+        "require approved .foundry/multimodal.json or explicit experimental flag".to_string(),
         "require model guard approval before benchmark execution".to_string(),
         "record promotion_ready=true only when a connected runtime production evidence block validates approval, model manifest hash, artifacts and quality/latency thresholds".to_string(),
     ];
@@ -14008,13 +14095,13 @@ fn multimodal_runtime_addon() -> AddonManifest {
     props.insert(
         "production_connected_runtime_evidence".to_string(),
         serde_json::json!(
-            "optional .forge/multimodal-runtimes.json production block can validate approval, model manifest hash, evidence artifacts and quality/latency thresholds"
+            "optional .foundry/multimodal-runtimes.json production block can validate approval, model manifest hash, evidence artifacts and quality/latency thresholds"
         ),
     );
 
     AddonManifest {
         schema_version: addon_manifest_schema_version(),
-        id: "forge.addon.multimodal".to_string(),
+        id: "foundry.addon.multimodal".to_string(),
         name: "Multimodal Runtime Addon".to_string(),
         version: "0.1.0".to_string(),
         description:
@@ -14031,9 +14118,9 @@ fn multimodal_runtime_addon() -> AddonManifest {
             risk: "medium".to_string(),
             requires_human_approval: false,
             tools: vec![
-                "forge.multimodal.readiness".to_string(),
-                "forge.multimodal.runtime_benchmark".to_string(),
-                "forge.multimodal.guard".to_string(),
+                "foundry.multimodal.readiness".to_string(),
+                "foundry.multimodal.runtime_benchmark".to_string(),
+                "foundry.multimodal.guard".to_string(),
             ],
             resources: vec![
                 "project_multimodal_config".to_string(),
@@ -14060,7 +14147,7 @@ fn multimodal_runtime_addon() -> AddonManifest {
             title: "Multimodal Benchmark Center".to_string(),
             surface: "ops_console".to_string(),
             view_type: "workbench".to_string(),
-            component: "forge.ops.multimodal_benchmark_center".to_string(),
+            component: "foundry.ops.multimodal_benchmark_center".to_string(),
             route: "/ops/multimodal-benchmark".to_string(),
             layout: AddonViewLayout {
                 zone: "main".to_string(),
@@ -14072,7 +14159,7 @@ fn multimodal_runtime_addon() -> AddonManifest {
             data_bindings: vec![
                 AddonViewDataBinding {
                     id: "multimodal_readiness".to_string(),
-                    source: "forge.multimodal.readiness".to_string(),
+                    source: "foundry.multimodal.readiness".to_string(),
                     query: "runtime.model_readiness".to_string(),
                     scope: "project".to_string(),
                     refresh_seconds: 10,
@@ -14080,7 +14167,7 @@ fn multimodal_runtime_addon() -> AddonManifest {
                 },
                 AddonViewDataBinding {
                     id: "multimodal_guard".to_string(),
-                    source: "forge.multimodal.guard".to_string(),
+                    source: "foundry.multimodal.guard".to_string(),
                     query: "runtime.guard_matrix".to_string(),
                     scope: "workflow".to_string(),
                     refresh_seconds: 10,
@@ -14097,7 +14184,7 @@ fn multimodal_runtime_addon() -> AddonManifest {
                     palette_group: "multimodal".to_string(),
                     source_panel: "multimodal_benchmark_center".to_string(),
                     action_type: "command".to_string(),
-                    target: "forge multimodal readiness".to_string(),
+                    target: "foundry multimodal readiness".to_string(),
                     method: "CLI".to_string(),
                     permission: "multimodal.runtime_benchmark".to_string(),
                     risk_level: "low".to_string(),
@@ -14127,7 +14214,7 @@ fn multimodal_runtime_addon() -> AddonManifest {
                     palette_group: "multimodal".to_string(),
                     source_panel: "multimodal_benchmark_center".to_string(),
                     action_type: "command".to_string(),
-                    target: "forge multimodal runtime-benchmark".to_string(),
+                    target: "foundry multimodal runtime-benchmark".to_string(),
                     method: "CLI".to_string(),
                     permission: "multimodal.runtime_benchmark".to_string(),
                     requires_confirmation: true,
@@ -14276,7 +14363,7 @@ fn hackathon_factory_addon() -> AddonManifest {
     ];
     AddonManifest {
         schema_version: addon_manifest_schema_version(),
-        id: "forge.addon.hackathon_factory".to_string(),
+        id: "foundry.addon.hackathon_factory".to_string(),
         name: "Hackathon Factory Addon".to_string(),
         version: "0.1.0".to_string(),
         description: "Workflow específico para maratonas, ideathons e escopo de MVP.".to_string(),
@@ -14291,7 +14378,7 @@ fn hackathon_factory_addon() -> AddonManifest {
             "planning_strategy",
             CAP_HACKATHON_FACTORY,
             "hackathon_factory",
-            "forge_core_builtin",
+            "foundry_core_builtin",
             "planner:hackathon_factory",
             &["goal", "deadline", "regulation_context"],
             &["feasibility_gate", "mvp_backlog", "pitch_package_tasks"],
@@ -14335,12 +14422,12 @@ fn daily_goal_research_addon() -> AddonManifest {
         "Telegram delivery record".to_string(),
     ];
     capability.constraints = vec![
-        "cron and loop semantics remain native Forge graph state".to_string(),
+        "cron and loop semantics remain native Foundry graph state".to_string(),
         "deterministic code handles stable repeated work".to_string(),
         "AI is reserved for judgment and summarization".to_string(),
     ];
     capability.risks = vec![
-        "recurring research must remain Forge-owned instead of becoming an ad hoc terminal loop"
+        "recurring research must remain Foundry-owned instead of becoming an ad hoc terminal loop"
             .to_string(),
         "Telegram delivery records must not expose raw secrets".to_string(),
     ];
@@ -14348,7 +14435,7 @@ fn daily_goal_research_addon() -> AddonManifest {
         vec!["live DuckDuckGo and Playwright page availability can vary per daily run".to_string()];
     AddonManifest {
         schema_version: addon_manifest_schema_version(),
-        id: "forge.addon.research".to_string(),
+        id: "foundry.addon.research".to_string(),
         name: "Research Addon".to_string(),
         version: "0.1.0".to_string(),
         description: "Loops de pesquisa recorrente e empacotamento de relatórios.".to_string(),
@@ -14363,7 +14450,7 @@ fn daily_goal_research_addon() -> AddonManifest {
             "planning_strategy",
             CAP_DAILY_GOAL_RESEARCH,
             "daily_goal_research",
-            "forge_core_builtin",
+            "foundry_core_builtin",
             "planner:daily_goal_research",
             &["goal", "cron", "timezone"],
             &["loop_node", "research_subflows", "report_artifacts"],
@@ -14407,7 +14494,7 @@ fn notification_addon() -> AddonManifest {
         "telegram.bot_send_message",
         "telegram",
         "egress",
-        &["forge", "codex", "opencode", "gemini", "claude"],
+        &["foundry", "codex", "opencode", "gemini", "claude"],
         &["send_message", "send_report", "notify_user"],
         &["telegram.message"],
         "telegram.send_message.v1",
@@ -14419,7 +14506,7 @@ fn notification_addon() -> AddonManifest {
         "telegram.bot_send_document",
         "telegram",
         "egress",
-        &["forge", "codex", "opencode", "gemini", "claude"],
+        &["foundry", "codex", "opencode", "gemini", "claude"],
         &["send_document", "send_report", "send_final_report"],
         &["telegram.document", "telegram.report"],
         "telegram.send_document.v1",
@@ -14429,7 +14516,7 @@ fn notification_addon() -> AddonManifest {
     telegram_document_egress.secret_env = Some("TELEGRAM_BOT_TOKEN".to_string());
     AddonManifest {
         schema_version: addon_manifest_schema_version(),
-        id: "forge.addon.notification".to_string(),
+        id: "foundry.addon.notification".to_string(),
         name: "Notification Addon".to_string(),
         version: "0.1.0".to_string(),
         description: "Canais de notificação acionados por workflows.".to_string(),
@@ -14511,7 +14598,7 @@ fn async_runtime_addon() -> AddonManifest {
     capability.workflow_extensions = vec!["async_runtime_policy".to_string()];
     AddonManifest {
         schema_version: addon_manifest_schema_version(),
-        id: "forge.addon.runtime".to_string(),
+        id: "foundry.addon.runtime".to_string(),
         name: "Runtime Addon".to_string(),
         version: "0.1.0".to_string(),
         description: "Políticas de execução assíncrona e substratos de runtime.".to_string(),
@@ -14526,7 +14613,7 @@ fn async_runtime_addon() -> AddonManifest {
             "planning_strategy",
             CAP_ASYNC_RUNTIME,
             "async_runtime_policy",
-            "forge_core_builtin",
+            "foundry_core_builtin",
             "planner:async_runtime_policy",
             &["goal", "runtime_availability", "execution_policy"],
             &["async_policy", "scale_to_zero_plan"],
@@ -14699,7 +14786,7 @@ fn addon_catalog_schema_version() -> String {
 }
 
 fn addon_manifest_schema_version() -> String {
-    "forge.addon_manifest.v1".to_string()
+    "foundry.addon_manifest.v1".to_string()
 }
 
 fn capability_resolution_schema_version() -> String {
@@ -14815,7 +14902,7 @@ fn addon_permission_authorizations_schema_version() -> String {
 }
 
 fn addon_permission_gate_schema_version() -> String {
-    "forge.addon_permission_gate.v1".to_string()
+    "foundry.addon_permission_gate.v1".to_string()
 }
 
 fn default_addon_lifecycle() -> String {
@@ -14842,6 +14929,83 @@ fn default_permission_risk() -> String {
 mod security_tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn default_addon_dirs_fall_back_to_legacy_state_only_when_canonical_is_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp
+            .path()
+            .join(crate::brand::LEGACY_STATE_DIRECTORY)
+            .join("addons");
+        std::fs::create_dir_all(&legacy).unwrap();
+
+        let dirs = default_addon_dirs_under(temp.path());
+        assert_eq!(dirs[0], legacy);
+
+        let canonical = temp
+            .path()
+            .join(crate::brand::DEFAULT_STATE_DIRECTORY)
+            .join("addons");
+        std::fs::create_dir_all(&canonical).unwrap();
+        let dirs = default_addon_dirs_under(temp.path());
+        assert_eq!(dirs[0], canonical);
+        assert!(!dirs.contains(&legacy));
+        assert_eq!(dirs[1], temp.path().join("addons"));
+    }
+
+    #[test]
+    fn legacy_addon_manifest_contracts_are_read_and_normalized_to_foundry() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest_path = temp.path().join("legacy-addon.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                // foundry-brand-allow: legacy-compat
+                "schema_version": "forge.addon_manifest.v1",
+                "id": "legacy-addon",
+                "name": "Legacy Addon",
+                "version": "1.0.0",
+                "compatibility": {
+                    // foundry-brand-allow: legacy-compat
+                    "forge_version_req": "0.6",
+                    // foundry-brand-allow: legacy-compat
+                    "api_versions": ["forge.addon_manifest.v1"],
+                    // foundry-brand-allow: legacy-compat
+                    "runtimes": ["forge_core_builtin"]
+                },
+                "runtime_contracts": [{
+                    "id": "legacy-echo",
+                    // foundry-brand-allow: legacy-compat
+                    "runtime": "forge_core_builtin",
+                    // foundry-brand-allow: legacy-compat
+                    "entrypoint": "forge_core.echo"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let manifest = load_addon_manifest_from_path(&manifest_path).unwrap();
+        assert_eq!(manifest.schema_version, "foundry.addon_manifest.v1");
+        assert_eq!(manifest.compatibility.foundry_version_req, "0.6");
+        assert_eq!(
+            manifest.compatibility.api_versions,
+            ["foundry.addon_manifest.v1"]
+        );
+        assert_eq!(manifest.compatibility.runtimes, ["foundry_core_builtin"]);
+        assert_eq!(
+            manifest.runtime_contracts[0].runtime,
+            "foundry_core_builtin"
+        );
+        assert_eq!(
+            manifest.runtime_contracts[0].entrypoint,
+            "foundry_core.echo"
+        );
+
+        let catalog = finalize_catalog(vec![manifest], vec![]);
+        let validation = validate_addon_catalog(&catalog);
+        assert_eq!(validation.status, "valid", "{:?}", validation.issues);
+    }
 
     #[test]
     fn local_process_output_is_bounded_and_redacts_allowlisted_values() {
