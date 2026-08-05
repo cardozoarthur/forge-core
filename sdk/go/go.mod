@@ -1,4 +1,4 @@
-module github.com/cardozoarthur/forge-core/sdk/go
+module github.com/cardozoarthur/foundry-core/sdk/go
 
 go 1.22
 

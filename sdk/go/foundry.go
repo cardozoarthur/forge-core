@@ -1,4 +1,4 @@
-package forge
+package foundry
 
 import "context"
 

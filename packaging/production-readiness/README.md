@@ -1,4 +1,4 @@
-# Forge production-readiness drills
+# Foundry production-readiness drills
 
 This bundle produces fresh source artifacts for the `bounded_load` and
 `upgrade_rollback` gates of the supported single-host Linux profile. The drills
@@ -6,9 +6,9 @@ do not edit the production store: they open it read-only, create a consistent
 SQLite backup, and perform every mutation against a private disposable copy.
 
 The reports are inputs to the production-evidence assembler. They are not
-canonical receipts and do not make Forge production-ready by themselves.
+canonical receipts and do not make Foundry production-ready by themselves.
 Each report uses the strict source-attestation envelope
-`forge.milestone.production_source_evidence.<kind>.v1`: release identity and
+`foundry.milestone.production_source_evidence.<kind>.v1`: release identity and
 execution mode stay at the top level, manifest fields live only under
 `claims`, and collector-specific hashes and canary details live only under
 `evidence`.
@@ -16,7 +16,7 @@ execution mode stay at the top level, manifest fields live only under
 Only a report with `execution_mode: "production"` is eligible as production
 source evidence. Offline self-tests emit `execution_mode: "test"` and must
 never be copied into a production evidence draft or promoted. Test mode is
-rejected whenever `FORGE_PRODUCTION_MODE` is any case-insensitive enabled
+rejected whenever `FOUNDRY_PRODUCTION_MODE` is any case-insensitive enabled
 value (`1`, `true`, `yes`, or `on`); unknown production-mode values also fail
 closed.
 
@@ -24,15 +24,15 @@ closed.
 
 - GNU/Linux with Bash, Python 3, GNU `timeout`, OpenSSL, curl, and the standard
   GNU core utilities;
-- canonical root-owned Forge binaries and drill scripts whose path components
+- canonical root-owned Foundry binaries and drill scripts whose path components
   are not writable by group or other;
-- an absolute `0600` source store readable by the `forge` service user;
-- an existing absolute `0700` output directory owned by `forge`;
-- `/etc/forge/secret.key` available to the system service manager for
+- an absolute `0600` source store readable by the `foundry` service user;
+- an existing absolute `0700` output directory owned by `foundry`;
+- `/etc/foundry/secret.key` available to the system service manager for
   `LoadCredential`; the drill receives only the runtime credential copy;
 - a real workflow ID that is safe to use as the persistence canary.
 
-Inline vault-key values are rejected. Raw Forge, Ops, and canary responses stay
+Inline vault-key values are rejected. Raw Foundry, Ops, and canary responses stay
 inside a temporary `0700` directory and are removed; only the fixed,
 secret-free report schema is published.
 
@@ -41,14 +41,14 @@ Install the verified drill scripts at fixed root-owned paths:
 ```bash
 sudo install -d -m 0755 -o root -g root /usr/local/libexec
 sudo install -m 0755 -o root -g root \
-  packaging/production-readiness/forge-bounded-load-drill \
-  packaging/production-readiness/forge-upgrade-rollback-drill \
+  packaging/production-readiness/foundry-bounded-load-drill \
+  packaging/production-readiness/foundry-upgrade-rollback-drill \
   /usr/local/libexec/
 ```
 
 The production examples below use fixed transient system-unit names. `sudo`
 authorizes only creation of the transient unit; the drill process itself runs
-as `forge:forge`. `--collect` unloads the unit after completion, while an
+as `foundry:foundry`. `--collect` unloads the unit after completion, while an
 already-active unit with the same name makes a concurrent invocation fail
 instead of starting a second drill.
 
@@ -56,22 +56,22 @@ instead of starting a second drill.
 
 ```bash
 sudo systemd-run \
-  --unit=forge-bounded-load-drill.service \
+  --unit=foundry-bounded-load-drill.service \
   --service-type=exec \
   --wait \
   --collect \
   --pipe \
-  --property=User=forge \
-  --property=Group=forge \
-  --property=LoadCredential=forge-secret-key:/etc/forge/secret.key \
-  --setenv=FORGE_PRODUCTION_MODE=1 \
-  --setenv=FORGE_SECRET_VAULT_KEY_FILE=/run/credentials/forge-bounded-load-drill.service/forge-secret-key \
-  /usr/local/libexec/forge-bounded-load-drill \
-  --forge /usr/local/bin/forge \
-  --store /var/lib/forge/forge.sqlite \
-  --release-version 0.5.3 \
+  --property=User=foundry \
+  --property=Group=foundry \
+  --property=LoadCredential=foundry-secret-key:/etc/foundry/secret.key \
+  --setenv=FOUNDRY_PRODUCTION_MODE=1 \
+  --setenv=FOUNDRY_SECRET_VAULT_KEY_FILE=/run/credentials/foundry-bounded-load-drill.service/foundry-secret-key \
+  /usr/local/libexec/foundry-bounded-load-drill \
+  --foundry /usr/local/bin/foundry \
+  --store /var/lib/foundry/foundry.sqlite \
+  --release-version 0.6.0 \
   --canary-workflow-id wf_REPLACE_WITH_KNOWN_WORKFLOW_ID \
-  --output-dir /var/lib/forge/evidence \
+  --output-dir /var/lib/foundry/evidence \
   --operations 120 \
   --concurrency 4 \
   --max-duration-seconds 120 \
@@ -92,27 +92,27 @@ binds the installed binary SHA-256 and canary workflow ID used by the drill.
 ## Upgrade and rollback
 
 Run this against a store or pre-upgrade backup that the previous verified
-binary and the `forge` service user can read:
+binary and the `foundry` service user can read:
 
 ```bash
 sudo systemd-run \
-  --unit=forge-upgrade-rollback-drill.service \
+  --unit=foundry-upgrade-rollback-drill.service \
   --service-type=exec \
   --wait \
   --collect \
   --pipe \
-  --property=User=forge \
-  --property=Group=forge \
-  --property=LoadCredential=forge-secret-key:/etc/forge/secret.key \
-  --setenv=FORGE_PRODUCTION_MODE=1 \
-  --setenv=FORGE_SECRET_VAULT_KEY_FILE=/run/credentials/forge-upgrade-rollback-drill.service/forge-secret-key \
-  /usr/local/libexec/forge-upgrade-rollback-drill \
-  --candidate /usr/local/bin/forge \
-  --previous /opt/forge/releases/0.5.2/forge \
-  --store /var/backups/forge/forge-pre-upgrade-YYYYMMDDTHHMMSSZ.sqlite \
-  --release-version 0.5.3 \
+  --property=User=foundry \
+  --property=Group=foundry \
+  --property=LoadCredential=foundry-secret-key:/etc/foundry/secret.key \
+  --setenv=FOUNDRY_PRODUCTION_MODE=1 \
+  --setenv=FOUNDRY_SECRET_VAULT_KEY_FILE=/run/credentials/foundry-upgrade-rollback-drill.service/foundry-secret-key \
+  /usr/local/libexec/foundry-upgrade-rollback-drill \
+  --candidate /usr/local/bin/foundry \
+  --previous /opt/foundry/releases/0.5.3/foundry \
+  --store /var/backups/foundry/foundry-pre-upgrade-YYYYMMDDTHHMMSSZ.sqlite \
+  --release-version 0.6.0 \
   --canary-workflow-id wf_REPLACE_WITH_KNOWN_WORKFLOW_ID \
-  --output-dir /var/lib/forge/evidence \
+  --output-dir /var/lib/foundry/evidence \
   --max-duration-seconds 120 \
   --ops-port 18768
 ```
@@ -140,8 +140,8 @@ system services, AWS, or the production store. Its reports are deliberately
 marked `execution_mode: "test"` and are not promotable:
 
 ```bash
-bash -n packaging/production-readiness/forge-bounded-load-drill
-bash -n packaging/production-readiness/forge-upgrade-rollback-drill
+bash -n packaging/production-readiness/foundry-bounded-load-drill
+bash -n packaging/production-readiness/foundry-upgrade-rollback-drill
 bash -n packaging/production-readiness/tests/self-test.sh
 bash packaging/production-readiness/tests/self-test.sh
 ```

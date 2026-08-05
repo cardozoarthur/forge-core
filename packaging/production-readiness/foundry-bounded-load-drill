@@ -6,16 +6,16 @@ umask 077
 export LC_ALL=C
 
 fail() {
-  printf 'forge bounded-load drill: %s\n' "$*" >&2
+  printf 'foundry bounded-load drill: %s\n' "$*" >&2
   exit 1
 }
 
 usage() {
   cat <<'EOF'
 Usage:
-  forge-bounded-load-drill \
-    --forge /absolute/path/to/installed/forge \
-    --store /absolute/path/to/forge.sqlite \
+  foundry-bounded-load-drill \
+    --foundry /absolute/path/to/installed/foundry \
+    --store /absolute/path/to/foundry.sqlite \
     --release-version X.Y.Z \
     --canary-workflow-id wf_ID \
     --output-dir /absolute/private/evidence-root \
@@ -32,7 +32,7 @@ The output directory must already exist, be private, and be owned by the
 invoking user. bounded-load-report.json must not already exist.
 
 Configure the production vault key out of band through
-FORGE_SECRET_VAULT_KEY_FILE. Inline vault-key values are rejected.
+FOUNDRY_SECRET_VAULT_KEY_FILE. Inline vault-key values are rejected.
 EOF
 }
 
@@ -70,27 +70,27 @@ audit_executable() {
   local mode=""
 
   canonical="$(realpath -e -- "$candidate")" ||
-    fail "cannot resolve Forge executable: $candidate"
+    fail "cannot resolve Foundry executable: $candidate"
   [[ "$candidate" = "$canonical" ]] ||
-    fail "Forge executable path must be canonical and contain no symlink"
+    fail "Foundry executable path must be canonical and contain no symlink"
   [[ -f "$canonical" && ! -L "$canonical" && -x "$canonical" ]] ||
-    fail "Forge executable must be an executable non-symlink regular file"
+    fail "Foundry executable must be an executable non-symlink regular file"
   if [[ "$audit_root" != "/" ]]; then
     [[ "$canonical" = "$audit_root/"* ]] ||
-      fail "Forge executable is outside the test trust root"
+      fail "Foundry executable is outside the test trust root"
   fi
 
   component="$canonical"
   while true; do
     [[ ! -L "$component" ]] ||
-      fail "Forge executable path component is a symlink: $component"
+      fail "Foundry executable path component is a symlink: $component"
     [[ "$(stat -c '%u' -- "$component")" -eq "$expected_uid" ]] ||
-      fail "Forge executable path component has an untrusted owner: $component"
+      fail "Foundry executable path component has an untrusted owner: $component"
     mode="$(stat -c '%a' -- "$component")"
     [[ "$mode" =~ ^[0-7]{3,4}$ ]] ||
-      fail "cannot validate Forge executable permissions: $component"
+      fail "cannot validate Foundry executable permissions: $component"
     (( (8#$mode & 0022) == 0 )) ||
-      fail "Forge executable path component is writable by group or other: $component"
+      fail "Foundry executable path component is writable by group or other: $component"
     [[ "$component" = "$audit_root" ]] && break
     component="${component%/*}"
     [[ -n "$component" ]] || component="/"
@@ -105,21 +105,21 @@ for required_command in \
 done
 timeout --version >/dev/null 2>&1 || fail "GNU timeout is required"
 
-test_mode="${FORGE_PRODUCTION_READINESS_TEST_MODE:-0}"
+test_mode="${FOUNDRY_PRODUCTION_READINESS_TEST_MODE:-0}"
 case "$test_mode" in
   0 | 1) ;;
-  *) fail "FORGE_PRODUCTION_READINESS_TEST_MODE must be 0 or 1" ;;
+  *) fail "FOUNDRY_PRODUCTION_READINESS_TEST_MODE must be 0 or 1" ;;
 esac
 production_mode_raw=0
-if [[ -v FORGE_PRODUCTION_MODE ]]; then
-  production_mode_raw="$FORGE_PRODUCTION_MODE"
+if [[ -v FOUNDRY_PRODUCTION_MODE ]]; then
+  production_mode_raw="$FOUNDRY_PRODUCTION_MODE"
 fi
 production_mode_value="${production_mode_raw,,}"
 case "$production_mode_value" in
   0 | false | no | off) production_mode=0 ;;
   1 | true | yes | on) production_mode=1 ;;
   *)
-    fail "FORGE_PRODUCTION_MODE must be one of 0,false,no,off,1,true,yes,on"
+    fail "FOUNDRY_PRODUCTION_MODE must be one of 0,false,no,off,1,true,yes,on"
     ;;
 esac
 execution_mode="production"
@@ -129,24 +129,24 @@ trust_root="/"
 trusted_uid=0
 if [[ "$test_mode" = 1 ]]; then
   [[ "$production_mode" = 0 ]] ||
-    fail "test mode is forbidden when FORGE_PRODUCTION_MODE is enabled"
-  test_root="${FORGE_PRODUCTION_READINESS_TEST_ROOT:-}"
+    fail "test mode is forbidden when FOUNDRY_PRODUCTION_MODE is enabled"
+  test_root="${FOUNDRY_PRODUCTION_READINESS_TEST_ROOT:-}"
   [[ "$test_root" = /* && "$test_root" != "/" && -d "$test_root" && ! -L "$test_root" ]] ||
-    fail "FORGE_PRODUCTION_READINESS_TEST_ROOT must be an absolute non-symlink directory"
-  marker="$test_root/.forge-production-readiness-test-root"
+    fail "FOUNDRY_PRODUCTION_READINESS_TEST_ROOT must be an absolute non-symlink directory"
+  marker="$test_root/.foundry-production-readiness-test-root"
   [[ -f "$marker" && ! -L "$marker" ]] ||
     fail "production-readiness test sentinel is missing"
-  [[ "$(<"$marker")" = "forge-production-readiness-test-v1" ]] ||
+  [[ "$(<"$marker")" = "foundry-production-readiness-test-v1" ]] ||
     fail "production-readiness test sentinel is invalid"
   trust_root="$(realpath -e -- "$test_root")"
   trusted_uid="$(stat -c '%u' -- "$trust_root")"
 else
-  [[ -z "${FORGE_PRODUCTION_READINESS_TEST_ROOT:-}" ]] ||
-    fail "FORGE_PRODUCTION_READINESS_TEST_ROOT requires test mode"
+  [[ -z "${FOUNDRY_PRODUCTION_READINESS_TEST_ROOT:-}" ]] ||
+    fail "FOUNDRY_PRODUCTION_READINESS_TEST_ROOT requires test mode"
 fi
 readonly test_mode production_mode execution_mode trust_root trusted_uid
 
-forge_binary=""
+foundry_binary=""
 source_store_input=""
 release_version=""
 canary_workflow_id=""
@@ -159,10 +159,10 @@ ops_port_input="18767"
 
 while (($# > 0)); do
   case "$1" in
-    --forge)
+    --foundry)
       require_value "$1" "${2-}"
-      [[ -z "$forge_binary" ]] || fail "--forge may only be specified once"
-      forge_binary="$2"
+      [[ -z "$foundry_binary" ]] || fail "--foundry may only be specified once"
+      foundry_binary="$2"
       shift 2
       ;;
     --store)
@@ -228,13 +228,13 @@ while (($# > 0)); do
   esac
 done
 
-[[ -n "$forge_binary" ]] || fail "--forge is required"
+[[ -n "$foundry_binary" ]] || fail "--foundry is required"
 [[ -n "$source_store_input" ]] || fail "--store is required"
 [[ -n "$release_version" ]] || fail "--release-version is required"
 [[ -n "$canary_workflow_id" ]] || fail "--canary-workflow-id is required"
 [[ -n "$output_dir_input" ]] || fail "--output-dir is required"
 
-for path_value in "$forge_binary" "$source_store_input" "$output_dir_input"; do
+for path_value in "$foundry_binary" "$source_store_input" "$output_dir_input"; do
   require_single_line "path" "$path_value"
 done
 require_single_line "release version" "$release_version"
@@ -266,8 +266,8 @@ parse_uint "$ops_port_input" "--ops-port" ops_port
 ((ops_port >= 1024 && ops_port <= 65535)) ||
   fail "--ops-port must be between 1024 and 65535"
 
-[[ "$forge_binary" = /* ]] || fail "--forge must be an absolute path"
-audit_executable "$forge_binary" "$trust_root" "$trusted_uid"
+[[ "$foundry_binary" = /* ]] || fail "--foundry must be an absolute path"
+audit_executable "$foundry_binary" "$trust_root" "$trusted_uid"
 
 [[ "$source_store_input" = /* ]] || fail "--store must be an absolute path"
 [[ -f "$source_store_input" && ! -L "$source_store_input" ]] ||
@@ -301,25 +301,25 @@ report_path="$output_dir/bounded-load-report.json"
 [[ ! -e "$report_path" && ! -L "$report_path" ]] ||
   fail "output must be new: $report_path"
 
-[[ -z "${FORGE_SECRET_VAULT_KEY+x}" ]] ||
-  fail "FORGE_SECRET_VAULT_KEY is forbidden; use a key file"
-[[ -z "${FORGE_SECRET_VAULT_PREVIOUS_KEYS+x}" ]] ||
-  fail "FORGE_SECRET_VAULT_PREVIOUS_KEYS is forbidden; use key files"
-vault_key_file="${FORGE_SECRET_VAULT_KEY_FILE:-}"
+[[ -z "${FOUNDRY_SECRET_VAULT_KEY+x}" ]] ||
+  fail "FOUNDRY_SECRET_VAULT_KEY is forbidden; use a key file"
+[[ -z "${FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS+x}" ]] ||
+  fail "FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS is forbidden; use key files"
+vault_key_file="${FOUNDRY_SECRET_VAULT_KEY_FILE:-}"
 [[ "$vault_key_file" = /* && -f "$vault_key_file" && ! -L "$vault_key_file" && -r "$vault_key_file" ]] ||
-  fail "FORGE_SECRET_VAULT_KEY_FILE must identify a readable absolute non-symlink file"
+  fail "FOUNDRY_SECRET_VAULT_KEY_FILE must identify a readable absolute non-symlink file"
 
-reported_version="$("$forge_binary" --version 2>/dev/null)" ||
-  fail "Forge executable did not report a version"
-[[ "$reported_version" = "forge $release_version" ]] ||
-  fail "Forge executable version does not match --release-version"
-binary_sha256="$(sha256sum "$forge_binary" | awk '{print $1}')"
+reported_version="$("$foundry_binary" --version 2>/dev/null)" ||
+  fail "Foundry executable did not report a version"
+[[ "$reported_version" = "foundry $release_version" ]] ||
+  fail "Foundry executable version does not match --release-version"
+binary_sha256="$(sha256sum "$foundry_binary" | awk '{print $1}')"
 [[ "$binary_sha256" =~ ^[0-9a-f]{64}$ ]] ||
-  fail "Forge executable digest is invalid"
+  fail "Foundry executable digest is invalid"
 
-work_dir="$(mktemp -d /tmp/forge-bounded-load.XXXXXX)"
+work_dir="$(mktemp -d /tmp/foundry-bounded-load.XXXXXX)"
 chmod 0700 "$work_dir"
-printf '%s\n' "forge-bounded-load-work-v1" >"$work_dir/.sentinel"
+printf '%s\n' "foundry-bounded-load-work-v1" >"$work_dir/.sentinel"
 stage_dir=""
 stage_report=""
 server_pid=""
@@ -339,9 +339,9 @@ cleanup() {
     -d "$stage_dir" && ! -L "$stage_dir" ]]; then
     rm -rf -- "$stage_dir"
   fi
-  if [[ "$work_dir" = /tmp/forge-bounded-load.* &&
+  if [[ "$work_dir" = /tmp/foundry-bounded-load.* &&
     -f "$work_dir/.sentinel" &&
-    "$(<"$work_dir/.sentinel")" = "forge-bounded-load-work-v1" ]]; then
+    "$(<"$work_dir/.sentinel")" = "foundry-bounded-load-work-v1" ]]; then
     rm -rf -- "$work_dir"
   fi
 }
@@ -357,19 +357,19 @@ stage_report="$stage_dir/bounded-load-report.json"
 vault_env=(
   env
   -u CREDENTIALS_DIRECTORY
-  -u FORGE_BACKUP_OFFHOST_COMMAND_FILE
-  -u FORGE_BACKUP_OFFHOST_DESTINATION_FILE
-  -u FORGE_BACKUP_OFFHOST_GENERATION_FILE
-  -u FORGE_OPS_BEARER_TOKEN
-  FORGE_PRODUCTION_MODE=1
-  "FORGE_SECRET_VAULT_KEY_FILE=$vault_key_file"
+  -u FOUNDRY_BACKUP_OFFHOST_COMMAND_FILE
+  -u FOUNDRY_BACKUP_OFFHOST_DESTINATION_FILE
+  -u FOUNDRY_BACKUP_OFFHOST_GENERATION_FILE
+  -u FOUNDRY_OPS_BEARER_TOKEN
+  FOUNDRY_PRODUCTION_MODE=1
+  "FOUNDRY_SECRET_VAULT_KEY_FILE=$vault_key_file"
 )
 
-run_forge() {
+run_foundry() {
   local label="$1"
   shift
   if timeout --foreground --signal=TERM --kill-after=2s "${max_duration_seconds}s" \
-    "${vault_env[@]}" "$forge_binary" "$@"; then
+    "${vault_env[@]}" "$foundry_binary" "$@"; then
     return 0
   fi
   fail "$label failed or exceeded the bounded timeout"
@@ -407,9 +407,9 @@ PY
   fail "SQLite did not create a safe non-empty source backup"
 cp --reflink=auto --no-clobber -- "$backup_store" "$working_store"
 chmod 0600 "$working_store"
-run_forge "disposable store check" \
+run_foundry "disposable store check" \
   --store "$working_store" store check --output json >"$work_dir/check-before.json"
-run_forge "canary inspection before load" \
+run_foundry "canary inspection before load" \
   --store "$working_store" inspect "$canary_workflow_id" --output json \
   >"$work_dir/canary-before.json"
 
@@ -454,7 +454,7 @@ stop_rss_monitor() {
   if [[ "$rss_monitor_pid" =~ ^[0-9]+$ ]]; then
     [[ ! -e "$rss_monitor_stop" && ! -L "$rss_monitor_stop" ]] ||
       fail "RSS monitor stop marker unexpectedly exists"
-    printf '%s\n' "forge-bounded-load-rss-monitor-stop-v1" >"$rss_monitor_stop"
+    printf '%s\n' "foundry-bounded-load-rss-monitor-stop-v1" >"$rss_monitor_stop"
     if wait "$rss_monitor_pid" 2>/dev/null; then
       monitor_status=0
     else
@@ -477,8 +477,8 @@ start_ops() {
   [[ ! -e "$rss_monitor_stop" && ! -L "$rss_monitor_stop" ]] ||
     fail "RSS monitor stop marker unexpectedly exists before startup"
   "${vault_env[@]}" \
-    "FORGE_OPS_BEARER_TOKEN_FILE=$ops_token_file" \
-    "$forge_binary" \
+    "FOUNDRY_OPS_BEARER_TOKEN_FILE=$ops_token_file" \
+    "$foundry_binary" \
     --store "$working_store" \
     ops serve \
     --project-root "$work_dir/workspace" \
@@ -606,10 +606,10 @@ wait "$server_pid" 2>/dev/null || true
 server_pid=""
 stop_rss_monitor
 
-run_forge "post-crash store check" \
+run_foundry "post-crash store check" \
   --store "$working_store" store check --output json >"$work_dir/check-after-crash.json"
 start_ops 2
-run_forge "canary inspection after restart" \
+run_foundry "canary inspection after restart" \
   --store "$working_store" inspect "$canary_workflow_id" --output json \
   >"$work_dir/canary-after.json"
 kill -TERM "$server_pid" 2>/dev/null ||
@@ -618,7 +618,7 @@ wait "$server_pid" ||
   fail "restarted Ops did not stop cleanly"
 server_pid=""
 stop_rss_monitor
-run_forge "final store check" \
+run_foundry "final store check" \
   --store "$working_store" store check --output json >"$work_dir/check-final.json"
 
 max_rss_observed="$(awk 'BEGIN { max = 0 } $1 > max { max = $1 } END { print max }' "$rss_samples")"
@@ -663,13 +663,13 @@ import sys
     canary_workflow_id,
 ) = sys.argv[1:]
 report = {
-    "schema_version": "forge.milestone.production_source_evidence.bounded_load.v1",
+    "schema_version": "foundry.milestone.production_source_evidence.bounded_load.v1",
     "kind": "bounded_load",
     "status": "passed",
     "subject_version": release,
     "observed_at_epoch": int(observed),
     "execution_mode": execution_mode,
-    "producer": "forge-bounded-load-drill",
+    "producer": "foundry-bounded-load-drill",
     "claims": {
         "duration_seconds": int(duration),
         "concurrency": int(concurrency),
@@ -684,7 +684,7 @@ report = {
         "crash_restart_verified": True,
     },
     "evidence": {
-        "collector_schema_version": "forge.production_readiness.bounded_load_drill.v1",
+        "collector_schema_version": "foundry.production_readiness.bounded_load_drill.v1",
         "binary_sha256": binary_sha256,
         "canary_workflow_id": canary_workflow_id,
     },
@@ -710,5 +710,5 @@ ln -- "$stage_report" "$report_path" ||
 rm -f -- "$stage_report"
 rm -rf -- "$stage_dir"
 stage_dir=""
-printf 'forge bounded-load drill: passed (%s, sha256=%s)\n' \
+printf 'foundry bounded-load drill: passed (%s, sha256=%s)\n' \
   "$report_path" "$(sha256sum "$report_path" | awk '{print $1}')"

@@ -4,13 +4,15 @@ useDefault = true
 [[allowlists]]
 description = "Ignore local build and runtime state that is never distributed"
 paths = [
+    '''^\.foundry/artifacts/''',
+    # foundry-brand-allow: legacy-compat
     '''^\.forge/artifacts/''',
     '''^\.serena/''',
     '''^target/''',
 ]
 
 [[allowlists]]
-description = "Forge context routing cache keys are content hashes, not credentials"
+description = "Foundry context routing cache keys are content hashes, not credentials"
 condition = "AND"
 targetRules = ["generic-api-key"]
 paths = ['''^docs/reports/worktree-sandbox-hardening-2026-07-22/context-package\.json$''']

@@ -1,4 +1,4 @@
-# Forge Rust SDK
+# Foundry Rust SDK
 
 Status: scaffold
 
@@ -10,5 +10,9 @@ Purpose:
 Contract:
 - expose workflow builders
 - run async graphs
-- preserve Forge-owned context and resume ids
+- preserve Foundry-owned context and resume ids
 - act as a native aggregator or embedded worker in multi-language graphs
+
+The canonical crate is `foundry-sdk-rust`. The old `forge-sdk-rust` package <!-- foundry-brand-allow: legacy-compat -->
+name denotes the legacy Forge generation and requires a separately published <!-- foundry-brand-allow: legacy-compat -->
+compatibility wrapper if existing registry consumers still depend on it.

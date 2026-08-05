@@ -23,6 +23,9 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Enforce Foundry branding
+        run: bash scripts/check-foundry-branding.sh
+
       - name: Show pinned toolchain
         run: |
           rustc --version
@@ -57,10 +60,10 @@ jobs:
         run: cargo build --release --all-features --locked
 
       - name: Run bounded production smoke
-        run: bash packaging/smoke-production.sh target/release/forge
+        run: bash packaging/smoke-production.sh target/release/foundry
 
       - name: Run off-host backup smoke
-        run: bash packaging/smoke-offhost-backup.sh target/release/forge
+        run: bash packaging/smoke-offhost-backup.sh target/release/foundry
 
       - name: Run provider-neutral adoption self-tests
         run: bash packaging/provider-adoption/single-host/tests/self-test.sh
@@ -87,30 +90,30 @@ jobs:
           cargo package --list --locked >"$package_list"
 
           printf '%s\n' \
-            .agents/skills/forge-core/SKILL.md \
-            .agents/skills/forge-core-addons-ui/SKILL.md \
-            .agents/skills/forge-core-agent/SKILL.md \
-            .agents/skills/forge-core-artifacts/SKILL.md \
-            .agents/skills/forge-core-context/SKILL.md \
-            .agents/skills/forge-core-documentation/SKILL.md \
-            .agents/skills/forge-core-executors/SKILL.md \
-            .agents/skills/forge-core-missions/SKILL.md \
-            .agents/skills/forge-core-runtime/SKILL.md \
-            .agents/skills/forge-core-workflow/SKILL.md \
-            .agents/skills/forge-core-workspaces/SKILL.md |
+            .agents/skills/foundry-core/SKILL.md \
+            .agents/skills/foundry-core-addons-ui/SKILL.md \
+            .agents/skills/foundry-core-agent/SKILL.md \
+            .agents/skills/foundry-core-artifacts/SKILL.md \
+            .agents/skills/foundry-core-context/SKILL.md \
+            .agents/skills/foundry-core-documentation/SKILL.md \
+            .agents/skills/foundry-core-executors/SKILL.md \
+            .agents/skills/foundry-core-missions/SKILL.md \
+            .agents/skills/foundry-core-runtime/SKILL.md \
+            .agents/skills/foundry-core-workflow/SKILL.md \
+            .agents/skills/foundry-core-workspaces/SKILL.md |
             LC_ALL=C sort >"$expected"
           grep -E '^\.agents/skills/[^/]+/SKILL\.md$' "$package_list" |
             LC_ALL=C sort >"$actual"
           diff -u "$expected" "$actual"
 
-          for directory in installer packaging src tests; do
+          for directory in installer packaging scripts src tests; do
             find "$directory" -type f -print | LC_ALL=C sort >"$expected"
             grep -E "^${directory}/" "$package_list" | LC_ALL=C sort >"$actual"
             diff -u "$expected" "$actual"
           done
 
           grep -Fx 'docs/production-single-host.md' "$package_list" >/dev/null
-          grep -Fx 'skills/forge-core/SKILL.md' "$package_list" >/dev/null
+          grep -Fx 'skills/foundry-core/SKILL.md' "$package_list" >/dev/null
           cargo package --locked
 
   windows-msvc:

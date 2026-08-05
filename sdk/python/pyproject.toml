@@ -3,11 +3,10 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "forge-sdk"
-version = "0.0.0"
-description = "Forge Python SDK scaffold for async workflow orchestration."
+name = "foundry-sdk"
+version = "0.6.0"
+description = "Foundry Python SDK scaffold for async workflow orchestration."
 requires-python = ">=3.10"
 
 [tool.setuptools]
-packages = ["forge_sdk"]
-
+packages = ["foundry_sdk", "forge_sdk"] # foundry-brand-allow: legacy-compat

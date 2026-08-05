@@ -1,5 +1,5 @@
 [Unit]
-Description=Run Forge production health alerts every five minutes
+Description=Run Foundry production health alerts every five minutes
 
 [Timer]
 OnBootSec=2min
@@ -7,7 +7,7 @@ OnUnitActiveSec=5min
 AccuracySec=30s
 RandomizedDelaySec=30s
 Persistent=true
-Unit=forge-production-alert.service
+Unit=foundry-production-alert.service
 
 [Install]
 WantedBy=timers.target

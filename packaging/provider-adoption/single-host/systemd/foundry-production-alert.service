@@ -1,0 +1,46 @@
+[Unit]
+Description=Check Foundry production health and alert through Telegram
+Documentation=https://github.com/cardozoarthur/foundry-core/blob/main/packaging/provider-adoption/single-host/README.md
+After=network-online.target foundry-ops.service foundry-backup.timer
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+TimeoutStartSec=2min
+ExecStart=/usr/local/libexec/foundry-production-alert
+LoadCredential=foundry-telegram-alert:/etc/foundry/credentials/foundry-telegram-alert
+StateDirectory=foundry-production-alert
+StateDirectoryMode=0700
+Environment=FOUNDRY_STORE_PATH=/var/lib/foundry/foundry.sqlite
+Environment=FOUNDRY_BACKUP_DIR=/var/backups/foundry
+Environment=FOUNDRY_OFFHOST_MAX_AGE_SECONDS=86400
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+ReadOnlyPaths=-/var/lib/foundry
+ReadOnlyPaths=-/var/backups/foundry
+ReadWritePaths=/var/lib/foundry-production-alert
+LimitCORE=0

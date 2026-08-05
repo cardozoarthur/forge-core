@@ -1,16 +1,16 @@
-export type ForgeInvocationKind =
+export type FoundryInvocationKind =
   | "workflow"
   | "node"
   | "resume"
   | "join";
 
-export interface ForgeClientOptions {
+export interface FoundryClientOptions {
   baseUrl?: string;
   token?: string | null;
 }
 
-export interface ForgeInvocation {
-  kind: ForgeInvocationKind;
+export interface FoundryInvocation {
+  kind: FoundryInvocationKind;
   workflow_id: string;
   node_id?: string;
   resume_id?: string;
@@ -19,29 +19,44 @@ export interface ForgeInvocation {
   branches?: unknown[];
 }
 
-export interface ForgeResult {
+export interface FoundryResult {
   baseUrl: string;
   tokenPresent: boolean;
-  payload: ForgeInvocation;
+  payload: FoundryInvocation;
 }
 
-export declare class ForgeNode {
-  constructor(client: ForgeClient, workflowId: string, nodeId: string);
-  run(input?: unknown): Promise<ForgeResult>;
+export declare class FoundryNode {
+  constructor(client: FoundryClient, workflowId: string, nodeId: string);
+  run(input?: unknown): Promise<FoundryResult>;
 }
 
-export declare class ForgeWorkflow {
-  constructor(client: ForgeClient, workflowId: string);
-  node(nodeId: string): ForgeNode;
-  run(input?: unknown): Promise<ForgeResult>;
-  resume(resumeId: string): Promise<ForgeResult>;
-  subworkflow(workflowId: string): Promise<ForgeWorkflow>;
+export declare class FoundryWorkflow {
+  constructor(client: FoundryClient, workflowId: string);
+  node(nodeId: string): FoundryNode;
+  run(input?: unknown): Promise<FoundryResult>;
+  resume(resumeId: string): Promise<FoundryResult>;
+  subworkflow(workflowId: string): Promise<FoundryWorkflow>;
   parallel(
     workflows: Promise<unknown>[],
-  ): Promise<{ join(aggregatorId: string): Promise<ForgeResult> }>;
+  ): Promise<{ join(aggregatorId: string): Promise<FoundryResult> }>;
 }
 
-export declare class ForgeClient {
-  constructor(options?: ForgeClientOptions);
-  workflow(workflowId: string): ForgeWorkflow;
+export declare class FoundryClient {
+  constructor(options?: FoundryClientOptions);
+  workflow(workflowId: string): FoundryWorkflow;
 }
+
+/** @deprecated Use FoundryInvocationKind during the 0.6.x migration window. */
+export type ForgeInvocationKind = FoundryInvocationKind; // foundry-brand-allow: legacy-compat
+/** @deprecated Use FoundryClientOptions during the 0.6.x migration window. */
+export type ForgeClientOptions = FoundryClientOptions; // foundry-brand-allow: legacy-compat
+/** @deprecated Use FoundryInvocation during the 0.6.x migration window. */
+export type ForgeInvocation = FoundryInvocation; // foundry-brand-allow: legacy-compat
+/** @deprecated Use FoundryResult during the 0.6.x migration window. */
+export type ForgeResult = FoundryResult; // foundry-brand-allow: legacy-compat
+/** @deprecated Use the Foundry-prefixed classes. */
+export {
+  FoundryClient as ForgeClient, // foundry-brand-allow: legacy-compat
+  FoundryNode as ForgeNode, // foundry-brand-allow: legacy-compat
+  FoundryWorkflow as ForgeWorkflow, // foundry-brand-allow: legacy-compat
+};

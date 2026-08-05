@@ -24,6 +24,6 @@ done
 
 [[ -n "$output" && -n "$url" ]]
 asset="${url##*/}"
-printf '%s\n' "$asset" >>"$FORGE_TEST_DOWNLOAD_LOG"
-[[ -f "$FORGE_TEST_RELEASE_DIR/$asset" ]] || exit 22
-cp -- "$FORGE_TEST_RELEASE_DIR/$asset" "$output"
+printf '%s\n' "$asset" >>"$FOUNDRY_TEST_DOWNLOAD_LOG"
+[[ -f "$FOUNDRY_TEST_RELEASE_DIR/$asset" ]] || exit 22
+cp -- "$FOUNDRY_TEST_RELEASE_DIR/$asset" "$output"

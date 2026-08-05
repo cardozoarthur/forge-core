@@ -3,11 +3,11 @@ set -euo pipefail
 umask 077
 
 fail() {
-  echo "forge backup: $*" >&2
+  echo "foundry backup: $*" >&2
   exit 1
 }
 
-production_mode_value="${FORGE_PRODUCTION_MODE:-}"
+production_mode_value="${FOUNDRY_PRODUCTION_MODE:-}"
 production_mode_value="${production_mode_value#"${production_mode_value%%[![:space:]]*}"}"
 production_mode_value="${production_mode_value%"${production_mode_value##*[![:space:]]}"}"
 production_mode_value="${production_mode_value,,}"
@@ -16,34 +16,34 @@ case "$production_mode_value" in
   *) production_mode_enabled=false ;;
 esac
 readonly production_mode_enabled
-readonly test_mode="${FORGE_BACKUP_TEST_MODE:-0}"
+readonly test_mode="${FOUNDRY_BACKUP_TEST_MODE:-0}"
 
 case "$test_mode" in
   0 | 1) ;;
-  *) fail "FORGE_BACKUP_TEST_MODE must be 0 or 1" ;;
+  *) fail "FOUNDRY_BACKUP_TEST_MODE must be 0 or 1" ;;
 esac
 
 if [[ "$test_mode" = 1 ]]; then
   [[ "$production_mode_enabled" = false ]] ||
-    fail "test overrides are forbidden when FORGE_PRODUCTION_MODE is enabled"
-  [[ -z "${FORGE_BACKUP_OFFHOST_COMMAND_FILE:-}" &&
-    -z "${FORGE_BACKUP_OFFHOST_DESTINATION_FILE:-}" &&
-    -z "${FORGE_BACKUP_OFFHOST_GENERATION_FILE:-}" &&
-    -z "${FORGE_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE:-}" ]] ||
-    fail "test mode derives all configuration paths from FORGE_BACKUP_TEST_ROOT"
+    fail "test overrides are forbidden when FOUNDRY_PRODUCTION_MODE is enabled"
+  [[ -z "${FOUNDRY_BACKUP_OFFHOST_COMMAND_FILE:-}" &&
+    -z "${FOUNDRY_BACKUP_OFFHOST_DESTINATION_FILE:-}" &&
+    -z "${FOUNDRY_BACKUP_OFFHOST_GENERATION_FILE:-}" &&
+    -z "${FOUNDRY_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE:-}" ]] ||
+    fail "test mode derives all configuration paths from FOUNDRY_BACKUP_TEST_ROOT"
 
-  test_root="${FORGE_BACKUP_TEST_ROOT:-}"
+  test_root="${FOUNDRY_BACKUP_TEST_ROOT:-}"
   [[ "$test_root" = /* && "$test_root" != "/" &&
     -d "$test_root" && ! -L "$test_root" ]] ||
-    fail "FORGE_BACKUP_TEST_ROOT must be an absolute non-symlink directory"
+    fail "FOUNDRY_BACKUP_TEST_ROOT must be an absolute non-symlink directory"
 
-  test_marker="$test_root/.forge-backup-test-root"
+  test_marker="$test_root/.foundry-backup-test-root"
   test_marker_lines=()
   [[ -f "$test_marker" && ! -L "$test_marker" ]] ||
     fail "test root sentinel is missing or unsafe: $test_marker"
   mapfile -t test_marker_lines <"$test_marker"
   [[ ${#test_marker_lines[@]} -eq 1 &&
-    "${test_marker_lines[0]}" = "forge-backup-smoke-v1" ]] ||
+    "${test_marker_lines[0]}" = "foundry-backup-smoke-v1" ]] ||
     fail "test root sentinel is invalid: $test_marker"
 
   for test_directory in bin state backups config; do
@@ -52,34 +52,34 @@ if [[ "$test_mode" = 1 ]]; then
       fail "test root directory is missing or unsafe: $test_root/$test_directory"
   done
 
-  forge_binary="$test_root/bin/forge"
-  store="$test_root/state/forge.sqlite"
+  foundry_binary="$test_root/bin/foundry"
+  store="$test_root/state/foundry.sqlite"
   backup_dir="$test_root/backups"
   default_offhost_command_file="$test_root/config/offhost-command"
   default_offhost_destination_file="$test_root/config/offhost-destination"
   default_offhost_generation_file="$test_root/config/offhost-generation"
   default_offhost_mount_identity_file="$test_root/config/offhost-mount-identity"
 else
-  [[ -z "${FORGE_BACKUP_TEST_ROOT:-}" &&
-    -z "${FORGE_BACKUP_TEST_TIMESTAMP:-}" ]] ||
-    fail "test-only overrides require FORGE_BACKUP_TEST_MODE=1"
+  [[ -z "${FOUNDRY_BACKUP_TEST_ROOT:-}" &&
+    -z "${FOUNDRY_BACKUP_TEST_TIMESTAMP:-}" ]] ||
+    fail "test-only overrides require FOUNDRY_BACKUP_TEST_MODE=1"
 
-  forge_binary="/usr/local/bin/forge"
-  store="/var/lib/forge/forge.sqlite"
-  backup_dir="/var/backups/forge"
-  default_offhost_command_file="/etc/forge/backup-offhost-command"
-  default_offhost_destination_file="/etc/forge/backup-offhost-destination"
-  default_offhost_generation_file="/etc/forge/backup-offhost-generation"
-  default_offhost_mount_identity_file="/etc/forge/backup-offhost-mount-identity"
+  foundry_binary="/usr/local/bin/foundry"
+  store="/var/lib/foundry/foundry.sqlite"
+  backup_dir="/var/backups/foundry"
+  default_offhost_command_file="/etc/foundry/backup-offhost-command"
+  default_offhost_destination_file="/etc/foundry/backup-offhost-destination"
+  default_offhost_generation_file="/etc/foundry/backup-offhost-generation"
+  default_offhost_mount_identity_file="/etc/foundry/backup-offhost-mount-identity"
 fi
 
-readonly forge_binary
+readonly foundry_binary
 readonly store
 readonly backup_dir
-readonly offhost_command_file="${FORGE_BACKUP_OFFHOST_COMMAND_FILE:-$default_offhost_command_file}"
-readonly offhost_destination_file="${FORGE_BACKUP_OFFHOST_DESTINATION_FILE:-$default_offhost_destination_file}"
-readonly offhost_generation_file="${FORGE_BACKUP_OFFHOST_GENERATION_FILE:-$default_offhost_generation_file}"
-readonly offhost_mount_identity_file="${FORGE_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE:-$default_offhost_mount_identity_file}"
+readonly offhost_command_file="${FOUNDRY_BACKUP_OFFHOST_COMMAND_FILE:-$default_offhost_command_file}"
+readonly offhost_destination_file="${FOUNDRY_BACKUP_OFFHOST_DESTINATION_FILE:-$default_offhost_destination_file}"
+readonly offhost_generation_file="${FOUNDRY_BACKUP_OFFHOST_GENERATION_FILE:-$default_offhost_generation_file}"
+readonly offhost_mount_identity_file="${FOUNDRY_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE:-$default_offhost_mount_identity_file}"
 readonly local_retention_days=14
 
 read_single_line_config() {
@@ -170,7 +170,7 @@ load_directory_mount_identity() {
     fail "directory mount identity file must contain no symlink or traversal"
   mapfile -t identity_lines <"$identity_path"
   [[ ${#identity_lines[@]} -eq 5 &&
-    "${identity_lines[0]}" = "forge-directory-mount-v1" &&
+    "${identity_lines[0]}" = "foundry-directory-mount-v1" &&
     "${identity_lines[1]}" = target=* &&
     "${identity_lines[2]}" = source=* &&
     "${identity_lines[3]}" = fstype=* &&
@@ -316,15 +316,15 @@ active_challenge_dir=""
 active_retention_file=""
 cleanup_runtime_files() {
   if [[ -n "$active_verify_file" &&
-    "$active_verify_file" = "$backup_dir/.forge-offhost-verify."* ]]; then
+    "$active_verify_file" = "$backup_dir/.foundry-offhost-verify."* ]]; then
     rm -f -- "$active_verify_file"
   fi
   if [[ -n "$active_retention_file" &&
-    "$active_retention_file" = "$backup_dir/.forge-retention-list."* ]]; then
+    "$active_retention_file" = "$backup_dir/.foundry-retention-list."* ]]; then
     rm -f -- "$active_retention_file"
   fi
   if [[ -n "$active_challenge_dir" &&
-    "$active_challenge_dir" = "$backup_dir/.forge-recovery-challenge."* ]]; then
+    "$active_challenge_dir" = "$backup_dir/.foundry-recovery-challenge."* ]]; then
     rm -rf -- "$active_challenge_dir"
   fi
 }
@@ -355,23 +355,23 @@ run_offhost_command() {
   require_current_directory_mount_identity
 
   env \
-    -u FORGE_SECRET_VAULT_KEY \
-    -u FORGE_SECRET_VAULT_KEY_FILE \
-    -u FORGE_SECRET_VAULT_PREVIOUS_KEYS \
-    -u FORGE_SECRET_VAULT_PREVIOUS_KEY_FILES \
-    FORGE_DIRECTORY_MOUNT_IDENTITY_FILE="$offhost_mount_identity_file" \
+    -u FOUNDRY_SECRET_VAULT_KEY \
+    -u FOUNDRY_SECRET_VAULT_KEY_FILE \
+    -u FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS \
+    -u FOUNDRY_SECRET_VAULT_PREVIOUS_KEY_FILES \
+    FOUNDRY_DIRECTORY_MOUNT_IDENTITY_FILE="$offhost_mount_identity_file" \
     "$offhost_command" "$@"
 }
 
-run_forge_command() {
+run_foundry_command() {
   env \
     -u CREDENTIALS_DIRECTORY \
-    -u FORGE_BACKUP_OFFHOST_COMMAND_FILE \
-    -u FORGE_BACKUP_OFFHOST_DESTINATION_FILE \
-    -u FORGE_BACKUP_OFFHOST_GENERATION_FILE \
-    -u FORGE_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE \
-    -u FORGE_DIRECTORY_MOUNT_IDENTITY_FILE \
-    "$forge_binary" "$@"
+    -u FOUNDRY_BACKUP_OFFHOST_COMMAND_FILE \
+    -u FOUNDRY_BACKUP_OFFHOST_DESTINATION_FILE \
+    -u FOUNDRY_BACKUP_OFFHOST_GENERATION_FILE \
+    -u FOUNDRY_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE \
+    -u FOUNDRY_DIRECTORY_MOUNT_IDENTITY_FILE \
+    "$foundry_binary" "$@"
 }
 
 verify_offhost_copy() {
@@ -379,7 +379,7 @@ verify_offhost_copy() {
   local expected_sha256="$2"
   local remote_sha256=""
 
-  active_verify_file="$(mktemp "$backup_dir/.forge-offhost-verify.XXXXXX")"
+  active_verify_file="$(mktemp "$backup_dir/.foundry-offhost-verify.XXXXXX")"
   if ! run_offhost_command verify \
     --destination "$offhost_destination" \
     --object "$backup_object" >"$active_verify_file"; then
@@ -405,7 +405,7 @@ run_recovery_challenge() {
   local restored_store=""
 
   active_challenge_dir="$(
-    mktemp -d "$backup_dir/.forge-recovery-challenge.XXXXXX"
+    mktemp -d "$backup_dir/.foundry-recovery-challenge.XXXXXX"
   )"
   downloaded_store="$active_challenge_dir/downloaded.sqlite"
   downloaded_digest_file="$active_challenge_dir/downloaded.sqlite.sha256"
@@ -432,14 +432,14 @@ run_recovery_challenge() {
     "$actual_downloaded_sha256" = "$expected_sha256" ]] ||
     fail "recovery download digest mismatch for $backup_object"
 
-  run_forge_command --store "$downloaded_store" store check \
+  run_foundry_command --store "$downloaded_store" store check \
     --output json >"$active_challenge_dir/downloaded-check.json"
-  run_forge_command --store "$restored_store" store restore \
+  run_foundry_command --store "$restored_store" store restore \
     --source "$downloaded_store" \
-    --approved-by forge-backup-recovery-challenge \
+    --approved-by foundry-backup-recovery-challenge \
     --confirm-restore \
     --output json >"$active_challenge_dir/restore.json"
-  run_forge_command --store "$restored_store" store check \
+  run_foundry_command --store "$restored_store" store check \
     --output json >"$active_challenge_dir/restored-check.json"
 
   rm -rf -- "$active_challenge_dir"
@@ -463,7 +463,7 @@ ensure_offhost_copy() {
 
   [[ -f "$backup_path" && ! -L "$backup_path" ]] ||
     fail "backup candidate must be a non-symlink regular file: $backup_path"
-  run_forge_command --store "$backup_path" store check --output json
+  run_foundry_command --store "$backup_path" store check --output json
 
   read -r backup_sha256 _ < <(sha256sum -- "$backup_path")
   [[ "$backup_sha256" =~ ^[0-9a-f]{64}$ ]] ||
@@ -483,7 +483,7 @@ ensure_offhost_copy() {
       marker_uploader_sha256 \
       marker_extra \
       <"$marker_path" || true
-    if [[ "$marker_schema" = "forge-offhost-v2" &&
+    if [[ "$marker_schema" = "foundry-offhost-v2" &&
       "$marker_backup_sha256" = "$backup_sha256" &&
       "$marker_destination_sha256" = "$offhost_destination_sha256" &&
       "$marker_generation" = "$offhost_generation" &&
@@ -505,9 +505,9 @@ ensure_offhost_copy() {
     verify_offhost_copy "$backup_object" "$backup_sha256"
     run_recovery_challenge "$backup_object" "$backup_sha256"
 
-    marker_tmp="$(mktemp "$backup_dir/.forge-offhost-marker.XXXXXX")"
+    marker_tmp="$(mktemp "$backup_dir/.foundry-offhost-marker.XXXXXX")"
     if ! printf '%s %s %s %s %s\n' \
-      "forge-offhost-v2" \
+      "foundry-offhost-v2" \
       "$backup_sha256" \
       "$offhost_destination_sha256" \
       "$offhost_generation" \
@@ -529,7 +529,7 @@ ensure_offhost_copy() {
 # allocating space for a new snapshot. This lets recovery from an off-host
 # outage free safely retained space before a full disk can block the retry.
 shopt -s nullglob
-local_backups=("$backup_dir"/forge-????????T??????Z.sqlite)
+local_backups=("$backup_dir"/foundry-????????T??????Z.sqlite)
 shopt -u nullglob
 for local_backup in "${local_backups[@]}"; do
   ensure_offhost_copy "$local_backup" false
@@ -537,11 +537,11 @@ done
 
 # Retention is intentionally narrow. Each expired object is verified remotely
 # again immediately before its local backup and marker are removed.
-active_retention_file="$(mktemp "$backup_dir/.forge-retention-list.XXXXXX")"
+active_retention_file="$(mktemp "$backup_dir/.foundry-retention-list.XXXXXX")"
 if ! find "$backup_dir" \
   -maxdepth 1 \
   -type f \
-  -name 'forge-????????T??????Z.sqlite' \
+  -name 'foundry-????????T??????Z.sqlite' \
   -mtime "+$local_retention_days" \
   -print0 >"$active_retention_file"; then
   fail "could not enumerate local backup retention candidates"
@@ -553,21 +553,21 @@ done <"$active_retention_file"
 rm -f -- "$active_retention_file"
 active_retention_file=""
 
-if [[ "$test_mode" = 1 && -n "${FORGE_BACKUP_TEST_TIMESTAMP:-}" ]]; then
-  timestamp="$FORGE_BACKUP_TEST_TIMESTAMP"
+if [[ "$test_mode" = 1 && -n "${FOUNDRY_BACKUP_TEST_TIMESTAMP:-}" ]]; then
+  timestamp="$FOUNDRY_BACKUP_TEST_TIMESTAMP"
 else
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 fi
 [[ "$timestamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] ||
   fail "backup timestamp must match YYYYMMDDTHHMMSSZ"
-object_name="forge-$timestamp.sqlite"
+object_name="foundry-$timestamp.sqlite"
 destination="$backup_dir/$object_name"
 
-run_forge_command --store "$store" store check --output json
+run_foundry_command --store "$store" store check --output json
 require_current_directory_mount_identity
-run_forge_command --store "$store" store backup \
+run_foundry_command --store "$store" store backup \
   --destination "$destination" \
   --output json
 ensure_offhost_copy "$destination" false
 
-printf 'forge backup: drain, remote recovery challenge, snapshot, and retention succeeded\n'
+printf 'foundry backup: drain, remote recovery challenge, snapshot, and retention succeeded\n'

@@ -5,18 +5,18 @@ set -o noclobber
 umask 077
 
 fail() {
-  printf 'forge restore drill: %s\n' "$*" >&2
+  printf 'foundry restore drill: %s\n' "$*" >&2
   exit 1
 }
 
 usage() {
   cat <<'EOF'
 Usage:
-  forge-restore-drill \
-    --forge /absolute/path/to/forge \
+  foundry-restore-drill \
+    --foundry /absolute/path/to/foundry \
     --uploader /absolute/path/to/offhost-uploader \
     --target NON_SECRET_OFFHOST_TARGET \
-    --object forge-YYYYMMDDTHHMMSSZ.sqlite \
+    --object foundry-YYYYMMDDTHHMMSSZ.sqlite \
     --object-epoch UTC_EPOCH_SECONDS \
     --incident-epoch UTC_EPOCH_SECONDS \
     --max-rpo-seconds SECONDS \
@@ -35,7 +35,7 @@ The uploader must authenticate out of band and implement:
 The output directory must already exist, be private, and be owned by the
 invoking user. Every drill output path must be absent before the run.
 
-Vault keys are not command-line arguments. Configure Forge's key files through
+Vault keys are not command-line arguments. Configure Foundry's key files through
 its normal out-of-band environment or service credentials. Inline vault key
 environment variables are rejected and key contents are never read or printed.
 EOF
@@ -148,7 +148,7 @@ done
 timeout --version >/dev/null 2>&1 ||
   fail "GNU timeout is required"
 
-production_mode_value="${FORGE_PRODUCTION_MODE:-}"
+production_mode_value="${FOUNDRY_PRODUCTION_MODE:-}"
 production_mode_value="${production_mode_value#"${production_mode_value%%[![:space:]]*}"}"
 production_mode_value="${production_mode_value%"${production_mode_value##*[![:space:]]}"}"
 production_mode_value="${production_mode_value,,}"
@@ -157,42 +157,42 @@ case "$production_mode_value" in
   *) production_mode_enabled=false ;;
 esac
 readonly production_mode_enabled
-readonly test_mode="${FORGE_RESTORE_DRILL_TEST_MODE:-0}"
+readonly test_mode="${FOUNDRY_RESTORE_DRILL_TEST_MODE:-0}"
 
 case "$test_mode" in
   0 | 1) ;;
-  *) fail "FORGE_RESTORE_DRILL_TEST_MODE must be 0 or 1" ;;
+  *) fail "FOUNDRY_RESTORE_DRILL_TEST_MODE must be 0 or 1" ;;
 esac
 
 trusted_executable_root="/"
 trusted_executable_uid=0
 if [[ "$test_mode" = 1 ]]; then
   [[ "$production_mode_enabled" = false ]] ||
-    fail "restore-drill test mode is forbidden when FORGE_PRODUCTION_MODE is enabled"
-  test_root="${FORGE_RESTORE_DRILL_TEST_ROOT:-}"
+    fail "restore-drill test mode is forbidden when FOUNDRY_PRODUCTION_MODE is enabled"
+  test_root="${FOUNDRY_RESTORE_DRILL_TEST_ROOT:-}"
   [[ "$test_root" = /* && "$test_root" != "/" &&
     -d "$test_root" && ! -L "$test_root" ]] ||
-    fail "FORGE_RESTORE_DRILL_TEST_ROOT must be an absolute non-symlink directory"
+    fail "FOUNDRY_RESTORE_DRILL_TEST_ROOT must be an absolute non-symlink directory"
 
-  test_marker="$test_root/.forge-restore-drill-test-root"
+  test_marker="$test_root/.foundry-restore-drill-test-root"
   test_marker_lines=()
   [[ -f "$test_marker" && ! -L "$test_marker" ]] ||
     fail "restore-drill test root sentinel is missing or unsafe: $test_marker"
   mapfile -t test_marker_lines <"$test_marker"
   [[ ${#test_marker_lines[@]} -eq 1 &&
-    "${test_marker_lines[0]}" = "forge-restore-drill-smoke-v1" ]] ||
+    "${test_marker_lines[0]}" = "foundry-restore-drill-smoke-v1" ]] ||
     fail "restore-drill test root sentinel is invalid: $test_marker"
 
   trusted_executable_root="$(realpath -e -- "$test_root")"
   trusted_executable_uid="$(stat -c '%u' -- "$trusted_executable_root")"
 else
-  [[ -z "${FORGE_RESTORE_DRILL_TEST_ROOT:-}" ]] ||
-    fail "FORGE_RESTORE_DRILL_TEST_ROOT requires FORGE_RESTORE_DRILL_TEST_MODE=1"
+  [[ -z "${FOUNDRY_RESTORE_DRILL_TEST_ROOT:-}" ]] ||
+    fail "FOUNDRY_RESTORE_DRILL_TEST_ROOT requires FOUNDRY_RESTORE_DRILL_TEST_MODE=1"
 fi
 readonly trusted_executable_root
 readonly trusted_executable_uid
 
-forge_binary=""
+foundry_binary=""
 uploader=""
 target=""
 object=""
@@ -206,10 +206,10 @@ output_dir_input=""
 
 while (($# > 0)); do
   case "$1" in
-    --forge)
+    --foundry)
       require_value "$1" "${2-}"
-      [[ -z "$forge_binary" ]] || fail "--forge may only be specified once"
-      forge_binary="$2"
+      [[ -z "$foundry_binary" ]] || fail "--foundry may only be specified once"
+      foundry_binary="$2"
       shift 2
       ;;
     --uploader)
@@ -292,7 +292,7 @@ while (($# > 0)); do
   esac
 done
 
-[[ -n "$forge_binary" ]] || fail "--forge is required"
+[[ -n "$foundry_binary" ]] || fail "--foundry is required"
 [[ -n "$uploader" ]] || fail "--uploader is required"
 [[ -n "$target" ]] || fail "--target is required"
 [[ -n "$object" ]] || fail "--object is required"
@@ -304,7 +304,7 @@ done
 [[ -n "$canary_workflow_id" ]] || fail "--canary-workflow-id is required"
 [[ -n "$output_dir_input" ]] || fail "--output-dir is required"
 
-for path_value in "$forge_binary" "$uploader" "$output_dir_input"; do
+for path_value in "$foundry_binary" "$uploader" "$output_dir_input"; do
   require_single_line "path" "$path_value"
 done
 require_single_line "target" "$target"
@@ -312,14 +312,14 @@ require_single_line "object" "$object"
 require_single_line "operator identity" "$approved_by"
 require_single_line "canary workflow id" "$canary_workflow_id"
 
-[[ "$forge_binary" = /* ]] || fail "--forge must be an absolute path"
-[[ -f "$forge_binary" && ! -L "$forge_binary" && -x "$forge_binary" ]] ||
-  fail "--forge must identify a non-symlink executable regular file"
+[[ "$foundry_binary" = /* ]] || fail "--foundry must be an absolute path"
+[[ -f "$foundry_binary" && ! -L "$foundry_binary" && -x "$foundry_binary" ]] ||
+  fail "--foundry must identify a non-symlink executable regular file"
 [[ "$uploader" = /* ]] || fail "--uploader must be an absolute path"
 [[ -f "$uploader" && ! -L "$uploader" && -x "$uploader" ]] ||
   fail "--uploader must identify a non-symlink executable regular file"
 audit_trusted_executable \
-  "$forge_binary" "Forge executable" \
+  "$foundry_binary" "Foundry executable" \
   "$trusted_executable_root" "$trusted_executable_uid"
 audit_trusted_executable \
   "$uploader" "off-host uploader" \
@@ -328,18 +328,18 @@ audit_trusted_executable \
 [[ "$target" != -* ]] || fail "--target must not begin with a dash"
 [[ "$target" != *\?* && "$target" != *\#* ]] ||
   fail "--target must be a non-secret locator without query or fragment data"
-if [[ "$object" =~ ^forge-([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z\.sqlite$ ]]; then
+if [[ "$object" =~ ^foundry-([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z\.sqlite$ ]]; then
   object_utc_text="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]} ${BASH_REMATCH[4]}:${BASH_REMATCH[5]}:${BASH_REMATCH[6]} UTC"
 else
-  fail "--object must match canonical forge-YYYYMMDDTHHMMSSZ.sqlite"
+  fail "--object must match canonical foundry-YYYYMMDDTHHMMSSZ.sqlite"
 fi
 [[ "$canary_workflow_id" =~ ^wf_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]] ||
   fail "--canary-workflow-id must be a bounded wf_ identifier"
 
-[[ -z "${FORGE_SECRET_VAULT_KEY+x}" ]] ||
-  fail "FORGE_SECRET_VAULT_KEY is forbidden; use a key file credential"
-[[ -z "${FORGE_SECRET_VAULT_PREVIOUS_KEYS+x}" ]] ||
-  fail "FORGE_SECRET_VAULT_PREVIOUS_KEYS is forbidden; use key file credentials"
+[[ -z "${FOUNDRY_SECRET_VAULT_KEY+x}" ]] ||
+  fail "FOUNDRY_SECRET_VAULT_KEY is forbidden; use a key file credential"
+[[ -z "${FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS+x}" ]] ||
+  fail "FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS is forbidden; use key file credentials"
 
 declared_object_epoch=0
 incident_epoch=0
@@ -362,7 +362,7 @@ object_epoch=0
 parse_nonnegative_integer \
   "$object_epoch_text" "canonical object UTC epoch" object_epoch
 canonical_object="$(
-  date -u -d "@$object_epoch" '+forge-%Y%m%dT%H%M%SZ.sqlite'
+  date -u -d "@$object_epoch" '+foundry-%Y%m%dT%H%M%SZ.sqlite'
 )" || fail "could not canonicalize the object UTC timestamp"
 [[ "$canonical_object" = "$object" ]] ||
   fail "--object contains a non-canonical or invalid UTC timestamp"
@@ -490,7 +490,7 @@ run_timed_command() {
   esac
 }
 
-run_forge_command() {
+run_foundry_command() {
   local label="$1"
   shift
 
@@ -498,13 +498,13 @@ run_forge_command() {
     "$label" \
     env \
     -u CREDENTIALS_DIRECTORY \
-    -u FORGE_BACKUP_OFFHOST_COMMAND_FILE \
-    -u FORGE_BACKUP_OFFHOST_DESTINATION_FILE \
-    -u FORGE_BACKUP_OFFHOST_GENERATION_FILE \
-    -u FORGE_OPS_BEARER_TOKEN \
-    -u FORGE_OPS_BEARER_TOKEN_FILE \
-    FORGE_PRODUCTION_MODE=1 \
-    "$forge_binary" "$@"
+    -u FOUNDRY_BACKUP_OFFHOST_COMMAND_FILE \
+    -u FOUNDRY_BACKUP_OFFHOST_DESTINATION_FILE \
+    -u FOUNDRY_BACKUP_OFFHOST_GENERATION_FILE \
+    -u FOUNDRY_OPS_BEARER_TOKEN \
+    -u FOUNDRY_OPS_BEARER_TOKEN_FILE \
+    FOUNDRY_PRODUCTION_MODE=1 \
+    "$foundry_binary" "$@"
 }
 
 run_uploader_command() {
@@ -514,12 +514,12 @@ run_uploader_command() {
   run_timed_command \
     "$label" \
     env \
-    -u FORGE_SECRET_VAULT_KEY \
-    -u FORGE_SECRET_VAULT_KEY_FILE \
-    -u FORGE_SECRET_VAULT_PREVIOUS_KEYS \
-    -u FORGE_SECRET_VAULT_PREVIOUS_KEY_FILES \
-    -u FORGE_OPS_BEARER_TOKEN \
-    -u FORGE_OPS_BEARER_TOKEN_FILE \
+    -u FOUNDRY_SECRET_VAULT_KEY \
+    -u FOUNDRY_SECRET_VAULT_KEY_FILE \
+    -u FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS \
+    -u FOUNDRY_SECRET_VAULT_PREVIOUS_KEY_FILES \
+    -u FOUNDRY_OPS_BEARER_TOKEN \
+    -u FOUNDRY_OPS_BEARER_TOKEN_FILE \
     "$uploader" "$@"
 }
 
@@ -535,18 +535,18 @@ cleanup_runtime() {
 }
 trap cleanup_runtime EXIT
 
-read -r forge_sha256 _ < <(sha256sum -- "$forge_binary")
-[[ "$forge_sha256" =~ ^[0-9a-f]{64}$ ]] ||
-  fail "could not calculate the Forge executable SHA-256"
+read -r foundry_sha256 _ < <(sha256sum -- "$foundry_binary")
+[[ "$foundry_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  fail "could not calculate the Foundry executable SHA-256"
 read -r uploader_sha256 _ < <(sha256sum -- "$uploader")
 [[ "$uploader_sha256" =~ ^[0-9a-f]{64}$ ]] ||
   fail "could not calculate the uploader SHA-256"
-forge_version="$(
-  run_forge_command "Forge version probe" --version
+foundry_version="$(
+  run_foundry_command "Foundry version probe" --version
 )"
-[[ -n "$forge_version" && "$forge_version" != *$'\n'* &&
-  "$forge_version" != *$'\r'* ]] ||
-  fail "Forge --version must return exactly one non-empty line"
+[[ -n "$foundry_version" && "$foundry_version" != *$'\n'* &&
+  "$foundry_version" != *$'\r'* ]] ||
+  fail "Foundry --version must return exactly one non-empty line"
 
 drill_started_epoch_text="$(date -u +%s)"
 drill_started_epoch=0
@@ -587,7 +587,7 @@ read -r local_sha256 _ < <(sha256sum -- "$downloaded_store")
 [[ "$local_sha256" = "$remote_sha256" ]] ||
   fail "downloaded store SHA-256 does not match the persisted remote digest"
 
-run_forge_command \
+run_foundry_command \
   "downloaded store check" \
   --store "$downloaded_store" \
   store check \
@@ -596,12 +596,12 @@ chmod 600 -- "$source_check_report"
 for source_sidecar in "$downloaded_store-wal" "$downloaded_store-shm"; do
   if [[ -e "$source_sidecar" || -L "$source_sidecar" ]]; then
     [[ -f "$source_sidecar" && ! -L "$source_sidecar" ]] ||
-      fail "Forge created an unsafe recovery source sidecar: $source_sidecar"
+      fail "Foundry created an unsafe recovery source sidecar: $source_sidecar"
     chmod 600 -- "$source_sidecar"
   fi
 done
 
-run_forge_command \
+run_foundry_command \
   "store restore" \
   --store "$restored_store" \
   store restore \
@@ -611,16 +611,16 @@ run_forge_command \
   --output json >"$restore_report"
 chmod 600 -- "$restore_report"
 [[ -f "$restored_store" && ! -L "$restored_store" ]] ||
-  fail "Forge restore did not create a non-symlink regular store"
+  fail "Foundry restore did not create a non-symlink regular store"
 
-run_forge_command \
+run_foundry_command \
   "restored store check" \
   --store "$restored_store" \
   store check \
   --output json >"$restored_check_report"
 chmod 600 -- "$restored_check_report"
 
-run_forge_command \
+run_foundry_command \
   "canary workflow inspection" \
   --store "$restored_store" \
   inspect "$canary_workflow_id" \
@@ -643,7 +643,7 @@ chmod 600 -- "$ops_curl_config"
   "$(stat -c '%a' -- "$ops_curl_config")" = 600 ]] ||
   fail "Ops token and curl config must have mode 0600"
 
-ops_remaining="$(remaining_rto_budget "Forge Ops startup")"
+ops_remaining="$(remaining_rto_budget "Foundry Ops startup")"
 timeout \
   --foreground \
   --signal=TERM \
@@ -651,13 +651,13 @@ timeout \
   "${ops_remaining}s" \
   env \
   -u CREDENTIALS_DIRECTORY \
-  -u FORGE_BACKUP_OFFHOST_COMMAND_FILE \
-  -u FORGE_BACKUP_OFFHOST_DESTINATION_FILE \
-  -u FORGE_BACKUP_OFFHOST_GENERATION_FILE \
-  -u FORGE_OPS_BEARER_TOKEN \
-  FORGE_PRODUCTION_MODE=1 \
-  "FORGE_OPS_BEARER_TOKEN_FILE=$ops_token_file" \
-  "$forge_binary" \
+  -u FOUNDRY_BACKUP_OFFHOST_COMMAND_FILE \
+  -u FOUNDRY_BACKUP_OFFHOST_DESTINATION_FILE \
+  -u FOUNDRY_BACKUP_OFFHOST_GENERATION_FILE \
+  -u FOUNDRY_OPS_BEARER_TOKEN \
+  FOUNDRY_PRODUCTION_MODE=1 \
+  "FOUNDRY_OPS_BEARER_TOKEN_FILE=$ops_token_file" \
+  "$foundry_binary" \
   --store "$restored_store" \
   ops serve \
   --project-root "$ops_workspace" \
@@ -679,11 +679,11 @@ while [[ "$ops_snapshot_status" != 200 ]]; do
       ops_exit_status=$?
     fi
     ops_pid=""
-    fail "Forge Ops exited before readiness with status $ops_exit_status"
+    fail "Foundry Ops exited before readiness with status $ops_exit_status"
   fi
 
   if [[ -z "$ops_bind_addr" ]] &&
-    grep -Fq '"schema_version": "forge.ops.serve.v1"' "$ops_startup_log" &&
+    grep -Fq '"schema_version": "foundry.ops.serve.v1"' "$ops_startup_log" &&
     grep -Fq '"status": "listening"' "$ops_startup_log" &&
     grep -Fq '"local_only": true' "$ops_startup_log"; then
     ops_bind_addr="$(
@@ -691,9 +691,9 @@ while [[ "$ops_snapshot_status" != 200 ]]; do
     )"
     if [[ -n "$ops_bind_addr" ]]; then
       [[ "$ops_bind_addr" =~ ^127\.0\.0\.1:([1-9][0-9]{0,4})$ ]] ||
-        fail "Forge Ops reported an unsafe loopback bind address"
+        fail "Foundry Ops reported an unsafe loopback bind address"
       ((10#${BASH_REMATCH[1]} <= 65535)) ||
-        fail "Forge Ops reported an invalid loopback port"
+        fail "Foundry Ops reported an invalid loopback port"
     fi
   fi
 
@@ -734,7 +734,7 @@ done
 [[ -f "$ops_snapshot_report" && ! -L "$ops_snapshot_report" ]] ||
   fail "authenticated Ops snapshot did not create a safe report"
 chmod 600 -- "$ops_snapshot_report"
-grep -Fq '"schema_version": "forge.ops.snapshot.v1"' "$ops_snapshot_report" ||
+grep -Fq '"schema_version": "foundry.ops.snapshot.v1"' "$ops_snapshot_report" ||
   fail "authenticated Ops snapshot returned an unexpected schema"
 grep -Fq '"status": "ok"' "$ops_snapshot_report" ||
   fail "authenticated Ops snapshot did not report ready status"
@@ -746,7 +746,7 @@ if ! kill -TERM "$ops_pid" 2>/dev/null; then
     ops_wait_status=$?
   fi
   ops_pid=""
-  fail "Forge Ops exited before graceful shutdown with status $ops_wait_status"
+  fail "Foundry Ops exited before graceful shutdown with status $ops_wait_status"
 fi
 if wait "$ops_pid"; then
   ops_wait_status=0
@@ -757,15 +757,15 @@ ops_pid=""
 case "$ops_wait_status" in
   0 | 143) ;;
   124 | 137)
-    fail "Forge Ops exhausted the remaining RTO budget"
+    fail "Foundry Ops exhausted the remaining RTO budget"
     ;;
   *)
-    fail "Forge Ops did not stop cleanly; status=$ops_wait_status"
+    fail "Foundry Ops did not stop cleanly; status=$ops_wait_status"
     ;;
 esac
 rm -f -- "$ops_token_file" "$ops_curl_config"
 
-run_forge_command \
+run_foundry_command \
   "final restored store check" \
   --store "$restored_store" \
   store check \
@@ -777,11 +777,11 @@ read -r final_source_sha256 _ < <(sha256sum -- "$downloaded_store")
   fail "downloaded recovery source changed during the restore drill"
 [[ ! -e "$restored_store.secret.key" &&
   ! -L "$restored_store.secret.key" ]] ||
-  fail "Forge created an adjacent vault key instead of using out-of-band credentials"
+  fail "Foundry created an adjacent vault key instead of using out-of-band credentials"
 for restored_sidecar in "$restored_store-wal" "$restored_store-shm"; do
   if [[ -e "$restored_sidecar" || -L "$restored_sidecar" ]]; then
     [[ -f "$restored_sidecar" && ! -L "$restored_sidecar" ]] ||
-      fail "Forge created an unsafe restored store sidecar: $restored_sidecar"
+      fail "Foundry created an unsafe restored store sidecar: $restored_sidecar"
     chmod 600 -- "$restored_sidecar"
   fi
 done
@@ -809,7 +809,7 @@ read -r target_sha256 _ < <(printf '%s' "$target" | sha256sum)
 
 cat >"$drill_report" <<EOF
 {
-  "schema_version": "forge.restore_drill.v1",
+  "schema_version": "foundry.restore_drill.v1",
   "status": "passed",
   "object": "$(json_escape "$object")",
   "target": "$(json_escape "$target")",
@@ -827,8 +827,8 @@ cat >"$drill_report" <<EOF
   "hot_script_rto_milliseconds": $hot_script_rto_milliseconds,
   "hot_script_rto_seconds": $hot_script_rto_seconds,
   "sha256": "$remote_sha256",
-  "forge_version": "$(json_escape "$forge_version")",
-  "forge_sha256": "$forge_sha256",
+  "foundry_version": "$(json_escape "$foundry_version")",
+  "foundry_sha256": "$foundry_sha256",
   "uploader_sha256": "$uploader_sha256",
   "approved_by": "$(json_escape "$approved_by")",
   "canary_workflow_id": "$(json_escape "$canary_workflow_id")",
@@ -847,5 +847,5 @@ EOF
 chmod 600 -- "$drill_report"
 
 trap - EXIT
-printf 'forge restore drill: passed; report=%s RPO=%ss RTO=%ss hot-script=%ss\n' \
+printf 'foundry restore drill: passed; report=%s RPO=%ss RTO=%ss hot-script=%ss\n' \
   "$drill_report" "$rpo_seconds" "$rto_seconds" "$hot_script_rto_seconds"

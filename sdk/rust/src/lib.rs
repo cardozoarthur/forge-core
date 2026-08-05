@@ -1,4 +1,4 @@
-//! Forge Rust SDK.
+//! Foundry Rust SDK.
 
 use std::future::Future;
 use std::pin::Pin;

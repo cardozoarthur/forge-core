@@ -8,19 +8,19 @@ fail() {
 }
 
 bundle_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-bounded_drill="$bundle_dir/forge-bounded-load-drill"
-upgrade_drill="$bundle_dir/forge-upgrade-rollback-drill"
+bounded_drill="$bundle_dir/foundry-bounded-load-drill"
+upgrade_drill="$bundle_dir/foundry-upgrade-rollback-drill"
 [[ -x "$bounded_drill" ]] || fail "bounded-load drill is not executable"
 [[ -x "$upgrade_drill" ]] || fail "upgrade/rollback drill is not executable"
 
-test_root="$(mktemp -d /tmp/forge-production-readiness-test.XXXXXX)"
+test_root="$(mktemp -d /tmp/foundry-production-readiness-test.XXXXXX)"
 chmod 0700 "$test_root"
-printf '%s\n' "forge-production-readiness-test-v1" \
-  >"$test_root/.forge-production-readiness-test-root"
+printf '%s\n' "foundry-production-readiness-test-v1" \
+  >"$test_root/.foundry-production-readiness-test-root"
 
 cleanup() {
-  if [[ "$test_root" = /tmp/forge-production-readiness-test.* &&
-    -f "$test_root/.forge-production-readiness-test-root" ]]; then
+  if [[ "$test_root" = /tmp/foundry-production-readiness-test.* &&
+    -f "$test_root/.foundry-production-readiness-test-root" ]]; then
     rm -rf -- "$test_root"
   fi
 }
@@ -36,7 +36,7 @@ mkdir -m 0700 \
   "$test_root/evidence-upgrade-interrupted" \
   "$test_root/evidence-newer-previous"
 
-source_store="$test_root/forge.sqlite"
+source_store="$test_root/foundry.sqlite"
 vault_key_file="$test_root/secret.key"
 printf '%064d\n' 0 >"$vault_key_file"
 chmod 0600 "$vault_key_file"
@@ -60,13 +60,13 @@ os.chmod(path, 0o600)
 PY
 source_store_sha256="$(sha256sum "$source_store" | awk '{print $1}')"
 
-fake_forge="$test_root/bin/forge"
-cat >"$fake_forge" <<'EOF'
+fake_foundry="$test_root/bin/foundry"
+cat >"$fake_foundry" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
 if [[ "${1-}" = "--version" ]]; then
-  printf 'forge 0.5.3\n'
+  printf 'foundry 0.6.0\n'
   exit 0
 fi
 
@@ -90,8 +90,8 @@ PY
     printf '{"status":"ok"}\n'
     ;;
   "ops serve")
-    if [[ -n "${FORGE_SELF_TEST_OPS_STARTED_FILE:-}" ]]; then
-      : >"$FORGE_SELF_TEST_OPS_STARTED_FILE"
+    if [[ -n "${FOUNDRY_SELF_TEST_OPS_STARTED_FILE:-}" ]]; then
+      : >"$FOUNDRY_SELF_TEST_OPS_STARTED_FILE"
     fi
     trap 'exit 0' TERM INT
     while :; do sleep 1; done
@@ -111,29 +111,29 @@ if row != ("wf_bounded_load_canary",):
 PY
       printf '{"workflow_id":"wf_bounded_load_canary"}\n'
     else
-      printf 'unsupported fake Forge command: %s\n' "$*" >&2
+      printf 'unsupported fake Foundry command: %s\n' "$*" >&2
       exit 2
     fi
     ;;
 esac
 EOF
-chmod 0755 "$fake_forge"
+chmod 0755 "$fake_foundry"
 
-fake_upgrade_forge="$test_root/bin/fake-upgrade-forge"
-cat >"$fake_upgrade_forge" <<'EOF'
+fake_upgrade_foundry="$test_root/bin/fake-upgrade-foundry"
+cat >"$fake_upgrade_foundry" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
 binary_name="${0##*/}"
 case "$binary_name" in
-  candidate-forge) version="0.5.3"; candidate=1 ;;
-  previous-forge) version="0.5.2"; candidate=0 ;;
-  newer-forge) version="0.6.0"; candidate=0 ;;
+  candidate-foundry) version="0.6.0"; candidate=1 ;;
+  previous-foundry) version="0.5.3"; candidate=0 ;;
+  newer-foundry) version="0.6.0"; candidate=0 ;;
   *) printf 'unexpected fake binary name: %s\n' "$binary_name" >&2; exit 2 ;;
 esac
 
 if [[ "${1-}" = "--version" ]]; then
-  printf 'forge %s\n' "$version"
+  printf 'foundry %s\n' "$version"
   exit 0
 fi
 
@@ -199,8 +199,8 @@ PY
     ;;
   "ops serve")
     migrate_candidate
-    if [[ -n "${FORGE_SELF_TEST_OPS_STARTED_FILE:-}" ]]; then
-      : >"$FORGE_SELF_TEST_OPS_STARTED_FILE"
+    if [[ -n "${FOUNDRY_SELF_TEST_OPS_STARTED_FILE:-}" ]]; then
+      : >"$FOUNDRY_SELF_TEST_OPS_STARTED_FILE"
     fi
     trap 'exit 0' TERM INT
     while :; do sleep 1; done
@@ -221,28 +221,28 @@ if row != ("wf_bounded_load_canary",):
 PY
       printf '{"workflow_id":"wf_bounded_load_canary"}\n'
     else
-      printf 'unsupported fake Forge command: %s\n' "$*" >&2
+      printf 'unsupported fake Foundry command: %s\n' "$*" >&2
       exit 2
     fi
     ;;
 esac
 EOF
-chmod 0755 "$fake_upgrade_forge"
-cp --no-clobber -- "$fake_upgrade_forge" "$test_root/bin/candidate-forge"
-cp --no-clobber -- "$fake_upgrade_forge" "$test_root/bin/previous-forge"
-cp --no-clobber -- "$fake_upgrade_forge" "$test_root/bin/newer-forge"
-printf '%s\n' '# candidate fixture identity' >>"$test_root/bin/candidate-forge"
-printf '%s\n' '# previous fixture identity' >>"$test_root/bin/previous-forge"
-printf '%s\n' '# newer fixture identity' >>"$test_root/bin/newer-forge"
+chmod 0755 "$fake_upgrade_foundry"
+cp --no-clobber -- "$fake_upgrade_foundry" "$test_root/bin/candidate-foundry"
+cp --no-clobber -- "$fake_upgrade_foundry" "$test_root/bin/previous-foundry"
+cp --no-clobber -- "$fake_upgrade_foundry" "$test_root/bin/newer-foundry"
+printf '%s\n' '# candidate fixture identity' >>"$test_root/bin/candidate-foundry"
+printf '%s\n' '# previous fixture identity' >>"$test_root/bin/previous-foundry"
+printf '%s\n' '# newer fixture identity' >>"$test_root/bin/newer-foundry"
 chmod 0755 \
-  "$test_root/bin/candidate-forge" \
-  "$test_root/bin/previous-forge" \
-  "$test_root/bin/newer-forge"
+  "$test_root/bin/candidate-foundry" \
+  "$test_root/bin/previous-foundry" \
+  "$test_root/bin/newer-foundry"
 
 cat >"$test_root/stubs/curl" <<'EOF'
 #!/usr/bin/env bash
-if [[ -n "${FORGE_SELF_TEST_CURL_DELAY_SECONDS:-}" ]]; then
-  sleep "$FORGE_SELF_TEST_CURL_DELAY_SECONDS"
+if [[ -n "${FOUNDRY_SELF_TEST_CURL_DELAY_SECONDS:-}" ]]; then
+  sleep "$FOUNDRY_SELF_TEST_CURL_DELAY_SECONDS"
 fi
 case " $* " in
   *time_total*) printf '200 0.001' ;;
@@ -258,13 +258,13 @@ assert_test_mode_rejected_by_production_mode() {
   local output="$test_root/${script_label}-production-${production_value}.stdout"
 
   if PATH="$test_root/stubs:$PATH" \
-    FORGE_PRODUCTION_READINESS_TEST_MODE=1 \
-    FORGE_PRODUCTION_READINESS_TEST_ROOT="$test_root" \
-    FORGE_PRODUCTION_MODE="$production_value" \
+    FOUNDRY_PRODUCTION_READINESS_TEST_MODE=1 \
+    FOUNDRY_PRODUCTION_READINESS_TEST_ROOT="$test_root" \
+    FOUNDRY_PRODUCTION_MODE="$production_value" \
     "$script" >"$output" 2>&1; then
-    fail "$script_label accepted test mode with FORGE_PRODUCTION_MODE=$production_value"
+    fail "$script_label accepted test mode with FOUNDRY_PRODUCTION_MODE=$production_value"
   fi
-  grep -F 'test mode is forbidden when FORGE_PRODUCTION_MODE is enabled' \
+  grep -F 'test mode is forbidden when FOUNDRY_PRODUCTION_MODE is enabled' \
     "$output" >/dev/null ||
     fail "$script_label did not fail at the production/test-mode boundary"
 }
@@ -275,14 +275,14 @@ assert_unknown_production_mode_rejected() {
   local output="$test_root/${script_label}-production-unknown.stdout"
 
   if PATH="$test_root/stubs:$PATH" \
-    FORGE_PRODUCTION_READINESS_TEST_MODE=0 \
-    FORGE_PRODUCTION_MODE=enabled \
+    FOUNDRY_PRODUCTION_READINESS_TEST_MODE=0 \
+    FOUNDRY_PRODUCTION_MODE=enabled \
     "$script" >"$output" 2>&1; then
-    fail "$script_label accepted an unknown FORGE_PRODUCTION_MODE value"
+    fail "$script_label accepted an unknown FOUNDRY_PRODUCTION_MODE value"
   fi
-  grep -F 'FORGE_PRODUCTION_MODE must be one of 0,false,no,off,1,true,yes,on' \
+  grep -F 'FOUNDRY_PRODUCTION_MODE must be one of 0,false,no,off,1,true,yes,on' \
     "$output" >/dev/null ||
-    fail "$script_label did not reject an unknown FORGE_PRODUCTION_MODE value"
+    fail "$script_label did not reject an unknown FOUNDRY_PRODUCTION_MODE value"
 }
 
 wait_for_file() {
@@ -361,8 +361,8 @@ assert_term_cleanup() {
   local drill_status=0
   local staged_path=""
 
-  FORGE_SELF_TEST_OPS_STARTED_FILE="$started_file" \
-    FORGE_SELF_TEST_CURL_DELAY_SECONDS=1 \
+  FOUNDRY_SELF_TEST_OPS_STARTED_FILE="$started_file" \
+    FOUNDRY_SELF_TEST_CURL_DELAY_SECONDS=1 \
     "$runner" "$output_dir" >"$stdout_file" 2>&1 &
   runner_pid="$!"
 
@@ -404,13 +404,13 @@ done
 run_bounded() {
   local output_dir="$1"
   PATH="$test_root/stubs:$PATH" \
-    FORGE_PRODUCTION_READINESS_TEST_MODE=1 \
-    FORGE_PRODUCTION_READINESS_TEST_ROOT="$test_root" \
-    FORGE_SECRET_VAULT_KEY_FILE="$vault_key_file" \
+    FOUNDRY_PRODUCTION_READINESS_TEST_MODE=1 \
+    FOUNDRY_PRODUCTION_READINESS_TEST_ROOT="$test_root" \
+    FOUNDRY_SECRET_VAULT_KEY_FILE="$vault_key_file" \
     "$bounded_drill" \
-    --forge "$fake_forge" \
+    --foundry "$fake_foundry" \
     --store "$source_store" \
-    --release-version 0.5.3 \
+    --release-version 0.6.0 \
     --canary-workflow-id wf_bounded_load_canary \
     --output-dir "$output_dir" \
     --operations 100 \
@@ -471,12 +471,12 @@ expected_evidence = {
 with open(sys.argv[1], "r", encoding="utf-8") as handle:
     report = json.load(handle)
 assert set(report) == expected_top_level
-assert report["schema_version"] == "forge.milestone.production_source_evidence.bounded_load.v1"
+assert report["schema_version"] == "foundry.milestone.production_source_evidence.bounded_load.v1"
 assert report["kind"] == "bounded_load"
 assert report["status"] == "passed"
-assert report["subject_version"] == "0.5.3"
+assert report["subject_version"] == "0.6.0"
 assert report["execution_mode"] == "test"
-assert report["producer"] == "forge-bounded-load-drill"
+assert report["producer"] == "foundry-bounded-load-drill"
 assert isinstance(report["observed_at_epoch"], int) and report["observed_at_epoch"] > 0
 claims = report["claims"]
 evidence = report["evidence"]
@@ -490,7 +490,7 @@ assert claims["timeout_enforced"] is True
 assert claims["resource_limit_enforced"] is True
 assert claims["store_check_passed"] is True
 assert claims["crash_restart_verified"] is True
-assert evidence["collector_schema_version"] == "forge.production_readiness.bounded_load_drill.v1"
+assert evidence["collector_schema_version"] == "foundry.production_readiness.bounded_load_drill.v1"
 assert len(evidence["binary_sha256"]) == 64
 assert evidence["canary_workflow_id"] == "wf_bounded_load_canary"
 PY
@@ -513,14 +513,14 @@ fi
 run_upgrade() {
   local output_dir="$1"
   PATH="$test_root/stubs:$PATH" \
-    FORGE_PRODUCTION_READINESS_TEST_MODE=1 \
-    FORGE_PRODUCTION_READINESS_TEST_ROOT="$test_root" \
-    FORGE_SECRET_VAULT_KEY_FILE="$vault_key_file" \
+    FOUNDRY_PRODUCTION_READINESS_TEST_MODE=1 \
+    FOUNDRY_PRODUCTION_READINESS_TEST_ROOT="$test_root" \
+    FOUNDRY_SECRET_VAULT_KEY_FILE="$vault_key_file" \
     "$upgrade_drill" \
-    --candidate "$test_root/bin/candidate-forge" \
-    --previous "$test_root/bin/previous-forge" \
+    --candidate "$test_root/bin/candidate-foundry" \
+    --previous "$test_root/bin/previous-foundry" \
     --store "$source_store" \
-    --release-version 0.5.3 \
+    --release-version 0.6.0 \
     --canary-workflow-id wf_bounded_load_canary \
     --output-dir "$output_dir" \
     --max-duration-seconds 10 \
@@ -583,22 +583,22 @@ expected_evidence = {
 with open(sys.argv[1], "r", encoding="utf-8") as handle:
     report = json.load(handle)
 assert set(report) == expected_top_level
-assert report["schema_version"] == "forge.milestone.production_source_evidence.upgrade_rollback.v1"
+assert report["schema_version"] == "foundry.milestone.production_source_evidence.upgrade_rollback.v1"
 assert report["kind"] == "upgrade_rollback"
 assert report["status"] == "passed"
-assert report["subject_version"] == "0.5.3"
+assert report["subject_version"] == "0.6.0"
 assert report["execution_mode"] == "test"
-assert report["producer"] == "forge-upgrade-rollback-drill"
+assert report["producer"] == "foundry-upgrade-rollback-drill"
 assert isinstance(report["observed_at_epoch"], int) and report["observed_at_epoch"] > 0
 claims = report["claims"]
 evidence = report["evidence"]
 assert set(claims) == expected_claims
 assert set(evidence) == expected_evidence
-assert claims["target_version"] == "0.5.3"
-assert evidence["previous_version"] == "0.5.2"
+assert claims["target_version"] == "0.6.0"
+assert evidence["previous_version"] == "0.5.3"
 assert evidence["candidate_binary_sha256"] != evidence["previous_binary_sha256"]
 assert evidence["canary_workflow_id"] == "wf_bounded_load_canary"
-assert evidence["collector_schema_version"] == "forge.production_readiness.upgrade_rollback_drill.v1"
+assert evidence["collector_schema_version"] == "foundry.production_readiness.upgrade_rollback_drill.v1"
 for field in {
     "candidate_binary_sha256",
     "previous_binary_sha256",
@@ -625,14 +625,14 @@ if run_upgrade "$test_root/evidence-upgrade" >"$test_root/upgrade-overwrite.stdo
 fi
 
 if PATH="$test_root/stubs:$PATH" \
-  FORGE_PRODUCTION_READINESS_TEST_MODE=1 \
-  FORGE_PRODUCTION_READINESS_TEST_ROOT="$test_root" \
-  FORGE_SECRET_VAULT_KEY_FILE="$vault_key_file" \
+  FOUNDRY_PRODUCTION_READINESS_TEST_MODE=1 \
+  FOUNDRY_PRODUCTION_READINESS_TEST_ROOT="$test_root" \
+  FOUNDRY_SECRET_VAULT_KEY_FILE="$vault_key_file" \
   "$upgrade_drill" \
-  --candidate "$test_root/bin/candidate-forge" \
-  --previous "$test_root/bin/newer-forge" \
+  --candidate "$test_root/bin/candidate-foundry" \
+  --previous "$test_root/bin/newer-foundry" \
   --store "$source_store" \
-  --release-version 0.5.3 \
+  --release-version 0.6.0 \
   --canary-workflow-id wf_bounded_load_canary \
   --output-dir "$test_root/evidence-newer-previous" \
   --max-duration-seconds 10 \

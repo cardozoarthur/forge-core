@@ -1,26 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${FORGE_REPO:-cardozoarthur/forge-core}"
-VERSION="${FORGE_VERSION:-latest}"
-PREFIX="${FORGE_PREFIX:-$HOME/.local}"
-BIN_DIR="${FORGE_BIN_DIR:-$PREFIX/bin}"
-RELEASE_BASE_URL="${FORGE_RELEASE_BASE_URL:-}"
-TEST_MODE="${FORGE_INSTALLER_TEST_MODE:-0}"
+# foundry-brand-allow: legacy-compat
+REPO="${FOUNDRY_REPO:-${FORGE_REPO:-cardozoarthur/foundry-core}}"
+# foundry-brand-allow: legacy-compat
+VERSION="${FOUNDRY_VERSION:-${FORGE_VERSION:-latest}}"
+# foundry-brand-allow: legacy-compat
+PREFIX="${FOUNDRY_PREFIX:-${FORGE_PREFIX:-$HOME/.local}}"
+# foundry-brand-allow: legacy-compat
+BIN_DIR="${FOUNDRY_BIN_DIR:-${FORGE_BIN_DIR:-$PREFIX/bin}}"
+# foundry-brand-allow: legacy-compat
+RELEASE_BASE_URL="${FOUNDRY_RELEASE_BASE_URL:-${FORGE_RELEASE_BASE_URL:-}}"
+# foundry-brand-allow: legacy-compat
+TEST_MODE="${FOUNDRY_INSTALLER_TEST_MODE:-${FORGE_INSTALLER_TEST_MODE:-0}}"
 SIGSTORE_ISSUER="https://token.actions.githubusercontent.com"
 TMP_DIR="$(mktemp -d)"
 STAGED_BINARY=""
+# foundry-brand-allow: legacy-compat
+STAGED_FORGE_SHIM=""
 
 cleanup() {
   rm -rf -- "$TMP_DIR"
   if [[ -n "$STAGED_BINARY" && -e "$STAGED_BINARY" ]]; then
     rm -f -- "$STAGED_BINARY"
   fi
+  # foundry-brand-allow: legacy-compat
+  if [[ -n "$STAGED_FORGE_SHIM" && -e "$STAGED_FORGE_SHIM" ]]; then
+    # foundry-brand-allow: legacy-compat
+    rm -f -- "$STAGED_FORGE_SHIM"
+  fi
 }
 trap cleanup EXIT
 
 fail() {
-  echo "forge installer: $*" >&2
+  echo "foundry installer: $*" >&2
   exit 1
 }
 
@@ -30,7 +43,7 @@ for required_command in awk cosign curl install mktemp tar tr; do
 done
 
 [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
-  fail "FORGE_REPO must be an exact GitHub owner/repository pair"
+  fail "FOUNDRY_REPO must be an exact GitHub owner/repository pair"
 
 release_version_is_valid() {
   [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
@@ -38,10 +51,10 @@ release_version_is_valid() {
 
 if [[ -n "$RELEASE_BASE_URL" ]]; then
   [[ "$VERSION" != "latest" ]] ||
-    fail "FORGE_VERSION must be explicit when FORGE_RELEASE_BASE_URL is set"
+    fail "FOUNDRY_VERSION must be explicit when FOUNDRY_RELEASE_BASE_URL is set"
   resolved_version="$VERSION"
   release_version_is_valid "$resolved_version" ||
-    fail "FORGE_VERSION must be a supported v-prefixed semantic version"
+    fail "FOUNDRY_VERSION must be a supported v-prefixed semantic version"
   base_url="${RELEASE_BASE_URL%/}"
 else
   if [[ "$VERSION" == "latest" ]]; then
@@ -67,7 +80,7 @@ case "$base_url" in
     ;;
   http://*)
     [[ "$TEST_MODE" == "1" ]] ||
-      fail "plain HTTP release URLs are allowed only with FORGE_INSTALLER_TEST_MODE=1"
+      fail "plain HTTP release URLs are allowed only with FOUNDRY_INSTALLER_TEST_MODE=1"
     download() {
       curl -fsSL --proto '=http,https' "$1" -o "$2"
     }
@@ -92,7 +105,7 @@ case "$arch" in
   *) fail "unsupported architecture: $arch" ;;
 esac
 
-asset="forge-${platform}-${target_arch}.tar.gz"
+asset="foundry-${platform}-${target_arch}.tar.gz"
 checksums="$TMP_DIR/SHA256SUMS"
 sigstore_bundle="$TMP_DIR/SHA256SUMS.sigstore.json"
 
@@ -135,21 +148,44 @@ fi
 extract_dir="$TMP_DIR/extract"
 mkdir -p "$extract_dir"
 binary_member=""
+# foundry-brand-allow: legacy-compat
+forge_shim_member=""
 while IFS= read -r member; do
   case "$member" in
-    forge|./forge) binary_member="$member" ;;
+    foundry|./foundry) binary_member="$member" ;;
+    # foundry-brand-allow: legacy-compat
+    forge|./forge) forge_shim_member="$member" ;;
   esac
 done < <(tar -tzf "$archive")
-[[ -n "$binary_member" ]] || fail "verified archive does not contain forge"
+[[ -n "$binary_member" ]] || fail "verified archive does not contain foundry"
+# foundry-brand-allow: legacy-compat
+[[ -n "$forge_shim_member" ]] || fail "verified archive does not contain the temporary forge compatibility shim"
 
-tar -xzf "$archive" -C "$extract_dir" "$binary_member"
-binary="$extract_dir/forge"
+# foundry-brand-allow: legacy-compat
+tar -xzf "$archive" -C "$extract_dir" "$binary_member" "$forge_shim_member"
+binary="$extract_dir/foundry"
 [[ -f "$binary" ]] ||
-  fail "forge binary was not extracted from the verified archive"
+  fail "foundry binary was not extracted from the verified archive"
+# foundry-brand-allow: legacy-compat
+forge_shim="$extract_dir/forge"
+# foundry-brand-allow: legacy-compat
+[[ -f "$forge_shim" ]] ||
+  # foundry-brand-allow: legacy-compat
+  fail "forge compatibility shim was not extracted from the verified archive"
 
 mkdir -p "$BIN_DIR"
-STAGED_BINARY="$(mktemp "$BIN_DIR/.forge.install.XXXXXX")"
+STAGED_BINARY="$(mktemp "$BIN_DIR/.foundry.install.XXXXXX")"
 install -m 0755 "$binary" "$STAGED_BINARY"
-mv -f -- "$STAGED_BINARY" "$BIN_DIR/forge"
+# foundry-brand-allow: legacy-compat
+STAGED_FORGE_SHIM="$(mktemp "$BIN_DIR/.forge-compat.install.XXXXXX")"
+# foundry-brand-allow: legacy-compat
+install -m 0755 "$forge_shim" "$STAGED_FORGE_SHIM"
+mv -f -- "$STAGED_BINARY" "$BIN_DIR/foundry"
 STAGED_BINARY=""
-echo "Installed forge to $BIN_DIR/forge"
+# foundry-brand-allow: legacy-compat
+mv -f -- "$STAGED_FORGE_SHIM" "$BIN_DIR/forge"
+# foundry-brand-allow: legacy-compat
+STAGED_FORGE_SHIM=""
+echo "Installed foundry to $BIN_DIR/foundry"
+# foundry-brand-allow: legacy-compat
+echo "Installed temporary forge compatibility shim to $BIN_DIR/forge" >&2

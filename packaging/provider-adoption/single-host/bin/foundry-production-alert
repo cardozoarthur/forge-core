@@ -5,8 +5,8 @@ umask 077
 export LC_ALL=C
 
 readonly -a CATEGORIES=(
-  forge_ops
-  forge_runtime
+  foundry_ops
+  foundry_runtime
   request_supervisor
   store_check
   backup_timer
@@ -16,7 +16,7 @@ readonly -a CATEGORIES=(
 )
 
 readonly SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-/usr/bin/systemctl}"
-readonly FORGE_ADMIN_BIN="${FORGE_ADMIN_BIN:-/usr/local/sbin/forge-admin}"
+readonly FOUNDRY_ADMIN_BIN="${FOUNDRY_ADMIN_BIN:-/usr/local/sbin/foundry-admin}"
 readonly CURL_BIN="${CURL_BIN:-/usr/bin/curl}"
 readonly STAT_BIN="${STAT_BIN:-/usr/bin/stat}"
 readonly DF_BIN="${DF_BIN:-/usr/bin/df}"
@@ -24,11 +24,11 @@ readonly DATE_BIN="${DATE_BIN:-/usr/bin/date}"
 readonly HOSTNAME_BIN="${HOSTNAME_BIN:-/usr/bin/hostname}"
 readonly FLOCK_BIN="${FLOCK_BIN:-/usr/bin/flock}"
 
-readonly STORE_PATH="${FORGE_STORE_PATH:-/var/lib/forge/forge.sqlite}"
-readonly BACKUP_DIR="${FORGE_BACKUP_DIR:-/var/backups/forge}"
-readonly STATE_DIR="${FORGE_ALERT_STATE_DIR:-${STATE_DIRECTORY:-/var/lib/forge-production-alert}}"
+readonly STORE_PATH="${FOUNDRY_STORE_PATH:-/var/lib/foundry/foundry.sqlite}"
+readonly BACKUP_DIR="${FOUNDRY_BACKUP_DIR:-/var/backups/foundry}"
+readonly STATE_DIR="${FOUNDRY_ALERT_STATE_DIR:-${STATE_DIRECTORY:-/var/lib/foundry-production-alert}}"
 readonly STATE_FILE="${STATE_DIR}/state"
-readonly OFFHOST_MAX_AGE_SECONDS="${FORGE_OFFHOST_MAX_AGE_SECONDS:-86400}"
+readonly OFFHOST_MAX_AGE_SECONDS="${FOUNDRY_OFFHOST_MAX_AGE_SECONDS:-86400}"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -45,7 +45,7 @@ cleanup() {
 trap cleanup EXIT
 
 log_error() {
-  printf 'forge-production-alert: %s\n' "$1" >&2
+  printf 'foundry-production-alert: %s\n' "$1" >&2
 }
 
 die() {
@@ -56,11 +56,11 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
-  forge-production-alert
-  forge-production-alert --test-alert <category>
+  foundry-production-alert
+  foundry-production-alert --test-alert <category>
 
 Categories:
-  forge_ops
+  foundry_ops
   store_check
   backup_timer
   backup_service
@@ -94,31 +94,31 @@ load_credentials() {
     die 'systemd credential directory is unavailable'
   [[ -d "$credential_dir" && ! -L "$credential_dir" ]] ||
     die 'systemd credential directory is unsafe'
-  if [[ "${FORGE_ALERT_OFFLINE_SELF_TEST:-0}" == "1" ]]; then
-    [[ "$credential_dir" == /tmp/forge-production-alert-selftest.*/* ]] ||
+  if [[ "${FOUNDRY_ALERT_OFFLINE_SELF_TEST:-0}" == "1" ]]; then
+    [[ "$credential_dir" == /tmp/foundry-production-alert-selftest.*/* ]] ||
       die 'offline self-test credential directory is outside its fixture'
   else
     [[ "$credential_dir" == /run/credentials/* ]] ||
       die 'credentials must be supplied by systemd LoadCredential'
   fi
 
-  credential_file="${credential_dir}/forge-telegram-alert"
+  credential_file="${credential_dir}/foundry-telegram-alert"
   [[ -f "$credential_file" && ! -L "$credential_file" ]] ||
-    die 'forge-telegram-alert credential is unavailable or unsafe'
+    die 'foundry-telegram-alert credential is unavailable or unsafe'
 
   mapfile -t credential_lines <"$credential_file" ||
-    die 'forge-telegram-alert credential could not be read'
+    die 'foundry-telegram-alert credential could not be read'
   [[ ${#credential_lines[@]} -eq 2 ]] ||
-    die 'forge-telegram-alert credential must contain exactly two lines'
+    die 'foundry-telegram-alert credential must contain exactly two lines'
 
   TELEGRAM_BOT_TOKEN="${credential_lines[0]}"
   TELEGRAM_CHAT_ID="${credential_lines[1]}"
   unset credential_lines
 
   [[ "$TELEGRAM_BOT_TOKEN" =~ ^[0-9]{6,}:[A-Za-z0-9_-]{20,}$ ]] ||
-    die 'forge-telegram-alert bot token has an invalid shape'
+    die 'foundry-telegram-alert bot token has an invalid shape'
   [[ "$TELEGRAM_CHAT_ID" =~ ^-?[0-9]{1,20}$ ]] ||
-    die 'forge-telegram-alert chat id has an invalid shape'
+    die 'foundry-telegram-alert chat id has an invalid shape'
 }
 
 curl_config_escape() {
@@ -132,7 +132,7 @@ curl_config_escape() {
 }
 
 alert_host() {
-  local host="${FORGE_ALERT_HOST_OVERRIDE:-}"
+  local host="${FOUNDRY_ALERT_HOST_OVERRIDE:-}"
   if [[ -z "$host" ]]; then
     host="$("$HOSTNAME_BIN" --fqdn 2>/dev/null || "$HOSTNAME_BIN" 2>/dev/null || true)"
   fi
@@ -167,57 +167,57 @@ send_telegram() {
   } | "$CURL_BIN" --config - --output /dev/null 2>/dev/null
 }
 
-check_forge_ops() {
-  CHECK_DETAIL='forge-ops.service is active'
-  if "$SYSTEMCTL_BIN" is-active --quiet forge-ops.service >/dev/null 2>&1; then
+check_foundry_ops() {
+  CHECK_DETAIL='foundry-ops.service is active'
+  if "$SYSTEMCTL_BIN" is-active --quiet foundry-ops.service >/dev/null 2>&1; then
     return 0
   fi
-  CHECK_DETAIL='forge-ops.service is not active'
+  CHECK_DETAIL='foundry-ops.service is not active'
   return 1
 }
 
-check_forge_runtime() {
-  CHECK_DETAIL='forge-runtime.service is active'
-  if "$SYSTEMCTL_BIN" is-active --quiet forge-runtime.service >/dev/null 2>&1; then
+check_foundry_runtime() {
+  CHECK_DETAIL='foundry-runtime.service is active'
+  if "$SYSTEMCTL_BIN" is-active --quiet foundry-runtime.service >/dev/null 2>&1; then
     return 0
   fi
-  CHECK_DETAIL='forge-runtime.service is not active'
+  CHECK_DETAIL='foundry-runtime.service is not active'
   return 1
 }
 
 check_request_supervisor() {
-  CHECK_DETAIL='forge-request-supervisor.service is active'
-  if "$SYSTEMCTL_BIN" is-active --quiet forge-request-supervisor.service >/dev/null 2>&1; then
+  CHECK_DETAIL='foundry-request-supervisor.service is active'
+  if "$SYSTEMCTL_BIN" is-active --quiet foundry-request-supervisor.service >/dev/null 2>&1; then
     return 0
   fi
-  CHECK_DETAIL='forge-request-supervisor.service is not active'
+  CHECK_DETAIL='foundry-request-supervisor.service is not active'
   return 1
 }
 
 check_store() {
-  CHECK_DETAIL='Forge store check passed'
+  CHECK_DETAIL='Foundry store check passed'
   if [[ ! -f "$STORE_PATH" || -L "$STORE_PATH" ]]; then
-    CHECK_DETAIL='Forge store is missing or unsafe'
+    CHECK_DETAIL='Foundry store is missing or unsafe'
     return 1
   fi
-  if "$FORGE_ADMIN_BIN" \
+  if "$FOUNDRY_ADMIN_BIN" \
     --store "$STORE_PATH" \
     store check \
     --output json \
     >/dev/null 2>&1; then
     return 0
   fi
-  CHECK_DETAIL='Forge store check failed'
+  CHECK_DETAIL='Foundry store check failed'
   return 1
 }
 
 check_backup_timer() {
-  CHECK_DETAIL='forge-backup.timer is active and enabled'
-  if "$SYSTEMCTL_BIN" is-active --quiet forge-backup.timer >/dev/null 2>&1 &&
-    "$SYSTEMCTL_BIN" is-enabled --quiet forge-backup.timer >/dev/null 2>&1; then
+  CHECK_DETAIL='foundry-backup.timer is active and enabled'
+  if "$SYSTEMCTL_BIN" is-active --quiet foundry-backup.timer >/dev/null 2>&1 &&
+    "$SYSTEMCTL_BIN" is-enabled --quiet foundry-backup.timer >/dev/null 2>&1; then
     return 0
   fi
-  CHECK_DETAIL='forge-backup.timer is not both active and enabled'
+  CHECK_DETAIL='foundry-backup.timer is not both active and enabled'
   return 1
 }
 
@@ -235,17 +235,17 @@ check_backup_service() {
   local exit_status=""
   local exit_timestamp=""
 
-  result="$(systemd_property forge-backup.service Result || true)"
-  exit_status="$(systemd_property forge-backup.service ExecMainStatus || true)"
-  exit_timestamp="$(systemd_property forge-backup.service ExecMainExitTimestampMonotonic || true)"
+  result="$(systemd_property foundry-backup.service Result || true)"
+  exit_status="$(systemd_property foundry-backup.service ExecMainStatus || true)"
+  exit_timestamp="$(systemd_property foundry-backup.service ExecMainExitTimestampMonotonic || true)"
 
-  CHECK_DETAIL='last forge-backup.service run passed'
+  CHECK_DETAIL='last foundry-backup.service run passed'
   if [[ "$result" == "success" &&
     "$exit_status" == "0" &&
     "$exit_timestamp" =~ ^[1-9][0-9]*$ ]]; then
     return 0
   fi
-  CHECK_DETAIL='last forge-backup.service run is absent or failed'
+  CHECK_DETAIL='last foundry-backup.service run is absent or failed'
   return 1
 }
 
@@ -256,7 +256,7 @@ check_disk_space() {
   local -a df_lines=()
 
   if [[ ! -f "$STORE_PATH" || -L "$STORE_PATH" ]]; then
-    CHECK_DETAIL='disk check cannot inspect a safe Forge store'
+    CHECK_DETAIL='disk check cannot inspect a safe Foundry store'
     return 1
   fi
 
@@ -307,7 +307,7 @@ marker_is_valid() {
     marker_uploader_sha256 \
     marker_extra \
     <<<"${marker_lines[0]}" || return 1
-  [[ "$marker_schema" == "forge-offhost-v2" ]] || return 1
+  [[ "$marker_schema" == "foundry-offhost-v2" ]] || return 1
   [[ "$marker_backup_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
   [[ "$marker_destination_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
   [[ "$marker_generation" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || return 1
@@ -316,7 +316,7 @@ marker_is_valid() {
 }
 
 current_epoch() {
-  local override="${FORGE_NOW_EPOCH_OVERRIDE:-}"
+  local override="${FOUNDRY_NOW_EPOCH_OVERRIDE:-}"
   if [[ -n "$override" ]]; then
     [[ "$override" =~ ^[1-9][0-9]*$ ]] || return 1
     printf '%s' "$override"
@@ -374,8 +374,8 @@ check_offhost_marker() {
 run_check() {
   local category="$1"
   case "$category" in
-    forge_ops) check_forge_ops ;;
-    forge_runtime) check_forge_runtime ;;
+    foundry_ops) check_foundry_ops ;;
+    foundry_runtime) check_foundry_runtime ;;
     request_supervisor) check_request_supervisor ;;
     store_check) check_store ;;
     backup_timer) check_backup_timer ;;
@@ -443,7 +443,7 @@ run_test_alert() {
   require_executable "$HOSTNAME_BIN" 'hostname'
   load_credentials
   host="$(alert_host)"
-  message="[Forge production][TEST] host=${host} category=${category} synthetic alert; no health state changed"
+  message="[Foundry production][TEST] host=${host} category=${category} synthetic alert; no health state changed"
   if send_telegram "$message"; then
     printf 'category=%s status=test notification=sent\n' "$category"
     return 0
@@ -469,7 +469,7 @@ run_monitor() {
   declare -A final_state=()
 
   require_executable "$SYSTEMCTL_BIN" 'systemctl'
-  require_executable "$FORGE_ADMIN_BIN" 'forge-admin'
+  require_executable "$FOUNDRY_ADMIN_BIN" 'foundry-admin'
   require_executable "$CURL_BIN" 'curl'
   require_executable "$STAT_BIN" 'stat'
   require_executable "$DF_BIN" 'df'
@@ -506,9 +506,9 @@ run_monitor() {
       changed="yes"
       message=""
       if [[ "$current_status" == "failed" ]]; then
-        message="[Forge production][ALERT] host=${host} category=${category} detail=${CHECK_DETAIL}"
+        message="[Foundry production][ALERT] host=${host} category=${category} detail=${CHECK_DETAIL}"
       elif [[ "$previous_status" == "failed" ]]; then
-        message="[Forge production][RECOVERY] host=${host} category=${category} detail=${CHECK_DETAIL}"
+        message="[Foundry production][RECOVERY] host=${host} category=${category} detail=${CHECK_DETAIL}"
       fi
 
       if [[ -n "$message" ]]; then

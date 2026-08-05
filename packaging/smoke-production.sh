@@ -2,8 +2,8 @@
 set -euo pipefail
 umask 077
 
-forge_binary="${1:-target/release/forge}"
-smoke_port="${FORGE_SMOKE_PORT:-18765}"
+foundry_binary="${1:-target/release/foundry}"
+smoke_port="${FOUNDRY_SMOKE_PORT:-18765}"
 smoke_dir="$(mktemp -d)"
 server_pid=""
 server_start_count=0
@@ -18,8 +18,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-[[ -x "$forge_binary" ]] || {
-  echo "production smoke: executable not found: $forge_binary" >&2
+[[ -x "$foundry_binary" ]] || {
+  echo "production smoke: executable not found: $foundry_binary" >&2
   exit 1
 }
 command -v curl >/dev/null 2>&1 || {
@@ -35,8 +35,8 @@ command -v stat >/dev/null 2>&1 || {
   exit 1
 }
 
-store="$smoke_dir/forge.sqlite"
-backup="$smoke_dir/forge-backup.sqlite"
+store="$smoke_dir/foundry.sqlite"
+backup="$smoke_dir/foundry-backup.sqlite"
 vault_key_file="$smoke_dir/secret.key"
 ops_token_file="$smoke_dir/ops-token"
 curl_auth_config="$smoke_dir/curl-auth.conf"
@@ -62,15 +62,15 @@ for credential_file in \
     exit 1
   }
 done
-forge_env=(
+foundry_env=(
   env
-  FORGE_PRODUCTION_MODE=1
-  "FORGE_SECRET_VAULT_KEY_FILE=$vault_key_file"
-  "FORGE_OPS_BEARER_TOKEN_FILE=$ops_token_file"
+  FOUNDRY_PRODUCTION_MODE=1
+  "FOUNDRY_SECRET_VAULT_KEY_FILE=$vault_key_file"
+  "FOUNDRY_OPS_BEARER_TOKEN_FILE=$ops_token_file"
 )
 
-"${forge_env[@]}" "$forge_binary" --store "$store" plan \
-  --goal "Validate the Forge v0.5 single-host production path" \
+"${foundry_env[@]}" "$foundry_binary" --store "$store" plan \
+  --goal "Validate the Foundry v0.6 single-host production path" \
   --output json >"$smoke_dir/plan.json"
 workflow_id=""
 while IFS= read -r plan_line; do
@@ -91,27 +91,27 @@ done <"$smoke_dir/plan.json"
   echo "production smoke: external key configuration created an adjacent fallback key" >&2
   exit 1
 }
-"${forge_env[@]}" "$forge_binary" --store "$store" store check \
+"${foundry_env[@]}" "$foundry_binary" --store "$store" store check \
   --output json >"$smoke_dir/check-before.json"
-"${forge_env[@]}" "$forge_binary" --store "$store" store backup \
+"${foundry_env[@]}" "$foundry_binary" --store "$store" store backup \
   --destination "$backup" \
   --output json >"$smoke_dir/backup.json"
 [[ -s "$backup" ]] || {
   echo "production smoke: backup was not created" >&2
   exit 1
 }
-"${forge_env[@]}" "$forge_binary" --store "$store" store restore \
+"${foundry_env[@]}" "$foundry_binary" --store "$store" store restore \
   --source "$backup" \
   --approved-by production-smoke \
   --confirm-restore \
   --output json >"$smoke_dir/restore.json"
-"${forge_env[@]}" "$forge_binary" --store "$store" store check \
+"${foundry_env[@]}" "$foundry_binary" --store "$store" store check \
   --output json >"$smoke_dir/check-after.json"
 
 mkdir -p "$smoke_dir/workspace"
-"$forge_binary" events runtime-daemon --help \
+"$foundry_binary" events runtime-daemon --help \
   >"$smoke_dir/runtime-daemon-help.txt"
-"$forge_binary" request supervise --help \
+"$foundry_binary" request supervise --help \
   >"$smoke_dir/request-supervisor-help.txt"
 grep -Fq -- '--continuous' "$smoke_dir/runtime-daemon-help.txt" || {
   echo "production smoke: runtime daemon help is missing continuous mode" >&2
@@ -122,7 +122,7 @@ grep -Fq -- '--max-steps-per-run' "$smoke_dir/request-supervisor-help.txt" || {
   exit 1
 }
 
-"${forge_env[@]}" "$forge_binary" --store "$store" events runtime-daemon \
+"${foundry_env[@]}" "$foundry_binary" --store "$store" events runtime-daemon \
   --project-root "$smoke_dir/workspace" \
   --execute \
   --dispatch-activations \
@@ -130,25 +130,25 @@ grep -Fq -- '--max-steps-per-run' "$smoke_dir/request-supervisor-help.txt" || {
   --interval-seconds 0 \
   --recover-stale-services \
   --scan-schedules \
-  --schedule-executor forge-production-smoke-scheduler \
+  --schedule-executor foundry-production-smoke-scheduler \
   --schedule-max-workers 1 \
   --schedule-ttl-seconds 30 \
   --output json \
   >"$smoke_dir/runtime-daemon.json"
-grep -Eq '"schema_version"[[:space:]]*:[[:space:]]*"forge.event_runtime_daemon.v1"' \
+grep -Eq '"schema_version"[[:space:]]*:[[:space:]]*"foundry.event_runtime_daemon.v1"' \
   "$smoke_dir/runtime-daemon.json" || {
   echo "production smoke: runtime daemon did not emit its contract" >&2
   exit 1
 }
 
 supervisor_store="$smoke_dir/request-supervisor.sqlite"
-"${forge_env[@]}" "$forge_binary" --store "$supervisor_store" request start \
+"${foundry_env[@]}" "$foundry_binary" --store "$supervisor_store" request start \
   --goal "Validate request supervisor advancement; constraint: use only temporary local state; deliverable: persisted supervisor evidence" \
   --origin production-smoke \
   --output json \
   >"$smoke_dir/request-supervisor-start.json"
-"${forge_env[@]}" "$forge_binary" --store "$supervisor_store" request supervise \
-  --executor forge-request-supervisor \
+"${foundry_env[@]}" "$foundry_binary" --store "$supervisor_store" request supervise \
+  --executor foundry-request-supervisor \
   --ttl-seconds 30 \
   --max-steps-per-run 1 \
   --origin production-smoke \
@@ -163,7 +163,7 @@ grep -Eq '"needs_attention"[[:space:]]*:[[:space:]]*[1-9][0-9]*' \
   exit 1
 }
 
-"${forge_env[@]}" "$forge_binary" --store "$supervisor_store" request start \
+"${foundry_env[@]}" "$foundry_binary" --store "$supervisor_store" request start \
   --goal "Validate stale request recovery; constraint: use only temporary local state; deliverable: persisted recovery evidence" \
   --origin production-smoke \
   --output json \
@@ -179,17 +179,17 @@ done <"$smoke_dir/request-supervisor-stale-start.json"
   echo "production smoke: stale recovery fixture did not return a run id" >&2
   exit 1
 }
-"${forge_env[@]}" "$forge_binary" --store "$supervisor_store" request heartbeat \
+"${foundry_env[@]}" "$foundry_binary" --store "$supervisor_store" request heartbeat \
   --run "$stale_run_id" \
-  --executor forge-request-supervisor \
+  --executor foundry-request-supervisor \
   --summary "production smoke stale heartbeat" \
   --ttl-seconds 1 \
   --origin production-smoke \
   --output json \
   >"$smoke_dir/request-supervisor-stale-heartbeat.json"
 sleep 2
-"${forge_env[@]}" "$forge_binary" --store "$supervisor_store" request supervise \
-  --executor forge-request-supervisor \
+"${foundry_env[@]}" "$foundry_binary" --store "$supervisor_store" request supervise \
+  --executor foundry-request-supervisor \
   --ttl-seconds 30 \
   --max-steps-per-run 1 \
   --origin production-smoke \
@@ -200,7 +200,7 @@ grep -Eq '"recovered"[[:space:]]*:[[:space:]]*[1-9][0-9]*' \
   echo "production smoke: request supervisor did not recover a stale owned run" >&2
   exit 1
 }
-"${forge_env[@]}" "$forge_binary" --store "$supervisor_store" request status \
+"${foundry_env[@]}" "$foundry_binary" --store "$supervisor_store" request status \
   --run "$stale_run_id" \
   --output json \
   >"$smoke_dir/request-supervisor-recovered-status.json"
@@ -209,7 +209,7 @@ grep -Eq '"status"[[:space:]]*:[[:space:]]*"needs_attention"' \
   echo "production smoke: stale run was not parked in needs_attention" >&2
   exit 1
 }
-"${forge_env[@]}" "$forge_binary" --store "$supervisor_store" store check \
+"${foundry_env[@]}" "$foundry_binary" --store "$supervisor_store" store check \
   --output json >"$smoke_dir/request-supervisor-store-check.json"
 
 start_server() {
@@ -232,7 +232,7 @@ start_server() {
   local pre_mutation_snapshot
   local post_mutation_snapshot
 
-  "${forge_env[@]}" "$forge_binary" --store "$store" ops serve \
+  "${foundry_env[@]}" "$foundry_binary" --store "$store" ops serve \
     --project-root "$smoke_dir/workspace" \
     --host 127.0.0.1 \
     --port "$smoke_port" \
@@ -268,7 +268,7 @@ start_server() {
     echo "production smoke: Ops bearer token file leaked into the server argv" >&2
     return 1
   }
-  [[ "$server_cmdline" != *"FORGE_OPS_BEARER_TOKEN"* ]] || {
+  [[ "$server_cmdline" != *"FOUNDRY_OPS_BEARER_TOKEN"* ]] || {
     echo "production smoke: Ops bearer credential leaked into the server argv" >&2
     return 1
   }
@@ -439,9 +439,9 @@ stop_server() {
 
 start_server
 stop_server KILL
-"${forge_env[@]}" "$forge_binary" --store "$store" store check \
+"${foundry_env[@]}" "$foundry_binary" --store "$store" store check \
   --output json >"$smoke_dir/check-after-sigkill.json"
 start_server
 stop_server TERM
 
-echo "Forge production smoke passed: store check, backup, restore, runtime reconciliation, receipt-aware request supervision and stale recovery, authenticated reads and mutations, bearer rejection, SIGKILL recovery, readiness, and graceful stop."
+echo "Foundry production smoke passed: store check, backup, restore, runtime reconciliation, receipt-aware request supervision and stale recovery, authenticated reads and mutations, bearer rejection, SIGKILL recovery, readiness, and graceful stop."

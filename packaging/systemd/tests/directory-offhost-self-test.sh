@@ -2,7 +2,7 @@
 set -euo pipefail
 
 fail() {
-  printf 'forge systemd directory off-host self-test: %s\n' "$*" >&2
+  printf 'foundry systemd directory off-host self-test: %s\n' "$*" >&2
   exit 1
 }
 
@@ -28,10 +28,10 @@ else
 fi
 [[ -n "$test_parent" && -d "$test_parent" && ! -L "$test_parent" && -w "$test_parent" ]] ||
   fail "secure test parent is unavailable"
-test_root="$(mktemp -d "$test_parent/.forge-systemd-directory-test.XXXXXX")"
+test_root="$(mktemp -d "$test_parent/.foundry-systemd-directory-test.XXXXXX")"
 cleanup() {
   case "${test_root:-}" in
-    "$test_parent"/.forge-systemd-directory-test.*)
+    "$test_parent"/.foundry-systemd-directory-test.*)
       chmod -R u+rwX "$test_root" >/dev/null 2>&1 || true
       [[ -d "$test_root" && ! -L "$test_root" ]] && rm -rf -- "$test_root"
       ;;
@@ -42,7 +42,7 @@ trap cleanup EXIT
 destination="$test_root/provider"
 install -d -m 0700 "$destination"
 export TEST_DIRECTORY_MOUNT_TARGET="$test_root"
-export TEST_DIRECTORY_MOUNT_SOURCE="fixture-remote:/forge"
+export TEST_DIRECTORY_MOUNT_SOURCE="fixture-remote:/foundry"
 export TEST_DIRECTORY_MOUNT_FSTYPE="fuse.fixture"
 export TEST_DIRECTORY_MOUNT_STATE="up"
 
@@ -58,7 +58,7 @@ mount_identity="$(
 )"
 expected_mount_identity="$(
   printf '%s\n' \
-    "forge-directory-mount-v1" \
+    "foundry-directory-mount-v1" \
     "target=$TEST_DIRECTORY_MOUNT_TARGET" \
     "source=$TEST_DIRECTORY_MOUNT_SOURCE" \
     "fstype=$TEST_DIRECTORY_MOUNT_FSTYPE" \
@@ -84,7 +84,7 @@ fi
 export TEST_DIRECTORY_MOUNT_STATE="up"
 
 non_directory_path="$(
-  resolve_directory_offhost_path "s3://example-forge/backups"
+  resolve_directory_offhost_path "s3://example-foundry/backups"
 )"
 [[ -z "$non_directory_path" ]] ||
   fail "non-file provider must not receive a filesystem write grant"
@@ -126,7 +126,7 @@ if locale -a | grep -Fxq "pt_PT.utf8"; then
   install -d -m 0700 "$unicode_destination"
   if LC_ALL=pt_PT.utf8 bash -c \
     'source "$1"; resolve_directory_offhost_path "$2"' \
-    forge-directory-locale-test \
+    foundry-directory-locale-test \
     "$installer" \
     "file://$unicode_destination" \
     >/dev/null 2>&1; then
@@ -184,7 +184,7 @@ if (
 fi
 chmod 0700 "$destination"
 
-dropin_dir="$test_root/forge-backup.service.d"
+dropin_dir="$test_root/foundry-backup.service.d"
 dropin="$dropin_dir/20-directory-offhost.conf"
 install -d -m 0700 "$dropin_dir"
 
@@ -222,7 +222,7 @@ reconcile_backup_directory_dropin "$dropin" ""
 # shellcheck disable=SC2016 # Match the literal managed-path expression.
 grep -Fq '"$directory_offhost_dropin"' "$installer" ||
   fail "directory drop-in is not part of the transactional managed path set"
-grep -Fq '/etc/forge/backup-offhost-mount-identity' "$installer" ||
+grep -Fq '/etc/foundry/backup-offhost-mount-identity' "$installer" ||
   fail "mount identity is not part of the transactional managed path set"
 
 apply_line="$(
@@ -237,7 +237,7 @@ daemon_reload_line="$(
 )"
 initial_backup_line="$(
   awk -v start="$apply_line" \
-    'NR > start && $0 == "if ! systemctl start forge-backup.service; then" { print NR; exit }' \
+    'NR > start && $0 == "if ! systemctl start foundry-backup.service; then" { print NR; exit }' \
     "$installer"
 )"
 [[ -n "$apply_line" &&
@@ -250,4 +250,4 @@ initial_backup_line="$(
 bash -n "$installer"
 bash -n "$tests_dir/directory-offhost-self-test.sh"
 
-printf 'forge systemd directory off-host self-test: PASS\n'
+printf 'foundry systemd directory off-host self-test: PASS\n'

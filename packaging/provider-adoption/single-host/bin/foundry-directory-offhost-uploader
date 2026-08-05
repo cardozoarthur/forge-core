@@ -7,7 +7,7 @@ umask 077
 readonly EXIT_USAGE=64
 readonly EXIT_REMOTE=69
 readonly EXIT_CONFLICT=73
-readonly DIGEST_SUFFIX=".forge-sha256"
+readonly DIGEST_SUFFIX=".foundry-sha256"
 
 operation=""
 source_path=""
@@ -25,7 +25,7 @@ active_download_object=""
 active_download_digest=""
 rollback_output=""
 rollback_digest_output=""
-mount_identity_file="${FORGE_DIRECTORY_MOUNT_IDENTITY_FILE:-}"
+mount_identity_file="${FOUNDRY_DIRECTORY_MOUNT_IDENTITY_FILE:-}"
 mount_target=""
 mount_source=""
 mount_fstype=""
@@ -34,7 +34,7 @@ mount_fsid=""
 fail() {
   local status="$1"
   shift
-  printf 'forge-directory-offhost-uploader: %s\n' "$*" >&2
+  printf 'foundry-directory-offhost-uploader: %s\n' "$*" >&2
   exit "$status"
 }
 
@@ -317,11 +317,11 @@ load_mount_identity() {
   local -a identity_lines=()
 
   [[ -n "$mount_identity_file" ]] ||
-    fail "$EXIT_REMOTE" "FORGE_DIRECTORY_MOUNT_IDENTITY_FILE is required"
+    fail "$EXIT_REMOTE" "FOUNDRY_DIRECTORY_MOUNT_IDENTITY_FILE is required"
   validate_canonical_input_file "$mount_identity_file" "mount identity file"
   mapfile -t identity_lines <"$mount_identity_file"
   [[ ${#identity_lines[@]} -eq 5 &&
-    "${identity_lines[0]}" = "forge-directory-mount-v1" &&
+    "${identity_lines[0]}" = "foundry-directory-mount-v1" &&
     "${identity_lines[1]}" = target=* &&
     "${identity_lines[2]}" = source=* &&
     "${identity_lines[3]}" = fstype=* &&
@@ -470,10 +470,10 @@ stage_remote_pair() {
     fail "$EXIT_REMOTE" "destination is not writable"
 
   active_remote_object="$(
-    mktemp "$destination_path/.forge-directory-object.XXXXXX"
+    mktemp "$destination_path/.foundry-directory-object.XXXXXX"
   )" || fail "$EXIT_REMOTE" "cannot allocate remote object staging file"
   active_remote_digest="$(
-    mktemp "$destination_path/.forge-directory-digest.XXXXXX"
+    mktemp "$destination_path/.foundry-directory-digest.XXXXXX"
   )" || fail "$EXIT_REMOTE" "cannot allocate remote digest staging file"
 
   cp --reflink=never -- "$source_path" "$active_remote_object" ||
@@ -665,10 +665,10 @@ download_object() {
   [[ -n "$digest_parent" ]] || digest_parent="/"
 
   active_download_object="$(
-    mktemp "$output_parent/.forge-directory-download-object.XXXXXX"
+    mktemp "$output_parent/.foundry-directory-download-object.XXXXXX"
   )" || fail "$EXIT_REMOTE" "cannot allocate download staging file"
   active_download_digest="$(
-    mktemp "$digest_parent/.forge-directory-download-digest.XXXXXX"
+    mktemp "$digest_parent/.foundry-directory-download-digest.XXXXXX"
   )" || fail "$EXIT_REMOTE" "cannot allocate digest download staging file"
 
   require_current_mount_identity

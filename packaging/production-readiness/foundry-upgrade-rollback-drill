@@ -6,17 +6,17 @@ umask 077
 export LC_ALL=C
 
 fail() {
-  printf 'forge upgrade/rollback drill: %s\n' "$*" >&2
+  printf 'foundry upgrade/rollback drill: %s\n' "$*" >&2
   exit 1
 }
 
 usage() {
   cat <<'EOF'
 Usage:
-  forge-upgrade-rollback-drill \
-    --candidate /absolute/path/to/candidate/forge \
-    --previous /absolute/path/to/previous/forge \
-    --store /absolute/path/to/pre-upgrade/forge.sqlite \
+  foundry-upgrade-rollback-drill \
+    --candidate /absolute/path/to/candidate/foundry \
+    --previous /absolute/path/to/previous/foundry \
+    --store /absolute/path/to/pre-upgrade/foundry.sqlite \
     --release-version X.Y.Z \
     --canary-workflow-id wf_ID \
     --output-dir /absolute/private/evidence-root \
@@ -32,7 +32,7 @@ The output directory must already exist, be private, and be owned by the
 invoking user. upgrade-rollback-report.json must not already exist.
 
 Configure the production vault key out of band through
-FORGE_SECRET_VAULT_KEY_FILE. Inline vault-key values are rejected.
+FOUNDRY_SECRET_VAULT_KEY_FILE. Inline vault-key values are rejected.
 EOF
 }
 
@@ -105,21 +105,21 @@ for required_command in \
 done
 timeout --version >/dev/null 2>&1 || fail "GNU timeout is required"
 
-test_mode="${FORGE_PRODUCTION_READINESS_TEST_MODE:-0}"
+test_mode="${FOUNDRY_PRODUCTION_READINESS_TEST_MODE:-0}"
 case "$test_mode" in
   0 | 1) ;;
-  *) fail "FORGE_PRODUCTION_READINESS_TEST_MODE must be 0 or 1" ;;
+  *) fail "FOUNDRY_PRODUCTION_READINESS_TEST_MODE must be 0 or 1" ;;
 esac
 production_mode_raw=0
-if [[ -v FORGE_PRODUCTION_MODE ]]; then
-  production_mode_raw="$FORGE_PRODUCTION_MODE"
+if [[ -v FOUNDRY_PRODUCTION_MODE ]]; then
+  production_mode_raw="$FOUNDRY_PRODUCTION_MODE"
 fi
 production_mode_value="${production_mode_raw,,}"
 case "$production_mode_value" in
   0 | false | no | off) production_mode=0 ;;
   1 | true | yes | on) production_mode=1 ;;
   *)
-    fail "FORGE_PRODUCTION_MODE must be one of 0,false,no,off,1,true,yes,on"
+    fail "FOUNDRY_PRODUCTION_MODE must be one of 0,false,no,off,1,true,yes,on"
     ;;
 esac
 execution_mode="production"
@@ -129,20 +129,20 @@ trust_root="/"
 trusted_uid=0
 if [[ "$test_mode" = 1 ]]; then
   [[ "$production_mode" = 0 ]] ||
-    fail "test mode is forbidden when FORGE_PRODUCTION_MODE is enabled"
-  test_root="${FORGE_PRODUCTION_READINESS_TEST_ROOT:-}"
+    fail "test mode is forbidden when FOUNDRY_PRODUCTION_MODE is enabled"
+  test_root="${FOUNDRY_PRODUCTION_READINESS_TEST_ROOT:-}"
   [[ "$test_root" = /* && "$test_root" != "/" && -d "$test_root" && ! -L "$test_root" ]] ||
-    fail "FORGE_PRODUCTION_READINESS_TEST_ROOT must be an absolute non-symlink directory"
-  marker="$test_root/.forge-production-readiness-test-root"
+    fail "FOUNDRY_PRODUCTION_READINESS_TEST_ROOT must be an absolute non-symlink directory"
+  marker="$test_root/.foundry-production-readiness-test-root"
   [[ -f "$marker" && ! -L "$marker" ]] ||
     fail "production-readiness test sentinel is missing"
-  [[ "$(<"$marker")" = "forge-production-readiness-test-v1" ]] ||
+  [[ "$(<"$marker")" = "foundry-production-readiness-test-v1" ]] ||
     fail "production-readiness test sentinel is invalid"
   trust_root="$(realpath -e -- "$test_root")"
   trusted_uid="$(stat -c '%u' -- "$trust_root")"
 else
-  [[ -z "${FORGE_PRODUCTION_READINESS_TEST_ROOT:-}" ]] ||
-    fail "FORGE_PRODUCTION_READINESS_TEST_ROOT requires test mode"
+  [[ -z "${FOUNDRY_PRODUCTION_READINESS_TEST_ROOT:-}" ]] ||
+    fail "FOUNDRY_PRODUCTION_READINESS_TEST_ROOT requires test mode"
 fi
 readonly test_mode production_mode execution_mode trust_root trusted_uid
 
@@ -247,22 +247,22 @@ parse_uint "$ops_port_input" "--ops-port" ops_port
 
 [[ "$candidate_binary" = /* ]] || fail "--candidate must be an absolute path"
 [[ "$previous_binary" = /* ]] || fail "--previous must be an absolute path"
-audit_executable "$candidate_binary" "candidate Forge executable" "$trust_root" "$trusted_uid"
-audit_executable "$previous_binary" "previous Forge executable" "$trust_root" "$trusted_uid"
+audit_executable "$candidate_binary" "candidate Foundry executable" "$trust_root" "$trusted_uid"
+audit_executable "$previous_binary" "previous Foundry executable" "$trust_root" "$trusted_uid"
 [[ "$candidate_binary" != "$previous_binary" ]] ||
-  fail "candidate and previous Forge paths must differ"
+  fail "candidate and previous Foundry paths must differ"
 
 candidate_version="$("$candidate_binary" --version 2>/dev/null)" ||
-  fail "candidate Forge executable did not report a version"
+  fail "candidate Foundry executable did not report a version"
 previous_version="$("$previous_binary" --version 2>/dev/null)" ||
-  fail "previous Forge executable did not report a version"
-[[ "$candidate_version" = "forge $release_version" ]] ||
-  fail "candidate Forge version does not match --release-version"
-[[ "$previous_version" =~ ^forge\ ([0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?)$ ]] ||
-  fail "previous Forge executable reported an unsupported version"
+  fail "previous Foundry executable did not report a version"
+[[ "$candidate_version" = "foundry $release_version" ]] ||
+  fail "candidate Foundry version does not match --release-version"
+[[ "$previous_version" =~ ^foundry\ ([0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?)$ ]] ||
+  fail "previous Foundry executable reported an unsupported version"
 previous_version="${BASH_REMATCH[1]}"
 [[ "$previous_version" != "$release_version" ]] ||
-  fail "previous Forge version must differ from the candidate release"
+  fail "previous Foundry version must differ from the candidate release"
 python3 - "$previous_version" "$release_version" <<'PY'
 import sys
 
@@ -280,9 +280,9 @@ candidate_binary_sha256="$(sha256sum "$candidate_binary" | awk '{print $1}')"
 previous_binary_sha256="$(sha256sum "$previous_binary" | awk '{print $1}')"
 [[ "$candidate_binary_sha256" =~ ^[0-9a-f]{64}$ &&
   "$previous_binary_sha256" =~ ^[0-9a-f]{64}$ ]] ||
-  fail "candidate or previous Forge executable digest is invalid"
+  fail "candidate or previous Foundry executable digest is invalid"
 [[ "$candidate_binary_sha256" != "$previous_binary_sha256" ]] ||
-  fail "candidate and previous Forge executable bytes must differ"
+  fail "candidate and previous Foundry executable bytes must differ"
 
 [[ "$source_store_input" = /* ]] || fail "--store must be an absolute path"
 [[ -f "$source_store_input" && ! -L "$source_store_input" ]] ||
@@ -316,17 +316,17 @@ report_path="$output_dir/upgrade-rollback-report.json"
 [[ ! -e "$report_path" && ! -L "$report_path" ]] ||
   fail "output must be new: $report_path"
 
-[[ -z "${FORGE_SECRET_VAULT_KEY+x}" ]] ||
-  fail "FORGE_SECRET_VAULT_KEY is forbidden; use a key file"
-[[ -z "${FORGE_SECRET_VAULT_PREVIOUS_KEYS+x}" ]] ||
-  fail "FORGE_SECRET_VAULT_PREVIOUS_KEYS is forbidden; use key files"
-vault_key_file="${FORGE_SECRET_VAULT_KEY_FILE:-}"
+[[ -z "${FOUNDRY_SECRET_VAULT_KEY+x}" ]] ||
+  fail "FOUNDRY_SECRET_VAULT_KEY is forbidden; use a key file"
+[[ -z "${FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS+x}" ]] ||
+  fail "FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS is forbidden; use key files"
+vault_key_file="${FOUNDRY_SECRET_VAULT_KEY_FILE:-}"
 [[ "$vault_key_file" = /* && -f "$vault_key_file" && ! -L "$vault_key_file" && -r "$vault_key_file" ]] ||
-  fail "FORGE_SECRET_VAULT_KEY_FILE must identify a readable absolute non-symlink file"
+  fail "FOUNDRY_SECRET_VAULT_KEY_FILE must identify a readable absolute non-symlink file"
 
-work_dir="$(mktemp -d /tmp/forge-upgrade-rollback.XXXXXX)"
+work_dir="$(mktemp -d /tmp/foundry-upgrade-rollback.XXXXXX)"
 chmod 0700 "$work_dir"
-printf '%s\n' "forge-upgrade-rollback-work-v1" >"$work_dir/.sentinel"
+printf '%s\n' "foundry-upgrade-rollback-work-v1" >"$work_dir/.sentinel"
 stage_dir=""
 stage_report=""
 server_pid=""
@@ -340,9 +340,9 @@ cleanup() {
     -d "$stage_dir" && ! -L "$stage_dir" ]]; then
     rm -rf -- "$stage_dir"
   fi
-  if [[ "$work_dir" = /tmp/forge-upgrade-rollback.* &&
+  if [[ "$work_dir" = /tmp/foundry-upgrade-rollback.* &&
     -f "$work_dir/.sentinel" &&
-    "$(<"$work_dir/.sentinel")" = "forge-upgrade-rollback-work-v1" ]]; then
+    "$(<"$work_dir/.sentinel")" = "foundry-upgrade-rollback-work-v1" ]]; then
     rm -rf -- "$work_dir"
   fi
 }
@@ -358,15 +358,15 @@ stage_report="$stage_dir/upgrade-rollback-report.json"
 vault_env=(
   env
   -u CREDENTIALS_DIRECTORY
-  -u FORGE_BACKUP_OFFHOST_COMMAND_FILE
-  -u FORGE_BACKUP_OFFHOST_DESTINATION_FILE
-  -u FORGE_BACKUP_OFFHOST_GENERATION_FILE
-  -u FORGE_OPS_BEARER_TOKEN
-  FORGE_PRODUCTION_MODE=1
-  "FORGE_SECRET_VAULT_KEY_FILE=$vault_key_file"
+  -u FOUNDRY_BACKUP_OFFHOST_COMMAND_FILE
+  -u FOUNDRY_BACKUP_OFFHOST_DESTINATION_FILE
+  -u FOUNDRY_BACKUP_OFFHOST_GENERATION_FILE
+  -u FOUNDRY_OPS_BEARER_TOKEN
+  FOUNDRY_PRODUCTION_MODE=1
+  "FOUNDRY_SECRET_VAULT_KEY_FILE=$vault_key_file"
 )
 
-run_forge() {
+run_foundry() {
   local binary="$1"
   local label="$2"
   shift 2
@@ -456,7 +456,7 @@ start_and_probe_ops() {
   local _attempt=""
 
   "${vault_env[@]}" \
-    "FORGE_OPS_BEARER_TOKEN_FILE=$ops_token_file" \
+    "FOUNDRY_OPS_BEARER_TOKEN_FILE=$ops_token_file" \
     "$binary" \
     --store "$working_store" \
     ops serve \
@@ -490,33 +490,33 @@ start_and_probe_ops() {
   fail "$label Ops did not become ready on loopback"
 }
 
-run_forge "$previous_binary" "previous-version store check" \
+run_foundry "$previous_binary" "previous-version store check" \
   --store "$working_store" store check --output json >"$work_dir/previous-check.json"
-run_forge "$previous_binary" "previous-version canary inspection" \
+run_foundry "$previous_binary" "previous-version canary inspection" \
   --store "$working_store" inspect "$canary_workflow_id" --output json \
   >"$work_dir/previous-canary.json"
 baseline_schema="$(schema_sha256 "$working_store")" ||
   fail "could not fingerprint the previous-version schema"
 start_and_probe_ops "$previous_binary" "previous-version baseline" previous-baseline
 
-run_forge "$candidate_binary" "candidate upgraded store check" \
+run_foundry "$candidate_binary" "candidate upgraded store check" \
   --store "$working_store" store check --output json >"$work_dir/upgraded-check.json"
-run_forge "$candidate_binary" "candidate upgraded canary inspection" \
+run_foundry "$candidate_binary" "candidate upgraded canary inspection" \
   --store "$working_store" inspect "$canary_workflow_id" --output json \
   >"$work_dir/upgraded-canary.json"
 start_and_probe_ops "$candidate_binary" "candidate upgraded" candidate-upgraded
 upgraded_schema="$(schema_sha256 "$working_store")" ||
   fail "could not fingerprint the upgraded schema"
 
-run_forge "$previous_binary" "rollback restore" \
+run_foundry "$previous_binary" "rollback restore" \
   --store "$working_store" store restore \
   --source "$baseline_store" \
   --approved-by production-readiness-drill \
   --confirm-restore \
   --output json >"$work_dir/rollback.json"
-run_forge "$previous_binary" "previous-version post-rollback store check" \
+run_foundry "$previous_binary" "previous-version post-rollback store check" \
   --store "$working_store" store check --output json >"$work_dir/rollback-check.json"
-run_forge "$previous_binary" "previous-version post-rollback canary inspection" \
+run_foundry "$previous_binary" "previous-version post-rollback canary inspection" \
   --store "$working_store" inspect "$canary_workflow_id" --output json \
   >"$work_dir/rollback-canary.json"
 rollback_schema="$(schema_sha256 "$working_store")" ||
@@ -527,9 +527,9 @@ rollback_schema="$(schema_sha256 "$working_store")" ||
   fail "rollback mutated the pre-upgrade backup"
 start_and_probe_ops "$previous_binary" "previous-version rollback" previous-rollback
 
-run_forge "$candidate_binary" "candidate reinstall store check" \
+run_foundry "$candidate_binary" "candidate reinstall store check" \
   --store "$working_store" store check --output json >"$work_dir/reinstall-check.json"
-run_forge "$candidate_binary" "candidate reinstall canary inspection" \
+run_foundry "$candidate_binary" "candidate reinstall canary inspection" \
   --store "$working_store" inspect "$canary_workflow_id" --output json \
   >"$work_dir/reinstall-canary.json"
 start_and_probe_ops "$candidate_binary" "candidate reinstall" candidate-reinstall
@@ -576,13 +576,13 @@ import sys
     reinstalled_schema_sha256,
 ) = sys.argv[1:]
 report = {
-    "schema_version": "forge.milestone.production_source_evidence.upgrade_rollback.v1",
+    "schema_version": "foundry.milestone.production_source_evidence.upgrade_rollback.v1",
     "kind": "upgrade_rollback",
     "status": "passed",
     "subject_version": release,
     "observed_at_epoch": int(observed),
     "execution_mode": execution_mode,
-    "producer": "forge-upgrade-rollback-drill",
+    "producer": "foundry-upgrade-rollback-drill",
     "claims": {
         "target_version": release,
         "simulation_completed": True,
@@ -595,7 +595,7 @@ report = {
         "target_reinstalled_and_healthy": True,
     },
     "evidence": {
-        "collector_schema_version": "forge.production_readiness.upgrade_rollback_drill.v1",
+        "collector_schema_version": "foundry.production_readiness.upgrade_rollback_drill.v1",
         "previous_version": previous_version,
         "candidate_binary_sha256": candidate_binary_sha256,
         "previous_binary_sha256": previous_binary_sha256,
@@ -627,5 +627,5 @@ ln -- "$stage_report" "$report_path" ||
   fail "could not publish upgrade/rollback report without overwriting"
 rm -rf -- "$stage_dir"
 stage_dir=""
-printf 'forge upgrade/rollback drill: passed (%s, sha256=%s)\n' \
+printf 'foundry upgrade/rollback drill: passed (%s, sha256=%s)\n' \
   "$report_path" "$(sha256sum "$report_path" | awk '{print $1}')"

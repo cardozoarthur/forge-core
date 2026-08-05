@@ -11,14 +11,14 @@ package_root="$(
 readonly package_root
 
 readonly -a shell_files=(
-  "$package_root/bin/forge-directory-offhost-uploader"
-  "$package_root/bin/forge-production-alert"
+  "$package_root/bin/foundry-directory-offhost-uploader"
+  "$package_root/bin/foundry-production-alert"
   "$test_dir/directory-offhost-self-test.sh"
   "$test_dir/directory-stubs/findmnt"
   "$test_dir/alert-self-test.sh"
   "$test_dir/stubs/curl"
   "$test_dir/stubs/df"
-  "$test_dir/stubs/forge-admin"
+  "$test_dir/stubs/foundry-admin"
   "$test_dir/stubs/stat"
   "$test_dir/stubs/systemctl"
 )
@@ -30,7 +30,7 @@ cloud_specific_path="$(
     -quit
 )"
 [[ -z "$cloud_specific_path" ]] || {
-  printf 'cloud-specific component leaked into Forge Core bundle: %s\n' \
+  printf 'cloud-specific component leaked into Foundry Core bundle: %s\n' \
     "$cloud_specific_path" >&2
   exit 1
 }
@@ -49,8 +49,8 @@ for shell_file in "${shell_files[@]}"; do
 done
 
 /usr/bin/grep -Fxq \
-  'LoadCredential=forge-telegram-alert:/etc/forge/credentials/forge-telegram-alert' \
-  "$package_root/systemd/forge-production-alert.service"
+  'LoadCredential=foundry-telegram-alert:/etc/foundry/credentials/foundry-telegram-alert' \
+  "$package_root/systemd/foundry-production-alert.service"
 
 /usr/bin/bash "$test_dir/directory-offhost-self-test.sh"
 /usr/bin/bash "$test_dir/alert-self-test.sh"
