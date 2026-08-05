@@ -13,7 +13,7 @@ use crate::registry::{
 use crate::request::{
     complete_ready_task, drive_request, step_request, RequestTaskCompletionInput,
 };
-use crate::storage::{ForgeStore, StoreEvent};
+use crate::storage::{FoundryStore, StoreEvent};
 use crate::{
     graph::TaskStatus,
     ir::{
@@ -32,7 +32,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -41,31 +40,32 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const OPS_SNAPSHOT_SCHEMA_VERSION: &str = "forge.ops.snapshot.v1";
-const OPS_ACTION_SCHEMA_VERSION: &str = "forge.ops.action.v1";
-const OPS_MODIFIER_LANE_SCHEMA_VERSION: &str = "forge.ops.modifier_lane.v1";
-const OPS_MODIFIER_PROPOSAL_SCHEMA_VERSION: &str = "forge.ops.modifier_proposal.v1";
-const OPS_MEMORY_CONTEXT_GOVERNANCE_SCHEMA_VERSION: &str = "forge.ops.memory_context_governance.v1";
-const OPS_ADDON_VIEW_RENDERERS_SCHEMA_VERSION: &str = "forge.ops.addon_view_renderers.v1";
+const OPS_SNAPSHOT_SCHEMA_VERSION: &str = "foundry.ops.snapshot.v1";
+const OPS_ACTION_SCHEMA_VERSION: &str = "foundry.ops.action.v1";
+const OPS_MODIFIER_LANE_SCHEMA_VERSION: &str = "foundry.ops.modifier_lane.v1";
+const OPS_MODIFIER_PROPOSAL_SCHEMA_VERSION: &str = "foundry.ops.modifier_proposal.v1";
+const OPS_MEMORY_CONTEXT_GOVERNANCE_SCHEMA_VERSION: &str =
+    "foundry.ops.memory_context_governance.v1";
+const OPS_ADDON_VIEW_RENDERERS_SCHEMA_VERSION: &str = "foundry.ops.addon_view_renderers.v1";
 const OPS_ADDON_VIEW_LIFECYCLE_FILTER: &str = "enabled_or_unauthorized";
 const OPS_ADDON_VIEW_INTERACTION_STATE_SCHEMA_VERSION: &str =
-    "forge.ops.addon_view_interaction_state.v1";
-const OPS_ADDON_VIEW_RUNTIME_STATE_SCHEMA_VERSION: &str = "forge.ops.addon_view_runtime_state.v1";
+    "foundry.ops.addon_view_interaction_state.v1";
+const OPS_ADDON_VIEW_RUNTIME_STATE_SCHEMA_VERSION: &str = "foundry.ops.addon_view_runtime_state.v1";
 const OPS_ADDON_RENDERER_CLIENT_EVENT_SCHEMA_VERSION: &str =
-    "forge.ops.addon_renderer_client_event.v1";
-const OPS_OPERATIONAL_DIGITAL_TWIN_SCHEMA_VERSION: &str = "forge.ops.operational_digital_twin.v1";
-const OPS_WORKFLOW_DIGITAL_TWIN_SCHEMA_VERSION: &str = "forge.ops.workflow_digital_twin.v1";
-const OPS_WORKFLOW_LIVE_STATE_SCHEMA_VERSION: &str = "forge.ops.workflow_live_state.v1";
+    "foundry.ops.addon_renderer_client_event.v1";
+const OPS_OPERATIONAL_DIGITAL_TWIN_SCHEMA_VERSION: &str = "foundry.ops.operational_digital_twin.v1";
+const OPS_WORKFLOW_DIGITAL_TWIN_SCHEMA_VERSION: &str = "foundry.ops.workflow_digital_twin.v1";
+const OPS_WORKFLOW_LIVE_STATE_SCHEMA_VERSION: &str = "foundry.ops.workflow_live_state.v1";
 const OPS_MODIFIER_PROPOSAL_CREATED_EVENT: &str = "ops_modifier_proposal_created";
 const OPS_MODIFIER_PROPOSAL_APPLIED_EVENT: &str = "ops_modifier_proposal_applied";
 const MAX_HTTP_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
-const OPS_BEARER_TOKEN_ENV: &str = "FORGE_OPS_BEARER_TOKEN";
-const OPS_BEARER_TOKEN_FILE_ENV: &str = "FORGE_OPS_BEARER_TOKEN_FILE";
-const OPS_ALLOW_REMOTE_ENV: &str = "FORGE_OPS_ALLOW_REMOTE";
-const OPS_ALLOWED_ORIGINS_ENV: &str = "FORGE_OPS_ALLOWED_ORIGINS";
-const OPS_PRODUCTION_MODE_ENV: &str = "FORGE_PRODUCTION_MODE";
-const OPS_SESSION_COOKIE_NAME: &str = "forge_ops_session";
+const OPS_BEARER_TOKEN_ENV: &str = "FOUNDRY_OPS_BEARER_TOKEN";
+const OPS_BEARER_TOKEN_FILE_ENV: &str = "FOUNDRY_OPS_BEARER_TOKEN_FILE";
+const OPS_ALLOW_REMOTE_ENV: &str = "FOUNDRY_OPS_ALLOW_REMOTE";
+const OPS_ALLOWED_ORIGINS_ENV: &str = "FOUNDRY_OPS_ALLOWED_ORIGINS";
+const OPS_PRODUCTION_MODE_ENV: &str = "FOUNDRY_PRODUCTION_MODE";
+const OPS_SESSION_COOKIE_NAME: &str = "foundry_ops_session";
 const MIN_OPS_BEARER_TOKEN_BYTES: usize = 32;
 const MAX_OPS_BEARER_TOKEN_BYTES: usize = 4096;
 
@@ -560,20 +560,20 @@ struct OpsHttpAuthorizationError {
     message: String,
 }
 
-pub fn build_ops_snapshot(store: &ForgeStore) -> Result<OpsSnapshot> {
+pub fn build_ops_snapshot(store: &FoundryStore) -> Result<OpsSnapshot> {
     let addon_dirs = default_addon_dirs();
     build_ops_snapshot_with_addon_dirs(store, &addon_dirs)
 }
 
 pub fn build_ops_snapshot_with_addon_dirs(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_dirs: &[PathBuf],
 ) -> Result<OpsSnapshot> {
     build_ops_snapshot_with_addon_dirs_and_project(store, addon_dirs, None)
 }
 
 pub fn build_ops_snapshot_with_addon_dirs_and_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_dirs: &[PathBuf],
     project_root: Option<&Path>,
 ) -> Result<OpsSnapshot> {
@@ -601,7 +601,7 @@ pub fn build_ops_snapshot_with_addon_dirs_and_project(
             assisted_operations: true,
             local_only_by_default: true,
             ai_modifier_lane:
-                "separate_orchestrator_can_update_goals_nodes_and_subflows_via_forge_apis"
+                "separate_orchestrator_can_update_goals_nodes_and_subflows_via_foundry_apis"
                     .to_string(),
             human_access: "full_local_workflow_visibility_and_runtime_mutation_controls"
                 .to_string(),
@@ -620,7 +620,7 @@ pub fn build_ops_snapshot_with_addon_dirs_and_project(
 }
 
 fn build_memory_context_governance(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: Option<&Path>,
 ) -> Result<OpsMemoryContextGovernance> {
     let project_governance = project_memory_governance_report(project_root);
@@ -662,7 +662,7 @@ fn build_memory_context_governance(
                 ops_default_audience_for_scope(&context.memory_scope)
             };
             let mut default_context_command = vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "context".to_string(),
                 "--workflow".to_string(),
                 workflow.id.clone(),
@@ -679,7 +679,7 @@ fn build_memory_context_governance(
             default_context_command.push("json".to_string());
 
             let mut default_memory_search_command = vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "memory".to_string(),
                 "search".to_string(),
                 "--workflow".to_string(),
@@ -802,7 +802,7 @@ pub fn build_addon_view_renderer_report(
 }
 
 pub fn build_addon_view_renderer_report_with_store(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_views: &AddonViewReport,
 ) -> Result<OpsAddonViewRendererReport> {
     let mut report = build_addon_view_renderer_report_base(addon_views);
@@ -829,7 +829,7 @@ fn build_addon_view_renderer_report_base(
                 .iter()
                 .map(|binding| OpsAddonViewDataSource {
                     binding_id: binding.id.clone(),
-                    source: defaulted(&binding.source, "forge.snapshot"),
+                    source: defaulted(&binding.source, "foundry.snapshot"),
                     scope: defaulted(&binding.scope, "workflow"),
                     query: binding.query.clone(),
                     refresh_seconds: binding.refresh_seconds,
@@ -917,7 +917,7 @@ fn build_addon_view_renderer_report_base(
                 actions,
                 interaction_state,
                 tui_affordance: format!(
-                    "forge addons views --addon {} --surface {} --output json",
+                    "foundry addons views --addon {} --surface {} --output json",
                     entry.addon_id,
                     defaulted(&entry.view.surface, "ops_console")
                 ),
@@ -978,7 +978,7 @@ impl OpsAddonViewRuntimeStateAccumulator {
             state_key: state_key.to_string(),
             event_count: 0,
             last_event_kind: String::new(),
-            last_actor: "forge".to_string(),
+            last_actor: "foundry".to_string(),
             last_event_at: String::new(),
             last_event_sequence: 0,
             last_payload: serde_json::json!({}),
@@ -1032,7 +1032,7 @@ impl OpsAddonViewRuntimeStateAccumulator {
 }
 
 fn project_addon_view_runtime_states(
-    store: &ForgeStore,
+    store: &FoundryStore,
     renderers: &mut [OpsAddonViewRenderer],
 ) -> Result<()> {
     if renderers.is_empty() {
@@ -1057,7 +1057,7 @@ fn project_addon_view_runtime_states(
             }
             let event_kind = string_value(&event.data, "event_kind")
                 .unwrap_or_else(|| "unknown_client_event".to_string());
-            let actor = string_value(&event.data, "actor").unwrap_or_else(|| "forge".to_string());
+            let actor = string_value(&event.data, "actor").unwrap_or_else(|| "foundry".to_string());
             let payload = event
                 .data
                 .get("payload")
@@ -1214,7 +1214,7 @@ fn build_addon_view_interaction_state(
         filters,
         allowed_client_events,
         state_policy: vec![
-            "state is owned by Forge and keyed by Addon/view identity".to_string(),
+            "state is owned by Foundry and keyed by Addon/view identity".to_string(),
             "client interactions mutate local renderer state until a declared action is invoked"
                 .to_string(),
             "no Addon JavaScript or arbitrary component code is executed".to_string(),
@@ -1309,7 +1309,7 @@ fn infer_form_field_type(field: &str) -> String {
 }
 
 pub fn record_addon_renderer_client_event(
-    store: &ForgeStore,
+    store: &FoundryStore,
     addon_dirs: &[PathBuf],
     input: OpsAddonRendererClientEventInput<'_>,
 ) -> Result<OpsAddonRendererClientEventReport> {
@@ -1401,7 +1401,7 @@ fn parse_renderer_event_payload(payload: Option<&str>) -> Result<Value> {
 }
 
 pub fn build_operational_digital_twin(
-    store: &ForgeStore,
+    store: &FoundryStore,
     modifier_lane: &OpsModifierLane,
 ) -> Result<OpsOperationalDigitalTwin> {
     let mut workflows = store
@@ -1438,7 +1438,7 @@ fn build_workflow_digital_twin(
         counts,
         commands: OpsWorkflowDigitalTwinCommands {
             inspect: vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "inspect".to_string(),
                 "--workflow".to_string(),
                 workflow.id.clone(),
@@ -1446,14 +1446,14 @@ fn build_workflow_digital_twin(
                 "json".to_string(),
             ],
             task_board: vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "interactive".to_string(),
                 "task-board".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
             validate: vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "validate".to_string(),
                 "--workflow".to_string(),
                 workflow.id.clone(),
@@ -1461,7 +1461,7 @@ fn build_workflow_digital_twin(
                 "json".to_string(),
             ],
             events: vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "events".to_string(),
                 "timeline".to_string(),
                 "--workflow".to_string(),
@@ -1582,7 +1582,7 @@ impl OpsWorkflowDigitalTwinCounts {
     }
 }
 
-fn build_visual_workflows(store: &ForgeStore) -> Result<Vec<OpsWorkflowVisual>> {
+fn build_visual_workflows(store: &FoundryStore) -> Result<Vec<OpsWorkflowVisual>> {
     let mut workflows = store
         .load_workflows()?
         .into_iter()
@@ -1684,7 +1684,7 @@ fn summarize_design_surface(workflow: &crate::graph::Workflow) -> OpsDesignSurfa
         .unwrap_or_default();
 
     OpsDesignSurface {
-        schema_version: "forge.ops.design_surface.v1".to_string(),
+        schema_version: "foundry.ops.design_surface.v1".to_string(),
         creative_artifact_count: workflow.creative_artifacts.len(),
         whiteboard_count,
         screen_count,
@@ -1784,14 +1784,14 @@ fn classify_addon_view_renderer_family(view_type: &str, component: &str) -> Stri
 
 fn renderer_component_for_family(family: &str) -> String {
     match family {
-        "visualization_renderer" => "forge.safe.visualization",
-        "editor_renderer" => "forge.safe.editor",
-        "data_list_renderer" => "forge.safe.data_list",
-        "timeline_renderer" => "forge.safe.timeline",
-        "canvas_renderer" => "forge.safe.canvas",
-        "document_renderer" => "forge.safe.document",
-        "dashboard_renderer" => "forge.safe.dashboard",
-        _ => "forge.safe.card",
+        "visualization_renderer" => "foundry.safe.visualization",
+        "editor_renderer" => "foundry.safe.editor",
+        "data_list_renderer" => "foundry.safe.data_list",
+        "timeline_renderer" => "foundry.safe.timeline",
+        "canvas_renderer" => "foundry.safe.canvas",
+        "document_renderer" => "foundry.safe.document",
+        "dashboard_renderer" => "foundry.safe.dashboard",
+        _ => "foundry.safe.card",
     }
     .to_string()
 }
@@ -1875,7 +1875,7 @@ fn slug_for_anchor(value: &str) -> String {
         .join("-")
 }
 
-pub fn load_modifier_lane(store: &ForgeStore) -> Result<OpsModifierLane> {
+pub fn load_modifier_lane(store: &FoundryStore) -> Result<OpsModifierLane> {
     let mut proposals = Vec::new();
     let mut applied = BTreeMap::new();
 
@@ -1944,7 +1944,7 @@ pub fn load_modifier_lane(store: &ForgeStore) -> Result<OpsModifierLane> {
 }
 
 pub fn create_modifier_proposal(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: OpsModifierProposalInput<'_>,
 ) -> Result<OpsModifierProposalReport> {
     ensure_workflow_policy(store, input.workflow_id, "ops modifier proposal")?;
@@ -2007,7 +2007,7 @@ pub fn create_modifier_proposal(
 }
 
 pub fn apply_modifier_proposal(
-    store: &ForgeStore,
+    store: &FoundryStore,
     proposal_id: &str,
     origin: &str,
 ) -> Result<OpsModifierApplyReport> {
@@ -2131,7 +2131,7 @@ fn build_ops_creative_artifact(kind: &str, title: &str, origin: &str) -> Result<
             SlideDeckSpec {
                 schema_version: ir_schema_version(),
                 title: title.clone(),
-                theme: "forge-ops".to_string(),
+                theme: "foundry-ops".to_string(),
                 slides: Vec::new(),
             },
         )),
@@ -2140,7 +2140,7 @@ fn build_ops_creative_artifact(kind: &str, title: &str, origin: &str) -> Result<
             ComponentSpec {
                 schema_version: ir_schema_version(),
                 name: title.clone(),
-                description: "Componente do sistema visual Forge Ops".to_string(),
+                description: "Componente do sistema visual Foundry Ops".to_string(),
                 props: Vec::new(),
                 variants: Vec::new(),
                 states: Vec::new(),
@@ -2157,7 +2157,7 @@ fn build_ops_creative_artifact(kind: &str, title: &str, origin: &str) -> Result<
 
 fn build_ops_token_collection(name: &str) -> TokenCollection {
     let collection_name =
-        clean_optional(Some(name)).unwrap_or_else(|| "Forge Ops Design System".to_string());
+        clean_optional(Some(name)).unwrap_or_else(|| "Foundry Ops Design System".to_string());
     TokenCollection {
         schema_version: ir_schema_version(),
         name: collection_name.clone(),
@@ -2273,12 +2273,12 @@ pub fn serve_ops_console_with_addon_dirs_and_project(
         .all(|addr| addr.ip().is_loopback());
     validate_ops_bind_security(requested_local_only, allow_remote, bearer_token.is_some())?;
     let listener = TcpListener::bind(requested_addresses.as_slice())
-        .with_context(|| format!("failed to bind Forge ops server on {host}:{port}"))?;
+        .with_context(|| format!("failed to bind Foundry ops server on {host}:{port}"))?;
     let addr = listener.local_addr()?;
     let security = OpsHttpSecurityPolicy::for_server(addr.ip(), addr.port(), bearer_token)?;
     let report = OpsServeReport {
         status: "listening".to_string(),
-        schema_version: "forge.ops.serve.v1".to_string(),
+        schema_version: "foundry.ops.serve.v1".to_string(),
         bind_addr: addr.to_string(),
         url: format!("http://{addr}/"),
         local_only: addr.ip().is_loopback(),
@@ -2304,20 +2304,20 @@ pub fn serve_ops_console_with_addon_dirs_and_project(
                     let _ = stream.write_all(&response.to_http_bytes());
                 }
             }
-            Err(error) => eprintln!("forge ops server connection error: {error}"),
+            Err(error) => eprintln!("foundry ops server connection error: {error}"),
         }
     }
 
     Ok(report)
 }
 
-pub fn handle_ops_http_request(store: &ForgeStore, request: &str) -> OpsHttpResponse {
+pub fn handle_ops_http_request(store: &FoundryStore, request: &str) -> OpsHttpResponse {
     let addon_dirs = default_addon_dirs();
     handle_ops_http_request_with_addon_dirs(store, request, &addon_dirs)
 }
 
 pub fn handle_ops_http_request_with_addon_dirs(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: &str,
     addon_dirs: &[PathBuf],
 ) -> OpsHttpResponse {
@@ -2325,7 +2325,7 @@ pub fn handle_ops_http_request_with_addon_dirs(
 }
 
 pub fn handle_ops_http_request_with_addon_dirs_and_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: &str,
     addon_dirs: &[PathBuf],
     project_root: Option<&Path>,
@@ -2346,7 +2346,7 @@ fn handle_stream(
     stream.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
     stream.set_write_timeout(Some(std::time::Duration::from_secs(15)))?;
     let request = read_ops_http_request(stream)?;
-    let store = ForgeStore::open(store_path)?;
+    let store = FoundryStore::open(store_path)?;
     let response =
         handle_secured_ops_http_request(&store, &request, addon_dirs, project_root, security);
     stream.write_all(&response.to_http_bytes())?;
@@ -2359,18 +2359,18 @@ fn read_ops_http_request(stream: &mut TcpStream) -> Result<String> {
     let header_end = loop {
         let read = stream.read(&mut buffer)?;
         if read == 0 {
-            bail!("Forge ops request closed before headers");
+            bail!("Foundry ops request closed before headers");
         }
         request.extend_from_slice(&buffer[..read]);
         if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
             let header_end = index + 4;
             if header_end > MAX_HTTP_HEADER_BYTES {
-                bail!("Forge ops request headers exceeded 16KiB");
+                bail!("Foundry ops request headers exceeded 16KiB");
             }
             break header_end;
         }
         if request.len() > MAX_HTTP_HEADER_BYTES {
-            bail!("Forge ops request headers exceeded 16KiB");
+            bail!("Foundry ops request headers exceeded 16KiB");
         }
     };
     let headers = String::from_utf8_lossy(&request[..header_end]);
@@ -2378,7 +2378,7 @@ fn read_ops_http_request(stream: &mut TcpStream) -> Result<String> {
         line.split_once(':')
             .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("transfer-encoding"))
     }) {
-        bail!("Forge ops does not accept Transfer-Encoding requests");
+        bail!("Foundry ops does not accept Transfer-Encoding requests");
     }
     let content_lengths = headers
         .lines()
@@ -2392,24 +2392,24 @@ fn read_ops_http_request(stream: &mut TcpStream) -> Result<String> {
         .map(|value| {
             value
                 .parse::<usize>()
-                .context("invalid Forge ops Content-Length")
+                .context("invalid Foundry ops Content-Length")
         })
         .collect::<Result<Vec<_>>>()?;
     if content_lengths.len() > 1 {
-        bail!("Forge ops request must not contain duplicate Content-Length headers");
+        bail!("Foundry ops request must not contain duplicate Content-Length headers");
     }
     let content_length = content_lengths.first().copied().unwrap_or(0);
     if content_length > MAX_HTTP_REQUEST_BYTES {
-        bail!("Forge ops request body exceeded configured byte limit");
+        bail!("Foundry ops request body exceeded configured byte limit");
     }
     while request.len() < header_end.saturating_add(content_length) {
         let read = stream.read(&mut buffer)?;
         if read == 0 {
-            bail!("Forge ops request closed before body was complete");
+            bail!("Foundry ops request closed before body was complete");
         }
         request.extend_from_slice(&buffer[..read]);
         if request.len() > header_end.saturating_add(MAX_HTTP_REQUEST_BYTES) {
-            bail!("Forge ops request exceeded configured byte limit");
+            bail!("Foundry ops request exceeded configured byte limit");
         }
     }
     request.truncate(header_end + content_length);
@@ -2417,7 +2417,7 @@ fn read_ops_http_request(stream: &mut TcpStream) -> Result<String> {
 }
 
 fn handle_secured_ops_http_request(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: &str,
     addon_dirs: &[PathBuf],
     project_root: Option<&Path>,
@@ -2468,7 +2468,7 @@ fn handle_secured_ops_http_request(
 }
 
 fn route_ops_http_request(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: &str,
     addon_dirs: &[PathBuf],
     project_root: Option<&Path>,
@@ -2478,7 +2478,7 @@ fn route_ops_http_request(
 }
 
 fn route_parsed_ops_http_request(
-    store: &ForgeStore,
+    store: &FoundryStore,
     parsed: &ParsedRequest,
     addon_dirs: &[PathBuf],
     project_root: Option<&Path>,
@@ -2524,6 +2524,10 @@ fn route_parsed_ops_http_request(
                 .map(String::as_str)
                 .unwrap_or("ops-web");
             let evidence_command = parsed.params.get("evidence_command").map(String::as_str);
+            let evidence_exit_code = parsed
+                .required("evidence_exit_code")?
+                .parse::<i32>()
+                .context("evidence_exit_code must be a signed integer")?;
             let report = complete_ready_task(
                 store,
                 run_id,
@@ -2533,6 +2537,7 @@ fn route_parsed_ops_http_request(
                     summary,
                     artifact_paths: &[],
                     evidence_command,
+                    evidence_exit_code: Some(evidence_exit_code),
                     evidence_summary: Some(summary),
                     estimated_usd: 0.0,
                     tokens_in: 0,
@@ -2588,7 +2593,7 @@ fn route_parsed_ops_http_request(
                 .params
                 .get("name")
                 .map(String::as_str)
-                .unwrap_or("Forge Ops Design System");
+                .unwrap_or("Foundry Ops Design System");
             let origin = parsed
                 .params
                 .get("origin")
@@ -2784,7 +2789,11 @@ fn route_parsed_ops_http_request(
             let report = apply_modifier_proposal(store, proposal_id, origin)?;
             action_response("modifier_apply", &report)
         }
-        _ => Ok(error_response(404, "Not Found", "unknown Forge ops route")),
+        _ => Ok(error_response(
+            404,
+            "Not Found",
+            "unknown Foundry ops route",
+        )),
     }
 }
 
@@ -3104,7 +3113,7 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
             ));
         }
         visual_sections.push_str(&format!(
-            r##"<section class="workflow-visual"><h3><code>{}</code></h3><p>{}</p><div class="design-strip"><span>whiteboards: {}</span><span>telas/wireframes/fluxos: {}</span><span>componentes: {}</span><span>docs: {}</span><span>tokens: {}</span><span>colaboração: {} comentários</span></div><div class="visual-panels"><div><h4>Artefatos visuais</h4><ul class="compact-list">{}</ul></div><div><h4>Tokens</h4><ul class="compact-list">{}</ul></div></div><div class="visual-actions"><form method="post" action="/api/visual/create-artifact"><input type="hidden" name="workflow_id" value="{}"><label>Criar artefato visual</label><select name="kind"><option value="whiteboard">Whiteboard</option><option value="screen">Tela</option><option value="wireframe">Wireframe</option><option value="flow">Fluxo</option><option value="component">Componente</option><option value="document">Documento</option><option value="slide_deck">Slides</option></select><input name="title" placeholder="Título do artefato"><input name="origin" value="ops-web"><button type="submit">Criar artefato visual</button></form><form method="post" action="/api/visual/set-tokens"><input type="hidden" name="workflow_id" value="{}"><label>Sistema de design</label><input name="name" value="Forge Ops Design System"><input name="origin" value="ops-web"><button type="submit">Criar tokens base</button></form><form method="post" action="/api/visual/patch-token"><input type="hidden" name="workflow_id" value="{}"><label>Atualizar token</label><input name="token_name" placeholder="color.primary"><input name="value" placeholder="#1f6feb"><input name="origin" value="ops-web"><button type="submit">Atualizar token</button></form><form method="post" action="/api/visual/collaboration-event"><input type="hidden" name="workflow_id" value="{}"><label>Registrar colaboração</label><input name="artifact_id" placeholder="artifact_id"><select name="event_kind"><option value="comment">Comentário</option><option value="presence">Presença</option><option value="patch">Patch</option><option value="conflict">Conflito</option><option value="rollback">Rollback</option></select><input name="actor" value="human"><input name="target" value="canvas"><input name="selection" placeholder="seleção opcional"><textarea name="summary" placeholder="Comentário, instrução de patch ou observação"></textarea><input name="origin" value="ops-web"><button type="submit">Registrar colaboração</button></form></div><div class="task-board">{}</div></section>"##,
+            r##"<section class="workflow-visual"><h3><code>{}</code></h3><p>{}</p><div class="design-strip"><span>whiteboards: {}</span><span>telas/wireframes/fluxos: {}</span><span>componentes: {}</span><span>docs: {}</span><span>tokens: {}</span><span>colaboração: {} comentários</span></div><div class="visual-panels"><div><h4>Artefatos visuais</h4><ul class="compact-list">{}</ul></div><div><h4>Tokens</h4><ul class="compact-list">{}</ul></div></div><div class="visual-actions"><form method="post" action="/api/visual/create-artifact"><input type="hidden" name="workflow_id" value="{}"><label>Criar artefato visual</label><select name="kind"><option value="whiteboard">Whiteboard</option><option value="screen">Tela</option><option value="wireframe">Wireframe</option><option value="flow">Fluxo</option><option value="component">Componente</option><option value="document">Documento</option><option value="slide_deck">Slides</option></select><input name="title" placeholder="Título do artefato"><input name="origin" value="ops-web"><button type="submit">Criar artefato visual</button></form><form method="post" action="/api/visual/set-tokens"><input type="hidden" name="workflow_id" value="{}"><label>Sistema de design</label><input name="name" value="Foundry Ops Design System"><input name="origin" value="ops-web"><button type="submit">Criar tokens base</button></form><form method="post" action="/api/visual/patch-token"><input type="hidden" name="workflow_id" value="{}"><label>Atualizar token</label><input name="token_name" placeholder="color.primary"><input name="value" placeholder="#1f6feb"><input name="origin" value="ops-web"><button type="submit">Atualizar token</button></form><form method="post" action="/api/visual/collaboration-event"><input type="hidden" name="workflow_id" value="{}"><label>Registrar colaboração</label><input name="artifact_id" placeholder="artifact_id"><select name="event_kind"><option value="comment">Comentário</option><option value="presence">Presença</option><option value="patch">Patch</option><option value="conflict">Conflito</option><option value="rollback">Rollback</option></select><input name="actor" value="human"><input name="target" value="canvas"><input name="selection" placeholder="seleção opcional"><textarea name="summary" placeholder="Comentário, instrução de patch ou observação"></textarea><input name="origin" value="ops-web"><button type="submit">Registrar colaboração</button></form></div><div class="task-board">{}</div></section>"##,
             escape_html(&workflow.workflow_id),
             escape_html(&truncate(&workflow.goal, 180)),
             design.whiteboard_count,
@@ -3379,7 +3388,7 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Forge Ops</title>
+  <title>Foundry Ops</title>
   <style>
     body {{ font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 24px; color: #18212f; background: #f7f8fb; }}
     h1 {{ margin: 0 0 8px; font-size: 28px; }}
@@ -3419,7 +3428,7 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
   </style>
 </head>
 <body>
-  <h1>Forge Ops</h1>
+  <h1>Foundry Ops</h1>
   <p>Operação assistida local: humano e IA podem observar workflows, dirigir runs e alterar objetivos em tempo real.</p>
   <p><a href="/auth/login">Autenticar ou renovar a sessão do navegador</a></p>
   <div class="summary">
@@ -3521,6 +3530,7 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
     <input name="executor" value="ops-web">
     <textarea name="summary" placeholder="Resumo/evidência do executor"></textarea>
     <input name="evidence_command" placeholder="comando ou gate de evidência">
+    <input name="evidence_exit_code" type="number" value="0" aria-label="Código de saída observado">
     <button type="submit">Completar task com evidência</button>
   </form>
   <h2>Atualizar objetivo em tempo real</h2>
@@ -3599,7 +3609,7 @@ fn ops_login_response() -> OpsHttpResponse {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Autenticação — Forge Ops</title>
+  <title>Autenticação — Foundry Ops</title>
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 24px; color: #18212f; background: #f7f8fb; }
     main { max-width: 520px; padding: 24px; background: white; border: 1px solid #d9deea; border-radius: 10px; }
@@ -3612,7 +3622,7 @@ fn ops_login_response() -> OpsHttpResponse {
 </head>
 <body>
   <main>
-    <h1>Forge Ops</h1>
+    <h1>Foundry Ops</h1>
     <p>Informe o Bearer token configurado pelo operador. O token será trocado por um cookie de sessão HttpOnly e não será incluído na URL.</p>
     <form method="post" action="/auth/login">
       <label for="token">Bearer token</label>
@@ -3644,7 +3654,7 @@ fn error_response(status_code: u16, reason: &str, message: &str) -> OpsHttpRespo
         headers: Vec::new(),
         body: serde_json::json!({
             "status": "error",
-            "schema_version": "forge.ops.error.v1",
+            "schema_version": "foundry.ops.error.v1",
             "message": message
         })
         .to_string()
@@ -3715,20 +3725,20 @@ impl ParsedRequest {
         for line in head.lines().skip(1) {
             let (name, value) = line
                 .split_once(':')
-                .with_context(|| "malformed Forge ops HTTP header")?;
+                .with_context(|| "malformed Foundry ops HTTP header")?;
             let name = name.trim().to_ascii_lowercase();
             if name.is_empty()
                 || !name
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
             {
-                bail!("malformed Forge ops HTTP header name");
+                bail!("malformed Foundry ops HTTP header name");
             }
             if headers
                 .insert(name.clone(), value.trim().to_string())
                 .is_some()
             {
-                bail!("duplicate Forge ops HTTP header `{name}`");
+                bail!("duplicate Foundry ops HTTP header `{name}`");
             }
         }
         Ok(Self {
@@ -3760,7 +3770,7 @@ impl OpsHttpSecurityPolicy {
             allowed_origins.insert(format!("http://127.0.0.1:{port}"));
             allowed_origins.insert(format!("http://[::1]:{port}"));
         }
-        if let Ok(configured) = env::var(OPS_ALLOWED_ORIGINS_ENV) {
+        if let Ok(configured) = crate::brand::env_var(OPS_ALLOWED_ORIGINS_ENV) {
             for origin in configured
                 .split(',')
                 .map(str::trim)
@@ -3817,7 +3827,7 @@ impl OpsHttpSecurityPolicy {
                 status_code: 401,
                 reason: "Unauthorized",
                 message: format!(
-                    "Forge ops requires a bearer token configured through {OPS_BEARER_TOKEN_ENV} or {OPS_BEARER_TOKEN_FILE_ENV}"
+                    "Foundry ops requires a bearer token configured through {OPS_BEARER_TOKEN_ENV} or {OPS_BEARER_TOKEN_FILE_ENV}"
                 ),
             });
         };
@@ -3844,7 +3854,7 @@ impl OpsHttpSecurityPolicy {
             return Err(OpsHttpAuthorizationError {
                 status_code: 401,
                 reason: "Unauthorized",
-                message: "missing or invalid Forge ops bearer token".to_string(),
+                message: "missing or invalid Foundry ops bearer token".to_string(),
             });
         }
         self.validate_origin(request)
@@ -3859,7 +3869,7 @@ impl OpsHttpSecurityPolicy {
                 return Err(OpsHttpAuthorizationError {
                     status_code: 403,
                     reason: "Forbidden",
-                    message: "cross-site Forge ops mutation denied".to_string(),
+                    message: "cross-site Foundry ops mutation denied".to_string(),
                 });
             }
         }
@@ -3869,7 +3879,7 @@ impl OpsHttpSecurityPolicy {
                 return Err(OpsHttpAuthorizationError {
                     status_code: 403,
                     reason: "Forbidden",
-                    message: "Forge ops request origin is not allowed".to_string(),
+                    message: "Foundry ops request origin is not allowed".to_string(),
                 });
             }
         }
@@ -3886,14 +3896,14 @@ impl OpsHttpSecurityPolicy {
             return Err(OpsHttpAuthorizationError {
                 status_code: 503,
                 reason: "Service Unavailable",
-                message: "Forge ops authentication is not configured".to_string(),
+                message: "Foundry ops authentication is not configured".to_string(),
             });
         };
         if !constant_time_bytes_eq(token.as_bytes(), expected_token) {
             return Err(OpsHttpAuthorizationError {
                 status_code: 401,
                 reason: "Unauthorized",
-                message: "invalid Forge ops bearer token".to_string(),
+                message: "invalid Foundry ops bearer token".to_string(),
             });
         }
         self.session_cookie
@@ -3902,13 +3912,13 @@ impl OpsHttpSecurityPolicy {
             .ok_or_else(|| OpsHttpAuthorizationError {
                 status_code: 503,
                 reason: "Service Unavailable",
-                message: "Forge ops browser session is unavailable".to_string(),
+                message: "Foundry ops browser session is unavailable".to_string(),
             })
     }
 }
 
 fn ops_session_cookie_value(token: &[u8]) -> String {
-    let mut input = b"forge.ops.session.v1\0".to_vec();
+    let mut input = b"foundry.ops.session.v1\0".to_vec();
     input.extend_from_slice(token);
     hex_sha256(&input)
 }
@@ -3923,10 +3933,10 @@ fn ops_cookie_value<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
 fn resolve_ops_bind_addresses(host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>> {
     let addresses = (host, port)
         .to_socket_addrs()
-        .with_context(|| format!("failed to resolve Forge ops bind host `{host}`"))?
+        .with_context(|| format!("failed to resolve Foundry ops bind host `{host}`"))?
         .collect::<Vec<_>>();
     if addresses.is_empty() {
-        bail!("Forge ops bind host `{host}` did not resolve");
+        bail!("Foundry ops bind host `{host}` did not resolve");
     }
     Ok(addresses)
 }
@@ -3937,21 +3947,21 @@ fn validate_ops_bind_security(
     bearer_token_configured: bool,
 ) -> Result<()> {
     if !local_only && !allow_remote {
-        bail!("refusing non-loopback Forge ops bind without {OPS_ALLOW_REMOTE_ENV}=true");
+        bail!("refusing non-loopback Foundry ops bind without {OPS_ALLOW_REMOTE_ENV}=true");
     }
     if !local_only && !bearer_token_configured {
         bail!(
-            "refusing non-loopback Forge ops bind without a strong bearer token in {OPS_BEARER_TOKEN_ENV} or {OPS_BEARER_TOKEN_FILE_ENV}"
+            "refusing non-loopback Foundry ops bind without a strong bearer token in {OPS_BEARER_TOKEN_ENV} or {OPS_BEARER_TOKEN_FILE_ENV}"
         );
     }
     Ok(())
 }
 
 fn load_ops_bearer_token() -> Result<Option<Vec<u8>>> {
-    let inline_token = env::var(OPS_BEARER_TOKEN_ENV)
+    let inline_token = crate::brand::env_var(OPS_BEARER_TOKEN_ENV)
         .ok()
         .filter(|value| !value.is_empty());
-    let token_file = env::var(OPS_BEARER_TOKEN_FILE_ENV)
+    let token_file = crate::brand::env_var(OPS_BEARER_TOKEN_FILE_ENV)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
@@ -3987,7 +3997,7 @@ fn read_ops_bearer_token_file(path: &Path) -> Result<Vec<u8>> {
     })?;
     let metadata = file
         .metadata()
-        .context("failed to inspect Forge ops bearer token file")?;
+        .context("failed to inspect Foundry ops bearer token file")?;
     if !metadata.is_file() {
         bail!("{OPS_BEARER_TOKEN_FILE_ENV} must reference a regular file");
     }
@@ -4006,7 +4016,7 @@ fn read_ops_bearer_token_file(path: &Path) -> Result<Vec<u8>> {
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.take((MAX_OPS_BEARER_TOKEN_BYTES + 3) as u64)
         .read_to_end(&mut bytes)
-        .context("failed to read Forge ops bearer token file")?;
+        .context("failed to read Foundry ops bearer token file")?;
     if bytes.len() > MAX_OPS_BEARER_TOKEN_BYTES + 2 {
         bail!("{OPS_BEARER_TOKEN_FILE_ENV} exceeds the bounded token size");
     }
@@ -4019,14 +4029,14 @@ fn read_ops_bearer_token_file(path: &Path) -> Result<Vec<u8>> {
 fn validate_ops_bearer_token(token: &[u8]) -> Result<()> {
     if !(MIN_OPS_BEARER_TOKEN_BYTES..=MAX_OPS_BEARER_TOKEN_BYTES).contains(&token.len()) {
         bail!(
-            "Forge ops bearer token must contain {MIN_OPS_BEARER_TOKEN_BYTES}-{MAX_OPS_BEARER_TOKEN_BYTES} bytes"
+            "Foundry ops bearer token must contain {MIN_OPS_BEARER_TOKEN_BYTES}-{MAX_OPS_BEARER_TOKEN_BYTES} bytes"
         );
     }
     if !token
         .iter()
         .all(|byte| byte.is_ascii_graphic() && !byte.is_ascii_whitespace())
     {
-        bail!("Forge ops bearer token must contain visible ASCII without whitespace");
+        bail!("Foundry ops bearer token must contain visible ASCII without whitespace");
     }
     Ok(())
 }
@@ -4055,7 +4065,7 @@ fn validate_ops_origin(origin: &str) -> Result<()> {
 }
 
 fn env_flag(name: &str) -> bool {
-    env::var(name)
+    crate::brand::env_var(name)
         .map(|value| {
             matches!(
                 value.trim().to_ascii_lowercase().as_str(),
@@ -4195,7 +4205,7 @@ fn ops_actions() -> Vec<OpsActionSpec> {
             "visual_create_artifact",
             "POST",
             "/api/visual/create-artifact",
-            "Create a Forge-owned visual artifact such as a whiteboard, screen, wireframe, flow, component, document or slide deck.",
+            "Create a Foundry-owned visual artifact such as a whiteboard, screen, wireframe, flow, component, document or slide deck.",
             true,
         ),
         action(
@@ -4279,7 +4289,7 @@ mod security_tests {
     #[test]
     fn ops_http_mutations_require_bearer_auth_and_same_origin() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let policy = OpsHttpSecurityPolicy::for_test(Some(TEST_TOKEN), &["http://127.0.0.1:8787"]);
 
         let missing = handle_secured_ops_http_request(
@@ -4317,7 +4327,7 @@ mod security_tests {
     #[test]
     fn ops_browser_login_exchanges_bearer_for_hardened_session_cookie() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let mut policy =
             OpsHttpSecurityPolicy::for_test(Some(TEST_TOKEN), &["https://ops.example.com"]);
         policy.secure_cookie = true;
@@ -4408,7 +4418,7 @@ mod security_tests {
     #[test]
     fn ops_loopback_snapshot_requires_configured_bearer_or_session() {
         let temp = tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let policy = OpsHttpSecurityPolicy::for_server(
             "127.0.0.1".parse().unwrap(),
             8787,

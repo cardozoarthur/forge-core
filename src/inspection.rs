@@ -13,12 +13,12 @@ use crate::graph::{
 use crate::interaction::{summarize_human_interactions, HumanInteractionSummary};
 use crate::registry::{list_workflows, RegistryRunActivitySummary, WorkflowRegistryRow};
 use crate::schedule::{summarize_loops, summarize_schedules, LoopSummary, ScheduleSummary};
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const INSPECT_EXECUTION_POLICY_SCHEMA_VERSION: &str = "forge.inspect_execution_policy.v1";
+const INSPECT_EXECUTION_POLICY_SCHEMA_VERSION: &str = "foundry.inspect_execution_policy.v1";
 const SUBFLOW_RECURSION_POLICY: &str = "stop_on_repeated_workflow_task_path";
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,7 +162,7 @@ pub struct SubflowInspection {
 }
 
 pub fn inspect_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     verbose: bool,
 ) -> Result<WorkflowInspectionReport> {
@@ -170,7 +170,7 @@ pub fn inspect_workflow(
 }
 
 pub fn inspect_workflow_with_focus(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     verbose: bool,
     focus_task_id: Option<&str>,
@@ -299,6 +299,7 @@ fn handoff_task(task: &AtomicTask, package: &ContextPackage) -> ContextHandoffTa
         task_id: task.id.clone(),
         title: task.title.clone(),
         executor: executor_kind(&task.executor).to_string(),
+        node_brain_routing: task.node_brain_routing.clone(),
         context_ready: package.context_ready,
         dependency_ready: package.dependency_summary.ready,
         handoff_ready: package.handoff_ready,
@@ -424,7 +425,7 @@ fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
 }
 
 fn collect_subflows(
-    store: &ForgeStore,
+    store: &FoundryStore,
     root_workflow_id: &str,
     nodes: &[TaskInspectionNode],
 ) -> Vec<SubflowInspection> {
@@ -451,7 +452,7 @@ fn collect_subflows(
 }
 
 struct SubflowCollector<'a> {
-    store: &'a ForgeStore,
+    store: &'a FoundryStore,
     visited_edges: BTreeSet<String>,
     subflows: Vec<SubflowInspection>,
 }

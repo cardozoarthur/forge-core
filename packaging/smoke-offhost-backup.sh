@@ -10,29 +10,29 @@ fail() {
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
-readonly backup_script="$script_dir/systemd/forge-backup"
-readonly restore_drill_script="$script_dir/systemd/forge-restore-drill"
+readonly backup_script="$script_dir/systemd/foundry-backup"
+readonly restore_drill_script="$script_dir/systemd/foundry-restore-drill"
 
-[[ $# -eq 1 ]] || fail "usage: $0 /path/to/real/forge"
+[[ $# -eq 1 ]] || fail "usage: $0 /path/to/real/foundry"
 [[ -f "$backup_script" && -x "$backup_script" ]] ||
   fail "backup script is not executable: $backup_script"
 [[ -f "$restore_drill_script" && -x "$restore_drill_script" ]] ||
   fail "restore drill is not executable: $restore_drill_script"
 
-forge_source="$(realpath -e -- "$1")" ||
-  fail "cannot resolve Forge binary: $1"
-readonly forge_source
-[[ -f "$forge_source" && -x "$forge_source" ]] ||
-  fail "Forge binary is not executable: $forge_source"
+foundry_source="$(realpath -e -- "$1")" ||
+  fail "cannot resolve Foundry binary: $1"
+readonly foundry_source
+[[ -f "$foundry_source" && -x "$foundry_source" ]] ||
+  fail "Foundry binary is not executable: $foundry_source"
 
 for required_command in awk cat chmod cp cut date dirname env find grep install ln mkdir mktemp mv realpath rm sha256sum sleep stat touch wc; do
   command -v "$required_command" >/dev/null 2>&1 ||
     fail "required command not found: $required_command"
 done
 
-smoke_root="$(mktemp -d "${TMPDIR:-/tmp}/forge-backup-smoke.XXXXXX")"
+smoke_root="$(mktemp -d "${TMPDIR:-/tmp}/foundry-backup-smoke.XXXXXX")"
 cleanup() {
-  if [[ "${FORGE_SMOKE_KEEP_ROOT:-0}" = 1 ]]; then
+  if [[ "${FOUNDRY_SMOKE_KEEP_ROOT:-0}" = 1 ]]; then
     printf 'off-host backup smoke: retained debug root: %s\n' \
       "${smoke_root:-unset}" >&2
     return
@@ -50,25 +50,25 @@ install -d -m 0700 \
   "$smoke_root/config" \
   "$smoke_root/uploader-credentials" \
   "$smoke_root/remote"
-printf 'forge-backup-smoke-v1\n' >"$smoke_root/.forge-backup-test-root"
-printf 'forge-restore-drill-smoke-v1\n' \
-  >"$smoke_root/.forge-restore-drill-test-root"
-install -m 0755 "$forge_source" "$smoke_root/bin/forge-real"
+printf 'foundry-backup-smoke-v1\n' >"$smoke_root/.foundry-backup-test-root"
+printf 'foundry-restore-drill-smoke-v1\n' \
+  >"$smoke_root/.foundry-restore-drill-test-root"
+install -m 0755 "$foundry_source" "$smoke_root/bin/foundry-real"
 
-cat >"$smoke_root/bin/forge" <<'FIXTURE_FORGE'
+cat >"$smoke_root/bin/foundry" <<'FIXTURE_FOUNDRY'
 #!/usr/bin/env bash
 set -euo pipefail
 
 [[ -z "${CREDENTIALS_DIRECTORY:-}" &&
-  -z "${FORGE_BACKUP_OFFHOST_COMMAND_FILE:-}" &&
-  -z "${FORGE_BACKUP_OFFHOST_DESTINATION_FILE:-}" &&
-  -z "${FORGE_BACKUP_OFFHOST_GENERATION_FILE:-}" &&
-  -z "${FORGE_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE:-}" &&
-  -z "${FORGE_DIRECTORY_MOUNT_IDENTITY_FILE:-}" ]] || exit 66
+  -z "${FOUNDRY_BACKUP_OFFHOST_COMMAND_FILE:-}" &&
+  -z "${FOUNDRY_BACKUP_OFFHOST_DESTINATION_FILE:-}" &&
+  -z "${FOUNDRY_BACKUP_OFFHOST_GENERATION_FILE:-}" &&
+  -z "${FOUNDRY_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE:-}" &&
+  -z "${FOUNDRY_DIRECTORY_MOUNT_IDENTITY_FILE:-}" ]] || exit 66
 
-exec "$(dirname -- "$0")/forge-real" "$@"
-FIXTURE_FORGE
-chmod 0755 "$smoke_root/bin/forge"
+exec "$(dirname -- "$0")/foundry-real" "$@"
+FIXTURE_FOUNDRY
+chmod 0755 "$smoke_root/bin/foundry"
 
 initialization_key="$smoke_root/initialization-only.key"
 printf 'off-host-smoke-initialization-key\n' |
@@ -76,17 +76,17 @@ printf 'off-host-smoke-initialization-key\n' |
   cut -d' ' -f1 >"$initialization_key"
 env \
   -u CREDENTIALS_DIRECTORY \
-  -u FORGE_BACKUP_OFFHOST_COMMAND_FILE \
-  -u FORGE_BACKUP_OFFHOST_DESTINATION_FILE \
-  -u FORGE_BACKUP_OFFHOST_GENERATION_FILE \
-  FORGE_SECRET_VAULT_KEY_FILE="$initialization_key" \
-  "$smoke_root/bin/forge" \
-  --store "$smoke_root/state/forge.sqlite" \
+  -u FOUNDRY_BACKUP_OFFHOST_COMMAND_FILE \
+  -u FOUNDRY_BACKUP_OFFHOST_DESTINATION_FILE \
+  -u FOUNDRY_BACKUP_OFFHOST_GENERATION_FILE \
+  FOUNDRY_SECRET_VAULT_KEY_FILE="$initialization_key" \
+  "$smoke_root/bin/foundry" \
+  --store "$smoke_root/state/foundry.sqlite" \
   plan \
   --goal "off-host-backup-recovery-canary" \
   --output json >"$smoke_root/initial-plan.json"
-[[ ! -e "$smoke_root/state/forge.sqlite.secret.key" ]] ||
-  fail "real Forge created an adjacent fallback vault key"
+[[ ! -e "$smoke_root/state/foundry.sqlite.secret.key" ]] ||
+  fail "real Foundry created an adjacent fallback vault key"
 
 workflow_id=""
 while IFS= read -r plan_line; do
@@ -96,7 +96,7 @@ while IFS= read -r plan_line; do
   fi
 done <"$smoke_root/initial-plan.json"
 [[ "$workflow_id" = wf_* ]] ||
-  fail "real Forge plan did not return a workflow id"
+  fail "real Foundry plan did not return a workflow id"
 
 cat >"$smoke_root/bin/offhost-uploader" <<'FIXTURE_UPLOADER'
 #!/usr/bin/env bash
@@ -105,12 +105,12 @@ set -euo pipefail
 operation="${1:-}"
 [[ -n "$operation" ]] || exit 64
 shift
-[[ -z "${FORGE_SECRET_VAULT_KEY:-}" &&
-  -z "${FORGE_SECRET_VAULT_KEY_FILE:-}" &&
-  -z "${FORGE_SECRET_VAULT_PREVIOUS_KEYS:-}" &&
-  -z "${FORGE_SECRET_VAULT_PREVIOUS_KEY_FILES:-}" &&
-  -z "${FORGE_OPS_BEARER_TOKEN:-}" &&
-  -z "${FORGE_OPS_BEARER_TOKEN_FILE:-}" ]] || exit 65
+[[ -z "${FOUNDRY_SECRET_VAULT_KEY:-}" &&
+  -z "${FOUNDRY_SECRET_VAULT_KEY_FILE:-}" &&
+  -z "${FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS:-}" &&
+  -z "${FOUNDRY_SECRET_VAULT_PREVIOUS_KEY_FILES:-}" &&
+  -z "${FOUNDRY_OPS_BEARER_TOKEN:-}" &&
+  -z "${FOUNDRY_OPS_BEARER_TOKEN_FILE:-}" ]] || exit 65
 [[ -n "${FIXTURE_EXPECTED_CREDENTIALS_DIRECTORY:-}" ]] || exit 67
 [[ "${CREDENTIALS_DIRECTORY:-}" = "$FIXTURE_EXPECTED_CREDENTIALS_DIRECTORY" ]] ||
   exit 67
@@ -255,8 +255,8 @@ fi
 FIXTURE_FINDMNT
 
 chmod 0755 \
-  "$smoke_root/bin/forge" \
-  "$smoke_root/bin/forge-real" \
+  "$smoke_root/bin/foundry" \
+  "$smoke_root/bin/foundry-real" \
   "$smoke_root/bin/offhost-uploader" \
   "$smoke_root/bin/findmnt"
 
@@ -265,23 +265,23 @@ readonly fail_verify_file="$smoke_root/fail-verify"
 readonly hang_download_file="$smoke_root/hang-download"
 readonly uploader_credentials_dir="$smoke_root/uploader-credentials"
 
-run_forge_without_vault() {
+run_foundry_without_vault() {
   env \
     -u CREDENTIALS_DIRECTORY \
-    -u FORGE_BACKUP_OFFHOST_COMMAND_FILE \
-    -u FORGE_BACKUP_OFFHOST_DESTINATION_FILE \
-    -u FORGE_BACKUP_OFFHOST_GENERATION_FILE \
-    -u FORGE_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE \
-    -u FORGE_DIRECTORY_MOUNT_IDENTITY_FILE \
-    -u FORGE_SECRET_VAULT_KEY \
-    -u FORGE_SECRET_VAULT_KEY_FILE \
-    -u FORGE_SECRET_VAULT_PREVIOUS_KEYS \
-    -u FORGE_SECRET_VAULT_PREVIOUS_KEY_FILES \
-    "$smoke_root/bin/forge" "$@"
+    -u FOUNDRY_BACKUP_OFFHOST_COMMAND_FILE \
+    -u FOUNDRY_BACKUP_OFFHOST_DESTINATION_FILE \
+    -u FOUNDRY_BACKUP_OFFHOST_GENERATION_FILE \
+    -u FOUNDRY_BACKUP_OFFHOST_MOUNT_IDENTITY_FILE \
+    -u FOUNDRY_DIRECTORY_MOUNT_IDENTITY_FILE \
+    -u FOUNDRY_SECRET_VAULT_KEY \
+    -u FOUNDRY_SECRET_VAULT_KEY_FILE \
+    -u FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS \
+    -u FOUNDRY_SECRET_VAULT_PREVIOUS_KEY_FILES \
+    "$smoke_root/bin/foundry" "$@"
 }
 
-run_forge_without_vault \
-  --store "$smoke_root/state/forge.sqlite" \
+run_foundry_without_vault \
+  --store "$smoke_root/state/foundry.sqlite" \
   store check \
   --output json >"$smoke_root/no-vault-check.json"
 
@@ -289,14 +289,14 @@ run_backup() {
   local timestamp="$1"
 
   env \
-    -u FORGE_PRODUCTION_MODE \
-    -u FORGE_SECRET_VAULT_KEY \
-    -u FORGE_SECRET_VAULT_KEY_FILE \
-    -u FORGE_SECRET_VAULT_PREVIOUS_KEYS \
-    -u FORGE_SECRET_VAULT_PREVIOUS_KEY_FILES \
-    FORGE_BACKUP_TEST_MODE=1 \
-    FORGE_BACKUP_TEST_ROOT="$smoke_root" \
-    FORGE_BACKUP_TEST_TIMESTAMP="$timestamp" \
+    -u FOUNDRY_PRODUCTION_MODE \
+    -u FOUNDRY_SECRET_VAULT_KEY \
+    -u FOUNDRY_SECRET_VAULT_KEY_FILE \
+    -u FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS \
+    -u FOUNDRY_SECRET_VAULT_PREVIOUS_KEY_FILES \
+    FOUNDRY_BACKUP_TEST_MODE=1 \
+    FOUNDRY_BACKUP_TEST_ROOT="$smoke_root" \
+    FOUNDRY_BACKUP_TEST_TIMESTAMP="$timestamp" \
     CREDENTIALS_DIRECTORY="$uploader_credentials_dir" \
     FIXTURE_EXPECTED_CREDENTIALS_DIRECTORY="$uploader_credentials_dir" \
     FIXTURE_REMOTE_DIR="$smoke_root/remote" \
@@ -304,7 +304,7 @@ run_backup() {
     FIXTURE_FAIL_VERIFY_FILE="$fail_verify_file" \
     FIXTURE_HANG_DOWNLOAD_FILE="$hang_download_file" \
     FIXTURE_DIRECTORY_MOUNT_TARGET="$smoke_root/remote-mount" \
-    FIXTURE_DIRECTORY_MOUNT_SOURCE="fixture-remote:/forge" \
+    FIXTURE_DIRECTORY_MOUNT_SOURCE="fixture-remote:/foundry" \
     FIXTURE_DIRECTORY_MOUNT_FSTYPE="fuse.fixture" \
     PATH="$smoke_root/bin:$PATH" \
     "$backup_script"
@@ -316,14 +316,14 @@ fi
 grep -q "off-host command file is not a readable regular file" \
   "$smoke_root/missing-config.log" ||
   fail "missing configuration did not fail closed"
-[[ ! -e "$smoke_root/backups/forge-20260724T010000Z.sqlite" ]] ||
+[[ ! -e "$smoke_root/backups/foundry-20260724T010000Z.sqlite" ]] ||
   fail "missing configuration created a backup"
 
 for production_value in 1 true yes on; do
   if env \
-    FORGE_PRODUCTION_MODE="$production_value" \
-    FORGE_BACKUP_TEST_MODE=1 \
-    FORGE_BACKUP_TEST_ROOT="$smoke_root" \
+    FOUNDRY_PRODUCTION_MODE="$production_value" \
+    FOUNDRY_BACKUP_TEST_MODE=1 \
+    FOUNDRY_BACKUP_TEST_ROOT="$smoke_root" \
     "$backup_script" \
     >"$smoke_root/production-conflict-$production_value.log" 2>&1; then
     fail "production value $production_value accepted test overrides"
@@ -344,9 +344,9 @@ install -d -m 0700 \
   "$smoke_root/remote-mount/provider"
 mount_fsid="$(stat -f -c '%i' -- "$smoke_root/remote-mount/provider")"
 printf '%s\n' \
-  "forge-directory-mount-v1" \
+  "foundry-directory-mount-v1" \
   "target=$smoke_root/remote-mount" \
-  "source=fixture-remote:/forge" \
+  "source=fixture-remote:/foundry" \
   "fstype=fuse.fixture" \
   "fsid=$mount_fsid" \
   >"$smoke_root/config/offhost-mount-identity"
@@ -360,7 +360,7 @@ unset FIXTURE_DIRECTORY_MOUNT_STATE
 grep -q "mount identity changed or is unavailable" \
   "$smoke_root/mount-loss.log" ||
   fail "backup mount-loss rejection was not explicit"
-[[ ! -e "$smoke_root/backups/forge-20260724T010500Z.sqlite" ]] ||
+[[ ! -e "$smoke_root/backups/foundry-20260724T010500Z.sqlite" ]] ||
   fail "mount-loss rejection created a local backup"
 [[ ! -s "$upload_log" ]] ||
   fail "mount-loss rejection invoked the uploader"
@@ -391,9 +391,9 @@ grep -q "writable by group or other" "$smoke_root/writable-parent.log" ||
 printf '%s\n' "$smoke_root/bin/offhost-uploader" \
   >"$smoke_root/config/offhost-command"
 
-readonly expired_object="forge-20260701T000000Z.sqlite"
+readonly expired_object="foundry-20260701T000000Z.sqlite"
 readonly expired_backup="$smoke_root/backups/$expired_object"
-cp -- "$smoke_root/state/forge.sqlite" "$expired_backup"
+cp -- "$smoke_root/state/foundry.sqlite" "$expired_backup"
 touch -d '20 days ago' "$expired_backup"
 touch "$fail_verify_file"
 
@@ -405,7 +405,7 @@ rm -f -- "$fail_verify_file"
   fail "failed remote verification removed the expired local backup"
 [[ ! -e "$expired_backup.offhost-verified" ]] ||
   fail "failed remote verification created a success marker"
-[[ ! -e "$smoke_root/backups/forge-20260724T020000Z.sqlite" ]] ||
+[[ ! -e "$smoke_root/backups/foundry-20260724T020000Z.sqlite" ]] ||
   fail "failed drain created a new snapshot before clearing pending backups"
 [[ "$(wc -l <"$upload_log")" -eq 2 ]] ||
   fail "failed run did not stop immediately after upload and verify"
@@ -413,8 +413,8 @@ rm -f -- "$fail_verify_file"
 run_backup 20260724T030000Z >"$smoke_root/retry-success.log"
 [[ ! -e "$expired_backup" && ! -e "$expired_backup.offhost-verified" ]] ||
   fail "verified expired backup was not removed by local retention"
-[[ -f "$smoke_root/backups/forge-20260724T030000Z.sqlite.offhost-verified" ]] ||
-  fail "successful retry did not mark forge-20260724T030000Z.sqlite"
+[[ -f "$smoke_root/backups/foundry-20260724T030000Z.sqlite.offhost-verified" ]] ||
+  fail "successful retry did not mark foundry-20260724T030000Z.sqlite"
 awk -F '\t' -v object="$expired_object" '
   $1 == "verify" && $2 == "fixture://primary" && $3 == object { count++ }
   END { exit(count == 3 ? 0 : 1) }
@@ -457,7 +457,7 @@ operations_after="$(wc -l <"$upload_log")"
 
 object_epoch="$(( $(date -u +%s) - 60 ))"
 selected_timestamp="$(date -u -d "@$object_epoch" +%Y%m%dT%H%M%SZ)"
-selected_object="forge-$selected_timestamp.sqlite"
+selected_object="foundry-$selected_timestamp.sqlite"
 incident_epoch="$((object_epoch + 60))"
 run_backup "$selected_timestamp" >"$smoke_root/dynamic-restore-source.log"
 
@@ -470,17 +470,17 @@ run_restore_drill() {
   local drill_canary_workflow_id="${6:-$workflow_id}"
 
   env \
-    -u FORGE_PRODUCTION_MODE \
-    -u FORGE_SECRET_VAULT_KEY \
-    -u FORGE_SECRET_VAULT_KEY_FILE \
-    -u FORGE_SECRET_VAULT_PREVIOUS_KEYS \
-    -u FORGE_SECRET_VAULT_PREVIOUS_KEY_FILES \
-    FORGE_RESTORE_DRILL_TEST_MODE=1 \
-    FORGE_RESTORE_DRILL_TEST_ROOT="$smoke_root" \
-    FORGE_SECRET_VAULT_KEY_FILE="$initialization_key" \
-    FORGE_BACKUP_OFFHOST_COMMAND_FILE=/must/not/reach/forge/command \
-    FORGE_BACKUP_OFFHOST_DESTINATION_FILE=/must/not/reach/forge/destination \
-    FORGE_BACKUP_OFFHOST_GENERATION_FILE=/must/not/reach/forge/generation \
+    -u FOUNDRY_PRODUCTION_MODE \
+    -u FOUNDRY_SECRET_VAULT_KEY \
+    -u FOUNDRY_SECRET_VAULT_KEY_FILE \
+    -u FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS \
+    -u FOUNDRY_SECRET_VAULT_PREVIOUS_KEY_FILES \
+    FOUNDRY_RESTORE_DRILL_TEST_MODE=1 \
+    FOUNDRY_RESTORE_DRILL_TEST_ROOT="$smoke_root" \
+    FOUNDRY_SECRET_VAULT_KEY_FILE="$initialization_key" \
+    FOUNDRY_BACKUP_OFFHOST_COMMAND_FILE=/must/not/reach/foundry/command \
+    FOUNDRY_BACKUP_OFFHOST_DESTINATION_FILE=/must/not/reach/foundry/destination \
+    FOUNDRY_BACKUP_OFFHOST_GENERATION_FILE=/must/not/reach/foundry/generation \
     CREDENTIALS_DIRECTORY="$uploader_credentials_dir" \
     FIXTURE_EXPECTED_CREDENTIALS_DIRECTORY="$uploader_credentials_dir" \
     FIXTURE_REMOTE_DIR="$smoke_root/remote" \
@@ -488,7 +488,7 @@ run_restore_drill() {
     FIXTURE_FAIL_VERIFY_FILE="$fail_verify_file" \
     FIXTURE_HANG_DOWNLOAD_FILE="$hang_download_file" \
     "$restore_drill_script" \
-    --forge "$smoke_root/bin/forge" \
+    --foundry "$smoke_root/bin/foundry" \
     --uploader "$smoke_root/bin/offhost-uploader" \
     --target "fixture://secondary" \
     --object "$drill_object" \
@@ -502,9 +502,9 @@ run_restore_drill() {
 }
 
 if env \
-  FORGE_PRODUCTION_MODE=true \
-  FORGE_RESTORE_DRILL_TEST_MODE=1 \
-  FORGE_RESTORE_DRILL_TEST_ROOT="$smoke_root" \
+  FOUNDRY_PRODUCTION_MODE=true \
+  FOUNDRY_RESTORE_DRILL_TEST_MODE=1 \
+  FOUNDRY_RESTORE_DRILL_TEST_ROOT="$smoke_root" \
   "$restore_drill_script" --help \
   >"$smoke_root/restore-production-conflict.log" 2>&1; then
   fail "production mode unexpectedly accepted restore-drill test overrides"
@@ -532,7 +532,7 @@ noncanonical_restore_dir="$smoke_root/noncanonical-restore"
 install -d -m 0700 "$noncanonical_restore_dir"
 if run_restore_drill \
   "$noncanonical_restore_dir" \
-  "forge-20260230T120000Z.sqlite" \
+  "foundry-20260230T120000Z.sqlite" \
   "$object_epoch" \
   "$incident_epoch" \
   1800 \
@@ -590,7 +590,7 @@ if run_restore_drill \
 fi
 grep -q "canary workflow inspection failed" \
   "$smoke_root/missing-canary.log" ||
-  fail "missing workflow-id canary did not fail by exact Forge lookup"
+  fail "missing workflow-id canary did not fail by exact Foundry lookup"
 
 manual_restore_dir="$smoke_root/manual-restore"
 install -d -m 0700 "$manual_restore_dir"
@@ -613,17 +613,17 @@ grep -Eq '"hot_script_rto_milliseconds": [0-9]+' \
 grep -Fq "\"canary_workflow_id\": \"$workflow_id\"" \
   "$manual_restore_dir/drill-report.json" ||
   fail "restore drill did not record the exact workflow-id canary"
-grep -Eq '"forge_sha256": "[0-9a-f]{64}"' \
+grep -Eq '"foundry_sha256": "[0-9a-f]{64}"' \
   "$manual_restore_dir/drill-report.json" ||
-  fail "restore drill did not record the Forge executable hash"
+  fail "restore drill did not record the Foundry executable hash"
 grep -Eq '"uploader_sha256": "[0-9a-f]{64}"' \
   "$manual_restore_dir/drill-report.json" ||
   fail "restore drill did not record the uploader hash"
-grep -Fq '"forge_version": "forge ' "$manual_restore_dir/drill-report.json" ||
-  fail "restore drill did not record Forge --version"
-grep -Fq '"schema_version": "forge.ops.snapshot.v1"' \
+grep -Fq '"foundry_version": "foundry ' "$manual_restore_dir/drill-report.json" ||
+  fail "restore drill did not record Foundry --version"
+grep -Fq '"schema_version": "foundry.ops.snapshot.v1"' \
   "$manual_restore_dir/ops-snapshot.json" ||
-  fail "restore drill did not probe the restored store through Forge Ops"
+  fail "restore drill did not probe the restored store through Foundry Ops"
 [[ ! -e "$manual_restore_dir/.ops-token" &&
   ! -e "$manual_restore_dir/.ops-curl.conf" ]] ||
   fail "restore drill retained temporary Ops credentials"

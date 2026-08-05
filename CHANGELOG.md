@@ -2,6 +2,84 @@
 
 ## Unreleased
 
+### Changed
+
+- Renamed the product and all canonical interfaces from Forge Core to Foundry
+  Core. The primary executable, package, state directory, environment prefix,
+  contract namespace, skills, service units and release assets are now
+  `foundry`, `foundry-core`, `.foundry`, `FOUNDRY_*`, `foundry.*` and
+  `foundry-*` respectively.
+- Added a bounded 0.6.x compatibility window for the deprecated `forge`
+  command, `FORGE_*` inputs, `.forge` configuration discovery and `forge.*`
+  contract inputs. Foundry emits only canonical names and never dual-writes
+  state; operator-controlled migration remains explicit and auditable.
+
+### Added
+
+- Added an explicit, workflow-bound Addon validator outcome router through
+  `foundry addons apply-validator-outcome` and
+  `foundry.addons.apply_validator_outcome`. Passed results become revisioned
+  evidence without auto-promotion, failed results create correlated rework
+  impediments, and review-required results open a revisioned human gate; stale
+  revisions, mismatched bindings and duplicate applications fail closed or
+  replay idempotently.
+
+- Added productive N:N Codex/Agy executor waves through `foundry request
+  execute-wave`, including bounded worker concurrency, task-local executor
+  routing, stdin prompt transport, wave/revision/task/context correlation,
+  idempotent runtime claims and receipts that never auto-promote tasks.
+- Added elastic teamwork lanes through repeatable
+  `foundry teamwork --lane <name>=<executor>:<count>` declarations and MCP
+  `foundry.teamwork.plan`, so a workflow may allocate several agents of the same
+  or different brains while the dependency DAG controls actual concurrency.
+- Added the explicit lane contract to the primary `foundry plan` and
+  `foundry request start` flows and to MCP `foundry.run.start`. Declarations with
+  `--lane frontend=agy:3`, `--lane backend=codex:5` and
+  `--max-parallel-agents 8` are
+  materialized by the shared Core path and persisted under
+  `core_orchestration.parallel_team`; requests without lanes retain the serial
+  generic DAG, and ambiguous or `auto` lane routing fails closed.
+- Added fail-closed task-scoped worktree admission for mutating Codex/Agy tasks,
+  so independent lanes can fan out while shared or missing checkout claims are
+  deferred before process execution.
+- Added `foundry worktree prepare-teamwork` so operators can review and apply the
+  worktree plan to the exact same persisted workflow without creating a second
+  workflow/run; an authorized replay reuses the existing task bindings.
+- Added Git dependency fan-in for lane joins and final auditors through
+  `foundry worktree integrate-dependencies`. The command plans before mutation,
+  freezes and revalidates every source binding/HEAD, serializes integration per
+  destination, creates one deterministic integration commit, records a hashed
+  receipt and rolls the Foundry-owned destination back on conflict or persistence
+  failure. Join and auditor dispatch fails closed when that receipt is missing
+  or stale.
+- Made dynamic DAG mutation and parallel teamwork universal Foundry Core
+  capabilities. Workflows now persist a Core orchestration policy, reject
+  malformed or cyclic graphs, expose revision-guarded task, dependency,
+  priority and impediment mutations, and schedule priority-aware bounded
+  handoff frontiers.
+- Added operational fan-out/fan-in mission graphs with multi-assignment drive
+  reports, plus teamwork workflows whose roster is bound to parallel task
+  branches and a dependency-enforced audit join.
+- Added caller-attested completion receipts correlated to the original task
+  lease, workflow revision, executor and context. `complete-task` now requires
+  both the evidence command and its actually observed exit code; Foundry does not
+  fabricate a passing result.
+
+### Fixed
+
+- Made the privileged `foundry-admin` transient unit tolerate an intentionally
+  absent local backup directory. Read-only store checks can now run when local
+  backups are disabled, while `/var/lib/foundry` remains the only required
+  writable state path.
+- Made read-only store checks and backups retry with SQLite immutable mode only
+  after WAL initialization fails and no WAL, SHM or rollback-journal sidecar
+  exists. This preserves the fully read-only `/var/lib/foundry` systemd boundary,
+  supports clean checkpointed stores and fails closed instead of ignoring
+  uncheckpointed transactions.
+- Aligned the production alert monitor with the one-line
+  `foundry-offhost-v2` marker emitted by `foundry-backup`, so a successful verified
+  recovery challenge is recognized instead of reported as missing.
+
 ## 0.5.3 - 2026-07-25
 
 ### Added

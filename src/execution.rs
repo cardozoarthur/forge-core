@@ -68,7 +68,7 @@ pub struct ConcurrentWaveReport {
 
 fn workflow_runtime_security_guardrails(workflow_id: &str) -> RuntimeSecurityGuardrailReport {
     let command = vec![
-        "forge-workflow-runtime".to_string(),
+        "foundry-workflow-runtime".to_string(),
         workflow_id.to_string(),
     ];
     evaluate_runtime_security_guardrails(RuntimeSecurityGuardrailRequest {
@@ -77,7 +77,7 @@ fn workflow_runtime_security_guardrails(workflow_id: &str) -> RuntimeSecurityGua
         command: &command,
         dry_run: false,
         allow_exec: true,
-        forge_first: true,
+        foundry_first: true,
         project_policy_status: "workflow_lineage_available",
         has_lineage: true,
     })
@@ -241,7 +241,7 @@ fn run_simulated_parallel(workflow: &mut Workflow) -> ExecutionReport {
                     to: notification.to.clone(),
                     subject: notification.subject.clone(),
                     body: format!(
-                        "Forge workflow {} completed. total_estimated_cost_usd={:.6}",
+                        "Foundry workflow {} completed. total_estimated_cost_usd={:.6}",
                         workflow.id, total_estimated_cost_usd
                     ),
                     simulated: true,

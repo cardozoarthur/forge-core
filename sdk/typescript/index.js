@@ -1,4 +1,4 @@
-class ForgeNode {
+class FoundryNode {
   constructor(client, workflowId, nodeId) {
     this.client = client;
     this.workflowId = workflowId;
@@ -15,14 +15,14 @@ class ForgeNode {
   }
 }
 
-class ForgeWorkflow {
+class FoundryWorkflow {
   constructor(client, workflowId) {
     this.client = client;
     this.workflowId = workflowId;
   }
 
   node(nodeId) {
-    return new ForgeNode(this.client, this.workflowId, nodeId);
+    return new FoundryNode(this.client, this.workflowId, nodeId);
   }
 
   async run(input = {}) {
@@ -42,7 +42,7 @@ class ForgeWorkflow {
   }
 
   async subworkflow(workflowId) {
-    return new ForgeWorkflow(this.client, workflowId);
+    return new FoundryWorkflow(this.client, workflowId);
   }
 
   async parallel(workflows) {
@@ -59,14 +59,14 @@ class ForgeWorkflow {
   }
 }
 
-class ForgeClient {
+class FoundryClient {
   constructor(options = {}) {
     this.baseUrl = options.baseUrl || "http://127.0.0.1:8787";
     this.token = options.token || null;
   }
 
   workflow(workflowId) {
-    return new ForgeWorkflow(this, workflowId);
+    return new FoundryWorkflow(this, workflowId);
   }
 
   async _invoke(payload) {
@@ -79,7 +79,11 @@ class ForgeClient {
 }
 
 module.exports = {
-  ForgeClient,
-  ForgeWorkflow,
-  ForgeNode,
+  FoundryClient,
+  FoundryWorkflow,
+  FoundryNode,
+  // Deprecated Forge-era aliases retained only for the 0.6.x migration cycle. // foundry-brand-allow: legacy-compat
+  ForgeClient: FoundryClient, // foundry-brand-allow: legacy-compat
+  ForgeWorkflow: FoundryWorkflow, // foundry-brand-allow: legacy-compat
+  ForgeNode: FoundryNode, // foundry-brand-allow: legacy-compat
 };

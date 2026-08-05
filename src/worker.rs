@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-const WORKER_POOL_SCHEMA_VERSION: &str = "forge.worker_pool.v1";
+const WORKER_POOL_SCHEMA_VERSION: &str = "foundry.worker_pool.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkerPoolReport {
@@ -219,7 +219,7 @@ mod tests {
         let pool = WorkerPool::new(1);
         let jobs: Vec<Job> = vec![ok_job()];
         let report = pool.execute(jobs);
-        assert_eq!(report.schema_version, "forge.worker_pool.v1");
+        assert_eq!(report.schema_version, "foundry.worker_pool.v1");
     }
 
     #[test]

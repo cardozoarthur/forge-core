@@ -1,10 +1,9 @@
 [package]
-name = "forge-sdk-rust"
-version = "0.0.0"
+name = "foundry-sdk-rust"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
-description = "Forge Rust SDK scaffold for native workflow embedding."
+description = "Foundry Rust SDK scaffold for native workflow embedding."
 
 [lib]
 path = "src/lib.rs"
-

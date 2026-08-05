@@ -1,12 +1,11 @@
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_yaml::Value as YamlValue;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const CREDENTIAL_VAULT_COMMAND_SCHEMA: &str = "forge.credential_vault.command.v1";
+pub const CREDENTIAL_VAULT_COMMAND_SCHEMA: &str = "foundry.credential_vault.command.v1";
 
 const DEFAULT_CREDENTIAL_VAULT_RELATIVE_BIN: &str =
     ".codex/skills/credential-vault/scripts/credential-vault";
@@ -30,17 +29,17 @@ pub fn resolve_credential_vault_bin(explicit: Option<&Path>) -> PathBuf {
     if let Some(path) = explicit {
         return path.to_path_buf();
     }
-    if let Ok(path) = env::var("FORGE_CREDENTIAL_VAULT_BIN") {
+    if let Ok(path) = crate::brand::env_var("FOUNDRY_CREDENTIAL_VAULT_BIN") {
         if !path.trim().is_empty() {
             return PathBuf::from(path);
         }
     }
-    if let Ok(path) = env::var("CREDENTIAL_VAULT_BIN") {
+    if let Ok(path) = crate::brand::env_var("CREDENTIAL_VAULT_BIN") {
         if !path.trim().is_empty() {
             return PathBuf::from(path);
         }
     }
-    if let Ok(home) = env::var("HOME") {
+    if let Ok(home) = crate::brand::env_var("HOME") {
         return PathBuf::from(home).join(DEFAULT_CREDENTIAL_VAULT_RELATIVE_BIN);
     }
     PathBuf::from("credential-vault")

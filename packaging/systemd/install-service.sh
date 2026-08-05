@@ -4,7 +4,7 @@ set -euo pipefail
 export LC_ALL=C
 
 fail() {
-  echo "forge systemd installer: $*" >&2
+  echo "foundry systemd installer: $*" >&2
   exit 1
 }
 
@@ -91,8 +91,8 @@ resolve_directory_offhost_path() {
     audit_directory_offhost_permissions "$destination_path" "$account"
   fi
   case "$destination_path" in
-    /var/lib/forge | /var/lib/forge/* | /var/backups/forge | /var/backups/forge/*)
-      fail "directory destination must be outside Forge state and local backup directories"
+    /var/lib/foundry | /var/lib/foundry/* | /var/backups/foundry | /var/backups/foundry/*)
+      fail "directory destination must be outside Foundry state and local backup directories"
       ;;
   esac
 
@@ -122,9 +122,9 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-probe_file="$(mktemp "$directory/.forge-install-write-probe.XXXXXX")"
+probe_file="$(mktemp "$directory/.foundry-install-write-probe.XXXXXX")"
 probe_link="$probe_file.link"
-printf "forge-directory-write-probe\n" >"$probe_file"
+printf "foundry-directory-write-probe\n" >"$probe_file"
 sync -f -- "$probe_file"
 ln -- "$probe_file" "$probe_link"
 [[ "$probe_file" -ef "$probe_link" ]]
@@ -137,11 +137,11 @@ trap - EXIT
 '
 
   if [[ "$account_uid" -eq "$EUID" ]]; then
-    bash -c "$probe_program" forge-directory-write-probe "$destination_path" ||
+    bash -c "$probe_program" foundry-directory-write-probe "$destination_path" ||
       fail "directory destination does not satisfy the write, hard-link, and durable-sync contract for user $account: $destination_path"
   else
     runuser --user "$account" -- \
-      bash -c "$probe_program" forge-directory-write-probe "$destination_path" ||
+      bash -c "$probe_program" foundry-directory-write-probe "$destination_path" ||
       fail "directory destination does not satisfy the write, hard-link, and durable-sync contract for user $account: $destination_path"
   fi
 }
@@ -223,7 +223,7 @@ capture_directory_mount_identity() {
     fail "directory destination mount changed while its identity was captured"
 
   printf '%s\n' \
-    "forge-directory-mount-v1" \
+    "foundry-directory-mount-v1" \
     "target=$mount_target" \
     "source=$mount_source" \
     "fstype=$mount_fstype" \
@@ -264,7 +264,7 @@ fi
 
 [[ "$EUID" -eq 0 ]] || fail "run as root"
 [[ $# -eq 4 ]] ||
-  fail "usage: $0 /absolute/path/to/verified/forge /absolute/path/to/offhost-uploader NON_SECRET_OFFHOST_DESTINATION OFFHOST_GENERATION"
+  fail "usage: $0 /absolute/path/to/verified/foundry /absolute/path/to/offhost-uploader NON_SECRET_OFFHOST_DESTINATION OFFHOST_GENERATION"
 
 binary="$1"
 offhost_command="$2"
@@ -280,8 +280,8 @@ offhost_generation="$4"
 [[ ! -L "$offhost_command" ]] ||
   fail "off-host uploader must not be a symbolic link: $offhost_command"
 case "$offhost_command" in
-  /var/lib/forge/* | /var/backups/forge/*)
-    fail "off-host uploader must be outside Forge writable directories"
+  /var/lib/foundry/* | /var/backups/foundry/*)
+    fail "off-host uploader must be outside Foundry writable directories"
     ;;
 esac
 [[ -n "$offhost_destination" ]] ||
@@ -327,54 +327,54 @@ audit_root_owned_path "$offhost_command"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-if ! getent group forge >/dev/null; then
-  groupadd --system forge
+if ! getent group foundry >/dev/null; then
+  groupadd --system foundry
 fi
-if ! id -u forge >/dev/null 2>&1; then
+if ! id -u foundry >/dev/null 2>&1; then
   useradd \
     --system \
-    --gid forge \
-    --home-dir /var/lib/forge \
+    --gid foundry \
+    --home-dir /var/lib/foundry \
     --shell "$(command -v nologin)" \
-    forge
+    foundry
 fi
 
 directory_offhost_path="$(
-  resolve_directory_offhost_path "$offhost_destination" forge
+  resolve_directory_offhost_path "$offhost_destination" foundry
 )"
 directory_mount_identity=""
 
 if [[ -n "$directory_offhost_path" ]]; then
-  probe_directory_write_contract forge "$directory_offhost_path"
+  probe_directory_write_contract foundry "$directory_offhost_path"
   directory_mount_identity="$(
     capture_directory_mount_identity "$directory_offhost_path"
   )"
 fi
 
-install -d -m 0700 -o forge -g forge /var/lib/forge
-install -d -m 0700 -o forge -g forge /var/lib/forge/workspace
-install -d -m 0700 -o forge -g forge /var/backups/forge
-install -d -m 0750 -o root -g forge /etc/forge
+install -d -m 0700 -o foundry -g foundry /var/lib/foundry
+install -d -m 0700 -o foundry -g foundry /var/lib/foundry/workspace
+install -d -m 0700 -o foundry -g foundry /var/backups/foundry
+install -d -m 0750 -o root -g foundry /etc/foundry
 install -d -m 0755 -o root -g root /usr/local/libexec
 
-directory_offhost_dropin="/etc/systemd/system/forge-backup.service.d/20-directory-offhost.conf"
+directory_offhost_dropin="/etc/systemd/system/foundry-backup.service.d/20-directory-offhost.conf"
 managed_paths=(
-  /etc/forge/secret.key
-  /etc/forge/ops-token
-  /etc/forge/backup-offhost-command
-  /etc/forge/backup-offhost-destination
-  /etc/forge/backup-offhost-generation
-  /etc/forge/backup-offhost-mount-identity
-  /usr/local/libexec/forge-backup
-  /usr/local/sbin/forge-admin
-  /usr/local/sbin/forge-restore-drill
-  /etc/systemd/system/forge-ops.service
-  /etc/systemd/system/forge-runtime.service
-  /etc/systemd/system/forge-request-supervisor.service
-  /etc/systemd/system/forge-backup.service
+  /etc/foundry/secret.key
+  /etc/foundry/ops-token
+  /etc/foundry/backup-offhost-command
+  /etc/foundry/backup-offhost-destination
+  /etc/foundry/backup-offhost-generation
+  /etc/foundry/backup-offhost-mount-identity
+  /usr/local/libexec/foundry-backup
+  /usr/local/sbin/foundry-admin
+  /usr/local/sbin/foundry-restore-drill
+  /etc/systemd/system/foundry-ops.service
+  /etc/systemd/system/foundry-runtime.service
+  /etc/systemd/system/foundry-request-supervisor.service
+  /etc/systemd/system/foundry-backup.service
   "$directory_offhost_dropin"
-  /etc/systemd/system/forge-backup.timer
-  /usr/local/bin/forge
+  /etc/systemd/system/foundry-backup.timer
+  /usr/local/bin/foundry
 )
 declare -a managed_path_had_previous=()
 rollback_root=""
@@ -396,30 +396,30 @@ read_unit_enable_state() {
   printf '%s\n' "$state"
 }
 
-forge_ops_enable_state="$(read_unit_enable_state forge-ops.service)"
-forge_runtime_enable_state="$(read_unit_enable_state forge-runtime.service)"
-forge_request_supervisor_enable_state="$(read_unit_enable_state forge-request-supervisor.service)"
-forge_backup_enable_state="$(read_unit_enable_state forge-backup.service)"
-forge_timer_enable_state="$(read_unit_enable_state forge-backup.timer)"
-forge_ops_was_active=false
-forge_runtime_was_active=false
-forge_request_supervisor_was_active=false
-forge_backup_was_active=false
-forge_timer_was_active=false
-if systemctl is-active --quiet forge-ops.service; then
-  forge_ops_was_active=true
+foundry_ops_enable_state="$(read_unit_enable_state foundry-ops.service)"
+foundry_runtime_enable_state="$(read_unit_enable_state foundry-runtime.service)"
+foundry_request_supervisor_enable_state="$(read_unit_enable_state foundry-request-supervisor.service)"
+foundry_backup_enable_state="$(read_unit_enable_state foundry-backup.service)"
+foundry_timer_enable_state="$(read_unit_enable_state foundry-backup.timer)"
+foundry_ops_was_active=false
+foundry_runtime_was_active=false
+foundry_request_supervisor_was_active=false
+foundry_backup_was_active=false
+foundry_timer_was_active=false
+if systemctl is-active --quiet foundry-ops.service; then
+  foundry_ops_was_active=true
 fi
-if systemctl is-active --quiet forge-runtime.service; then
-  forge_runtime_was_active=true
+if systemctl is-active --quiet foundry-runtime.service; then
+  foundry_runtime_was_active=true
 fi
-if systemctl is-active --quiet forge-request-supervisor.service; then
-  forge_request_supervisor_was_active=true
+if systemctl is-active --quiet foundry-request-supervisor.service; then
+  foundry_request_supervisor_was_active=true
 fi
-if systemctl is-active --quiet forge-backup.service; then
-  forge_backup_was_active=true
+if systemctl is-active --quiet foundry-backup.service; then
+  foundry_backup_was_active=true
 fi
-if systemctl is-active --quiet forge-backup.timer; then
-  forge_timer_was_active=true
+if systemctl is-active --quiet foundry-backup.timer; then
+  foundry_timer_was_active=true
 fi
 
 cleanup_transaction_artifacts() {
@@ -438,7 +438,7 @@ cleanup_transaction_artifacts() {
     fi
   done
   if [[ -n "$rollback_root" &&
-    "$rollback_root" = /var/tmp/forge-install-rollback.* &&
+    "$rollback_root" = /var/tmp/foundry-install-rollback.* &&
     -d "$rollback_root" && ! -L "$rollback_root" ]]; then
     rm -rf -- "$rollback_root"
   fi
@@ -468,7 +468,7 @@ restore_unit_enable_state() {
       return 0
       ;;
     *)
-      echo "forge systemd installer: cannot restore unknown enable state '$state' for $unit" >&2
+      echo "foundry systemd installer: cannot restore unknown enable state '$state' for $unit" >&2
       return 1
       ;;
   esac
@@ -479,68 +479,68 @@ rollback_installation() {
   local path=""
   local rollback_failed=false
 
-  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service \
+  systemctl disable --now foundry-request-supervisor.service foundry-backup.timer foundry-runtime.service foundry-ops.service \
     >/dev/null 2>&1 || true
-  systemctl stop forge-backup.service \
+  systemctl stop foundry-backup.service \
     >/dev/null 2>&1 || true
 
   for index in "${!managed_paths[@]}"; do
     path="${managed_paths[$index]}"
     if ! rm -f -- "$path"; then
-      echo "forge systemd installer: rollback could not remove $path" >&2
+      echo "foundry systemd installer: rollback could not remove $path" >&2
       rollback_failed=true
       continue
     fi
     if [[ "${managed_path_had_previous[$index]}" = 1 ]] &&
       ! cp -a -- "$rollback_root/$index" "$path"; then
-      echo "forge systemd installer: rollback could not restore $path" >&2
+      echo "foundry systemd installer: rollback could not restore $path" >&2
       rollback_failed=true
     fi
   done
 
   systemctl daemon-reload >/dev/null 2>&1 || rollback_failed=true
   restore_unit_enable_state \
-    forge-ops.service "$forge_ops_enable_state" \
+    foundry-ops.service "$foundry_ops_enable_state" \
     >/dev/null 2>&1 || rollback_failed=true
   restore_unit_enable_state \
-    forge-runtime.service "$forge_runtime_enable_state" \
+    foundry-runtime.service "$foundry_runtime_enable_state" \
     >/dev/null 2>&1 || rollback_failed=true
   restore_unit_enable_state \
-    forge-request-supervisor.service "$forge_request_supervisor_enable_state" \
+    foundry-request-supervisor.service "$foundry_request_supervisor_enable_state" \
     >/dev/null 2>&1 || rollback_failed=true
   restore_unit_enable_state \
-    forge-backup.service "$forge_backup_enable_state" \
+    foundry-backup.service "$foundry_backup_enable_state" \
     >/dev/null 2>&1 || rollback_failed=true
   restore_unit_enable_state \
-    forge-backup.timer "$forge_timer_enable_state" \
+    foundry-backup.timer "$foundry_timer_enable_state" \
     >/dev/null 2>&1 || rollback_failed=true
 
-  if [[ "$forge_ops_was_active" = true ]] &&
-    ! systemctl start forge-ops.service >/dev/null 2>&1; then
+  if [[ "$foundry_ops_was_active" = true ]] &&
+    ! systemctl start foundry-ops.service >/dev/null 2>&1; then
     rollback_failed=true
   fi
-  if [[ "$forge_runtime_was_active" = true ]] &&
-    ! systemctl start forge-runtime.service >/dev/null 2>&1; then
+  if [[ "$foundry_runtime_was_active" = true ]] &&
+    ! systemctl start foundry-runtime.service >/dev/null 2>&1; then
     rollback_failed=true
   fi
-  if [[ "$forge_request_supervisor_was_active" = true ]] &&
-    ! systemctl start forge-request-supervisor.service >/dev/null 2>&1; then
+  if [[ "$foundry_request_supervisor_was_active" = true ]] &&
+    ! systemctl start foundry-request-supervisor.service >/dev/null 2>&1; then
     rollback_failed=true
   fi
-  if [[ "$forge_backup_was_active" = true ]] &&
-    ! systemctl start forge-backup.service >/dev/null 2>&1; then
+  if [[ "$foundry_backup_was_active" = true ]] &&
+    ! systemctl start foundry-backup.service >/dev/null 2>&1; then
     rollback_failed=true
   fi
-  if [[ "$forge_timer_was_active" = true ]] &&
-    ! systemctl start forge-backup.timer >/dev/null 2>&1; then
+  if [[ "$foundry_timer_was_active" = true ]] &&
+    ! systemctl start foundry-backup.timer >/dev/null 2>&1; then
     rollback_failed=true
   fi
 
   if [[ "$rollback_failed" = true ]]; then
-    echo "forge systemd installer: transactional rollback was incomplete; keep services isolated and repair manually" >&2
+    echo "foundry systemd installer: transactional rollback was incomplete; keep services isolated and repair manually" >&2
     return 1
   fi
-  echo "forge systemd installer: restored previous files and systemd state" >&2
+  echo "foundry systemd installer: restored previous files and systemd state" >&2
 }
 
 handle_transaction_exit() {
@@ -558,7 +558,7 @@ handle_transaction_exit() {
 }
 trap handle_transaction_exit EXIT
 
-rollback_root="$(mktemp -d /var/tmp/forge-install-rollback.XXXXXX)"
+rollback_root="$(mktemp -d /var/tmp/foundry-install-rollback.XXXXXX)"
 chmod 0700 "$rollback_root"
 chown root:root "$rollback_root"
 for index in "${!managed_paths[@]}"; do
@@ -572,9 +572,9 @@ for index in "${!managed_paths[@]}"; do
 done
 transaction_active=true
 
-secret_key="/etc/forge/secret.key"
+secret_key="/etc/foundry/secret.key"
 if [[ ! -e "$secret_key" ]]; then
-  staged_secret="$(mktemp /etc/forge/.secret.key.XXXXXX)"
+  staged_secret="$(mktemp /etc/foundry/.secret.key.XXXXXX)"
   openssl rand -hex 32 >"$staged_secret"
   chmod 0600 "$staged_secret"
   chown root:root "$staged_secret"
@@ -588,9 +588,9 @@ secret_key_value="$(tr -d '\r\n' <"$secret_key")"
 chmod 0600 "$secret_key"
 chown root:root "$secret_key"
 
-ops_token="/etc/forge/ops-token"
+ops_token="/etc/foundry/ops-token"
 if [[ ! -e "$ops_token" ]]; then
-  staged_token="$(mktemp /etc/forge/.ops-token.XXXXXX)"
+  staged_token="$(mktemp /etc/foundry/.ops-token.XXXXXX)"
   openssl rand -hex 32 >"$staged_token"
   chmod 0600 "$staged_token"
   chown root:root "$staged_token"
@@ -617,10 +617,10 @@ wait_for_ops_ready() {
   local response_code=""
 
   while ((SECONDS < deadline)); do
-    if systemctl is-failed --quiet forge-ops.service; then
+    if systemctl is-failed --quiet foundry-ops.service; then
       return 1
     fi
-    if systemctl is-active --quiet forge-ops.service; then
+    if systemctl is-active --quiet foundry-ops.service; then
       response_code="$(
         curl \
           --disable \
@@ -650,10 +650,10 @@ wait_for_runtime_ready() {
   local stable_checks=0
 
   while ((SECONDS < deadline)); do
-    if systemctl is-failed --quiet forge-runtime.service; then
+    if systemctl is-failed --quiet foundry-runtime.service; then
       return 1
     fi
-    if systemctl is-active --quiet forge-runtime.service; then
+    if systemctl is-active --quiet foundry-runtime.service; then
       stable_checks="$((stable_checks + 1))"
       if ((stable_checks >= 3)); then
         return 0
@@ -672,10 +672,10 @@ wait_for_request_supervisor_ready() {
   local stable_checks=0
 
   while ((SECONDS < deadline)); do
-    if systemctl is-failed --quiet forge-request-supervisor.service; then
+    if systemctl is-failed --quiet foundry-request-supervisor.service; then
       return 1
     fi
-    if systemctl is-active --quiet forge-request-supervisor.service; then
+    if systemctl is-active --quiet foundry-request-supervisor.service; then
       stable_checks="$((stable_checks + 1))"
       if ((stable_checks >= 3)); then
         return 0
@@ -693,7 +693,7 @@ install_backup_config() {
   local destination="$1"
   local value="$2"
 
-  staged_backup_config="$(mktemp /etc/forge/.backup-config.XXXXXX)"
+  staged_backup_config="$(mktemp /etc/foundry/.backup-config.XXXXXX)"
   printf '%s\n' "$value" >"$staged_backup_config"
   chmod 0600 "$staged_backup_config"
   chown root:root "$staged_backup_config"
@@ -706,7 +706,7 @@ install_backup_mount_identity() {
   local value="$2"
 
   staged_backup_mount_identity="$(
-    mktemp /etc/forge/.backup-mount-identity.XXXXXX
+    mktemp /etc/foundry/.backup-mount-identity.XXXXXX
   )"
   printf '%s\n' "$value" >"$staged_backup_mount_identity"
   chmod 0644 "$staged_backup_mount_identity"
@@ -715,59 +715,59 @@ install_backup_mount_identity() {
   staged_backup_mount_identity=""
 }
 
-if [[ "$forge_timer_was_active" = true ]]; then
-  systemctl stop forge-backup.timer
+if [[ "$foundry_timer_was_active" = true ]]; then
+  systemctl stop foundry-backup.timer
 fi
-if [[ "$forge_ops_was_active" = true ]]; then
-  systemctl stop forge-ops.service
+if [[ "$foundry_ops_was_active" = true ]]; then
+  systemctl stop foundry-ops.service
 fi
-if [[ "$forge_runtime_was_active" = true ]]; then
-  systemctl stop forge-runtime.service
+if [[ "$foundry_runtime_was_active" = true ]]; then
+  systemctl stop foundry-runtime.service
 fi
-if systemctl is-active --quiet forge-request-supervisor.service; then
-  systemctl stop forge-request-supervisor.service
+if systemctl is-active --quiet foundry-request-supervisor.service; then
+  systemctl stop foundry-request-supervisor.service
 fi
-if [[ "$forge_backup_was_active" = true ]]; then
-  systemctl stop forge-backup.service
+if [[ "$foundry_backup_was_active" = true ]]; then
+  systemctl stop foundry-backup.service
 fi
 
 if [[ -n "$directory_offhost_path" ]]; then
   install -d -m 0755 -o root -g root \
-    /etc/systemd/system/forge-backup.service.d
+    /etc/systemd/system/foundry-backup.service.d
 fi
 reconcile_backup_directory_dropin \
   "$directory_offhost_dropin" \
   "$directory_offhost_path"
 
-install_backup_config /etc/forge/backup-offhost-command "$offhost_command"
-install_backup_config /etc/forge/backup-offhost-destination "$offhost_destination"
-install_backup_config /etc/forge/backup-offhost-generation "$offhost_generation"
+install_backup_config /etc/foundry/backup-offhost-command "$offhost_command"
+install_backup_config /etc/foundry/backup-offhost-destination "$offhost_destination"
+install_backup_config /etc/foundry/backup-offhost-generation "$offhost_generation"
 if [[ -n "$directory_mount_identity" ]]; then
   install_backup_mount_identity \
-    /etc/forge/backup-offhost-mount-identity \
+    /etc/foundry/backup-offhost-mount-identity \
     "$directory_mount_identity"
 else
-  rm -f -- /etc/forge/backup-offhost-mount-identity
+  rm -f -- /etc/foundry/backup-offhost-mount-identity
 fi
 
-install -m 0755 -o root -g root "$script_dir/forge-backup" /usr/local/libexec/forge-backup
-install -m 0755 -o root -g root "$script_dir/forge-admin" /usr/local/sbin/forge-admin
-install -m 0755 -o root -g root "$script_dir/forge-restore-drill" /usr/local/sbin/forge-restore-drill
-install -m 0644 -o root -g root "$script_dir/forge-ops.service" /etc/systemd/system/forge-ops.service
-install -m 0644 -o root -g root "$script_dir/forge-runtime.service" /etc/systemd/system/forge-runtime.service
-install -m 0644 -o root -g root "$script_dir/forge-request-supervisor.service" /etc/systemd/system/forge-request-supervisor.service
-install -m 0644 -o root -g root "$script_dir/forge-backup.service" /etc/systemd/system/forge-backup.service
-install -m 0644 -o root -g root "$script_dir/forge-backup.timer" /etc/systemd/system/forge-backup.timer
+install -m 0755 -o root -g root "$script_dir/foundry-backup" /usr/local/libexec/foundry-backup
+install -m 0755 -o root -g root "$script_dir/foundry-admin" /usr/local/sbin/foundry-admin
+install -m 0755 -o root -g root "$script_dir/foundry-restore-drill" /usr/local/sbin/foundry-restore-drill
+install -m 0644 -o root -g root "$script_dir/foundry-ops.service" /etc/systemd/system/foundry-ops.service
+install -m 0644 -o root -g root "$script_dir/foundry-runtime.service" /etc/systemd/system/foundry-runtime.service
+install -m 0644 -o root -g root "$script_dir/foundry-request-supervisor.service" /etc/systemd/system/foundry-request-supervisor.service
+install -m 0644 -o root -g root "$script_dir/foundry-backup.service" /etc/systemd/system/foundry-backup.service
+install -m 0644 -o root -g root "$script_dir/foundry-backup.timer" /etc/systemd/system/foundry-backup.timer
 
-staged_binary="$(mktemp /usr/local/bin/.forge.XXXXXX)"
+staged_binary="$(mktemp /usr/local/bin/.foundry.XXXXXX)"
 install -m 0755 -o root -g root "$binary" "$staged_binary"
-mv "$staged_binary" /usr/local/bin/forge
+mv "$staged_binary" /usr/local/bin/foundry
 staged_binary=""
 
 systemctl daemon-reload
-systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
+systemctl disable --now foundry-request-supervisor.service foundry-backup.timer foundry-runtime.service foundry-ops.service
 
-ops_probe_config="$(mktemp /etc/forge/.ops-probe.XXXXXX)"
+ops_probe_config="$(mktemp /etc/foundry/.ops-probe.XXXXXX)"
 ops_token_for_curl="${ops_token_value//\\/\\\\}"
 ops_token_for_curl="${ops_token_for_curl//\"/\\\"}"
 printf 'header = "Authorization: Bearer %s"\n' \
@@ -776,59 +776,59 @@ chmod 0600 "$ops_probe_config"
 chown root:root "$ops_probe_config"
 unset ops_token_for_curl ops_token_value
 
-if ! systemctl start forge-ops.service; then
-  fail "Forge Ops failed during store initialization; services remain disabled"
+if ! systemctl start foundry-ops.service; then
+  fail "Foundry Ops failed during store initialization; services remain disabled"
 fi
 
 store_ready=false
-if wait_for_ops_ready && [[ -f /var/lib/forge/forge.sqlite ]]; then
+if wait_for_ops_ready && [[ -f /var/lib/foundry/foundry.sqlite ]]; then
   store_ready=true
 fi
-systemctl stop forge-ops.service
+systemctl stop foundry-ops.service
 
 [[ "$store_ready" = true ]] ||
-  fail "Forge store or authenticated Ops snapshot did not become ready; Ops, runtime, request supervisor and backup timer remain disabled"
+  fail "Foundry store or authenticated Ops snapshot did not become ready; Ops, runtime, request supervisor and backup timer remain disabled"
 
-if ! systemctl start forge-backup.service; then
-  systemctl stop forge-ops.service
+if ! systemctl start foundry-backup.service; then
+  systemctl stop foundry-ops.service
   fail "initial off-host recovery challenge failed; Ops, runtime, request supervisor and backup timer remain disabled"
 fi
 
-systemctl enable forge-ops.service forge-runtime.service forge-request-supervisor.service forge-backup.timer
-if ! systemctl start forge-ops.service; then
-  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
-  fail "Forge Ops failed after backup promotion; services were disabled again"
+systemctl enable foundry-ops.service foundry-runtime.service foundry-request-supervisor.service foundry-backup.timer
+if ! systemctl start foundry-ops.service; then
+  systemctl disable --now foundry-request-supervisor.service foundry-backup.timer foundry-runtime.service foundry-ops.service
+  fail "Foundry Ops failed after backup promotion; services were disabled again"
 fi
 if ! wait_for_ops_ready; then
-  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
-  fail "authenticated Forge Ops snapshot failed after backup promotion; services were disabled again"
+  systemctl disable --now foundry-request-supervisor.service foundry-backup.timer foundry-runtime.service foundry-ops.service
+  fail "authenticated Foundry Ops snapshot failed after backup promotion; services were disabled again"
 fi
-if ! systemctl start forge-runtime.service; then
-  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
-  fail "Forge runtime failed after backup promotion; services were disabled again"
+if ! systemctl start foundry-runtime.service; then
+  systemctl disable --now foundry-request-supervisor.service foundry-backup.timer foundry-runtime.service foundry-ops.service
+  fail "Foundry runtime failed after backup promotion; services were disabled again"
 fi
 if ! wait_for_runtime_ready; then
-  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
-  fail "Forge runtime did not remain active after startup; services were disabled again"
+  systemctl disable --now foundry-request-supervisor.service foundry-backup.timer foundry-runtime.service foundry-ops.service
+  fail "Foundry runtime did not remain active after startup; services were disabled again"
 fi
-if ! systemctl start forge-request-supervisor.service; then
-  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
-  fail "Forge request supervisor failed after backup promotion; services were disabled again"
+if ! systemctl start foundry-request-supervisor.service; then
+  systemctl disable --now foundry-request-supervisor.service foundry-backup.timer foundry-runtime.service foundry-ops.service
+  fail "Foundry request supervisor failed after backup promotion; services were disabled again"
 fi
 if ! wait_for_request_supervisor_ready; then
-  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
-  fail "Forge request supervisor did not remain active after startup; services were disabled again"
+  systemctl disable --now foundry-request-supervisor.service foundry-backup.timer foundry-runtime.service foundry-ops.service
+  fail "Foundry request supervisor did not remain active after startup; services were disabled again"
 fi
-if ! systemctl start forge-backup.timer; then
-  systemctl disable --now forge-request-supervisor.service forge-backup.timer forge-runtime.service forge-ops.service
+if ! systemctl start foundry-backup.timer; then
+  systemctl disable --now foundry-request-supervisor.service foundry-backup.timer foundry-runtime.service foundry-ops.service
   fail "backup timer failed after promotion; Ops, runtime, request supervisor and timer were disabled again"
 fi
 cleanup_ops_probe_config
 ops_probe_config=""
-systemctl --no-pager --full status forge-ops.service
-systemctl --no-pager --full status forge-runtime.service
-systemctl --no-pager --full status forge-request-supervisor.service
-systemctl --no-pager --full status forge-backup.timer
+systemctl --no-pager --full status foundry-ops.service
+systemctl --no-pager --full status foundry-runtime.service
+systemctl --no-pager --full status foundry-request-supervisor.service
+systemctl --no-pager --full status foundry-backup.timer
 transaction_committed=true
 cleanup_transaction_artifacts
 transaction_active=false

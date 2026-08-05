@@ -1,16 +1,16 @@
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use forge_core::adapter::validate_executor_response_file;
-use forge_core::addon::{
-    addon_observability_report, authorize_addon_permission, claim_addon_runtime_contract_dispatch,
-    complete_addon_runtime_contract_dispatch, create_addon_migration_workflow,
-    create_addon_package_lock, default_addon_dirs, disable_addon, downgrade_addon, enable_addon,
-    enqueue_addon_planner_dispatch, enqueue_addon_runtime_contract_dispatch,
-    evaluate_addon_runtime_contract_policy, execute_addon_executor, execute_addon_handoff,
-    execute_addon_planning_strategy, execute_addon_runtime_contract_dispatch,
-    execute_addon_validator, fetch_addon_package, install_addon, install_addon_package,
-    list_addon_capability_index, list_addon_event_adapters, list_addon_marketplace,
-    list_addon_permission_authorizations, list_addon_planner_registry,
+use foundry_core::adapter::validate_executor_response_file;
+use foundry_core::addon::{
+    addon_observability_report, apply_addon_validator_outcome, authorize_addon_permission,
+    claim_addon_runtime_contract_dispatch, complete_addon_runtime_contract_dispatch,
+    create_addon_migration_workflow, create_addon_package_lock, default_addon_dirs, disable_addon,
+    downgrade_addon, enable_addon, enqueue_addon_planner_dispatch,
+    enqueue_addon_runtime_contract_dispatch, evaluate_addon_runtime_contract_policy,
+    execute_addon_executor, execute_addon_handoff, execute_addon_planning_strategy,
+    execute_addon_runtime_contract_dispatch, execute_addon_validator, fetch_addon_package,
+    install_addon, install_addon_package, list_addon_capability_index, list_addon_event_adapters,
+    list_addon_marketplace, list_addon_permission_authorizations, list_addon_planner_registry,
     list_addon_runtime_contract_dispatches, list_addon_runtime_contracts,
     list_addon_runtime_workers, list_addon_trust_store, list_addon_views, list_installed_addons,
     load_addon_catalog_from_store, package_addon, plan_addon_lifecycle, publish_addon_package,
@@ -22,50 +22,50 @@ use forge_core::addon::{
     AddonHandoffDispatchInput, AddonHandoffExecutionInput, AddonPackageInput,
     AddonPlannerDispatchInput, AddonPlanningStrategyInput, AddonRuntimeContractCompletionInput,
     AddonRuntimeWorkerRegistrationInput, AddonTrustKeyInput, AddonValidatorDispatchInput,
-    AddonValidatorExecutionInput, CapabilityRegistrySyncInput,
+    AddonValidatorExecutionInput, AddonValidatorOutcomeApplyInput, CapabilityRegistrySyncInput,
 };
-use forge_core::artifact::list_workflow_artifacts_with_tags;
-use forge_core::aws_ops::{
+use foundry_core::artifact::list_workflow_artifacts_with_tags;
+use foundry_core::aws_ops::{
     run_check as run_aws_ops_check, run_inventory as run_aws_ops_inventory,
     run_raw as run_aws_ops_raw,
 };
-use forge_core::checkpoint::{
+use foundry_core::checkpoint::{
     load_latest_task_checkpoint, record_task_checkpoint, TaskCheckpointRequest,
 };
-use forge_core::cli_factory::{create_cli_factory_plan, CliFactoryCreateInput};
-use forge_core::cli_integration::{
+use foundry_core::cli_factory::{create_cli_factory_plan, CliFactoryCreateInput};
+use foundry_core::cli_integration::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_activation_profile,
     build_harness_adoption_plan, build_harness_bootstrap_report, build_harness_doctor_report,
     build_harness_headroom_plan, build_harness_mode_report, build_headroom_stats_report,
     inspect_cli_harness_shim_status, install_cli_harness_shim, install_cli_provider_adapter,
-    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
+    persist_token_headroom_report, resolve_harness_foundry_first_source_for_project,
     resolve_harness_runtime_policy, retrieve_headroom_blob, run_cli_harness_exec,
     CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
     HarnessActivationProfileOptions, HarnessAdoptionPlanOptions, HarnessBootstrapOptions,
     HarnessDoctorOptions, HarnessHeadroomPlanOptions, HarnessModeOptions,
     HarnessRuntimePolicyOptions, HeadroomStatsOptions, ProviderAdapterInstallOptions,
 };
-use forge_core::cluster::{
+use foundry_core::cluster::{
     build_cluster_task_handoff, list_cluster_node_leases, list_cluster_nodes,
     place_task_on_cluster, register_cluster_node, ClusterNodeInput,
 };
-use forge_core::context::{
+use foundry_core::context::{
     build_compact_context_view_with_predecessor_plans,
     build_context_package_with_checkpoint_and_project,
     build_context_package_with_checkpoint_project_and_worktree, DEFAULT_CONTEXT_BUDGET,
 };
-use forge_core::cost::{
+use foundry_core::cost::{
     apply_cost_ledger_retention_for_context, build_cost_ledger_for_context,
     build_cost_ledger_history_for_context, maintain_cost_ledger_for_context,
     materialize_cost_ledger_incremental_for_context, materialize_cost_ledger_index_for_context,
     run_cost_ledger_daemon_for_context,
 };
-use forge_core::credential_vault::{
+use foundry_core::credential_vault::{
     run_describe as run_credential_vault_describe, run_exec as run_credential_vault_exec,
     run_key_init as run_credential_vault_key_init, run_panel as run_credential_vault_panel,
     run_records as run_credential_vault_records,
 };
-use forge_core::event::{
+use foundry_core::event::{
     build_event_improvement_policy_for_context, build_event_observability_history_for_context,
     build_event_observability_index_for_context, build_event_service_plan,
     build_global_event_timeline_for_context, build_workflow_event_stream,
@@ -77,40 +77,41 @@ use forge_core::event::{
     scan_inbound_event_inbox, EventEgressEmitInput, InboundEventIngestInput,
     InboundEventWorkerLoopOptions,
 };
-use forge_core::execution::run_simulated;
-use forge_core::executor::{
+use foundry_core::execution::run_simulated;
+use foundry_core::executor::{
     build_brain_session_history_report, build_brain_sessions_report_with_options,
     build_shell_launch_plan, decide_executor_model_for_task, import_ai_limits_observations,
     load_executors, record_brain_session_lifecycle, record_shell_session_plan, sync_executors,
     BrainSessionLifecycleOptions, BrainSessionsReportOptions, ExecutorModelDecisionOptions,
     ExecutorQuotaObservation, ExecutorSyncOptions, ShellLaunchPlanOptions,
 };
-use forge_core::graph::create_workflow;
-use forge_core::handoff::{
+use foundry_core::executor_runtime::{execute_request_executor_wave, RequestExecutorWaveOptions};
+use foundry_core::graph::{create_workflow, CoreParallelTeamSpec};
+use foundry_core::handoff::{
     build_predecessor_handoff_plans, build_task_handoff_response_with_project, TaskHandoffView,
 };
-use forge_core::identity::{
+use foundry_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
     evaluate_tenant_policy_for_action, inspect_project_operating_context, link_identity,
     list_identity_links, list_identity_memberships, list_identity_registry, list_tenant_index,
     load_project_operating_context, resolve_identity, sync_project_operating_context,
     unlink_identity, update_identity_membership, IdentityLinkInput, IdentityMembershipUpdateInput,
 };
-use forge_core::improve::{
+use foundry_core::improve::{
     apply_event_improvement_policy, benchmark_event_improvement_policy, generate_improvement,
     normalize_avoidable_ai_costs, normalize_avoidable_ai_costs_for_candidates,
     promote_event_improvement_policy, rank_improvement_candidates_with_filter,
     ImprovementCandidateFilter,
 };
-use forge_core::inspection::inspect_workflow_with_focus;
-use forge_core::intent::{parse_intent_with_catalog_and_context, OperatingContextSpec};
-use forge_core::interaction::{
+use foundry_core::inspection::inspect_workflow_with_focus;
+use foundry_core::intent::{parse_intent_with_catalog_and_context, OperatingContextSpec};
+use foundry_core::interaction::{
     answer_human_interaction, create_choice_interaction, create_form_interaction,
     expire_human_interaction, list_human_interactions, summarize_human_interactions,
     CreateChoiceInteractionRequest,
 };
-use forge_core::interactive::{
-    build_forge_first_harness_smoke, build_interactive_action_invocation_for_project,
+use foundry_core::interactive::{
+    build_foundry_first_harness_smoke, build_interactive_action_invocation_for_project,
     build_interactive_action_registry_for_project,
     build_interactive_addon_capabilities_for_project, build_interactive_architecture_compass,
     build_interactive_artifacts, build_interactive_autocomplete_for_project,
@@ -127,7 +128,7 @@ use forge_core::interactive::{
     build_interactive_workflow_dag, build_interactive_workflow_mutation,
     build_interactive_workflow_sidebar, build_multimodal_runtime_evidence_smoke,
     build_operational_tui_smoke, build_replacement_cli_evidence_smoke,
-    dispatch_interactive_action_hooks_for_project, render_forge_first_harness_smoke,
+    dispatch_interactive_action_hooks_for_project, render_foundry_first_harness_smoke,
     render_interactive_action_dispatch, render_interactive_action_invocation,
     render_interactive_action_registry, render_interactive_addon_capabilities,
     render_interactive_architecture_compass, render_interactive_artifacts,
@@ -148,17 +149,17 @@ use forge_core::interactive::{
     slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
     InteractiveReplacementCliOptions, InteractiveSessionsOptions,
 };
-use forge_core::ir::{CreativeArtifact, TokenCollection};
-use forge_core::lease::{acquire_task_lease, release_task_lease};
-use forge_core::mcp::{call_mcp_tool, mcp_tools_manifest};
-use forge_core::mcp_stdio::serve_stdio;
-use forge_core::memory::{
+use foundry_core::ir::{CreativeArtifact, TokenCollection};
+use foundry_core::lease::{acquire_task_lease, release_task_lease};
+use foundry_core::mcp::{call_mcp_tool, mcp_tools_manifest};
+use foundry_core::mcp_stdio::serve_stdio;
+use foundry_core::memory::{
     configure_memory_governance, list_memory_promotions, memory_cleanup_report,
     memory_policy_report_for_project, memory_retention_report, promote_memory, search_memory,
     MemoryCleanupOptions, MemoryGovernanceConfigOptions, MemoryPromotionOptions,
     MemoryRetentionOptions, MemorySearchOptions,
 };
-use forge_core::milestone::{
+use foundry_core::milestone::{
     assemble_production_evidence, attach_milestone_evidence, build_milestone_evidence_plan,
     build_milestone_export_demo, build_milestone_manifest_with_store, build_milestone_research,
     build_milestone_status, build_production_mission_lifecycle_evidence,
@@ -170,21 +171,21 @@ use forge_core::milestone::{
     MilestonePrepareEvidenceInputsOptions, ProductionEvidenceAssemblyOptions,
     ProductionEvidenceTemplateOptions, ProductionReadinessOptions,
 };
-use forge_core::mission::{
+use foundry_core::mission::{
     builtin_squad_catalog, clone_squad, drive_mission, install_builtin_squads, install_squad,
     list_installed_squads, list_missions, load_mission, load_squad, read_squad_manifest,
     resume_mission, simulate_mission_with_worktree, start_mission, submit_mission,
     validate_squad_definition, MissionSubmission,
 };
-use forge_core::mission_executor::{
+use foundry_core::mission_executor::{
     build_mission_execution_approval, execute_mission_command, inspect_mission_execution_receipt,
     list_mission_execution_receipts, plan_mission_execution, reconcile_mission_execution,
     MissionExecutionReconcileRequest, MissionExecutionRequest,
 };
-use forge_core::mission_platform::{
+use foundry_core::mission_platform::{
     mission_platform_catalog, simulate_mission_platform_with_store,
 };
-use forge_core::multimodal::{
+use foundry_core::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
     build_multimodal_demo_plan, build_multimodal_demo_receipt, build_multimodal_install_plan,
     build_multimodal_readiness, build_multimodal_runtime_benchmark,
@@ -192,57 +193,63 @@ use forge_core::multimodal::{
     resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
     MultimodalDemoReceiptOptions, MultimodalReadinessOptions, MultimodalRuntimeBenchmarkOptions,
 };
-use forge_core::opencode_tui::{build_forge_tui, render_forge_tui, run_forge_tui};
-use forge_core::ops::{
+use foundry_core::opencode_tui::{build_foundry_tui, render_foundry_tui, run_foundry_tui};
+use foundry_core::ops::{
     build_ops_snapshot_with_addon_dirs_and_project, record_addon_renderer_client_event,
     serve_ops_console_with_addon_dirs_and_project, OpsAddonRendererClientEventInput,
 };
-use forge_core::patch::{
+use foundry_core::patch::{
     build_patch_apply, build_patch_diff, build_patch_plan, build_patch_restore, build_patch_revert,
     build_patch_review, PatchDiffOptions,
 };
-use forge_core::registry::{
+use foundry_core::registry::{
     attach_reuse_candidates_as_child_subflows, context_action_catalog, find_reuse_candidates,
     list_workflows_with_filters, quality_action_catalog, WorkflowLifecycleFilter,
     WorkflowRegistryFilters,
 };
-use forge_core::request::{
+use foundry_core::request::{
     cancel_request, complete_ready_task, create_final_delivery_package, drive_request,
     ensure_final_audit, heartbeat_request, list_requests, load_request_status,
-    recover_stale_request, resume_async_request, start_async_request_with_idempotency,
-    start_async_request_with_project_and_idempotency, step_request, switch_request_executor,
-    RequestExecutorSwitchInput, RequestTaskCompletionInput,
+    recover_stale_request, resume_async_request,
+    start_async_request_with_idempotency_and_parallel_team,
+    start_async_request_with_project_idempotency_and_parallel_team, step_request,
+    switch_request_executor, RequestExecutorSwitchInput, RequestTaskCompletionInput,
 };
-use forge_core::request_supervisor::{
+use foundry_core::request_supervisor::{
     supervise_request_once, supervise_requests_once, RequestSupervisorOptions,
 };
-use forge_core::runtime::{
+use foundry_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
 };
-use forge_core::schedule::{
+use foundry_core::schedule::{
     aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
     run_daily_goal_research_smoke, run_due_workflow, scan_due_workflows,
     scan_due_workflows_parallel, update_loop_state, update_workflow_schedule,
     ScheduleUpdateOptions,
 };
-use forge_core::security::{
+use foundry_core::security::{
     sanitize_prompt_secrets_with_vault, sanitize_workflow_secrets_for_storage,
     SecretSanitizationOptions, SecretVaultPersistOptions,
 };
-use forge_core::self_evolve::{run_self_evolution, SelfRunOptions};
-use forge_core::skill::install_skill;
-use forge_core::storage::ForgeStore;
-use forge_core::store_admin::{backup_store, check_store, restore_store};
-use forge_core::validation::validate_workflow;
-use forge_core::workflow::{
-    attach_creative_artifact, attach_workflow_artifact_with_tags, get_workflow_token_collection,
-    inspect_creative_artifact, inspect_creative_collaboration, list_creative_artifacts,
-    parse_node_brain_agent_slot, patch_workflow_token, record_creative_collaboration_event,
-    resolve_workflow_tokens, set_workflow_token_collection, update_workflow_goal,
-    update_workflow_node_brain_routing, validate_child_subflow_binding,
+use foundry_core::self_evolve::{run_self_evolution, SelfRunOptions};
+use foundry_core::skill::install_skill;
+use foundry_core::storage::FoundryStore;
+use foundry_core::store_admin::{backup_store, check_store, restore_store};
+use foundry_core::validation::validate_workflow;
+use foundry_core::workflow::{
+    add_workflow_task, add_workflow_task_dependency, attach_creative_artifact,
+    attach_workflow_artifact_with_tags, clear_workflow_task_impediment,
+    get_workflow_token_collection, inspect_creative_artifact, inspect_creative_collaboration,
+    list_creative_artifacts, parse_node_brain_agent_slot, patch_workflow_token,
+    record_creative_collaboration_event, remove_workflow_task_dependency, resolve_workflow_tokens,
+    set_workflow_task_impediment, set_workflow_task_priority, set_workflow_token_collection,
+    update_workflow_goal_with_expected_revision, update_workflow_node_brain_routing,
+    update_workflow_task_with_expected_revision, validate_child_subflow_binding,
     CreativeCollaborationEventRequest, ProductDecisionInput, WorkflowNodeBrainRoutingUpdateInput,
+    WorkflowTaskAddInput, WorkflowTaskDependencyInput, WorkflowTaskImpedimentClearInput,
+    WorkflowTaskImpedimentInput, WorkflowTaskPriorityInput, WorkflowTaskUpdateInput,
 };
-use forge_core::worktree::{
+use foundry_core::worktree::{
     approve_worktree_config, bind_worktree, bound_worktree_context, create_worktree,
     create_worktree_guard_predecessor_task, discover_worktrees,
     evaluate_worktree_modification_guard, initialize_worktree, inspect_registered_worktree,
@@ -258,10 +265,14 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
+const LEGACY_BINARY_NAME: &str = "forge"; // foundry-brand-allow: legacy-compat
+const LEGACY_DEFAULT_STORE_PATH: &str = ".forge/forge.sqlite"; // foundry-brand-allow: legacy-compat
+const LEGACY_BINARY_WARNING: &str = "warning: `forge` is deprecated and will be removed after the 0.6.x compatibility cycle; use `foundry`"; // foundry-brand-allow: legacy-compat
+
 #[derive(Debug, Parser)]
-#[command(name = "forge", version, about = "Forge Core workflow runtime")]
+#[command(name = "foundry", version, about = "Foundry Core workflow runtime")]
 struct Cli {
-    #[arg(long, default_value = ".forge/forge.sqlite")]
+    #[arg(long, default_value = ".foundry/foundry.sqlite")]
     store: PathBuf,
 
     #[command(subcommand)]
@@ -275,6 +286,18 @@ enum Commands {
         goal: String,
         #[arg(long)]
         worktree: Option<String>,
+        #[arg(
+            long = "lane",
+            value_name = "ID=EXECUTOR:COUNT",
+            help = "Declare an independent parallel lane; repeat for multiple frontend/backend teams"
+        )]
+        lanes: Vec<String>,
+        #[arg(
+            long = "max-parallel-agents",
+            requires = "lanes",
+            help = "Bound total concurrent agents across the declared lanes"
+        )]
+        max_parallel_agents: Option<usize>,
         #[arg(long = "addon-dir")]
         addon_dirs: Vec<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -428,7 +451,7 @@ enum Commands {
         ttl_seconds: u64,
         #[arg(long = "record-session", default_value_t = false)]
         record_session: bool,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -531,6 +554,36 @@ enum Commands {
     Teamwork {
         #[arg(long)]
         goal: String,
+        #[arg(
+            long = "lane",
+            value_name = "ID=BRAIN:COUNT",
+            help = "Repeatable independent teamwork lane, for example frontend=agy:3"
+        )]
+        lanes: Vec<String>,
+        #[arg(
+            long = "max-parallel-agents",
+            help = "Optional admission ceiling; defaults to the sum of configured lane agents"
+        )]
+        max_parallel_agents: Option<usize>,
+        #[arg(
+            long,
+            requires = "worktree_root",
+            help = "Git repository used to prepare one task-scoped worktree per external agent task"
+        )]
+        repository: Option<PathBuf>,
+        #[arg(
+            long = "worktree-root",
+            requires = "repository",
+            help = "Dedicated parent directory for the prepared teamwork worktrees"
+        )]
+        worktree_root: Option<PathBuf>,
+        #[arg(long = "branch-prefix", default_value = "foundry/teamwork")]
+        branch_prefix: String,
+        #[arg(
+            long = "allow-repository-mutation",
+            help = "Explicitly authorize creation and task-scoped binding of the planned Git worktrees"
+        )]
+        allow_repository_mutation: bool,
         #[arg(short = 'd', long = "detached")]
         detached: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -810,7 +863,7 @@ enum SessionCommands {
         task_id: Option<String>,
         #[arg(long = "run")]
         run_id: Option<String>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long)]
         note: Option<String>,
@@ -952,7 +1005,7 @@ enum CostCommands {
         interval_seconds: u64,
         #[arg(long = "idle-exit")]
         idle_exit: bool,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long = "project-root", default_value = ".")]
         project_root: PathBuf,
@@ -984,7 +1037,7 @@ enum CostCommands {
         reason: Option<String>,
         #[arg(long)]
         confirm: bool,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long = "project-root", default_value = ".")]
         project_root: PathBuf,
@@ -1054,9 +1107,10 @@ enum HarnessCommands {
         output: OutputFormat,
     },
     Mode {
-        #[arg(long = "forge-first")]
-        forge_first: bool,
-        #[arg(long = "observe-only", conflicts_with = "forge_first")]
+        // foundry-brand-allow: legacy-compat
+        #[arg(long = "foundry-first", visible_alias = "forge-first")]
+        foundry_first: bool,
+        #[arg(long = "observe-only", conflicts_with = "foundry_first")]
         observe_only: bool,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
@@ -1068,9 +1122,10 @@ enum HarnessCommands {
         executor: String,
         #[arg(long = "shim-dir")]
         shim_dir: PathBuf,
-        #[arg(long = "forge-first")]
-        forge_first: bool,
-        #[arg(long = "observe-only", conflicts_with = "forge_first")]
+        // foundry-brand-allow: legacy-compat
+        #[arg(long = "foundry-first", visible_alias = "forge-first")]
+        foundry_first: bool,
+        #[arg(long = "observe-only", conflicts_with = "foundry_first")]
         observe_only: bool,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
@@ -1094,9 +1149,10 @@ enum HarnessCommands {
         executor: String,
         #[arg(long = "cmd")]
         command: Vec<String>,
-        #[arg(long = "forge-first")]
-        forge_first: bool,
-        #[arg(long = "observe-only", conflicts_with = "forge_first")]
+        // foundry-brand-allow: legacy-compat
+        #[arg(long = "foundry-first", visible_alias = "forge-first")]
+        foundry_first: bool,
+        #[arg(long = "observe-only", conflicts_with = "foundry_first")]
         observe_only: bool,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
@@ -1120,9 +1176,10 @@ enum HarnessCommands {
         executor: String,
         #[arg(long = "shim-dir")]
         shim_dir: PathBuf,
-        #[arg(long = "forge-first")]
-        forge_first: bool,
-        #[arg(long = "observe-only", conflicts_with = "forge_first")]
+        // foundry-brand-allow: legacy-compat
+        #[arg(long = "foundry-first", visible_alias = "forge-first")]
+        foundry_first: bool,
+        #[arg(long = "observe-only", conflicts_with = "foundry_first")]
         observe_only: bool,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
@@ -1168,9 +1225,10 @@ enum HarnessCommands {
         executor: String,
         #[arg(long = "cmd")]
         command: Vec<String>,
-        #[arg(long = "forge-first")]
-        forge_first: bool,
-        #[arg(long = "observe-only", conflicts_with = "forge_first")]
+        // foundry-brand-allow: legacy-compat
+        #[arg(long = "foundry-first", visible_alias = "forge-first")]
+        foundry_first: bool,
+        #[arg(long = "observe-only", conflicts_with = "foundry_first")]
         observe_only: bool,
         #[arg(long = "workflow")]
         workflow_id: Option<String>,
@@ -1218,9 +1276,10 @@ enum HarnessCommands {
         executor: String,
         #[arg(long = "real-cmd")]
         real_cmd: Option<String>,
-        #[arg(long = "forge-first")]
-        forge_first: bool,
-        #[arg(long = "observe-only", conflicts_with = "forge_first")]
+        // foundry-brand-allow: legacy-compat
+        #[arg(long = "foundry-first", visible_alias = "forge-first")]
+        foundry_first: bool,
+        #[arg(long = "observe-only", conflicts_with = "foundry_first")]
         observe_only: bool,
         #[arg(long = "workflow")]
         workflow_id: Option<String>,
@@ -1270,9 +1329,10 @@ enum HarnessCommands {
     Exec {
         #[arg(long)]
         executor: String,
-        #[arg(long = "forge-first")]
-        forge_first: bool,
-        #[arg(long = "observe-only", conflicts_with = "forge_first")]
+        // foundry-brand-allow: legacy-compat
+        #[arg(long = "foundry-first", visible_alias = "forge-first")]
+        foundry_first: bool,
+        #[arg(long = "observe-only", conflicts_with = "foundry_first")]
         observe_only: bool,
         #[arg(long = "workflow")]
         workflow_id: Option<String>,
@@ -1508,6 +1568,10 @@ enum AddonCommands {
         worker: String,
         #[arg(long)]
         subject: String,
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long = "task")]
+        task_id: Option<String>,
         #[arg(long, default_value = "{}")]
         input: String,
         #[arg(long, default_value = "{}")]
@@ -1520,6 +1584,20 @@ enum AddonCommands {
         dry_run: bool,
         #[arg(long = "addon-dir")]
         addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ApplyValidatorOutcome {
+        #[arg(long = "dispatch")]
+        dispatch_id: String,
+        #[arg(long = "workflow")]
+        workflow_id: String,
+        #[arg(long = "task")]
+        task_id: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: u64,
+        #[arg(long, default_value = "cli")]
+        origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -2121,7 +2199,7 @@ enum EventCommands {
         max_body_bytes: usize,
         #[arg(long = "hmac-secret-env")]
         hmac_secret_env: Option<String>,
-        #[arg(long = "signature-header", default_value = "X-Forge-Signature")]
+        #[arg(long = "signature-header", default_value = "X-Foundry-Signature")]
         signature_header: String,
         #[arg(long = "lease-seconds", default_value_t = 300)]
         lease_seconds: u64,
@@ -2175,9 +2253,9 @@ enum EventCommands {
         max_body_bytes: usize,
         #[arg(long = "hmac-secret-env")]
         hmac_secret_env: Option<String>,
-        #[arg(long = "signature-header", default_value = "X-Forge-Signature")]
+        #[arg(long = "signature-header", default_value = "X-Foundry-Signature")]
         signature_header: String,
-        #[arg(long = "lease-owner", default_value = "forge.event_service_manager")]
+        #[arg(long = "lease-owner", default_value = "foundry.event_service_manager")]
         lease_owner: String,
         #[arg(long = "lease-seconds", default_value_t = 300)]
         lease_seconds: u64,
@@ -2225,9 +2303,12 @@ enum EventCommands {
         max_body_bytes: usize,
         #[arg(long = "hmac-secret-env")]
         hmac_secret_env: Option<String>,
-        #[arg(long = "signature-header", default_value = "X-Forge-Signature")]
+        #[arg(long = "signature-header", default_value = "X-Foundry-Signature")]
         signature_header: String,
-        #[arg(long = "lease-owner", default_value = "forge.event_service_supervisor")]
+        #[arg(
+            long = "lease-owner",
+            default_value = "foundry.event_service_supervisor"
+        )]
         lease_owner: String,
         #[arg(long = "lease-seconds", default_value_t = 300)]
         lease_seconds: u64,
@@ -2265,7 +2346,10 @@ enum EventCommands {
         recover_stale_services: bool,
         #[arg(long = "stop-file")]
         stop_file: Option<PathBuf>,
-        #[arg(long = "lease-owner", default_value = "forge.event_runtime_reconcile")]
+        #[arg(
+            long = "lease-owner",
+            default_value = "foundry.event_runtime_reconcile"
+        )]
         lease_owner: String,
         #[arg(long = "lease-seconds", default_value_t = 300)]
         lease_seconds: u64,
@@ -2279,7 +2363,10 @@ enum EventCommands {
         backoff_max_seconds: u64,
         #[arg(long = "scan-schedules")]
         scan_schedules: bool,
-        #[arg(long = "schedule-executor", default_value = "forge-runtime-scheduler")]
+        #[arg(
+            long = "schedule-executor",
+            default_value = "foundry-runtime-scheduler"
+        )]
         schedule_executor: String,
         #[arg(long = "schedule-max-workers", default_value_t = 1)]
         schedule_max_workers: usize,
@@ -2315,7 +2402,7 @@ enum EventCommands {
         recover_stale_services: bool,
         #[arg(long = "stop-file")]
         stop_file: Option<PathBuf>,
-        #[arg(long = "lease-owner", default_value = "forge.event_runtime_daemon")]
+        #[arg(long = "lease-owner", default_value = "foundry.event_runtime_daemon")]
         lease_owner: String,
         #[arg(long = "lease-seconds", default_value_t = 300)]
         lease_seconds: u64,
@@ -2329,7 +2416,10 @@ enum EventCommands {
         backoff_max_seconds: u64,
         #[arg(long = "scan-schedules")]
         scan_schedules: bool,
-        #[arg(long = "schedule-executor", default_value = "forge-runtime-scheduler")]
+        #[arg(
+            long = "schedule-executor",
+            default_value = "foundry-runtime-scheduler"
+        )]
         schedule_executor: String,
         #[arg(long = "schedule-max-workers", default_value_t = 1)]
         schedule_max_workers: usize,
@@ -2357,7 +2447,7 @@ enum EventCommands {
         service_kind: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -2387,7 +2477,7 @@ enum EventCommands {
         max_body_bytes: usize,
         #[arg(long = "hmac-secret-env")]
         hmac_secret_env: Option<String>,
-        #[arg(long = "signature-header", default_value = "X-Forge-Signature")]
+        #[arg(long = "signature-header", default_value = "X-Foundry-Signature")]
         signature_header: String,
         #[arg(long = "stop-file")]
         stop_file: Option<PathBuf>,
@@ -2415,7 +2505,7 @@ enum EventCommands {
         event_type: String,
         #[arg(long)]
         action: String,
-        #[arg(long, default_value = "forge")]
+        #[arg(long, default_value = "foundry")]
         origin: String,
         #[arg(long, default_value = "{}")]
         payload: String,
@@ -2517,7 +2607,7 @@ enum IdentityCommands {
         not_before: Option<String>,
         #[arg(long = "clear-not-before")]
         clear_not_before: bool,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         source: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -2533,7 +2623,7 @@ enum IdentityCommands {
         right_id: String,
         #[arg(long = "type", default_value = "same_person")]
         link_type: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         source: String,
         #[arg(long)]
         reason: Option<String>,
@@ -2551,7 +2641,7 @@ enum IdentityCommands {
         right_id: String,
         #[arg(long = "type", default_value = "same_person")]
         link_type: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         source: String,
         #[arg(long)]
         reason: Option<String>,
@@ -2637,7 +2727,7 @@ enum OpsCommands {
         view_id: String,
         #[arg(long = "event-kind")]
         event_kind: String,
-        #[arg(long, default_value = "forge-cli")]
+        #[arg(long, default_value = "foundry-cli")]
         actor: String,
         #[arg(long)]
         payload: Option<String>,
@@ -2699,7 +2789,7 @@ enum SyncCommands {
 }
 
 fn default_home_path() -> PathBuf {
-    std::env::var_os("HOME")
+    foundry_core::brand::env_var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }
@@ -2807,7 +2897,7 @@ enum WorktreeCommands {
         start_point: Option<String>,
         #[arg(long = "allow-repository-mutation", default_value_t = false)]
         allow_repository_mutation: bool,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -2821,7 +2911,7 @@ enum WorktreeCommands {
         workflow: Option<String>,
         #[arg(long, requires = "workflow")]
         task: Option<String>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -2833,7 +2923,7 @@ enum WorktreeCommands {
         workflow: String,
         #[arg(long)]
         task: Option<String>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -2845,7 +2935,7 @@ enum WorktreeCommands {
         allow_worktree_write: bool,
         #[arg(long, default_value_t = false)]
         force: bool,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -2857,7 +2947,7 @@ enum WorktreeCommands {
         allow_guardrail_update: bool,
         #[arg(long = "approved-by")]
         approved_by: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -2873,6 +2963,38 @@ enum WorktreeCommands {
     Inspect {
         #[arg(long)]
         worktree: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    PrepareTeamwork {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        repository: PathBuf,
+        #[arg(long = "worktree-root")]
+        worktree_root: PathBuf,
+        #[arg(long = "branch-prefix", default_value = "foundry/teamwork")]
+        branch_prefix: String,
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
+        #[arg(long = "allow-repository-mutation", default_value_t = false)]
+        allow_repository_mutation: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    IntegrateDependencies {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "allow-repository-mutation", default_value_t = false)]
+        allow_repository_mutation: bool,
+        #[arg(long = "approved-by")]
+        approved_by: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -2919,7 +3041,7 @@ enum WorktreeGuardCommands {
         allow_workflow_mutation: bool,
         #[arg(long = "approved-by")]
         approved_by: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3006,7 +3128,7 @@ enum SecurityCommands {
         input_file: Option<PathBuf>,
         #[arg(long = "workflow")]
         workflow_id: Option<String>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, default_value = "project")]
         scope: String,
@@ -3136,7 +3258,7 @@ enum ScheduleCommands {
         timezone: String,
         #[arg(long, default_value = "0 8 * * *")]
         cron: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3164,7 +3286,7 @@ enum ScheduleCommands {
         missed_run_policy: Option<String>,
         #[arg(long = "next-run-at")]
         next_run_at: Option<String>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3174,7 +3296,7 @@ enum ScheduleCommands {
         workflow: String,
         #[arg(long)]
         task: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3184,7 +3306,7 @@ enum ScheduleCommands {
         workflow: String,
         #[arg(long)]
         task: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3194,7 +3316,7 @@ enum ScheduleCommands {
         workflow: String,
         #[arg(long)]
         task: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3206,7 +3328,7 @@ enum ScheduleCommands {
         output: OutputFormat,
     },
     ScanDue {
-        #[arg(long, default_value = "forge-scheduler")]
+        #[arg(long, default_value = "foundry-scheduler")]
         executor: String,
         #[arg(long = "max-workers", default_value_t = 1)]
         max_workers: usize,
@@ -3224,7 +3346,7 @@ enum ScheduleCommands {
         output: OutputFormat,
     },
     WorkerStatus {
-        #[arg(long, default_value = "forge-scheduler")]
+        #[arg(long, default_value = "foundry-scheduler")]
         executor: String,
         #[arg(long = "max-workers", default_value_t = 1)]
         max_workers: usize,
@@ -3323,8 +3445,119 @@ enum WorkflowCommands {
         workflow: String,
         #[arg(long)]
         goal: String,
-        #[arg(long)]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    AddTask {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        description: String,
+        #[arg(long, default_value = "medium")]
+        priority: String,
+        #[arg(long = "task-id")]
+        task_id: Option<String>,
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    UpdateTask {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        goal: Option<String>,
+        #[arg(long = "expected-output")]
+        expected_output: Option<String>,
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    SetPriority {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        priority: String,
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    AddDependency {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "depends-on")]
+        depends_on: String,
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    RemoveDependency {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "depends-on")]
+        depends_on: String,
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    SetImpediment {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value = "manual")]
+        kind: String,
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ClearImpediment {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(
+            long = "impediment",
+            help = "Impediment id to clear; omit to clear manual impediments only"
+        )]
+        impediment_id: Option<String>,
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -3341,7 +3574,7 @@ enum WorkflowCommands {
         agent_slots: Vec<String>,
         #[arg(long = "max-parallel-agents")]
         max_parallel_agents: Option<usize>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3487,7 +3720,7 @@ enum WorkflowCommands {
         affected_tasks: Vec<String>,
         #[arg(long = "affected-artifact")]
         affected_artifacts: Vec<String>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3577,7 +3810,19 @@ enum RequestCommands {
         goal: String,
         #[arg(long)]
         worktree: Option<String>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(
+            long = "lane",
+            value_name = "ID=EXECUTOR:COUNT",
+            help = "Declare an independent parallel lane; repeat for multiple frontend/backend teams"
+        )]
+        lanes: Vec<String>,
+        #[arg(
+            long = "max-parallel-agents",
+            requires = "lanes",
+            help = "Bound total concurrent agents across the declared lanes"
+        )]
+        max_parallel_agents: Option<usize>,
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long = "idempotency-key")]
         idempotency_key: Option<String>,
@@ -3595,11 +3840,11 @@ enum RequestCommands {
     Drive {
         #[arg(long = "run")]
         run_id: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         executor: String,
         #[arg(long = "ttl-seconds", default_value_t = 300)]
         ttl_seconds: u64,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3607,11 +3852,44 @@ enum RequestCommands {
     Step {
         #[arg(long = "run")]
         run_id: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         executor: String,
         #[arg(long = "ttl-seconds", default_value_t = 300)]
         ttl_seconds: u64,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ExecuteWave {
+        #[arg(long = "run")]
+        run_id: String,
+        #[arg(long, default_value = "auto")]
+        executor: String,
+        #[arg(long = "ttl-seconds", default_value_t = 300)]
+        ttl_seconds: u64,
+        #[arg(long = "timeout-seconds", default_value_t = 1800)]
+        timeout_seconds: u64,
+        #[arg(long = "context-budget", default_value_t = DEFAULT_CONTEXT_BUDGET)]
+        context_budget: usize,
+        #[arg(
+            long = "max-parallel",
+            help = "Optional execution ceiling; the worker count is capped by admitted assignments"
+        )]
+        max_parallel: Option<usize>,
+        #[arg(
+            long = "allow-exec",
+            help = "Explicitly authorize Foundry to start the admitted Codex/Agy processes"
+        )]
+        allow_exec: bool,
+        #[arg(long = "approved-by")]
+        approved_by: String,
+        #[arg(
+            long,
+            default_value = "execute the dependency-ready, task-worktree-bound dispatch wave"
+        )]
+        reason: String,
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3621,7 +3899,7 @@ enum RequestCommands {
         run_id: String,
         #[arg(long)]
         task: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         executor: String,
         #[arg(long)]
         summary: String,
@@ -3629,6 +3907,8 @@ enum RequestCommands {
         artifacts: Vec<PathBuf>,
         #[arg(long = "evidence-command")]
         evidence_command: Option<String>,
+        #[arg(long = "evidence-exit-code")]
+        evidence_exit_code: Option<i32>,
         #[arg(long = "evidence-summary")]
         evidence_summary: Option<String>,
         #[arg(long = "estimated-usd", default_value_t = 0.0)]
@@ -3641,7 +3921,7 @@ enum RequestCommands {
         ttl_seconds: u64,
         #[arg(long = "budget")]
         context_budget: Option<usize>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3649,7 +3929,7 @@ enum RequestCommands {
     FinalPackage {
         #[arg(long = "run")]
         run_id: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3657,9 +3937,9 @@ enum RequestCommands {
     EnsureFinalAudit {
         #[arg(long)]
         workflow: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         executor: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3673,7 +3953,7 @@ enum RequestCommands {
     Cancel {
         #[arg(long = "run")]
         run_id: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3681,7 +3961,7 @@ enum RequestCommands {
     Resume {
         #[arg(long = "run")]
         run_id: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3689,7 +3969,7 @@ enum RequestCommands {
     Heartbeat {
         #[arg(long = "run")]
         run_id: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         executor: String,
         #[arg(long, default_value = "executor heartbeat")]
         summary: String,
@@ -3697,7 +3977,7 @@ enum RequestCommands {
         ttl_seconds: u64,
         #[arg(long)]
         pid: Option<u32>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3717,7 +3997,7 @@ enum RequestCommands {
         pid: Option<u32>,
         #[arg(long, default_value = "executor limit or availability changed")]
         reason: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3725,7 +4005,7 @@ enum RequestCommands {
     RecoverStale {
         #[arg(long = "run")]
         run_id: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3733,7 +4013,7 @@ enum RequestCommands {
     DriveLoop {
         #[arg(long = "run")]
         run_id: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         executor: String,
         #[arg(long = "ttl-seconds", default_value_t = 300)]
         ttl_seconds: u64,
@@ -3741,9 +4021,9 @@ enum RequestCommands {
         origin: String,
     },
     Supervise {
-        #[arg(long, default_value = "forge-request-supervisor")]
+        #[arg(long, default_value = "foundry-request-supervisor")]
         executor: String,
-        #[arg(long, default_value = "forge-request-supervisor")]
+        #[arg(long, default_value = "foundry-request-supervisor")]
         origin: String,
         #[arg(long = "ttl-seconds", default_value_t = 300)]
         ttl_seconds: u64,
@@ -3957,7 +4237,7 @@ enum ImproveCommands {
         all: bool,
         #[arg(long, default_value_t = 20)]
         limit: usize,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3973,7 +4253,7 @@ enum ImproveCommands {
         apply: bool,
         #[arg(long = "approved-by")]
         approved_by: Option<String>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3985,7 +4265,7 @@ enum ImproveCommands {
         recommendation_id: Option<String>,
         #[arg(long = "policy")]
         recommended_policy: Option<String>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -3999,7 +4279,7 @@ enum ImproveCommands {
         recommended_policy: Option<String>,
         #[arg(long = "approved-by")]
         approved_by: Option<String>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -4069,7 +4349,7 @@ enum InteractiveCommands {
         output: OutputFormat,
     },
     ReleaseGates {
-        #[arg(long, default_value = "0.5")]
+        #[arg(long, default_value = "0.6")]
         version: String,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
@@ -4083,8 +4363,9 @@ enum InteractiveCommands {
         shim_dir: Option<PathBuf>,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
-        #[arg(long = "forge-first")]
-        forge_first: bool,
+        // foundry-brand-allow: legacy-compat
+        #[arg(long = "foundry-first", visible_alias = "forge-first")]
+        foundry_first: bool,
         #[arg(long = "observe-only")]
         observe_only: bool,
         #[arg(long = "workflow")]
@@ -4139,7 +4420,7 @@ enum InteractiveCommands {
         action_id: String,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, default_value = "{}")]
         payload: String,
@@ -4225,7 +4506,7 @@ enum InteractiveCommands {
     Route {
         #[arg(long)]
         input: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -4247,7 +4528,7 @@ enum InteractionCommands {
         choices: Vec<String>,
         #[arg(long = "timeout-seconds")]
         timeout_seconds: Option<u64>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -4263,7 +4544,7 @@ enum InteractionCommands {
         fields: Vec<String>,
         #[arg(long = "timeout-seconds")]
         timeout_seconds: Option<u64>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -4279,7 +4560,7 @@ enum InteractionCommands {
         field_values: Vec<String>,
         #[arg(long)]
         rationale: Option<String>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -4289,7 +4570,7 @@ enum InteractionCommands {
         workflow: String,
         #[arg(long)]
         task: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -4305,12 +4586,12 @@ enum SmokeCommands {
     OperationalTui {
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
-        #[arg(long, default_value = "forge_smoke")]
+        #[arg(long, default_value = "foundry_smoke")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
-    ForgeFirstHarness {
+    FoundryFirstHarness {
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
         #[arg(long, default_value = "codex")]
@@ -4347,27 +4628,27 @@ enum SmokeCommands {
 #[derive(Debug, Subcommand)]
 enum MilestoneCommands {
     Status {
-        #[arg(long, default_value = "0.5")]
+        #[arg(long, default_value = "0.6")]
         version: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
     Manifest {
-        #[arg(long, default_value = "0.5")]
+        #[arg(long, default_value = "0.6")]
         version: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
     #[command(name = "production-plan")]
     ProductionPlan {
-        #[arg(long, default_value = "0.5")]
+        #[arg(long, default_value = "0.6")]
         version: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
     #[command(name = "production-evidence-template")]
     ProductionEvidenceTemplate {
-        #[arg(long, default_value = "0.5")]
+        #[arg(long, default_value = "0.6")]
         version: String,
         #[arg(long = "release-version")]
         release_version: String,
@@ -4380,7 +4661,7 @@ enum MilestoneCommands {
     },
     #[command(name = "production-evidence-assemble")]
     ProductionEvidenceAssemble {
-        #[arg(long, default_value = "0.5")]
+        #[arg(long, default_value = "0.6")]
         version: String,
         #[arg(long = "release-version")]
         release_version: String,
@@ -4412,7 +4693,7 @@ enum MilestoneCommands {
     },
     #[command(name = "production-readiness")]
     ProductionReadiness {
-        #[arg(long, default_value = "0.5")]
+        #[arg(long, default_value = "0.6")]
         version: String,
         #[arg(long)]
         manifest: PathBuf,
@@ -4423,7 +4704,7 @@ enum MilestoneCommands {
     },
     #[command(name = "attach-evidence")]
     AttachEvidence {
-        #[arg(long, default_value = "0.5")]
+        #[arg(long, default_value = "0.6")]
         version: String,
         #[arg(long = "capability", alias = "capability-id")]
         capability_id: String,
@@ -4435,14 +4716,14 @@ enum MilestoneCommands {
         artifact: PathBuf,
         #[arg(long = "approved-by")]
         approved_by: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
     #[command(name = "evidence-plan")]
     EvidencePlan {
-        #[arg(long, default_value = "0.5")]
+        #[arg(long, default_value = "0.6")]
         version: String,
         #[arg(long = "capability", alias = "capability-id")]
         capability_id: String,
@@ -4457,7 +4738,7 @@ enum MilestoneCommands {
     },
     #[command(name = "prepare-evidence-inputs")]
     PrepareEvidenceInputs {
-        #[arg(long, default_value = "0.5")]
+        #[arg(long, default_value = "0.6")]
         version: String,
         #[arg(long = "capability", alias = "capability-id")]
         capability_id: String,
@@ -4479,14 +4760,14 @@ enum MilestoneCommands {
         approved_by: Option<String>,
         #[arg(long)]
         force: bool,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
     #[command(name = "collect-evidence")]
     CollectEvidence {
-        #[arg(long, default_value = "0.5")]
+        #[arg(long, default_value = "0.6")]
         version: String,
         #[arg(long = "capability", alias = "capability-id")]
         capability_id: String,
@@ -4500,14 +4781,14 @@ enum MilestoneCommands {
         connected_runtime: Option<String>,
         #[arg(long = "approved-by")]
         approved_by: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
     #[command(name = "collect-ready-evidence")]
     CollectReadyEvidence {
-        #[arg(long, default_value = "0.5")]
+        #[arg(long, default_value = "0.6")]
         version: String,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
@@ -4517,27 +4798,27 @@ enum MilestoneCommands {
         connected_runtime: Option<String>,
         #[arg(long = "approved-by")]
         approved_by: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
     Research {
-        #[arg(long, default_value = "0.5")]
+        #[arg(long, default_value = "0.6")]
         version: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
     #[command(name = "export-demo")]
     ExportDemo {
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
     #[command(name = "cli-demo")]
     CliDemo {
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
@@ -4691,7 +4972,7 @@ enum PatchCommands {
         intent: String,
         #[arg(long = "path")]
         paths: Vec<String>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -4703,7 +4984,7 @@ enum PatchCommands {
         task: String,
         #[arg(long = "path")]
         paths: Vec<String>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long = "plan-artifact")]
         plan_artifact: Option<String>,
@@ -4717,7 +4998,7 @@ enum PatchCommands {
         task: String,
         #[arg(long = "path")]
         paths: Vec<String>,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long = "plan-artifact")]
         plan_artifact: Option<String>,
@@ -4737,7 +5018,7 @@ enum PatchCommands {
         hunk_index: usize,
         #[arg(long = "context-lines", default_value_t = 3)]
         context_lines: usize,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -4749,7 +5030,7 @@ enum PatchCommands {
         task: String,
         #[arg(long = "apply-artifact")]
         apply_artifact: String,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -4765,7 +5046,7 @@ enum PatchCommands {
         approved_by: String,
         #[arg(long = "confirm-restore")]
         confirm_restore: bool,
-        #[arg(long, default_value = "forge_cli")]
+        #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -4852,6 +5133,9 @@ impl From<WorkflowLifecycleArg> for WorkflowLifecycleFilter {
 }
 
 fn main() {
+    if legacy_binary_invoked() {
+        eprintln!("{LEGACY_BINARY_WARNING}");
+    }
     match run() {
         Ok(code) => std::process::exit(code),
         Err(error) => {
@@ -4869,7 +5153,7 @@ fn main() {
                 match serde_json::to_string(&response) {
                     Ok(json) => eprintln!("{json}"),
                     Err(_) => eprintln!(
-                        "{{\"schema_version\":\"forge.cli.error.v1\",\"status\":\"error\",\"error\":{{\"code\":\"internal_error\",\"category\":\"internal\",\"message\":\"Forge command failed\",\"retryable\":false,\"remediation\":\"Retry with human output and inspect operator logs.\"}}}}"
+                        "{{\"schema_version\":\"foundry.cli.error.v1\",\"status\":\"error\",\"error\":{{\"code\":\"internal_error\",\"category\":\"internal\",\"message\":\"Foundry command failed\",\"retryable\":false,\"remediation\":\"Retry with human output and inspect operator logs.\"}}}}"
                     ),
                 }
             } else {
@@ -4878,6 +5162,19 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn legacy_binary_invoked() -> bool {
+    env!("CARGO_BIN_NAME") == LEGACY_BINARY_NAME
+}
+
+fn explicit_store_argument_present() -> bool {
+    std::env::args_os().any(|argument| {
+        argument == "--store"
+            || argument
+                .to_str()
+                .is_some_and(|value| value.starts_with("--store="))
+    })
 }
 
 fn requested_json_output() -> bool {
@@ -4954,7 +5251,7 @@ fn classify_cli_error(error: &anyhow::Error) -> CliErrorEnvelope {
     };
 
     CliErrorEnvelope {
-        schema_version: "forge.cli.error.v1",
+        schema_version: "foundry.cli.error.v1",
         status: "error",
         error: CliErrorDetail {
             code,
@@ -4966,15 +5263,75 @@ fn classify_cli_error(error: &anyhow::Error) -> CliErrorEnvelope {
     }
 }
 
+fn parse_teamwork_lane_spec(value: &str) -> Result<foundry_core::teamwork::TeamworkLaneConfig> {
+    let value = value.trim();
+    let (lane_id, routing) = value.split_once('=').with_context(|| {
+        format!("teamwork lane `{value}` must use ID=BRAIN:COUNT, for example frontend=agy:3")
+    })?;
+    let (brain, agent_count) = routing.rsplit_once(':').with_context(|| {
+        format!("teamwork lane `{value}` must include a positive agent count after ':'")
+    })?;
+    let lane_id = lane_id.trim();
+    let brain = brain.trim();
+    if lane_id.is_empty() || brain.is_empty() {
+        bail!("teamwork lane `{value}` requires non-empty lane and brain ids");
+    }
+    let agent_count = agent_count
+        .trim()
+        .parse::<usize>()
+        .with_context(|| format!("teamwork lane `{value}` has an invalid agent count"))?;
+    if agent_count == 0 {
+        bail!("teamwork lane `{value}` requires at least one agent");
+    }
+    Ok(foundry_core::teamwork::TeamworkLaneConfig {
+        id: lane_id.to_string(),
+        brain: brain.to_string(),
+        agent_count,
+        parallel_group: "implementation-wave-001".to_string(),
+        responsibility: format!("Deliver independent bounded work for the {lane_id} lane."),
+    })
+}
+
+fn explicit_parallel_team_from_lane_specs(
+    lane_specs: &[String],
+    max_parallel_agents: Option<usize>,
+    source: &str,
+) -> Result<Option<CoreParallelTeamSpec>> {
+    if lane_specs.is_empty() {
+        if max_parallel_agents.is_some() {
+            bail!("--max-parallel-agents requires at least one --lane ID=EXECUTOR:COUNT");
+        }
+        return Ok(None);
+    }
+
+    let lanes = lane_specs
+        .iter()
+        .map(|lane| parse_teamwork_lane_spec(lane))
+        .collect::<Result<Vec<_>>>()?;
+    let derived_parallelism = lanes.iter().try_fold(0usize, |total, lane| {
+        total
+            .checked_add(lane.agent_count)
+            .context("parallel team lane agent count overflow")
+    })?;
+    let config = foundry_core::teamwork::TeamworkParallelConfig {
+        lanes,
+        max_parallel_agents: max_parallel_agents.unwrap_or(derived_parallelism),
+    };
+    foundry_core::teamwork::core_parallel_team_from_teamwork(&config, source).map(Some)
+}
+
 fn run() -> Result<i32> {
-    let cli = Cli::try_parse()?;
-    if forge_production_mode_enabled() && !cli.store.is_absolute() {
+    let mut cli = Cli::try_parse()?;
+    if legacy_binary_invoked() && !explicit_store_argument_present() {
+        cli.store = PathBuf::from(LEGACY_DEFAULT_STORE_PATH);
+    }
+    if foundry_production_mode_enabled() && !cli.store.is_absolute() {
         anyhow::bail!(
-            "FORGE_PRODUCTION_MODE requires an absolute --store path to prevent state fragmentation"
+            "FOUNDRY_PRODUCTION_MODE requires an absolute --store path to prevent state fragmentation"
         );
     }
     let Some(command) = cli.command else {
-        return run_forge_tui(&cli.store, Some(std::env::current_dir()?));
+        return run_foundry_tui(&cli.store, Some(std::env::current_dir()?));
     };
     match command {
         Commands::Squad { command } => {
@@ -4986,7 +5343,7 @@ fn run() -> Result<i32> {
                     print_response(output, &mission_platform_catalog())?;
                 }
                 SquadCommands::InstallOriginals { output } => {
-                    let store = ForgeStore::open(&cli.store)?;
+                    let store = FoundryStore::open(&cli.store)?;
                     print_response(output, &install_builtin_squads(&store)?)?;
                 }
                 SquadCommands::Validate { manifest, output } => {
@@ -4994,12 +5351,12 @@ fn run() -> Result<i32> {
                     print_response(output, &validate_squad_definition(&squad)?)?;
                 }
                 SquadCommands::Install { manifest, output } => {
-                    let store = ForgeStore::open(&cli.store)?;
+                    let store = FoundryStore::open(&cli.store)?;
                     let squad = read_squad_manifest(&manifest)?;
                     print_response(output, &install_squad(&store, &squad)?)?;
                 }
                 SquadCommands::List { output } => {
-                    let store = ForgeStore::open(&cli.store)?;
+                    let store = FoundryStore::open(&cli.store)?;
                     print_response(output, &list_installed_squads(&store)?)?;
                 }
                 SquadCommands::Inspect {
@@ -5007,7 +5364,7 @@ fn run() -> Result<i32> {
                     version,
                     output,
                 } => {
-                    let store = ForgeStore::open(&cli.store)?;
+                    let store = FoundryStore::open(&cli.store)?;
                     print_response(output, &load_squad(&store, &id, version.as_deref())?)?;
                 }
                 SquadCommands::Clone {
@@ -5018,7 +5375,7 @@ fn run() -> Result<i32> {
                     new_version,
                     output,
                 } => {
-                    let store = ForgeStore::open(&cli.store)?;
+                    let store = FoundryStore::open(&cli.store)?;
                     print_response(
                         output,
                         &clone_squad(
@@ -5035,7 +5392,7 @@ fn run() -> Result<i32> {
             Ok(0)
         }
         Commands::Mission { command } => {
-            let store = ForgeStore::open(&cli.store)?;
+            let store = FoundryStore::open(&cli.store)?;
             match command {
                 MissionCommands::Simulate {
                     goal,
@@ -5252,20 +5609,69 @@ fn run() -> Result<i32> {
         }
         Commands::Teamwork {
             goal,
+            lanes,
+            max_parallel_agents,
+            repository,
+            worktree_root,
+            branch_prefix,
+            allow_repository_mutation,
             detached,
             output,
             bypass_cache,
         } => {
             let store_path = cli.store.clone();
-            let store = ForgeStore::open(store_path.clone())?;
-            let response = forge_core::teamwork::plan_teamwork_workflow(
-                &store,
-                &goal,
-                detached,
-                bypass_cache,
-            )?;
+            let store = FoundryStore::open(store_path.clone())?;
+            let response = if lanes.is_empty() {
+                foundry_core::teamwork::plan_teamwork_workflow(
+                    &store,
+                    &goal,
+                    detached,
+                    bypass_cache,
+                )?
+            } else {
+                let lanes = lanes
+                    .iter()
+                    .map(|lane| parse_teamwork_lane_spec(lane))
+                    .collect::<Result<Vec<_>>>()?;
+                let derived_parallelism = lanes.iter().try_fold(0usize, |total, lane| {
+                    total
+                        .checked_add(lane.agent_count)
+                        .context("teamwork lane agent count overflow")
+                })?;
+                foundry_core::teamwork::plan_teamwork_workflow_with_config(
+                    &store,
+                    &goal,
+                    detached,
+                    bypass_cache,
+                    foundry_core::teamwork::TeamworkParallelConfig {
+                        lanes,
+                        max_parallel_agents: max_parallel_agents.unwrap_or(derived_parallelism),
+                    },
+                )?
+            };
+            if allow_repository_mutation && repository.is_none() {
+                bail!(
+                    "teamwork --allow-repository-mutation requires --repository and --worktree-root"
+                );
+            }
+            let worktree_preparation = repository
+                .zip(worktree_root)
+                .map(|(repository, worktree_root)| {
+                    foundry_core::teamwork::prepare_teamwork_worktrees(
+                        &store,
+                        foundry_core::teamwork::TeamworkWorktreePrepareOptions {
+                            workflow_id: response.workflow_id.clone(),
+                            repository,
+                            worktree_root,
+                            branch_prefix: branch_prefix.clone(),
+                            origin: "foundry_teamwork".to_string(),
+                            allow_repository_mutation,
+                        },
+                    )
+                })
+                .transpose()?;
             if matches!(output, OutputFormat::Human) {
-                println!("FORGE TEAMWORK EXECUTION PLAN");
+                println!("FOUNDRY TEAMWORK EXECUTION PLAN");
                 println!("Goal: {}", response.goal);
                 println!(
                     "Execution Mode: {}",
@@ -5275,8 +5681,30 @@ fn run() -> Result<i32> {
                 println!("\nTASK GRAPH");
                 println!("\nEXECUTION STATUS");
                 println!("Status: {}", response.status);
+                if let Some(preparation) = &worktree_preparation {
+                    println!("Worktree preparation: {}", preparation.status);
+                    println!(
+                        "Parallel branch worktrees: {}",
+                        preparation.parallel_branch_worktrees
+                    );
+                    println!(
+                        "Supporting agent worktrees: {}",
+                        preparation.supporting_agent_worktrees
+                    );
+                }
             } else {
-                print_response(output, &response)?;
+                if let Some(preparation) = &worktree_preparation {
+                    print_response(
+                        output,
+                        &serde_json::json!({
+                            "schema_version": "foundry.teamwork.prepared_plan.v1",
+                            "teamwork": &response,
+                            "worktree_preparation": preparation,
+                        }),
+                    )?;
+                } else {
+                    print_response(output, &response)?;
+                }
             }
             if detached {
                 if let Some(ref r_id) = response.run_id {
@@ -5298,12 +5726,14 @@ fn run() -> Result<i32> {
         Commands::Plan {
             goal,
             worktree,
+            lanes,
+            max_parallel_agents,
             addon_dirs,
             output,
             detached,
         } => {
             let store_path = cli.store.clone();
-            let store = ForgeStore::open(store_path.clone())?;
+            let store = FoundryStore::open(store_path.clone())?;
             let project_root = match worktree.as_deref() {
                 Some(selector) => resolve_worktree_selector_root(&store, selector)?,
                 None => std::env::current_dir()?,
@@ -5324,16 +5754,35 @@ fn run() -> Result<i32> {
             let intent =
                 parse_intent_with_catalog_and_context(&goal, &addon_catalog, operating_context);
             let mut workflow = create_workflow(intent);
-            let _ = sanitize_workflow_secrets_for_storage(&store, &mut workflow, "forge_plan")?;
+            if let Some(parallel_team) = explicit_parallel_team_from_lane_specs(
+                &lanes,
+                max_parallel_agents,
+                "foundry.plan.cli",
+            )? {
+                foundry_core::teamwork::materialize_explicit_parallel_team(
+                    &mut workflow,
+                    parallel_team,
+                )?;
+            }
+            let _ = sanitize_workflow_secrets_for_storage(&store, &mut workflow, "foundry_plan")?;
             let reuse_candidates = find_reuse_candidates(&store, &workflow)?;
             let attached_subflows =
                 attach_reuse_candidates_as_child_subflows(&mut workflow, &reuse_candidates);
-            store.save_workflow(&workflow)?;
-            store.record_event(
-                &workflow.id,
-                "workflow_planned",
-                &serde_json::to_value(&workflow)?,
-            )?;
+            let planned_run = detached.then(|| {
+                foundry_core::request::create_run_record(&workflow, "foundry_cli", "accepted")
+            });
+            store.with_transaction(|| {
+                store.save_workflow(&workflow)?;
+                store.record_event(
+                    &workflow.id,
+                    "workflow_planned",
+                    &serde_json::to_value(&workflow)?,
+                )?;
+                if let Some(run) = planned_run.as_ref() {
+                    foundry_core::request::save_run_record(&store, run)?;
+                }
+                Ok(())
+            })?;
             let worktree_report = if let Some(selector) = worktree {
                 if PathBuf::from(&selector).exists() {
                     Some(register_worktree(
@@ -5343,8 +5792,8 @@ fn run() -> Result<i32> {
                             id: None,
                             workflow_id: Some(workflow.id.clone()),
                             task_id: None,
-                            origin: "forge_plan".to_string(),
-                            created_by_forge: false,
+                            origin: "foundry_plan".to_string(),
+                            created_by_foundry: false,
                         },
                     )?)
                 } else {
@@ -5353,25 +5802,20 @@ fn run() -> Result<i32> {
                         &selector,
                         &workflow.id,
                         None,
-                        "forge_plan",
+                        "foundry_plan",
                     )?)
                 }
             } else {
                 None
             };
             let workflow = store.load_workflow(&workflow.id)?;
-            let mut run_id = None;
-            if detached {
-                let run =
-                    forge_core::request::create_run_record(&workflow, "forge_cli", "accepted");
-                forge_core::request::save_run_record(&store, &run)?;
-                run_id = Some(run.run_id.clone());
-            }
+            let run_id = planned_run.as_ref().map(|run| run.run_id.clone());
             let response = serde_json::json!({
                 "status": "planned",
                 "workflow_id": workflow.id,
                 "goal": workflow.goal,
                 "runtime": workflow.runtime,
+                "core_orchestration": workflow.core_orchestration,
                 "tasks": workflow.tasks,
                 "intent": workflow.intent,
                 "reuse_candidates": reuse_candidates,
@@ -5417,7 +5861,7 @@ fn run() -> Result<i32> {
                 return Ok(0);
             }
 
-            let store = ForgeStore::open(cli.store)?;
+            let store = FoundryStore::open(cli.store)?;
             let quality_action = quality_action
                 .map(|action| action.trim().to_string())
                 .filter(|action| !action.is_empty());
@@ -5437,7 +5881,7 @@ fn run() -> Result<i32> {
             verbose,
             output,
         } => {
-            let store = ForgeStore::open(cli.store)?;
+            let store = FoundryStore::open(cli.store)?;
             let report = inspect_workflow_with_focus(&store, &workflow, verbose, task.as_deref())?;
             match output {
                 OutputFormat::Json => print_response(output, &report)?,
@@ -5446,7 +5890,7 @@ fn run() -> Result<i32> {
             Ok(0)
         }
         Commands::Status { workflow, output } => {
-            let store = ForgeStore::open(cli.store)?;
+            let store = FoundryStore::open(cli.store)?;
             let workflow = store.load_workflow(&workflow)?;
             let worktree = bound_worktree_context(&store, &workflow.id, None)?;
             let worktrees = list_registered_worktrees(&store, None, Some(&workflow.id))?;
@@ -5465,12 +5909,12 @@ fn run() -> Result<i32> {
                 .collect();
             let token_summary = workflow.token_collection.as_ref().map(|tokens| {
                 serde_json::json!({
-                    "schema_version": "forge.tokens.workflow_summary.v1",
+                    "schema_version": "foundry.tokens.workflow_summary.v1",
                     "collection_name": tokens.name,
                     "token_count": tokens.tokens.len(),
                     "semantic_alias_count": tokens.semantic_aliases.len(),
                     "mode_count": tokens.modes.len(),
-                    "resolution_schema_version": "forge.tokens.resolution.v1",
+                    "resolution_schema_version": "foundry.tokens.resolution.v1",
                 })
             });
             let response = serde_json::json!({
@@ -5501,7 +5945,7 @@ fn run() -> Result<i32> {
             output,
         } => {
             let store_path = cli.store.clone();
-            let store = ForgeStore::open(cli.store)?;
+            let store = FoundryStore::open(cli.store)?;
             ensure_workflow_policy(&store, &workflow, "context request")?;
             let workflow = store.load_workflow(&workflow)?;
             let latest_checkpoint = load_latest_task_checkpoint(&store, &workflow.id, &task)?;
@@ -5513,7 +5957,7 @@ fn run() -> Result<i32> {
                 SecretVaultPersistOptions {
                     store: &store,
                     workflow_id: Some(&workflow.id),
-                    origin: "forge_context",
+                    origin: "foundry_context",
                     tenant_context: &tenant_context,
                 },
             )?;
@@ -5579,7 +6023,7 @@ fn run() -> Result<i32> {
             if !simulate {
                 anyhow::bail!("v0 execution requires --simulate; real provider execution is intentionally not enabled");
             }
-            let store = ForgeStore::open(cli.store)?;
+            let store = FoundryStore::open(cli.store)?;
             let mut workflow = store.load_workflow(&workflow)?;
             let mut report = run_simulated(&mut workflow);
             let completed = report.status == "completed";
@@ -5598,7 +6042,7 @@ fn run() -> Result<i32> {
             Ok(if completed { 0 } else { 1 })
         }
         Commands::Validate { workflow, output } => {
-            let store = ForgeStore::open(cli.store)?;
+            let store = FoundryStore::open(cli.store)?;
             let workflow = store.load_workflow(&workflow)?;
             let report = validate_workflow(&workflow);
             let exit_code = if report.promotable { 0 } else { 1 };
@@ -5637,7 +6081,7 @@ fn run() -> Result<i32> {
             target_version,
             output,
         } => {
-            let store = ForgeStore::open(cli.store)?;
+            let store = FoundryStore::open(cli.store)?;
             match command {
                 Some(ImproveCommands::Candidates {
                     limit,
@@ -5665,7 +6109,7 @@ fn run() -> Result<i32> {
                 }) => {
                     if all && workflow.is_some() {
                         anyhow::bail!(
-                            "`forge improve normalize-cost` accepts either --workflow <id> or --all, not both"
+                            "`foundry improve normalize-cost` accepts either --workflow <id> or --all, not both"
                         );
                     }
                     if all {
@@ -5677,7 +6121,7 @@ fn run() -> Result<i32> {
                         print_response(output, &report)?;
                     } else {
                         anyhow::bail!(
-                            "`forge improve normalize-cost` requires --workflow <id> or --all"
+                            "`foundry improve normalize-cost` requires --workflow <id> or --all"
                         );
                     }
                     Ok(0)
@@ -5742,7 +6186,7 @@ fn run() -> Result<i32> {
                 None => {
                     let Some(workflow) = workflow else {
                         anyhow::bail!(
-                            "`forge improve` requires --workflow or a subcommand such as `candidates`"
+                            "`foundry improve` requires --workflow or a subcommand such as `candidates`"
                         );
                     };
                     let workflow = store.load_workflow(&workflow)?;
@@ -5753,7 +6197,7 @@ fn run() -> Result<i32> {
             }
         }
         Commands::Artifacts { workflow, output } => {
-            let store = ForgeStore::open(cli.store)?;
+            let store = FoundryStore::open(cli.store)?;
             let loaded_workflow = store.load_workflow(&workflow)?;
             let artifact_tags = loaded_workflow
                 .artifacts
@@ -5775,7 +6219,7 @@ fn run() -> Result<i32> {
                 limit,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_workflow_event_stream(&store, &workflow, limit)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -5790,7 +6234,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let operating_context = load_project_operating_context(&project_root)?;
                 let report = build_global_event_timeline_for_context(
                     &store,
@@ -5817,7 +6261,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let operating_context = load_project_operating_context(&project_root)?;
                 let report = build_event_observability_index_for_context(
                     &store,
@@ -5848,7 +6292,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let operating_context = load_project_operating_context(&project_root)?;
                 let report = build_event_observability_history_for_context(
                     &store,
@@ -5884,7 +6328,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let operating_context = load_project_operating_context(&project_root)?;
                 let report = build_event_improvement_policy_for_context(
                     &store,
@@ -5914,7 +6358,7 @@ fn run() -> Result<i32> {
                 input_file,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let data = read_mcp_input(input, input_file)?;
                 let operating_context = load_project_operating_context(&project_root)?;
                 let report = ingest_inbound_event_with_context(
@@ -5935,7 +6379,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let operating_context = load_project_operating_context(&project_root)?;
                 let report = list_inbound_event_inbox_for_context(
                     &store,
@@ -5953,7 +6397,7 @@ fn run() -> Result<i32> {
                 dispatch_activations,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = scan_inbound_event_inbox(
                     &store,
                     &project_root,
@@ -5975,7 +6419,7 @@ fn run() -> Result<i32> {
                 stop_file,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = run_inbound_event_worker_loop(
                     &store,
                     &project_root,
@@ -6019,7 +6463,7 @@ fn run() -> Result<i32> {
                 shutdown_grace_seconds,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_event_service_plan(
                     &store,
                     &project_root,
@@ -6076,7 +6520,7 @@ fn run() -> Result<i32> {
                 heartbeat_seconds,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let normalized_kind = service_kind.trim();
                 let report = if normalized_kind == "worker" {
                     run_event_worker_service(
@@ -6159,7 +6603,7 @@ fn run() -> Result<i32> {
                 backoff_max_seconds,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = run_event_service_supervisor(
                     &store,
                     &project_root,
@@ -6224,7 +6668,7 @@ fn run() -> Result<i32> {
                 schedule_ttl_seconds,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = run_event_runtime_reconcile(
                     &store,
                     &project_root,
@@ -6284,7 +6728,7 @@ fn run() -> Result<i32> {
                 schedule_ttl_seconds,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = run_event_runtime_daemon(
                     &store,
                     &project_root,
@@ -6327,7 +6771,7 @@ fn run() -> Result<i32> {
                 limit,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_event_services(
                     &store,
                     &project_root,
@@ -6345,7 +6789,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = recover_stale_event_services(
                     &store,
                     &project_root,
@@ -6373,7 +6817,7 @@ fn run() -> Result<i32> {
                 stop_file,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = run_event_webhook_ingress_server(
                     &store,
                     &host,
@@ -6401,7 +6845,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let report = list_addon_event_adapters(
@@ -6418,7 +6862,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = route_inbound_event(&store, &event_id, &project_root)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -6429,7 +6873,7 @@ fn run() -> Result<i32> {
                 dry_run,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report =
                     dispatch_inbound_event_activations(&store, &event_id, &project_root, dry_run)?;
                 let should_fail = report.blocked_count > 0
@@ -6450,7 +6894,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let operating_context = load_project_operating_context(&project_root)?;
@@ -6491,13 +6935,13 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = sync_project_operating_context(&store, &project_root)?;
                 print_response(output, &report)?;
                 Ok(0)
             }
             IdentityCommands::Registry { scope, id, output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_identity_registry(&store, scope.as_deref(), id.as_deref())?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -6511,7 +6955,7 @@ fn run() -> Result<i32> {
                 status,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_identity_memberships(
                     &store,
                     subject_scope.as_deref(),
@@ -6543,7 +6987,7 @@ fn run() -> Result<i32> {
                 source,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = update_identity_membership(
                     &store,
                     IdentityMembershipUpdateInput {
@@ -6578,7 +7022,7 @@ fn run() -> Result<i32> {
                 reason,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = link_identity(
                     &store,
                     IdentityLinkInput {
@@ -6604,7 +7048,7 @@ fn run() -> Result<i32> {
                 reason,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = unlink_identity(
                     &store,
                     IdentityLinkInput {
@@ -6626,7 +7070,7 @@ fn run() -> Result<i32> {
                 status,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_identity_links(
                     &store,
                     scope.as_deref(),
@@ -6637,7 +7081,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             IdentityCommands::Resolve { scope, id, output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = resolve_identity(&store, &scope, &id)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -6650,7 +7094,7 @@ fn run() -> Result<i32> {
                 workflow_id,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_tenant_index(
                     &store,
                     resource_type.as_deref(),
@@ -6663,7 +7107,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             IdentityCommands::TenantAudit { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = audit_tenant_index(&store)?;
                 print_response(output, &report)?;
                 Ok(if report.status == "tenant_index_complete" {
@@ -6678,7 +7122,7 @@ fn run() -> Result<i32> {
                 action,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report =
                     evaluate_tenant_policy_for_action(&store, &workflow_id, &mode, &action)?;
                 let should_fail = report.mode == "enforce" && !report.allowed;
@@ -6688,7 +7132,7 @@ fn run() -> Result<i32> {
         },
         Commands::Addons { command } => match command {
             AddonCommands::Installed { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_installed_addons(&store)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -6699,7 +7143,7 @@ fn run() -> Result<i32> {
                 lifecycle,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_addon_capability_index(
                     &store,
                     addon.as_deref(),
@@ -6716,7 +7160,7 @@ fn run() -> Result<i32> {
                 dispatch_limit,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let report = addon_observability_report(
@@ -6735,7 +7179,7 @@ fn run() -> Result<i32> {
                 status,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_addon_permission_authorizations(
                     &store,
                     addon.as_deref(),
@@ -6753,7 +7197,7 @@ fn run() -> Result<i32> {
                 source,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = authorize_addon_permission(
                     &store,
                     &addon,
@@ -6772,14 +7216,14 @@ fn run() -> Result<i32> {
                 source,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report =
                     revoke_addon_permission(&store, &addon, &permission, &approved_by, &source)?;
                 print_response(output, &report)?;
                 Ok(0)
             }
             AddonCommands::Catalog { addon_dirs, output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 print_response(output, &catalog)?;
@@ -6793,7 +7237,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let report = list_addon_runtime_contracts(
@@ -6814,7 +7258,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let report = list_addon_planner_registry(
@@ -6836,7 +7280,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let report = evaluate_addon_runtime_contract_policy(
@@ -6857,7 +7301,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let report = list_addon_views(
@@ -6878,7 +7322,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let input_value: serde_json::Value = serde_json::from_str(&input)?;
@@ -6908,7 +7352,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let context_value: serde_json::Value = serde_json::from_str(&context)?;
@@ -6946,7 +7390,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let context_value: serde_json::Value = serde_json::from_str(&context)?;
@@ -6983,6 +7427,8 @@ fn run() -> Result<i32> {
                 contract,
                 worker,
                 subject,
+                workflow_id,
+                task_id,
                 input,
                 context,
                 lease_seconds,
@@ -6991,7 +7437,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let input_value: serde_json::Value = serde_json::from_str(&input)?;
@@ -7004,6 +7450,8 @@ fn run() -> Result<i32> {
                             addon_id: addon.as_deref(),
                             contract_id: &contract,
                             subject: &subject,
+                            workflow_id: workflow_id.as_deref(),
+                            task_id: task_id.as_deref(),
                             input: input_value,
                             context: context_value,
                             source: &source,
@@ -7022,6 +7470,28 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(if should_fail { 1 } else { 0 })
             }
+            AddonCommands::ApplyValidatorOutcome {
+                dispatch_id,
+                workflow_id,
+                task_id,
+                expected_revision,
+                origin,
+                output,
+            } => {
+                let store = FoundryStore::open(cli.store)?;
+                let report = apply_addon_validator_outcome(
+                    &store,
+                    AddonValidatorOutcomeApplyInput {
+                        dispatch_id: &dispatch_id,
+                        workflow_id: &workflow_id,
+                        task_id: &task_id,
+                        expected_revision,
+                        origin: &origin,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
             AddonCommands::ExecuteExecutor {
                 addon,
                 contract,
@@ -7036,7 +7506,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let input_value: serde_json::Value = serde_json::from_str(&input)?;
@@ -7083,7 +7553,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let input_value: serde_json::Value = serde_json::from_str(&input)?;
@@ -7123,7 +7593,7 @@ fn run() -> Result<i32> {
                 limit,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_addon_runtime_contract_dispatches(
                     &store,
                     addon.as_deref(),
@@ -7141,7 +7611,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let report = run_addon_runtime_contract_dispatch(
@@ -7159,7 +7629,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let report = run_addon_runtime_contract_dispatch_worker(
@@ -7182,7 +7652,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let report = execute_addon_runtime_contract_dispatch(
@@ -7211,7 +7681,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let report = claim_addon_runtime_contract_dispatch(
@@ -7240,7 +7710,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let result_value: serde_json::Value = serde_json::from_str(&result)?;
@@ -7278,7 +7748,7 @@ fn run() -> Result<i32> {
                 rotation_reason,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let data_value: serde_json::Value = serde_json::from_str(&data)?;
                 let report = register_addon_runtime_worker(
                     &store,
@@ -7304,7 +7774,7 @@ fn run() -> Result<i32> {
                 limit,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_addon_runtime_workers(
                     &store,
                     runtime.as_deref(),
@@ -7326,7 +7796,7 @@ fn run() -> Result<i32> {
                 registry_lock_path,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let report = if registry_sources.is_empty() {
@@ -7350,7 +7820,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             AddonCommands::Validate { addon_dirs, output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let catalog = load_addon_catalog_from_store(&store, &dirs)?;
                 let report = validate_addon_catalog(&catalog);
@@ -7365,7 +7835,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let report = plan_addon_lifecycle(
                     &store,
@@ -7383,7 +7853,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let report = install_addon(&store, &manifest, &dirs)?;
                 print_response(output, &report)?;
@@ -7399,7 +7869,7 @@ fn run() -> Result<i32> {
                 package_path,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let report = package_addon(
                     &store,
@@ -7426,7 +7896,7 @@ fn run() -> Result<i32> {
                 data,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let data_value: serde_json::Value = serde_json::from_str(&data)?;
                 let report = trust_addon_package_key(
                     &store,
@@ -7451,7 +7921,7 @@ fn run() -> Result<i32> {
                 limit,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_addon_trust_store(
                     &store,
                     repository.as_deref(),
@@ -7468,7 +7938,7 @@ fn run() -> Result<i32> {
                 source,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = publish_addon_package(&store, &package_path, &source)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -7482,7 +7952,7 @@ fn run() -> Result<i32> {
                 max_bytes,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = fetch_addon_package(
                     &store,
                     &source,
@@ -7504,7 +7974,7 @@ fn run() -> Result<i32> {
                 max_packages,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = sync_addon_package_registry(
                     &store,
                     &source,
@@ -7526,7 +7996,7 @@ fn run() -> Result<i32> {
                 limit,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = create_addon_package_lock(
                     &store,
                     repository.as_deref(),
@@ -7547,7 +8017,7 @@ fn run() -> Result<i32> {
                 limit,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_addon_marketplace(
                     &store,
                     repository.as_deref(),
@@ -7565,7 +8035,7 @@ fn run() -> Result<i32> {
                 lock_path,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let report =
                     install_addon_package(&store, &package_path, &dirs, lock_path.as_deref())?;
@@ -7579,7 +8049,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = create_addon_migration_workflow(
                     &store,
                     &from_manifest,
@@ -7595,7 +8065,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let report = upgrade_addon(&store, &manifest, &dirs)?;
                 print_response(output, &report)?;
@@ -7606,7 +8076,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let report = downgrade_addon(&store, &manifest, &dirs)?;
                 print_response(output, &report)?;
@@ -7617,7 +8087,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let report = enable_addon(&store, &id, &dirs)?;
                 print_response(output, &report)?;
@@ -7628,7 +8098,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let report = disable_addon(&store, &id, &dirs)?;
                 print_response(output, &report)?;
@@ -7639,7 +8109,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let report = uninstall_addon(&store, &id, &dirs)?;
                 print_response(output, &report)?;
@@ -7655,7 +8125,7 @@ fn run() -> Result<i32> {
                 compound_commands,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = create_cli_factory_plan(
                     &store,
                     CliFactoryCreateInput {
@@ -7688,7 +8158,7 @@ fn run() -> Result<i32> {
                     reversible,
                 );
                 let report = if persist {
-                    let store = ForgeStore::open(cli.store)?;
+                    let store = FoundryStore::open(cli.store)?;
                     persist_token_headroom_report(&store, report, &content)?
                 } else {
                     report
@@ -7701,7 +8171,7 @@ fn run() -> Result<i32> {
                 include_content,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = retrieve_headroom_blob(&store, &retrieval_ref, include_content)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -7712,7 +8182,7 @@ fn run() -> Result<i32> {
                 limit,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_headroom_stats_report(
                     &store,
                     HeadroomStatsOptions {
@@ -7725,13 +8195,13 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             HarnessCommands::Mode {
-                forge_first,
+                foundry_first,
                 observe_only,
                 project_root,
                 output,
             } => {
                 let report = build_harness_mode_report(HarnessModeOptions {
-                    forge_first,
+                    foundry_first,
                     observe_only,
                     project_root: project_root.as_deref(),
                 });
@@ -7741,7 +8211,7 @@ fn run() -> Result<i32> {
             HarnessCommands::Doctor {
                 executor,
                 shim_dir,
-                forge_first,
+                foundry_first,
                 observe_only,
                 project_root,
                 workflow_id,
@@ -7752,8 +8222,8 @@ fn run() -> Result<i32> {
                 no_token_headroom,
                 output,
             } => {
-                let (effective_forge_first, _) = resolve_harness_forge_first_source_for_project(
-                    forge_first,
+                let (effective_foundry_first, _) = resolve_harness_foundry_first_source_for_project(
+                    foundry_first,
                     observe_only,
                     project_root.as_deref(),
                 );
@@ -7765,13 +8235,13 @@ fn run() -> Result<i32> {
                     context_budget_source: "explicit_flag",
                     token_headroom: token_headroom_input,
                     token_headroom_source,
-                    forge_first: effective_forge_first,
+                    foundry_first: effective_foundry_first,
                     default_context_budget: DEFAULT_CONTEXT_BUDGET,
                 });
                 let report = build_harness_doctor_report(HarnessDoctorOptions {
                     shim_dir: &shim_dir,
                     executor: &executor,
-                    forge_first,
+                    foundry_first,
                     observe_only,
                     project_root: project_root.as_deref(),
                     workflow_id: workflow_id.as_deref(),
@@ -7781,8 +8251,8 @@ fn run() -> Result<i32> {
                     context_budget_source: &runtime_policy.context_budget_source,
                     token_headroom: runtime_policy.token_headroom,
                     token_headroom_source: &runtime_policy.token_headroom_source,
-                    require_token_headroom_for_forge_first: runtime_policy
-                        .require_token_headroom_for_forge_first,
+                    require_token_headroom_for_foundry_first: runtime_policy
+                        .require_token_headroom_for_foundry_first,
                 })?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -7790,7 +8260,7 @@ fn run() -> Result<i32> {
             HarnessCommands::HeadroomPlan {
                 executor,
                 command,
-                forge_first,
+                foundry_first,
                 observe_only,
                 project_root,
                 workflow_id,
@@ -7801,9 +8271,9 @@ fn run() -> Result<i32> {
                 no_token_headroom,
                 output,
             } => {
-                let (forge_first, forge_first_source) =
-                    resolve_harness_forge_first_source_for_project(
-                        forge_first,
+                let (foundry_first, foundry_first_source) =
+                    resolve_harness_foundry_first_source_for_project(
+                        foundry_first,
                         observe_only,
                         project_root.as_deref(),
                     );
@@ -7815,14 +8285,14 @@ fn run() -> Result<i32> {
                     context_budget_source: "explicit_flag",
                     token_headroom: token_headroom_input,
                     token_headroom_source,
-                    forge_first,
+                    foundry_first,
                     default_context_budget: DEFAULT_CONTEXT_BUDGET,
                 });
                 let report = build_harness_headroom_plan(HarnessHeadroomPlanOptions {
                     executor: &executor,
                     command: &command,
-                    forge_first,
-                    forge_first_source,
+                    foundry_first,
+                    foundry_first_source,
                     project_root: project_root.as_deref(),
                     workflow_id: workflow_id.as_deref(),
                     task_id: task_id.as_deref(),
@@ -7831,8 +8301,8 @@ fn run() -> Result<i32> {
                     context_budget_source: &runtime_policy.context_budget_source,
                     token_headroom: runtime_policy.token_headroom,
                     token_headroom_source: &runtime_policy.token_headroom_source,
-                    require_token_headroom_for_forge_first: runtime_policy
-                        .require_token_headroom_for_forge_first,
+                    require_token_headroom_for_foundry_first: runtime_policy
+                        .require_token_headroom_for_foundry_first,
                 });
                 print_response(output, &report)?;
                 Ok(0)
@@ -7840,7 +8310,7 @@ fn run() -> Result<i32> {
             HarnessCommands::AdoptionPlan {
                 executor,
                 shim_dir,
-                forge_first,
+                foundry_first,
                 observe_only,
                 project_root,
                 workflow_id,
@@ -7851,8 +8321,8 @@ fn run() -> Result<i32> {
                 no_token_headroom,
                 output,
             } => {
-                let (effective_forge_first, _) = resolve_harness_forge_first_source_for_project(
-                    forge_first,
+                let (effective_foundry_first, _) = resolve_harness_foundry_first_source_for_project(
+                    foundry_first,
                     observe_only,
                     project_root.as_deref(),
                 );
@@ -7864,13 +8334,13 @@ fn run() -> Result<i32> {
                     context_budget_source: "explicit_flag",
                     token_headroom: token_headroom_input,
                     token_headroom_source,
-                    forge_first: effective_forge_first,
+                    foundry_first: effective_foundry_first,
                     default_context_budget: DEFAULT_CONTEXT_BUDGET,
                 });
                 let report = build_harness_adoption_plan(HarnessAdoptionPlanOptions {
                     shim_dir: &shim_dir,
                     executor: &executor,
-                    forge_first,
+                    foundry_first,
                     observe_only,
                     project_root: project_root.as_deref(),
                     workflow_id: workflow_id.as_deref(),
@@ -7880,8 +8350,8 @@ fn run() -> Result<i32> {
                     context_budget_source: &runtime_policy.context_budget_source,
                     token_headroom: runtime_policy.token_headroom,
                     token_headroom_source: &runtime_policy.token_headroom_source,
-                    require_token_headroom_for_forge_first: runtime_policy
-                        .require_token_headroom_for_forge_first,
+                    require_token_headroom_for_foundry_first: runtime_policy
+                        .require_token_headroom_for_foundry_first,
                 })?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -7906,7 +8376,7 @@ fn run() -> Result<i32> {
                     context_budget_source: "explicit_flag",
                     token_headroom: token_headroom_input,
                     token_headroom_source,
-                    forge_first: true,
+                    foundry_first: true,
                     default_context_budget: DEFAULT_CONTEXT_BUDGET,
                 });
                 let report = build_harness_activation_profile(HarnessActivationProfileOptions {
@@ -7927,7 +8397,7 @@ fn run() -> Result<i32> {
             HarnessCommands::WrapPlan {
                 executor,
                 command,
-                forge_first,
+                foundry_first,
                 observe_only,
                 workflow_id,
                 task_id,
@@ -7938,9 +8408,9 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let (forge_first, forge_first_source) =
-                    resolve_harness_forge_first_source_for_project(
-                        forge_first,
+                let (foundry_first, foundry_first_source) =
+                    resolve_harness_foundry_first_source_for_project(
+                        foundry_first,
                         observe_only,
                         project_root.as_deref(),
                     );
@@ -7952,14 +8422,14 @@ fn run() -> Result<i32> {
                     context_budget_source: "explicit_flag",
                     token_headroom: token_headroom_input,
                     token_headroom_source,
-                    forge_first,
+                    foundry_first,
                     default_context_budget: DEFAULT_CONTEXT_BUDGET,
                 });
                 let report = build_cli_wrapper_plan(CliWrapperPlanOptions {
                     executor: &executor,
                     command: &command,
-                    forge_first,
-                    forge_first_source,
+                    foundry_first,
+                    foundry_first_source,
                     project_root: project_root.as_deref(),
                     workflow_id: workflow_id.as_deref(),
                     task_id: task_id.as_deref(),
@@ -7968,8 +8438,8 @@ fn run() -> Result<i32> {
                     context_budget_source: &runtime_policy.context_budget_source,
                     token_headroom: runtime_policy.token_headroom,
                     token_headroom_source: &runtime_policy.token_headroom_source,
-                    require_token_headroom_for_forge_first: runtime_policy
-                        .require_token_headroom_for_forge_first,
+                    require_token_headroom_for_foundry_first: runtime_policy
+                        .require_token_headroom_for_foundry_first,
                 });
                 print_response(output, &report)?;
                 Ok(0)
@@ -7994,7 +8464,7 @@ fn run() -> Result<i32> {
                     context_budget_source: "explicit_flag",
                     token_headroom: token_headroom_input,
                     token_headroom_source,
-                    forge_first: true,
+                    foundry_first: true,
                     default_context_budget: DEFAULT_CONTEXT_BUDGET,
                 });
                 let report = build_harness_bootstrap_report(HarnessBootstrapOptions {
@@ -8017,7 +8487,7 @@ fn run() -> Result<i32> {
                 shim_dir,
                 executor,
                 real_cmd,
-                forge_first,
+                foundry_first,
                 observe_only,
                 workflow_id,
                 task_id,
@@ -8029,9 +8499,9 @@ fn run() -> Result<i32> {
                 force,
                 output,
             } => {
-                let (forge_first, forge_first_source) =
-                    resolve_harness_forge_first_source_for_project(
-                        forge_first,
+                let (foundry_first, foundry_first_source) =
+                    resolve_harness_foundry_first_source_for_project(
+                        foundry_first,
                         observe_only,
                         project_root.as_deref(),
                     );
@@ -8043,7 +8513,7 @@ fn run() -> Result<i32> {
                     context_budget_source: "explicit_flag",
                     token_headroom: token_headroom_input,
                     token_headroom_source,
-                    forge_first,
+                    foundry_first,
                     default_context_budget: DEFAULT_CONTEXT_BUDGET,
                 });
                 let report = install_cli_harness_shim(CliShimInstallOptions {
@@ -8051,8 +8521,8 @@ fn run() -> Result<i32> {
                     executor: &executor,
                     real_cmd: real_cmd.as_deref(),
                     store_path: Some(cli.store.as_path()),
-                    forge_first,
-                    forge_first_source,
+                    foundry_first,
+                    foundry_first_source,
                     workflow_id: workflow_id.as_deref(),
                     task_id: task_id.as_deref(),
                     run_id: run_id.as_deref(),
@@ -8081,7 +8551,7 @@ fn run() -> Result<i32> {
                     context_budget_source: "explicit_flag",
                     token_headroom: token_headroom_input,
                     token_headroom_source,
-                    forge_first: true,
+                    foundry_first: true,
                     default_context_budget: DEFAULT_CONTEXT_BUDGET,
                 });
                 let report = install_cli_provider_adapter(ProviderAdapterInstallOptions {
@@ -8109,7 +8579,7 @@ fn run() -> Result<i32> {
             }
             HarnessCommands::Exec {
                 executor,
-                forge_first,
+                foundry_first,
                 observe_only,
                 workflow_id,
                 task_id,
@@ -8126,7 +8596,7 @@ fn run() -> Result<i32> {
                 command,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let effective_project_root = if let Some(workflow_id) = workflow_id.as_deref() {
                     resolve_effective_project_root(
                         &store,
@@ -8165,9 +8635,9 @@ fn run() -> Result<i32> {
                 } else {
                     cwd.clone()
                 };
-                let (forge_first, forge_first_source) =
-                    resolve_harness_forge_first_source_for_project(
-                        forge_first,
+                let (foundry_first, foundry_first_source) =
+                    resolve_harness_foundry_first_source_for_project(
+                        foundry_first,
                         observe_only,
                         effective_project_root.as_deref(),
                     );
@@ -8179,15 +8649,15 @@ fn run() -> Result<i32> {
                     context_budget_source: "explicit_flag",
                     token_headroom: token_headroom_input,
                     token_headroom_source,
-                    forge_first,
+                    foundry_first,
                     default_context_budget: DEFAULT_CONTEXT_BUDGET,
                 });
                 let report = run_cli_harness_exec(CliHarnessExecOptions {
                     store: Some(&store),
                     executor: &executor,
                     command: &command,
-                    forge_first,
-                    forge_first_source,
+                    foundry_first,
+                    foundry_first_source,
                     workflow_id: workflow_id.as_deref(),
                     task_id: task_id.as_deref(),
                     run_id: run_id.as_deref(),
@@ -8195,8 +8665,8 @@ fn run() -> Result<i32> {
                     context_budget_source: &runtime_policy.context_budget_source,
                     token_headroom: runtime_policy.token_headroom,
                     token_headroom_source: &runtime_policy.token_headroom_source,
-                    require_token_headroom_for_forge_first: runtime_policy
-                        .require_token_headroom_for_forge_first,
+                    require_token_headroom_for_foundry_first: runtime_policy
+                        .require_token_headroom_for_foundry_first,
                     dry_run: !execute,
                     allow_exec,
                     secret_env: &secret_env,
@@ -8217,7 +8687,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let operating_context = load_project_operating_context(&project_root)?;
                 let report = build_cost_ledger_for_context(
                     &store,
@@ -8241,7 +8711,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let operating_context = load_project_operating_context(&project_root)?;
                 let report = materialize_cost_ledger_index_for_context(
                     &store,
@@ -8268,7 +8738,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let operating_context = load_project_operating_context(&project_root)?;
                 let report = materialize_cost_ledger_incremental_for_context(
                     &store,
@@ -8297,7 +8767,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let operating_context = load_project_operating_context(&project_root)?;
                 let report = build_cost_ledger_history_for_context(
                     &store,
@@ -8329,7 +8799,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let operating_context = load_project_operating_context(&project_root)?;
                 let report = maintain_cost_ledger_for_context(
                     &store,
@@ -8366,7 +8836,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let operating_context = load_project_operating_context(&project_root)?;
                 let report = run_cost_ledger_daemon_for_context(
                     &store,
@@ -8406,7 +8876,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let operating_context = load_project_operating_context(&project_root)?;
                 let report = apply_cost_ledger_retention_for_context(
                     &store,
@@ -8442,7 +8912,7 @@ fn run() -> Result<i32> {
                 output,
             } => {
                 let home = home.unwrap_or_else(default_home_path);
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = install_skill(&home, &target)?;
                 let executor_sync = sync_executors(
                     &store,
@@ -8486,7 +8956,7 @@ fn run() -> Result<i32> {
                 output,
             } => {
                 let home = home.unwrap_or_else(default_home_path);
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = sync_executors(
                     &store,
                     ExecutorSyncOptions {
@@ -8510,7 +8980,7 @@ fn run() -> Result<i32> {
                 output,
             } => {
                 let home = home.unwrap_or_else(default_home_path);
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = sync_runtimes(
                     &store,
                     RuntimeSyncOptions {
@@ -8535,7 +9005,7 @@ fn run() -> Result<i32> {
                 output,
             } => {
                 let home = home.unwrap_or_else(default_home_path);
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let executor_sync = sync_executors(
                     &store,
                     ExecutorSyncOptions {
@@ -8567,13 +9037,13 @@ fn run() -> Result<i32> {
             }
         },
         Commands::Executors { output } => {
-            let store = ForgeStore::open(cli.store)?;
+            let store = FoundryStore::open(cli.store)?;
             let report = load_executors(&store)?;
             print_response(output, &report)?;
             Ok(0)
         }
         Commands::Brains { output } => {
-            let store = ForgeStore::open(cli.store)?;
+            let store = FoundryStore::open(cli.store)?;
             let report = load_executors(&store)?;
             print_response(output, &report.brain_router)?;
             Ok(0)
@@ -8585,7 +9055,7 @@ fn run() -> Result<i32> {
             readiness,
             output,
         } => {
-            let store = ForgeStore::open(cli.store)?;
+            let store = FoundryStore::open(cli.store)?;
             let report = load_executors(&store)?;
             match command {
                 Some(SessionCommands::History { session_id, output }) => {
@@ -8647,7 +9117,7 @@ fn run() -> Result<i32> {
             origin,
             output,
         } => {
-            let store = ForgeStore::open(cli.store)?;
+            let store = FoundryStore::open(cli.store)?;
             let report = load_executors(&store)?;
             let options = ShellLaunchPlanOptions {
                 executor_filter: executor,
@@ -8673,13 +9143,13 @@ fn run() -> Result<i32> {
                 timeout_ms,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = import_ai_limits_observations(&store, &ai_limits_cmd, timeout_ms)?;
                 print_response(output, &report)?;
                 Ok(0)
             }
             ExecutorQuotaCommands::Decide(args) => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = decide_executor_model_for_task(
                     &store,
                     ExecutorModelDecisionOptions {
@@ -8695,7 +9165,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             ExecutorQuotaCommands::Record(args) => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let observation = build_executor_quota_observation(
                     args.executor,
                     args.provider,
@@ -8718,7 +9188,7 @@ fn run() -> Result<i32> {
                     &serde_json::to_value(&observation)?,
                 )?;
                 let response = serde_json::json!({
-                    "schema_version": "forge.executor_quota_record.v1",
+                    "schema_version": "foundry.executor_quota_record.v1",
                     "status": "executor_quota_recorded",
                     "observation": observation,
                 });
@@ -8728,7 +9198,7 @@ fn run() -> Result<i32> {
             }
         },
         Commands::Runtimes { output } => {
-            let store = ForgeStore::open(cli.store)?;
+            let store = FoundryStore::open(cli.store)?;
             let report = load_runtimes(&store)?;
             print_response(output, &report)?;
             Ok(0)
@@ -8743,7 +9213,7 @@ fn run() -> Result<i32> {
                 allow_external,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = guard_runtime_scope(
                     &store,
                     RuntimeGuardRequest {
@@ -8775,7 +9245,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = create_worktree(
                     &store,
                     WorktreeCreateOptions {
@@ -8798,7 +9268,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = register_worktree(
                     &store,
                     WorktreeRegisterOptions {
@@ -8807,7 +9277,7 @@ fn run() -> Result<i32> {
                         workflow_id: workflow,
                         task_id: task,
                         origin,
-                        created_by_forge: false,
+                        created_by_foundry: false,
                     },
                 )?;
                 print_response(output, &report)?;
@@ -8820,7 +9290,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = bind_worktree(&store, &worktree, &workflow, task.as_deref(), &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -8832,7 +9302,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report =
                     initialize_worktree(&store, &worktree, allow_worktree_write, force, &origin)?;
                 print_response(output, &report)?;
@@ -8845,7 +9315,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = approve_worktree_config(
                     &store,
                     &worktree,
@@ -8861,17 +9331,66 @@ fn run() -> Result<i32> {
                 workflow,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report =
                     list_registered_worktrees(&store, repository.as_deref(), workflow.as_deref())?;
                 print_response(output, &report)?;
                 Ok(0)
             }
             WorktreeCommands::Inspect { worktree, output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = inspect_registered_worktree(&store, &worktree)?;
                 print_response(output, &report)?;
                 Ok(0)
+            }
+            WorktreeCommands::PrepareTeamwork {
+                workflow,
+                repository,
+                worktree_root,
+                branch_prefix,
+                origin,
+                allow_repository_mutation,
+                output,
+            } => {
+                let store = FoundryStore::open(cli.store)?;
+                let report = foundry_core::teamwork::prepare_teamwork_worktrees(
+                    &store,
+                    foundry_core::teamwork::TeamworkWorktreePrepareOptions {
+                        workflow_id: workflow,
+                        repository,
+                        worktree_root,
+                        branch_prefix,
+                        origin,
+                        allow_repository_mutation,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorktreeCommands::IntegrateDependencies {
+                workflow,
+                task,
+                allow_repository_mutation,
+                approved_by,
+                reason,
+                origin,
+                output,
+            } => {
+                let store = FoundryStore::open(cli.store)?;
+                let report = foundry_core::teamwork_fan_in::integrate_worktree_dependencies(
+                    &store,
+                    &foundry_core::teamwork_fan_in::IntegrateDependenciesOptions {
+                        workflow_id: &workflow,
+                        task_id: &task,
+                        allow_repository_mutation,
+                        approved_by: approved_by.as_deref().unwrap_or_default(),
+                        reason: reason.as_deref().unwrap_or_default(),
+                        origin: &origin,
+                    },
+                )?;
+                let exit_code = i32::from(!report.success);
+                print_response(output, &report)?;
+                Ok(exit_code)
             }
             WorktreeCommands::Sandbox { command } => match command {
                 WorktreeSandboxCommands::Plan {
@@ -8882,7 +9401,7 @@ fn run() -> Result<i32> {
                     command,
                     output,
                 } => {
-                    let store = ForgeStore::open(cli.store)?;
+                    let store = FoundryStore::open(cli.store)?;
                     let report = plan_worktree_sandbox(
                         &store,
                         WorktreeSandboxRequest {
@@ -8906,7 +9425,7 @@ fn run() -> Result<i32> {
                     command,
                     output,
                 } => {
-                    let store = ForgeStore::open(cli.store)?;
+                    let store = FoundryStore::open(cli.store)?;
                     let report = run_worktree_sandbox(
                         &store,
                         WorktreeSandboxRequest {
@@ -8940,7 +9459,7 @@ fn run() -> Result<i32> {
                     command,
                     output,
                 } => {
-                    let store = ForgeStore::open(cli.store)?;
+                    let store = FoundryStore::open(cli.store)?;
                     let report = start_worktree_sandbox(
                         &store,
                         WorktreeSandboxRequest {
@@ -8964,7 +9483,7 @@ fn run() -> Result<i32> {
                     Ok(exit_code)
                 }
                 WorktreeSandboxCommands::Status { sandbox, output } => {
-                    let store = ForgeStore::open(cli.store)?;
+                    let store = FoundryStore::open(cli.store)?;
                     let report = inspect_worktree_sandbox_lifecycle(&store, &sandbox)?;
                     print_response(output, &report)?;
                     Ok(0)
@@ -8974,7 +9493,7 @@ fn run() -> Result<i32> {
                     allow_stop,
                     output,
                 } => {
-                    let store = ForgeStore::open(cli.store)?;
+                    let store = FoundryStore::open(cli.store)?;
                     let report = stop_worktree_sandbox(&store, &sandbox, allow_stop)?;
                     let exit_code = if report.status == "sandbox_stop_failed" {
                         1
@@ -8988,7 +9507,7 @@ fn run() -> Result<i32> {
                     sandbox,
                     allow_supervisor_exec,
                 } => {
-                    let store = ForgeStore::open(cli.store)?;
+                    let store = FoundryStore::open(cli.store)?;
                     let _ = supervise_worktree_sandbox(&store, &sandbox, allow_supervisor_exec)?;
                     Ok(0)
                 }
@@ -9003,7 +9522,7 @@ fn run() -> Result<i32> {
                     task,
                     output,
                 } => {
-                    let store = ForgeStore::open(cli.store)?;
+                    let store = FoundryStore::open(cli.store)?;
                     let report = evaluate_worktree_modification_guard(
                         &store,
                         WorktreeModificationGuardRequest {
@@ -9030,7 +9549,7 @@ fn run() -> Result<i32> {
                     origin,
                     output,
                 } => {
-                    let store = ForgeStore::open(cli.store)?;
+                    let store = FoundryStore::open(cli.store)?;
                     let report = create_worktree_guard_predecessor_task(
                         &store,
                         &worktree,
@@ -9073,7 +9592,7 @@ fn run() -> Result<i32> {
                     allow_external_ai,
                     ..SecretSanitizationOptions::default()
                 };
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let tenant_context = workflow_id
                     .as_deref()
                     .and_then(|workflow_id| store.load_workflow(workflow_id).ok())
@@ -9105,7 +9624,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report =
                     create_daily_goal_research_workflow(&store, goals, &timezone, &cron, &origin)?;
                 let workflow = report.workflow.clone();
@@ -9124,7 +9643,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             ScheduleCommands::List { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_workflows_with_filters(
                     &store,
                     WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All)
@@ -9134,7 +9653,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             ScheduleCommands::Inspect { workflow, output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = inspect_workflow_with_focus(&store, &workflow, true, None)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9149,7 +9668,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = update_workflow_schedule(
                     &store,
                     &workflow,
@@ -9171,7 +9690,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = update_loop_state(&store, &workflow, &task, "paused", &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9182,7 +9701,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = update_loop_state(&store, &workflow, &task, "active", &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9193,13 +9712,13 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = update_loop_state(&store, &workflow, &task, "stopped", &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
             }
             ScheduleCommands::RunDue { workflow, output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = run_due_workflow(&store, &workflow)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9210,7 +9729,7 @@ fn run() -> Result<i32> {
                 ttl_seconds,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = if max_workers > 1 {
                     scan_due_workflows_parallel(&store, &executor, max_workers, ttl_seconds)?
                 } else {
@@ -9220,18 +9739,18 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             ScheduleCommands::Summary { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let workflows = store.load_workflows()?;
-                let task_slices: Vec<&[forge_core::graph::AtomicTask]> =
+                let task_slices: Vec<&[foundry_core::graph::AtomicTask]> =
                     workflows.iter().map(|wf| wf.tasks.as_slice()).collect();
                 let report = aggregate_summary(&task_slices);
                 print_response(output, &report)?;
                 Ok(0)
             }
             ScheduleCommands::LoopSummary { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let workflows = store.load_workflows()?;
-                let task_slices: Vec<&[forge_core::graph::AtomicTask]> =
+                let task_slices: Vec<&[foundry_core::graph::AtomicTask]> =
                     workflows.iter().map(|wf| wf.tasks.as_slice()).collect();
                 let report = aggregate_summary(&task_slices);
                 print_response(output, &report)?;
@@ -9243,7 +9762,7 @@ fn run() -> Result<i32> {
                 ttl_seconds,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report =
                     build_schedule_worker_status(&store, &executor, max_workers, ttl_seconds)?;
                 print_response(output, &report)?;
@@ -9275,7 +9794,7 @@ fn run() -> Result<i32> {
                 reliability,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = register_cluster_node(
                     &store,
                     ClusterNodeInput {
@@ -9306,13 +9825,13 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             ClusterCommands::List { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_cluster_nodes(&store)?;
                 print_response(output, &report)?;
                 Ok(0)
             }
             ClusterCommands::Leases { node_id, output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_cluster_node_leases(&store, node_id.as_deref())?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9322,7 +9841,7 @@ fn run() -> Result<i32> {
                 task,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = place_task_on_cluster(&store, &workflow, &task)?;
                 let exit_code = if report.selected_node.is_some() { 0 } else { 1 };
                 print_response(output, &report)?;
@@ -9335,7 +9854,7 @@ fn run() -> Result<i32> {
                 ttl_seconds,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report =
                     build_cluster_task_handoff(&store, &workflow, &task, budget, ttl_seconds)?;
                 let exit_code = if report.allowed { 0 } else { 1 };
@@ -9348,10 +9867,179 @@ fn run() -> Result<i32> {
                 workflow,
                 goal,
                 origin,
+                expected_revision,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
-                let report = update_workflow_goal(&store, &workflow, &goal, &origin)?;
+                let store = FoundryStore::open(cli.store)?;
+                let report = update_workflow_goal_with_expected_revision(
+                    &store,
+                    &workflow,
+                    &goal,
+                    &origin,
+                    expected_revision,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::AddTask {
+                workflow,
+                description,
+                priority,
+                task_id,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = FoundryStore::open(cli.store)?;
+                let report = add_workflow_task(
+                    &store,
+                    &workflow,
+                    WorkflowTaskAddInput {
+                        task_id,
+                        description,
+                        priority,
+                        origin,
+                        expected_revision,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::UpdateTask {
+                workflow,
+                task,
+                title,
+                goal,
+                expected_output,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = FoundryStore::open(cli.store)?;
+                let report = update_workflow_task_with_expected_revision(
+                    &store,
+                    &workflow,
+                    WorkflowTaskUpdateInput {
+                        task_id: &task,
+                        title: title.as_deref(),
+                        goal: goal.as_deref(),
+                        expected_output: expected_output.as_deref(),
+                        origin: &origin,
+                    },
+                    expected_revision,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::SetPriority {
+                workflow,
+                task,
+                priority,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = FoundryStore::open(cli.store)?;
+                let report = set_workflow_task_priority(
+                    &store,
+                    &workflow,
+                    WorkflowTaskPriorityInput {
+                        task_id: task,
+                        priority,
+                        origin,
+                        expected_revision,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::AddDependency {
+                workflow,
+                task,
+                depends_on,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = FoundryStore::open(cli.store)?;
+                let report = add_workflow_task_dependency(
+                    &store,
+                    &workflow,
+                    WorkflowTaskDependencyInput {
+                        task_id: task,
+                        dependency_task_id: depends_on,
+                        origin,
+                        expected_revision,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::RemoveDependency {
+                workflow,
+                task,
+                depends_on,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = FoundryStore::open(cli.store)?;
+                let report = remove_workflow_task_dependency(
+                    &store,
+                    &workflow,
+                    WorkflowTaskDependencyInput {
+                        task_id: task,
+                        dependency_task_id: depends_on,
+                        origin,
+                        expected_revision,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::SetImpediment {
+                workflow,
+                task,
+                reason,
+                kind,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = FoundryStore::open(cli.store)?;
+                let report = set_workflow_task_impediment(
+                    &store,
+                    &workflow,
+                    WorkflowTaskImpedimentInput {
+                        task_id: task,
+                        reason,
+                        kind,
+                        origin,
+                        expected_revision,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::ClearImpediment {
+                workflow,
+                task,
+                impediment_id,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = FoundryStore::open(cli.store)?;
+                let report = clear_workflow_task_impediment(
+                    &store,
+                    &workflow,
+                    WorkflowTaskImpedimentClearInput {
+                        task_id: task,
+                        impediment_id,
+                        origin,
+                        expected_revision,
+                    },
+                )?;
                 print_response(output, &report)?;
                 Ok(0)
             }
@@ -9365,7 +10053,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let parsed_slots = agent_slots
                     .iter()
                     .map(|slot| parse_node_brain_agent_slot(slot))
@@ -9393,7 +10081,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = attach_workflow_artifact_with_tags(
                     &store, &workflow, &path, &kind, &origin, &tags,
                 )?;
@@ -9408,7 +10096,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = validate_child_subflow_binding(
                     &store,
                     &workflow,
@@ -9427,12 +10115,12 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let artifact = match kind.as_str() {
                     "screen" => CreativeArtifact::new_screen(
                         &title,
-                        forge_core::ir::ScreenSpec {
-                            schema_version: forge_core::ir::ir_schema_version(),
+                        foundry_core::ir::ScreenSpec {
+                            schema_version: foundry_core::ir::ir_schema_version(),
                             width_px: 1440,
                             height_px: 900,
                             background: "#ffffff".to_string(),
@@ -9443,8 +10131,8 @@ fn run() -> Result<i32> {
                     ),
                     "whiteboard" => CreativeArtifact::new_whiteboard(
                         &title,
-                        forge_core::ir::WhiteboardSpec {
-                            schema_version: forge_core::ir::ir_schema_version(),
+                        foundry_core::ir::WhiteboardSpec {
+                            schema_version: foundry_core::ir::ir_schema_version(),
                             width_px: 1920,
                             height_px: 1080,
                             background: "#ffffff".to_string(),
@@ -9457,8 +10145,8 @@ fn run() -> Result<i32> {
                     ),
                     "document" => CreativeArtifact::new_document(
                         &title,
-                        forge_core::ir::DocumentSpec {
-                            schema_version: forge_core::ir::ir_schema_version(),
+                        foundry_core::ir::DocumentSpec {
+                            schema_version: foundry_core::ir::ir_schema_version(),
                             title: title.clone(),
                             author: origin.clone(),
                             front_matter: std::collections::BTreeMap::new(),
@@ -9467,8 +10155,8 @@ fn run() -> Result<i32> {
                     ),
                     "slide_deck" => CreativeArtifact::new_slide_deck(
                         &title,
-                        forge_core::ir::SlideDeckSpec {
-                            schema_version: forge_core::ir::ir_schema_version(),
+                        foundry_core::ir::SlideDeckSpec {
+                            schema_version: foundry_core::ir::ir_schema_version(),
                             title: title.clone(),
                             theme: "default".to_string(),
                             slides: Vec::new(),
@@ -9476,8 +10164,8 @@ fn run() -> Result<i32> {
                     ),
                     "component" => CreativeArtifact::new_component(
                         &title,
-                        forge_core::ir::ComponentSpec {
-                            schema_version: forge_core::ir::ir_schema_version(),
+                        foundry_core::ir::ComponentSpec {
+                            schema_version: foundry_core::ir::ir_schema_version(),
                             name: title.clone(),
                             description: String::new(),
                             props: Vec::new(),
@@ -9497,7 +10185,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             WorkflowCommands::ListCreative { workflow, output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_creative_artifacts(&store, &workflow)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9507,7 +10195,7 @@ fn run() -> Result<i32> {
                 artifact,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = inspect_creative_artifact(&store, &workflow, &artifact)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9523,7 +10211,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = record_creative_collaboration_event(
                     &store,
                     CreativeCollaborationEventRequest {
@@ -9545,7 +10233,7 @@ fn run() -> Result<i32> {
                 artifact,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = inspect_creative_collaboration(&store, &workflow, &artifact)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9556,29 +10244,29 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let token_collection = TokenCollection {
-                    schema_version: forge_core::ir::ir_schema_version(),
+                    schema_version: foundry_core::ir::ir_schema_version(),
                     description: format!("Design tokens for {name}"),
                     tokens: vec![
-                        forge_core::ir::DesignToken {
+                        foundry_core::ir::DesignToken {
                             name: "color.primary".to_string(),
                             value: "#3B82F6".to_string(),
-                            token_type: forge_core::ir::TokenType::Color,
+                            token_type: foundry_core::ir::TokenType::Color,
                             description: "Primary brand color".to_string(),
                             group: "color".to_string(),
                             extensions: std::collections::BTreeMap::new(),
                         },
-                        forge_core::ir::DesignToken {
+                        foundry_core::ir::DesignToken {
                             name: "spacing.md".to_string(),
                             value: "16px".to_string(),
-                            token_type: forge_core::ir::TokenType::Spacing,
+                            token_type: foundry_core::ir::TokenType::Spacing,
                             description: "Medium spacing".to_string(),
                             group: "spacing".to_string(),
                             extensions: std::collections::BTreeMap::new(),
                         },
                     ],
-                    semantic_aliases: vec![forge_core::ir::SemanticAlias {
+                    semantic_aliases: vec![foundry_core::ir::SemanticAlias {
                         name: format!("semantic.{name}"),
                         resolves_to: "color.primary".to_string(),
                         description: format!("Semantic alias for {name}"),
@@ -9592,7 +10280,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             WorkflowCommands::GetTokens { workflow, output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = get_workflow_token_collection(&store, &workflow)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9602,7 +10290,7 @@ fn run() -> Result<i32> {
                 mode,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = resolve_workflow_tokens(&store, &workflow, mode.as_deref())?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9614,7 +10302,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = patch_workflow_token(&store, &workflow, &token, &value, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9634,8 +10322,8 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
-                let report = forge_core::workflow::record_product_decision(
+                let store = FoundryStore::open(cli.store)?;
+                let report = foundry_core::workflow::record_product_decision(
                     &store,
                     &workflow,
                     ProductDecisionInput {
@@ -9667,7 +10355,7 @@ fn run() -> Result<i32> {
                 view,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_task_handoff_response_with_project(
                     &store,
                     &workflow,
@@ -9692,7 +10380,7 @@ fn run() -> Result<i32> {
                 ttl_seconds,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = acquire_task_lease(&store, &workflow, &task, &executor, ttl_seconds)?;
                 let exit_code = if report.allowed { 0 } else { 1 };
                 print_response(output, &report)?;
@@ -9705,7 +10393,7 @@ fn run() -> Result<i32> {
                 executor,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = release_task_lease(&store, &workflow, &task, &lease, &executor)?;
                 let exit_code = if report.released { 0 } else { 1 };
                 print_response(output, &report)?;
@@ -9722,7 +10410,7 @@ fn run() -> Result<i32> {
                 workflow_revision,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = record_task_checkpoint(
                     &store,
                     TaskCheckpointRequest {
@@ -9745,7 +10433,7 @@ fn run() -> Result<i32> {
                 response,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = validate_executor_response_file(&store, &workflow, &task, &response)?;
                 let exit_code = if report.accepted { 0 } else { 1 };
                 print_response(output, &report)?;
@@ -9756,31 +10444,40 @@ fn run() -> Result<i32> {
             RequestCommands::Start {
                 goal,
                 worktree,
+                lanes,
+                max_parallel_agents,
                 origin,
                 idempotency_key,
                 output,
                 detached,
             } => {
                 let store_path = cli.store.clone();
-                let store = ForgeStore::open(store_path.clone())?;
+                let store = FoundryStore::open(store_path.clone())?;
                 let selected_project_root = worktree
                     .as_deref()
                     .map(|selector| resolve_worktree_selector_root(&store, selector))
                     .transpose()?;
+                let parallel_team = explicit_parallel_team_from_lane_specs(
+                    &lanes,
+                    max_parallel_agents,
+                    "foundry.request.start.cli",
+                )?;
                 let mut report = if let Some(project_root) = selected_project_root.as_deref() {
-                    start_async_request_with_project_and_idempotency(
+                    start_async_request_with_project_idempotency_and_parallel_team(
                         &store,
                         &goal,
                         &origin,
                         project_root,
                         idempotency_key.as_deref(),
+                        parallel_team.clone(),
                     )?
                 } else {
-                    start_async_request_with_idempotency(
+                    start_async_request_with_idempotency_and_parallel_team(
                         &store,
                         &goal,
                         &origin,
                         idempotency_key.as_deref(),
+                        parallel_team,
                     )?
                 };
                 if let Some(selector) = worktree {
@@ -9793,7 +10490,7 @@ fn run() -> Result<i32> {
                                 workflow_id: Some(report.workflow_id.clone()),
                                 task_id: None,
                                 origin: origin.clone(),
-                                created_by_forge: false,
+                                created_by_foundry: false,
                             },
                         )?;
                     } else {
@@ -9818,7 +10515,7 @@ fn run() -> Result<i32> {
                         &report.workflow_id,
                         "async_request_detached_driver_spawned",
                         &serde_json::json!({
-                            "schema_version": "forge.request_detached_driver.v1",
+                            "schema_version": "foundry.request_detached_driver.v1",
                             "run_id": report.run_id,
                             "pid": child.id(),
                             "origin": origin,
@@ -9828,7 +10525,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             RequestCommands::Status { run_id, output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = load_request_status(&store, &run_id)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9840,7 +10537,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = drive_request(&store, &run_id, &executor, ttl_seconds, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9852,9 +10549,46 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = step_request(&store, &run_id, &executor, ttl_seconds, &origin)?;
                 let exit_code = if report.status == "validation_failed" {
+                    1
+                } else {
+                    0
+                };
+                print_response(output, &report)?;
+                Ok(exit_code)
+            }
+            RequestCommands::ExecuteWave {
+                run_id,
+                executor,
+                ttl_seconds,
+                timeout_seconds,
+                context_budget,
+                max_parallel,
+                allow_exec,
+                approved_by,
+                reason,
+                origin,
+                output,
+            } => {
+                let store = FoundryStore::open(cli.store)?;
+                let report = execute_request_executor_wave(
+                    &store,
+                    &RequestExecutorWaveOptions {
+                        run_id: &run_id,
+                        requested_executor: &executor,
+                        ttl_seconds,
+                        timeout_seconds,
+                        context_budget,
+                        max_parallel,
+                        allow_exec,
+                        approved_by: &approved_by,
+                        reason: &reason,
+                        origin: &origin,
+                    },
+                )?;
+                let exit_code = if !report.success && report.status != "execution_not_started" {
                     1
                 } else {
                     0
@@ -9869,6 +10603,7 @@ fn run() -> Result<i32> {
                 summary,
                 artifacts,
                 evidence_command,
+                evidence_exit_code,
                 evidence_summary,
                 estimated_usd,
                 tokens_in,
@@ -9878,7 +10613,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = complete_ready_task(
                     &store,
                     &run_id,
@@ -9888,6 +10623,7 @@ fn run() -> Result<i32> {
                         summary: &summary,
                         artifact_paths: &artifacts,
                         evidence_command: evidence_command.as_deref(),
+                        evidence_exit_code,
                         evidence_summary: evidence_summary.as_deref(),
                         estimated_usd,
                         tokens_in,
@@ -9911,7 +10647,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = create_final_delivery_package(&store, &run_id, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9922,13 +10658,13 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = ensure_final_audit(&store, &workflow, &executor, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
             }
             RequestCommands::List { status, output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_requests(&store, status.as_deref())?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9938,7 +10674,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = cancel_request(&store, &run_id, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9948,7 +10684,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = resume_async_request(&store, &run_id, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -9962,7 +10698,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = heartbeat_request(
                     &store,
                     &run_id,
@@ -9986,7 +10722,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = switch_request_executor(
                     &store,
                     &run_id,
@@ -10008,7 +10744,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = recover_stale_request(&store, &run_id, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -10032,7 +10768,7 @@ fn run() -> Result<i32> {
                     anyhow::bail!("max-cycles only applies continuous request supervision");
                 }
 
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let options =
                     RequestSupervisorOptions::new(executor, origin, ttl_seconds, max_steps_per_run);
                 let mut cycle = 0usize;
@@ -10059,7 +10795,7 @@ fn run() -> Result<i32> {
                 ttl_seconds,
                 origin,
             } => {
-                let store = ForgeStore::open(cli.store.clone())?;
+                let store = FoundryStore::open(cli.store.clone())?;
                 loop {
                     let report = step_request(&store, &run_id, &executor, ttl_seconds, &origin)?;
                     let stops_loop = |status: &str| {
@@ -10127,7 +10863,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = memory_policy_report_for_project(&store, project_root.as_deref());
                 print_response(output, &report)?;
                 Ok(0)
@@ -10172,7 +10908,7 @@ fn run() -> Result<i32> {
                 processing_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = search_memory(
                     &store,
                     MemorySearchOptions {
@@ -10213,7 +10949,7 @@ fn run() -> Result<i32> {
                 dry_run,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = promote_memory(
                     &store,
                     MemoryPromotionOptions {
@@ -10245,7 +10981,7 @@ fn run() -> Result<i32> {
                 approved_by,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report =
                     list_memory_promotions(&store, from_scope, to_scope, approved_by, workflow_id)?;
                 print_response(output, &report)?;
@@ -10262,7 +10998,7 @@ fn run() -> Result<i32> {
                 processing_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = memory_retention_report(
                     &store,
                     MemoryRetentionOptions {
@@ -10296,7 +11032,7 @@ fn run() -> Result<i32> {
                 confirm,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = memory_cleanup_report(
                     &store,
                     MemoryCleanupOptions {
@@ -10322,7 +11058,7 @@ fn run() -> Result<i32> {
         },
         Commands::Mcp { command } => match command {
             McpCommands::Serve => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 serve_stdio(&store)?;
                 Ok(0)
             }
@@ -10337,7 +11073,7 @@ fn run() -> Result<i32> {
                 input_file,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let input = read_mcp_input(input, input_file)?;
                 let report = call_mcp_tool(&store, &tool, input)?;
                 print_response(output, &report)?;
@@ -10348,11 +11084,11 @@ fn run() -> Result<i32> {
             project_root,
             output,
         } => {
-            let store = ForgeStore::open(cli.store)?;
-            let report = build_forge_tui(&store, project_root)?;
+            let store = FoundryStore::open(cli.store)?;
+            let report = build_foundry_tui(&store, project_root)?;
             match output {
                 OutputFormat::Json => print_response(output, &report)?,
-                OutputFormat::Human => println!("{}", render_forge_tui(&report)),
+                OutputFormat::Human => println!("{}", render_foundry_tui(&report)),
             }
             Ok(0)
         }
@@ -10361,7 +11097,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_home_with_options(
                     &store,
                     InteractiveHomeOptions { project_root },
@@ -10373,7 +11109,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             InteractiveCommands::GuidedCockpit { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_guided_cockpit(&store)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10387,7 +11123,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_ui_composition(&store, project_root)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10398,7 +11134,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             InteractiveCommands::Readiness { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_readiness(&store)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10410,7 +11146,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_replacement_cli_with_options(
                     &store,
                     InteractiveReplacementCliOptions { project_root },
@@ -10428,7 +11164,7 @@ fn run() -> Result<i32> {
                 enable_experimental,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_multimodal_runtime(
                     &store,
                     &project_root,
@@ -10446,7 +11182,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_addon_capabilities_for_project(
                     &store,
                     project_root.as_deref(),
@@ -10463,7 +11199,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report =
                     build_interactive_core_boundary_for_project(&store, project_root.as_deref());
                 match output {
@@ -10478,7 +11214,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_architecture_compass(&store, project_root)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10489,7 +11225,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             InteractiveCommands::OperationalCockpit { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_operational_cockpit(&store)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10500,7 +11236,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             InteractiveCommands::ImprovementLoop { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_improvement_loop(&store)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10515,7 +11251,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report =
                     build_interactive_release_gates(&store, &version, project_root.as_deref())?;
                 match output {
@@ -10530,7 +11266,7 @@ fn run() -> Result<i32> {
                 executor,
                 shim_dir,
                 project_root,
-                forge_first,
+                foundry_first,
                 observe_only,
                 workflow_id,
                 task_id,
@@ -10539,7 +11275,7 @@ fn run() -> Result<i32> {
                 token_headroom,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let mut options = InteractiveHarnessOptions::default_for_current_dir();
                 options.executor = executor;
                 if let Some(shim_dir) = shim_dir {
@@ -10548,7 +11284,7 @@ fn run() -> Result<i32> {
                 if let Some(project_root) = project_root {
                     options.project_root = Some(project_root);
                 }
-                options.forge_first = forge_first;
+                options.foundry_first = foundry_first;
                 options.observe_only = observe_only;
                 options.workflow_id = workflow_id;
                 options.task_id = task_id;
@@ -10568,7 +11304,7 @@ fn run() -> Result<i32> {
                 readiness,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_sessions(
                     &store,
                     InteractiveSessionsOptions {
@@ -10588,7 +11324,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_command_palette_for_project(
                     &store,
                     query.as_deref(),
@@ -10607,7 +11343,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_action_registry_for_project(
                     &store,
                     query.as_deref(),
@@ -10626,7 +11362,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_action_invocation_for_project(
                     &store,
                     &action_id,
@@ -10647,7 +11383,7 @@ fn run() -> Result<i32> {
                 payload,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let payload: Value = serde_json::from_str(&payload)?;
                 let report = dispatch_interactive_action_hooks_for_project(
                     &store,
@@ -10669,7 +11405,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_autocomplete_for_project(
                     &store,
                     &input,
@@ -10682,7 +11418,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             InteractiveCommands::PatchWorkbench { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_patch_workbench(&store)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10693,7 +11429,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             InteractiveCommands::Permissions { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_permissions(&store)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10705,7 +11441,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_identity(&store, &project_root)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10714,7 +11450,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             InteractiveCommands::TaskBoard { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_task_board(&store)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10723,7 +11459,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             InteractiveCommands::WorkflowMutation { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_workflow_mutation(&store)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10734,7 +11470,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             InteractiveCommands::WorkflowSidebar { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_workflow_sidebar(&store)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10745,7 +11481,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             InteractiveCommands::Artifacts { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_artifacts(&store)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10754,7 +11490,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             InteractiveCommands::TokenUsage { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_token_usage(&store)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10763,7 +11499,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             InteractiveCommands::WorkflowDag { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_workflow_dag(&store)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10772,7 +11508,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             InteractiveCommands::Schedules { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_schedules(&store);
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10784,7 +11520,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_event_runtime(&store, &project_root)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10798,7 +11534,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_context_memory(&store, &project_root)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10812,7 +11548,7 @@ fn run() -> Result<i32> {
                 project_root,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_operating_context(&store, &project_root)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10823,7 +11559,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             InteractiveCommands::StructuredLogs { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_interactive_structured_logs(&store)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -10843,7 +11579,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = route_interactive_input(&store, &input, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -10860,7 +11596,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = create_choice_interaction(
                     &store,
                     CreateChoiceInteractionRequest {
@@ -10871,6 +11607,7 @@ fn run() -> Result<i32> {
                         choices: &choices,
                         timeout_seconds,
                         origin: &origin,
+                        expected_revision: None,
                     },
                 )?;
                 print_response(output, &report)?;
@@ -10885,7 +11622,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = create_form_interaction(
                     &store,
                     &workflow,
@@ -10907,7 +11644,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = answer_human_interaction(
                     &store,
                     &workflow,
@@ -10926,13 +11663,13 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = expire_human_interaction(&store, &workflow, &task, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
             }
             InteractionCommands::List { output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = list_human_interactions(&store)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -10944,7 +11681,7 @@ fn run() -> Result<i32> {
                 addon_dirs,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let report = build_ops_snapshot_with_addon_dirs_and_project(
                     &store,
@@ -10980,7 +11717,7 @@ fn run() -> Result<i32> {
                 payload,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let report = record_addon_renderer_client_event(
                     &store,
@@ -11005,7 +11742,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             MilestoneCommands::Manifest { version, output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_milestone_manifest_with_store(&version, Some(&store))?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -11063,7 +11800,7 @@ fn run() -> Result<i32> {
                 let artifact_value = artifact
                     .to_str()
                     .context("production mission evidence artifact path must be valid UTF-8")?;
-                let store = ForgeStore::open(&cli.store)?;
+                let store = FoundryStore::open(&cli.store)?;
                 let package = build_production_mission_lifecycle_evidence(
                     &store,
                     &release_version,
@@ -11122,7 +11859,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = attach_milestone_evidence(
                     &store,
                     MilestoneAttachEvidenceOptions {
@@ -11146,7 +11883,7 @@ fn run() -> Result<i32> {
                 connected_runtime,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_milestone_evidence_plan(
                     &store,
                     MilestoneEvidencePlanOptions {
@@ -11175,7 +11912,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = prepare_milestone_evidence_inputs(
                     &store,
                     MilestonePrepareEvidenceInputsOptions {
@@ -11207,7 +11944,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = collect_milestone_evidence(
                     &store,
                     MilestoneCollectEvidenceOptions {
@@ -11233,7 +11970,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = collect_ready_milestone_evidence(
                     &store,
                     MilestoneCollectReadyEvidenceOptions {
@@ -11254,7 +11991,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             MilestoneCommands::ExportDemo { origin, output } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_milestone_export_demo(&store, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -11265,7 +12002,7 @@ fn run() -> Result<i32> {
                 connected_brain,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_replacement_cli_demo_with_options(
                     &store,
                     &origin,
@@ -11452,7 +12189,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_patch_plan(&store, &workflow, &task, paths, &intent, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -11465,7 +12202,7 @@ fn run() -> Result<i32> {
                 plan_artifact,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_patch_apply(
                     &store,
                     &workflow,
@@ -11486,7 +12223,7 @@ fn run() -> Result<i32> {
                 plan_artifact,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_patch_review(
                     &store,
                     &workflow,
@@ -11508,7 +12245,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_patch_diff(
                     &store,
                     &workflow,
@@ -11531,7 +12268,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report =
                     build_patch_revert(&store, &workflow, &task, &apply_artifact, &origin, None)?;
                 print_response(output, &report)?;
@@ -11546,7 +12283,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_patch_restore(
                     &store,
                     &workflow,
@@ -11566,7 +12303,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_operational_tui_smoke(&store, project_root.as_deref(), &origin)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
@@ -11574,14 +12311,14 @@ fn run() -> Result<i32> {
                 }
                 Ok(0)
             }
-            SmokeCommands::ForgeFirstHarness {
+            SmokeCommands::FoundryFirstHarness {
                 project_root,
                 executor,
                 real_cmd,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
-                let report = build_forge_first_harness_smoke(
+                let store = FoundryStore::open(cli.store)?;
+                let report = build_foundry_first_harness_smoke(
                     &store,
                     project_root.as_deref(),
                     &executor,
@@ -11590,7 +12327,7 @@ fn run() -> Result<i32> {
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => {
-                        println!("{}", render_forge_first_harness_smoke(&report))
+                        println!("{}", render_foundry_first_harness_smoke(&report))
                     }
                 }
                 Ok(0)
@@ -11601,7 +12338,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_replacement_cli_evidence_smoke(
                     &store,
                     project_root.as_deref(),
@@ -11623,7 +12360,7 @@ fn run() -> Result<i32> {
                 origin,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = build_multimodal_runtime_evidence_smoke(
                     &store,
                     project_root.as_deref(),
@@ -11775,7 +12512,7 @@ fn run() -> Result<i32> {
                 push,
                 output,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store = FoundryStore::open(cli.store)?;
                 let report = run_self_evolution(
                     &store,
                     SelfRunOptions {
@@ -11801,8 +12538,8 @@ fn run() -> Result<i32> {
     }
 }
 
-fn forge_production_mode_enabled() -> bool {
-    std::env::var("FORGE_PRODUCTION_MODE")
+fn foundry_production_mode_enabled() -> bool {
+    foundry_core::brand::env_var("FOUNDRY_PRODUCTION_MODE")
         .ok()
         .map(|value| value.trim().to_ascii_lowercase())
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))

@@ -1,0 +1,21 @@
+{
+  "schema_version": "foundry.memory_governance_config.v1",
+  "status": "memory_governance_configured",
+  "project_root": ".",
+  "config_path": ".foundry/memory-governance.json",
+  "memory_level": "MEMORY_STANDARD",
+  "default_scopes": [
+    "organization",
+    "project",
+    "processing"
+  ],
+  "default_audience": "internal",
+  "privacy_mode": "private_by_default",
+  "retention_mode": "processing_auto_archive",
+  "approval": {
+    "approved_by": "arthur",
+    "approved_at": "2026-06-12T00:00:00-03:00",
+    "reason": "Foundry Core project context must prove organization/project memory isolation for the AI-native workflow operating system."
+  },
+  "governance_rule": "project .foundry/memory-governance.json controls the default memory level, scopes, audience, privacy and retention posture for Foundry-owned project operations"
+}

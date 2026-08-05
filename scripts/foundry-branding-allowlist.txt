@@ -1,0 +1,19 @@
+# Exact repository-relative path<TAB>reason. Globs are forbidden.
+scripts/foundry-branding-allowlist.txt	branding gate policy data
+.forge/connected-brain-runtimes.json	legacy runtime compatibility config; canonical path is .foundry/connected-brain-runtimes.json
+.forge/harness.json	legacy harness compatibility config; canonical path is .foundry/harness.json
+.forge/memory-governance.json	legacy memory compatibility config; canonical path is .foundry/memory-governance.json
+.forge/multimodal-runtimes.json	legacy multimodal runtime compatibility config; canonical path is .foundry/multimodal-runtimes.json
+.forge/multimodal.json	legacy multimodal compatibility config; canonical path is .foundry/multimodal.json
+.forge/operating-context.yaml	legacy operating-context compatibility config; canonical path is .foundry/operating-context.yaml
+CHANGELOG.md	immutable historical release record
+ORIGINAL_REQUEST.md	immutable historical user request record
+forge_strategic_report.md	historical pre-rebrand strategy report
+src/bin/forge.rs	temporary 0.6.x CLI compatibility shim
+sdk/python/forge_sdk/__init__.py	temporary 0.6.x Python import compatibility package
+sdk/python/forge_sdk/workflow.py	temporary 0.6.x Python class compatibility aliases
+docs/forge-0.5-milestone.md	immutable historical 0.5 milestone record
+docs/forge-operating-system-gap-plan-2026-06-08.md	immutable historical dated gap analysis
+docs/validation-report-2026-05-23.md	immutable historical dated validation report
+docs/migration-to-foundry.md	active 0.6.x migration contract documenting legacy names
+tests/forge_compatibility.rs	temporary 0.6.x compatibility contract suite

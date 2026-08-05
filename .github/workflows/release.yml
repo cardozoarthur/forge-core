@@ -40,10 +40,14 @@ jobs:
         id: identity
         shell: bash
         env:
-          TAG_SIGNER_PRINCIPAL: ${{ vars.FORGE_RELEASE_TAG_SIGNER_PRINCIPAL }}
-          TAG_SIGNER_SSH_PUBLIC_KEY: ${{ vars.FORGE_RELEASE_TAG_SIGNER_SSH_PUBLIC_KEY }}
-          RELEASE_TAGGER_NAME: ${{ vars.FORGE_RELEASE_TAGGER_NAME }}
-          RELEASE_TAGGER_EMAIL: ${{ vars.FORGE_RELEASE_TAGGER_EMAIL }}
+          # foundry-brand-allow: legacy-compat
+          TAG_SIGNER_PRINCIPAL: ${{ vars.FOUNDRY_RELEASE_TAG_SIGNER_PRINCIPAL || vars.FORGE_RELEASE_TAG_SIGNER_PRINCIPAL }}
+          # foundry-brand-allow: legacy-compat
+          TAG_SIGNER_SSH_PUBLIC_KEY: ${{ vars.FOUNDRY_RELEASE_TAG_SIGNER_SSH_PUBLIC_KEY || vars.FORGE_RELEASE_TAG_SIGNER_SSH_PUBLIC_KEY }}
+          # foundry-brand-allow: legacy-compat
+          RELEASE_TAGGER_NAME: ${{ vars.FOUNDRY_RELEASE_TAGGER_NAME || vars.FORGE_RELEASE_TAGGER_NAME }}
+          # foundry-brand-allow: legacy-compat
+          RELEASE_TAGGER_EMAIL: ${{ vars.FOUNDRY_RELEASE_TAGGER_EMAIL || vars.FORGE_RELEASE_TAGGER_EMAIL }}
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || {
@@ -67,23 +71,23 @@ jobs:
             exit 1
           }
 
-          crate_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "forge-core") | .version')"
+          crate_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "foundry-core") | .version')"
           test "$RELEASE_TAG" = "v${crate_version}"
 
           test -n "$TAG_SIGNER_PRINCIPAL" || {
-            echo "Repository variable FORGE_RELEASE_TAG_SIGNER_PRINCIPAL is required." >&2
+            echo "Repository variable FOUNDRY_RELEASE_TAG_SIGNER_PRINCIPAL is required." >&2
             exit 1
           }
           test -n "$TAG_SIGNER_SSH_PUBLIC_KEY" || {
-            echo "Repository variable FORGE_RELEASE_TAG_SIGNER_SSH_PUBLIC_KEY is required." >&2
+            echo "Repository variable FOUNDRY_RELEASE_TAG_SIGNER_SSH_PUBLIC_KEY is required." >&2
             exit 1
           }
           test -n "$RELEASE_TAGGER_NAME" || {
-            echo "Repository variable FORGE_RELEASE_TAGGER_NAME is required." >&2
+            echo "Repository variable FOUNDRY_RELEASE_TAGGER_NAME is required." >&2
             exit 1
           }
           test -n "$RELEASE_TAGGER_EMAIL" || {
-            echo "Repository variable FORGE_RELEASE_TAGGER_EMAIL is required." >&2
+            echo "Repository variable FOUNDRY_RELEASE_TAGGER_EMAIL is required." >&2
             exit 1
           }
 
@@ -199,7 +203,7 @@ jobs:
 
       - name: Scan tagged source and history for secrets
         run: |
-          # Run before tests and smokes create ignored runtime keys under .forge/.
+          # Run before tests and smokes create ignored runtime keys under .foundry/.
           gitleaks dir --redact=100 --no-banner --no-color .
           gitleaks git --redact=100 --no-banner --no-color --log-opts="--all" .
 
@@ -221,12 +225,13 @@ jobs:
 
       - name: Run release gates
         run: |
+          bash scripts/check-foundry-branding.sh
           cargo fmt --check
           cargo clippy --all-targets --all-features --locked -- -D warnings
           cargo test --all-features --locked
           cargo build --release --all-features --locked
-          bash packaging/smoke-production.sh target/release/forge
-          bash packaging/smoke-offhost-backup.sh target/release/forge
+          bash packaging/smoke-production.sh target/release/foundry
+          bash packaging/smoke-offhost-backup.sh target/release/foundry
           bash packaging/provider-adoption/single-host/tests/self-test.sh
           bash packaging/production-readiness/tests/self-test.sh
           bash packaging/systemd/tests/runtime-self-test.sh
@@ -247,30 +252,30 @@ jobs:
           cargo package --list --locked >"$package_list"
 
           printf '%s\n' \
-            .agents/skills/forge-core/SKILL.md \
-            .agents/skills/forge-core-addons-ui/SKILL.md \
-            .agents/skills/forge-core-agent/SKILL.md \
-            .agents/skills/forge-core-artifacts/SKILL.md \
-            .agents/skills/forge-core-context/SKILL.md \
-            .agents/skills/forge-core-documentation/SKILL.md \
-            .agents/skills/forge-core-executors/SKILL.md \
-            .agents/skills/forge-core-missions/SKILL.md \
-            .agents/skills/forge-core-runtime/SKILL.md \
-            .agents/skills/forge-core-workflow/SKILL.md \
-            .agents/skills/forge-core-workspaces/SKILL.md |
+            .agents/skills/foundry-core/SKILL.md \
+            .agents/skills/foundry-core-addons-ui/SKILL.md \
+            .agents/skills/foundry-core-agent/SKILL.md \
+            .agents/skills/foundry-core-artifacts/SKILL.md \
+            .agents/skills/foundry-core-context/SKILL.md \
+            .agents/skills/foundry-core-documentation/SKILL.md \
+            .agents/skills/foundry-core-executors/SKILL.md \
+            .agents/skills/foundry-core-missions/SKILL.md \
+            .agents/skills/foundry-core-runtime/SKILL.md \
+            .agents/skills/foundry-core-workflow/SKILL.md \
+            .agents/skills/foundry-core-workspaces/SKILL.md |
             LC_ALL=C sort >"$expected"
           grep -E '^\.agents/skills/[^/]+/SKILL\.md$' "$package_list" |
             LC_ALL=C sort >"$actual"
           diff -u "$expected" "$actual"
 
-          for directory in installer packaging src tests; do
+          for directory in installer packaging scripts src tests; do
             find "$directory" -type f -print | LC_ALL=C sort >"$expected"
             grep -E "^${directory}/" "$package_list" | LC_ALL=C sort >"$actual"
             diff -u "$expected" "$actual"
           done
 
           grep -Fx 'docs/production-single-host.md' "$package_list" >/dev/null
-          grep -Fx 'skills/forge-core/SKILL.md' "$package_list" >/dev/null
+          grep -Fx 'skills/foundry-core/SKILL.md' "$package_list" >/dev/null
           cargo package --locked
 
       - name: Prove bounded mission-platform inventory 40/40
@@ -278,7 +283,7 @@ jobs:
           # This is a fast deterministic contract smoke. It must remain
           # production_ready=false and is not deployment evidence.
           cargo test --all-features --locked \
-            --test forge_mission_platform_contract \
+            --test foundry_mission_platform_contract \
             registered_worktree_binding_receipt_allows_the_bounded_probe_to_pass \
             -- --exact
 
@@ -288,7 +293,7 @@ jobs:
           # It is a pre-publish runtime gate, not the post-installation
           # production-readiness manifest.
           cargo test --all-features --locked \
-            --test forge_mission_execution_cli_e2e \
+            --test foundry_mission_execution_cli_e2e \
             cli_execution_receipts_cover_nonzero_timeout_replay_submit_and_reopen \
             -- --exact
 
@@ -299,9 +304,9 @@ jobs:
           plan_file="$(mktemp)"
           trap 'rm -f -- "$catalog_file" "$plan_file"' EXIT
 
-          target/release/forge squad capabilities --output json >"$catalog_file"
-          target/release/forge milestone production-plan \
-            --version 0.5 \
+          target/release/foundry squad capabilities --output json >"$catalog_file"
+          target/release/foundry milestone production-plan \
+            --version 0.6 \
             --output json >"$plan_file"
 
           jq -e '
@@ -334,24 +339,24 @@ jobs:
         include:
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            asset: forge-linux-x86_64.tar.gz
-            binary: forge
+            asset: foundry-linux-x86_64.tar.gz
+            binary: foundry
           - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            asset: forge-linux-aarch64.tar.gz
-            binary: forge
+            asset: foundry-linux-aarch64.tar.gz
+            binary: foundry
           - runner: macos-15-intel
             target: x86_64-apple-darwin
-            asset: forge-macos-x86_64.tar.gz
-            binary: forge
+            asset: foundry-macos-x86_64.tar.gz
+            binary: foundry
           - runner: macos-15
             target: aarch64-apple-darwin
-            asset: forge-macos-aarch64.tar.gz
-            binary: forge
+            asset: foundry-macos-aarch64.tar.gz
+            binary: foundry
           - runner: windows-2025
             target: x86_64-pc-windows-msvc
-            asset: forge-windows-x86_64.zip
-            binary: forge.exe
+            asset: foundry-windows-x86_64.zip
+            binary: foundry.exe
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
@@ -374,48 +379,51 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          legacy_shim=forge # foundry-brand-allow: legacy-compat
           mkdir -p dist/stage/packaging dist/stage/docs dist/stage/installer
-          install -m 0755 "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/stage/forge
+          install -m 0755 "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/stage/foundry
+          install -m 0755 "target/${{ matrix.target }}/release/$legacy_shim" "dist/stage/$legacy_shim"
           install -m 0644 LICENSE dist/stage/LICENSE
           cp -a packaging/systemd dist/stage/packaging/systemd
           cp -a packaging/provider-adoption dist/stage/packaging/provider-adoption
           cp -a packaging/production-readiness dist/stage/packaging/production-readiness
           chmod 0755 \
-            dist/stage/packaging/systemd/forge-admin \
-            dist/stage/packaging/systemd/forge-backup \
-            dist/stage/packaging/systemd/forge-restore-drill \
+            dist/stage/packaging/systemd/foundry-admin \
+            dist/stage/packaging/systemd/foundry-backup \
+            dist/stage/packaging/systemd/foundry-restore-drill \
             dist/stage/packaging/systemd/install-service.sh \
             dist/stage/packaging/systemd/tests/runtime-self-test.sh \
-            dist/stage/packaging/production-readiness/forge-bounded-load-drill \
-            dist/stage/packaging/production-readiness/forge-upgrade-rollback-drill \
+            dist/stage/packaging/production-readiness/foundry-bounded-load-drill \
+            dist/stage/packaging/production-readiness/foundry-upgrade-rollback-drill \
             dist/stage/packaging/production-readiness/tests/self-test.sh \
-            dist/stage/packaging/provider-adoption/single-host/bin/forge-production-alert \
-            dist/stage/packaging/provider-adoption/single-host/bin/forge-directory-offhost-uploader \
+            dist/stage/packaging/provider-adoption/single-host/bin/foundry-production-alert \
+            dist/stage/packaging/provider-adoption/single-host/bin/foundry-directory-offhost-uploader \
             dist/stage/packaging/provider-adoption/single-host/tests/alert-self-test.sh \
             dist/stage/packaging/provider-adoption/single-host/tests/directory-offhost-self-test.sh \
             dist/stage/packaging/provider-adoption/single-host/tests/self-test.sh \
             dist/stage/packaging/provider-adoption/single-host/tests/stubs/curl \
             dist/stage/packaging/provider-adoption/single-host/tests/stubs/df \
-            dist/stage/packaging/provider-adoption/single-host/tests/stubs/forge-admin \
+            dist/stage/packaging/provider-adoption/single-host/tests/stubs/foundry-admin \
             dist/stage/packaging/provider-adoption/single-host/tests/stubs/stat \
             dist/stage/packaging/provider-adoption/single-host/tests/stubs/systemctl
           chmod 0644 \
-            dist/stage/packaging/systemd/forge-ops.service \
-            dist/stage/packaging/systemd/forge-runtime.service \
-            dist/stage/packaging/systemd/forge-request-supervisor.service \
-            dist/stage/packaging/systemd/forge-backup.service \
-            dist/stage/packaging/systemd/forge-backup.timer \
+            dist/stage/packaging/systemd/foundry-ops.service \
+            dist/stage/packaging/systemd/foundry-runtime.service \
+            dist/stage/packaging/systemd/foundry-request-supervisor.service \
+            dist/stage/packaging/systemd/foundry-backup.service \
+            dist/stage/packaging/systemd/foundry-backup.timer \
             dist/stage/packaging/production-readiness/README.md \
             dist/stage/packaging/provider-adoption/single-host/README.md \
-            dist/stage/packaging/provider-adoption/single-host/systemd/forge-production-alert.service \
-            dist/stage/packaging/provider-adoption/single-host/systemd/forge-production-alert.timer
+            dist/stage/packaging/provider-adoption/single-host/systemd/foundry-production-alert.service \
+            dist/stage/packaging/provider-adoption/single-host/systemd/foundry-production-alert.timer
           install -m 0644 docs/production-single-host.md dist/stage/docs/production-single-host.md
           install -m 0644 installer/README.md dist/stage/installer/README.md
           python3 packaging/reproducible_archive.py create \
             --format tar.gz \
             --source dist/stage \
             --output "dist/${{ matrix.asset }}" \
-            forge \
+            foundry \
+            "$legacy_shim" \
             LICENSE \
             packaging/systemd \
             packaging/production-readiness \
@@ -427,11 +435,13 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          legacy_shim=forge # foundry-brand-allow: legacy-compat
           python3 packaging/reproducible_archive.py verify \
             --format tar.gz \
             --source dist/stage \
             --output "dist/${{ matrix.asset }}" \
-            forge \
+            foundry \
+            "$legacy_shim" \
             LICENSE \
             packaging/systemd \
             packaging/production-readiness \
@@ -443,7 +453,8 @@ jobs:
             --format tar.gz \
             --source dist/stage \
             --output "dist/${{ matrix.asset }}.reproduced" \
-            forge \
+            foundry \
+            "$legacy_shim" \
             LICENSE \
             packaging/systemd \
             packaging/production-readiness \
@@ -460,7 +471,8 @@ jobs:
 
           {
             printf '%s\n' \
-              forge \
+              foundry \
+              "$legacy_shim" \
               LICENSE \
               docs/production-single-host.md \
               installer/README.md
@@ -477,23 +489,24 @@ jobs:
           diff -u "$validation_dir/expected" "$validation_dir/actual"
 
           for executable in \
-            forge \
-            packaging/systemd/forge-admin \
-            packaging/systemd/forge-backup \
-            packaging/systemd/forge-restore-drill \
+            foundry \
+            "$legacy_shim" \
+            packaging/systemd/foundry-admin \
+            packaging/systemd/foundry-backup \
+            packaging/systemd/foundry-restore-drill \
             packaging/systemd/install-service.sh \
             packaging/systemd/tests/runtime-self-test.sh \
-            packaging/production-readiness/forge-bounded-load-drill \
-            packaging/production-readiness/forge-upgrade-rollback-drill \
+            packaging/production-readiness/foundry-bounded-load-drill \
+            packaging/production-readiness/foundry-upgrade-rollback-drill \
             packaging/production-readiness/tests/self-test.sh \
-            packaging/provider-adoption/single-host/bin/forge-production-alert \
-            packaging/provider-adoption/single-host/bin/forge-directory-offhost-uploader \
+            packaging/provider-adoption/single-host/bin/foundry-production-alert \
+            packaging/provider-adoption/single-host/bin/foundry-directory-offhost-uploader \
             packaging/provider-adoption/single-host/tests/alert-self-test.sh \
             packaging/provider-adoption/single-host/tests/directory-offhost-self-test.sh \
             packaging/provider-adoption/single-host/tests/self-test.sh \
             packaging/provider-adoption/single-host/tests/stubs/curl \
             packaging/provider-adoption/single-host/tests/stubs/df \
-            packaging/provider-adoption/single-host/tests/stubs/forge-admin \
+            packaging/provider-adoption/single-host/tests/stubs/foundry-admin \
             packaging/provider-adoption/single-host/tests/stubs/stat \
             packaging/provider-adoption/single-host/tests/stubs/systemctl
           do
@@ -504,21 +517,25 @@ jobs:
             LICENSE \
             docs/production-single-host.md \
             installer/README.md \
-            packaging/systemd/forge-ops.service \
-            packaging/systemd/forge-runtime.service \
-            packaging/systemd/forge-request-supervisor.service \
-            packaging/systemd/forge-backup.service \
-            packaging/systemd/forge-backup.timer \
+            packaging/systemd/foundry-ops.service \
+            packaging/systemd/foundry-runtime.service \
+            packaging/systemd/foundry-request-supervisor.service \
+            packaging/systemd/foundry-backup.service \
+            packaging/systemd/foundry-backup.timer \
             packaging/production-readiness/README.md \
             packaging/provider-adoption/single-host/README.md \
-            packaging/provider-adoption/single-host/systemd/forge-production-alert.service \
-            packaging/provider-adoption/single-host/systemd/forge-production-alert.timer
+            packaging/provider-adoption/single-host/systemd/foundry-production-alert.service \
+            packaging/provider-adoption/single-host/systemd/foundry-production-alert.timer
           do
             test "$(stat -c '%a' "$validation_dir/archive/$non_executable")" = 644
           done
 
-          expected_version="forge ${RELEASE_TAG#v}"
-          test "$("$validation_dir/archive/forge" --version)" = "$expected_version"
+          expected_version="foundry ${RELEASE_TAG#v}"
+          test "$("$validation_dir/archive/foundry" --version)" = "$expected_version"
+          legacy_stderr="$validation_dir/$legacy_shim.stderr"
+          test "$("$validation_dir/archive/$legacy_shim" --version 2>"$legacy_stderr")" = "$expected_version"
+          # foundry-brand-allow: legacy-compat
+          grep -Fq 'warning: `forge` is deprecated and will be removed after the 0.6.x compatibility cycle; use `foundry`' "$legacy_stderr"
           kernel_version="$(uname -r | cut -d- -f1)"
           dpkg --compare-versions "$kernel_version" ge 4.18
           systemd_version="$(systemd --version | awk 'NR == 1 { print $2 }')"
@@ -527,7 +544,7 @@ jobs:
           bash "$validation_dir/archive/packaging/provider-adoption/single-host/tests/self-test.sh"
           bash "$validation_dir/archive/packaging/systemd/tests/runtime-self-test.sh"
           required_glibc="$(
-            readelf --version-info "$validation_dir/archive/forge" |
+            readelf --version-info "$validation_dir/archive/foundry" |
               grep -Eo 'GLIBC_[0-9]+(\.[0-9]+)+' |
               sort -Vu |
               tail -1
@@ -543,6 +560,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          legacy_shim=forge # foundry-brand-allow: legacy-compat
           smoke_dir="$(mktemp -d)"
           server_pid=""
           cleanup() {
@@ -564,7 +582,7 @@ jobs:
           )"
           {
             printf 'issuer=https://token.actions.githubusercontent.com\n'
-            printf 'identity=https://github.com/cardozoarthur/forge-core/.github/workflows/release.yml@refs/tags/%s\n' "$RELEASE_TAG"
+            printf 'identity=https://github.com/cardozoarthur/foundry-core/.github/workflows/release.yml@refs/tags/%s\n' "$RELEASE_TAG"
             printf 'subject_sha256=%s\n' "$checksums_digest"
           } >"$smoke_dir/release/SHA256SUMS.sigstore.json"
           mkdir "$smoke_dir/stubs"
@@ -594,42 +612,52 @@ jobs:
           curl -fsS "$base_url/SHA256SUMS" >/dev/null
 
           PATH="$smoke_dir/stubs:$PATH" \
-            FORGE_VERSION="$RELEASE_TAG" \
-            FORGE_INSTALLER_TEST_MODE=1 \
-            FORGE_RELEASE_BASE_URL="$base_url" \
-            FORGE_BIN_DIR="$smoke_dir/bin" \
+            FOUNDRY_VERSION="$RELEASE_TAG" \
+            FOUNDRY_INSTALLER_TEST_MODE=1 \
+            FOUNDRY_RELEASE_BASE_URL="$base_url" \
+            FOUNDRY_BIN_DIR="$smoke_dir/bin" \
             bash installer/install.sh
-          test "$("$smoke_dir/bin/forge" --version)" = "forge ${RELEASE_TAG#v}"
+          test "$("$smoke_dir/bin/foundry" --version)" = "foundry ${RELEASE_TAG#v}"
+          legacy_stderr="$smoke_dir/$legacy_shim.stderr"
+          test "$("$smoke_dir/bin/$legacy_shim" --version 2>"$legacy_stderr")" = "foundry ${RELEASE_TAG#v}"
+          # foundry-brand-allow: legacy-compat
+          grep -Fq 'warning: `forge` is deprecated' "$legacy_stderr"
 
       - name: Package macOS archive
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          legacy_shim=forge # foundry-brand-allow: legacy-compat
           mkdir -p dist/stage
-          install -m 0755 "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/stage/forge
+          install -m 0755 "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/stage/foundry
+          install -m 0755 "target/${{ matrix.target }}/release/$legacy_shim" "dist/stage/$legacy_shim"
           install -m 0644 LICENSE dist/stage/LICENSE
           python3 packaging/reproducible_archive.py create \
             --format tar.gz \
             --source dist/stage \
             --output "dist/${{ matrix.asset }}" \
-            forge \
+            foundry \
+            "$legacy_shim" \
             LICENSE
 
       - name: Validate macOS archive layout
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          legacy_shim=forge # foundry-brand-allow: legacy-compat
           python3 packaging/reproducible_archive.py verify \
             --format tar.gz \
             --source dist/stage \
             --output "dist/${{ matrix.asset }}" \
-            forge \
+            foundry \
+            "$legacy_shim" \
             LICENSE
           python3 packaging/reproducible_archive.py create \
             --format tar.gz \
             --source dist/stage \
             --output "dist/${{ matrix.asset }}.reproduced" \
-            forge \
+            foundry \
+            "$legacy_shim" \
             LICENSE
           cmp "dist/${{ matrix.asset }}" "dist/${{ matrix.asset }}.reproduced"
           rm "dist/${{ matrix.asset }}.reproduced"
@@ -639,19 +667,25 @@ jobs:
           mkdir "$validation_dir/archive"
           tar -xzf "dist/${{ matrix.asset }}" -C "$validation_dir/archive"
 
-          printf '%s\n' forge LICENSE | LC_ALL=C sort >"$validation_dir/expected"
+          printf '%s\n' foundry "$legacy_shim" LICENSE | LC_ALL=C sort >"$validation_dir/expected"
           (
             cd "$validation_dir/archive"
             find . -type f -print
           ) | sed 's#^\./##' | LC_ALL=C sort >"$validation_dir/actual"
           diff -u "$validation_dir/expected" "$validation_dir/actual"
-          test -x "$validation_dir/archive/forge"
-          test "$("$validation_dir/archive/forge" --version)" = "forge ${RELEASE_TAG#v}"
+          test -x "$validation_dir/archive/foundry"
+          test "$("$validation_dir/archive/foundry" --version)" = "foundry ${RELEASE_TAG#v}"
+          test -x "$validation_dir/archive/$legacy_shim"
+          legacy_stderr="$validation_dir/$legacy_shim.stderr"
+          test "$("$validation_dir/archive/$legacy_shim" --version 2>"$legacy_stderr")" = "foundry ${RELEASE_TAG#v}"
+          # foundry-brand-allow: legacy-compat
+          grep -Fq 'warning: `forge` is deprecated' "$legacy_stderr"
 
       - name: Exercise Unix installer against release fixture
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          legacy_shim=forge # foundry-brand-allow: legacy-compat
           smoke_dir="$(mktemp -d)"
           server_pid=""
           cleanup() {
@@ -673,7 +707,7 @@ jobs:
           )"
           {
             printf 'issuer=https://token.actions.githubusercontent.com\n'
-            printf 'identity=https://github.com/cardozoarthur/forge-core/.github/workflows/release.yml@refs/tags/%s\n' "$RELEASE_TAG"
+            printf 'identity=https://github.com/cardozoarthur/foundry-core/.github/workflows/release.yml@refs/tags/%s\n' "$RELEASE_TAG"
             printf 'subject_sha256=%s\n' "$checksums_digest"
           } >"$smoke_dir/release/SHA256SUMS.sigstore.json"
           mkdir "$smoke_dir/stubs"
@@ -703,42 +737,52 @@ jobs:
           curl -fsS "$base_url/SHA256SUMS" >/dev/null
 
           PATH="$smoke_dir/stubs:$PATH" \
-            FORGE_VERSION="$RELEASE_TAG" \
-            FORGE_INSTALLER_TEST_MODE=1 \
-            FORGE_RELEASE_BASE_URL="$base_url" \
-            FORGE_BIN_DIR="$smoke_dir/bin" \
+            FOUNDRY_VERSION="$RELEASE_TAG" \
+            FOUNDRY_INSTALLER_TEST_MODE=1 \
+            FOUNDRY_RELEASE_BASE_URL="$base_url" \
+            FOUNDRY_BIN_DIR="$smoke_dir/bin" \
             bash installer/install.sh
-          test "$("$smoke_dir/bin/forge" --version)" = "forge ${RELEASE_TAG#v}"
+          test "$("$smoke_dir/bin/foundry" --version)" = "foundry ${RELEASE_TAG#v}"
+          legacy_stderr="$smoke_dir/$legacy_shim.stderr"
+          test "$("$smoke_dir/bin/$legacy_shim" --version 2>"$legacy_stderr")" = "foundry ${RELEASE_TAG#v}"
+          # foundry-brand-allow: legacy-compat
+          grep -Fq 'warning: `forge` is deprecated' "$legacy_stderr"
 
       - name: Package Windows archive
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $legacyShim = "forge" # foundry-brand-allow: legacy-compat
           New-Item -ItemType Directory -Force -Path dist/stage | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/stage/forge.exe
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/stage/foundry.exe
+          Copy-Item "target/${{ matrix.target }}/release/$legacyShim.exe" "dist/stage/$legacyShim.exe"
           Copy-Item LICENSE dist/stage/LICENSE
           python packaging/reproducible_archive.py create `
             --format zip `
             --source dist/stage `
             --output "dist/${{ matrix.asset }}" `
-            forge.exe `
+            foundry.exe `
+            "$legacyShim.exe" `
             LICENSE
 
       - name: Validate Windows archive layout
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $legacyShim = "forge" # foundry-brand-allow: legacy-compat
           python packaging/reproducible_archive.py verify `
             --format zip `
             --source dist/stage `
             --output "dist/${{ matrix.asset }}" `
-            forge.exe `
+            foundry.exe `
+            "$legacyShim.exe" `
             LICENSE
           python packaging/reproducible_archive.py create `
             --format zip `
             --source dist/stage `
             --output "dist/${{ matrix.asset }}.reproduced" `
-            forge.exe `
+            foundry.exe `
+            "$legacyShim.exe" `
             LICENSE
           $digest = (Get-FileHash -Algorithm SHA256 "dist/${{ matrix.asset }}").Hash
           $reproducedDigest = (
@@ -759,13 +803,21 @@ jobs:
                 } |
                 Sort-Object
             )
-            $expected = @('forge.exe', 'LICENSE') | Sort-Object
+            $expected = @('foundry.exe', "$legacyShim.exe", 'LICENSE') | Sort-Object
             if (($actual -join "`n") -ne ($expected -join "`n")) {
               throw "Unexpected Windows archive layout: $($actual -join ', ')"
             }
-            $actualVersion = & (Join-Path $validationDir "forge.exe") --version
-            if ($actualVersion -ne "forge $($env:RELEASE_TAG.TrimStart('v'))") {
-              throw "Unexpected forge.exe version: $actualVersion"
+            $actualVersion = & (Join-Path $validationDir "foundry.exe") --version
+            if ($actualVersion -ne "foundry $($env:RELEASE_TAG.TrimStart('v'))") {
+              throw "Unexpected foundry.exe version: $actualVersion"
+            }
+            $legacyStderr = Join-Path $validationDir "$legacyShim.stderr"
+            $legacyVersion = & (Join-Path $validationDir "$legacyShim.exe") --version 2>$legacyStderr
+            if ($legacyVersion -ne "foundry $($env:RELEASE_TAG.TrimStart('v'))") {
+              throw "Compatibility shim did not forward --version: $legacyVersion"
+            }
+            if ((Get-Content -Raw $legacyStderr) -notmatch 'deprecated') {
+              throw "Compatibility shim did not emit its deprecation warning"
             }
           } finally {
             Remove-Item -Path $validationDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -775,6 +827,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $legacyShim = "forge" # foundry-brand-allow: legacy-compat
           $smokeDir = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString())
           $releaseDir = Join-Path $smokeDir "release"
           $binDir = Join-Path $smokeDir "bin"
@@ -790,7 +843,7 @@ jobs:
           $checksumsDigest = (Get-FileHash -Algorithm SHA256 $checksumsPath).Hash.ToLowerInvariant()
           @{
             issuer = "https://token.actions.githubusercontent.com"
-            identity = "https://github.com/cardozoarthur/forge-core/.github/workflows/release.yml@refs/tags/$env:RELEASE_TAG"
+            identity = "https://github.com/cardozoarthur/foundry-core/.github/workflows/release.yml@refs/tags/$env:RELEASE_TAG"
             subject_sha256 = $checksumsDigest
           } | ConvertTo-Json | Set-Content `
             -Path (Join-Path $releaseDir "SHA256SUMS.sigstore.json") `
@@ -822,10 +875,10 @@ jobs:
             -PassThru `
             -WindowStyle Hidden
 
-          $previousBaseUrl = $env:FORGE_RELEASE_BASE_URL
-          $previousBinDir = $env:FORGE_BIN_DIR
-          $previousVersion = $env:FORGE_VERSION
-          $previousTestMode = $env:FORGE_INSTALLER_TEST_MODE
+          $previousBaseUrl = $env:FOUNDRY_RELEASE_BASE_URL
+          $previousBinDir = $env:FOUNDRY_BIN_DIR
+          $previousVersion = $env:FOUNDRY_VERSION
+          $previousTestMode = $env:FOUNDRY_INSTALLER_TEST_MODE
           $previousPath = $env:PATH
           try {
             $baseUrl = "http://127.0.0.1:$port"
@@ -845,21 +898,29 @@ jobs:
               throw "Local release fixture did not become ready"
             }
 
-            $env:FORGE_RELEASE_BASE_URL = $baseUrl
-            $env:FORGE_BIN_DIR = $binDir
-            $env:FORGE_VERSION = $env:RELEASE_TAG
-            $env:FORGE_INSTALLER_TEST_MODE = "1"
+            $env:FOUNDRY_RELEASE_BASE_URL = $baseUrl
+            $env:FOUNDRY_BIN_DIR = $binDir
+            $env:FOUNDRY_VERSION = $env:RELEASE_TAG
+            $env:FOUNDRY_INSTALLER_TEST_MODE = "1"
             $env:PATH = "$stubDir;$previousPath"
             & ./installer/install.ps1
-            $actualVersion = & (Join-Path $binDir "forge.exe") --version
-            if ($actualVersion -ne "forge $($env:RELEASE_TAG.TrimStart('v'))") {
-              throw "Installed forge.exe has unexpected version: $actualVersion"
+            $actualVersion = & (Join-Path $binDir "foundry.exe") --version
+            if ($actualVersion -ne "foundry $($env:RELEASE_TAG.TrimStart('v'))") {
+              throw "Installed foundry.exe has unexpected version: $actualVersion"
+            }
+            $legacyStderr = Join-Path $smokeDir "$legacyShim.stderr"
+            $legacyVersion = & (Join-Path $binDir "$legacyShim.exe") --version 2>$legacyStderr
+            if ($legacyVersion -ne "foundry $($env:RELEASE_TAG.TrimStart('v'))") {
+              throw "Installed compatibility shim did not forward --version: $legacyVersion"
+            }
+            if ((Get-Content -Raw $legacyStderr) -notmatch 'deprecated') {
+              throw "Installed compatibility shim did not emit its deprecation warning"
             }
           } finally {
-            $env:FORGE_RELEASE_BASE_URL = $previousBaseUrl
-            $env:FORGE_BIN_DIR = $previousBinDir
-            $env:FORGE_VERSION = $previousVersion
-            $env:FORGE_INSTALLER_TEST_MODE = $previousTestMode
+            $env:FOUNDRY_RELEASE_BASE_URL = $previousBaseUrl
+            $env:FOUNDRY_BIN_DIR = $previousBinDir
+            $env:FOUNDRY_VERSION = $previousVersion
+            $env:FOUNDRY_INSTALLER_TEST_MODE = $previousTestMode
             $env:PATH = $previousPath
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
             Remove-Item -Path $smokeDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -908,7 +969,7 @@ jobs:
       - name: Download release archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: forge-*
+          pattern: foundry-*
           path: release
           merge-multiple: true
 
@@ -920,15 +981,15 @@ jobs:
       - name: Generate CycloneDX SBOM and checksums
         shell: bash
         run: |
-          cargo cyclonedx --all --format json --spec-version 1.5 --override-filename forge-core.cdx
-          mv forge-core.cdx.json release/forge-core.cdx.json
+          cargo cyclonedx --all --format json --spec-version 1.5 --override-filename foundry-core.cdx
+          mv foundry-core.cdx.json release/foundry-core.cdx.json
           install -m 0755 installer/install.sh release/install.sh
           install -m 0644 installer/install.ps1 release/install.ps1
           cd release
           LC_ALL=C sha256sum \
-            forge-*.tar.gz \
-            forge-*.zip \
-            forge-core.cdx.json \
+            foundry-*.tar.gz \
+            foundry-*.zip \
+            foundry-core.cdx.json \
             install.sh \
             install.ps1 \
             >SHA256SUMS

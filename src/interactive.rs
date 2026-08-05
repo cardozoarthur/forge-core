@@ -13,7 +13,7 @@ use crate::cli_integration::{
     build_harness_executor_compatibility_report, build_harness_headroom_plan,
     build_harness_mode_report, build_headroom_stats_report, inspect_cli_harness_shim_status,
     inspect_cli_harness_shim_status_with_path, install_cli_harness_shim,
-    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
+    persist_token_headroom_report, resolve_harness_foundry_first_source_for_project,
     resolve_harness_runtime_policy, run_cli_harness_exec, CliHarnessExecOptions,
     CliShimInstallOptions, CliShimInstallReport, CliShimStatusOptions, CliShimStatusReport,
     CliWrapperPlanReport, HarnessActivationProfileOptions, HarnessActivationProfileReport,
@@ -81,7 +81,7 @@ use crate::runtime::load_runtimes;
 use crate::schedule::{
     build_schedule_worker_status, create_daily_goal_research_workflow, ScheduleWorkerStatusReport,
 };
-use crate::storage::{ForgeStore, GlobalEventWrite, StoreEvent};
+use crate::storage::{FoundryStore, GlobalEventWrite, StoreEvent};
 use crate::workflow::{record_product_decision, ProductDecisionInput};
 use anyhow::Result;
 use chrono::Utc;
@@ -95,70 +95,74 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
-const INTERACTIVE_WORKFLOW_SIDEBAR_SCHEMA_VERSION: &str = "forge.interactive.workflow_sidebar.v1";
-const INTERACTIVE_REPLACEMENT_CLI_SCHEMA_VERSION: &str = "forge.interactive.replacement_cli.v1";
+const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "foundry.interactive.home.v1";
+const INTERACTIVE_WORKFLOW_SIDEBAR_SCHEMA_VERSION: &str = "foundry.interactive.workflow_sidebar.v1";
+const INTERACTIVE_REPLACEMENT_CLI_SCHEMA_VERSION: &str = "foundry.interactive.replacement_cli.v1";
 const INTERACTIVE_MULTIMODAL_RUNTIME_SCHEMA_VERSION: &str =
-    "forge.interactive.multimodal_runtime.v1";
-const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
-const INTERACTIVE_ARTIFACTS_SCHEMA_VERSION: &str = "forge.interactive.artifacts.v1";
-const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
-const INTERACTIVE_SCHEDULES_SCHEMA_VERSION: &str = "forge.interactive.schedules.v1";
-const INTERACTIVE_CONTEXT_MEMORY_SCHEMA_VERSION: &str = "forge.interactive.context_memory.v1";
-const INTERACTIVE_OPERATING_CONTEXT_SCHEMA_VERSION: &str = "forge.interactive.operating_context.v1";
-const INTERACTIVE_IMPROVEMENT_LOOP_SCHEMA_VERSION: &str = "forge.interactive.improvement_loop.v1";
-const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "forge.interactive.readiness.v1";
-const INTERACTIVE_RELEASE_GATES_SCHEMA_VERSION: &str = "forge.interactive.release_gates.v1";
-const INTERACTIVE_HARNESS_SCHEMA_VERSION: &str = "forge.interactive.harness.v1";
-const INTERACTIVE_TOKEN_USAGE_SCHEMA_VERSION: &str = "forge.interactive.token_usage.v1";
-const INTERACTIVE_SESSIONS_SCHEMA_VERSION: &str = "forge.interactive.sessions.v1";
-const INTERACTIVE_COMMAND_PALETTE_SCHEMA_VERSION: &str = "forge.interactive.command_palette.v1";
+    "foundry.interactive.multimodal_runtime.v1";
+const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "foundry.interactive.task_board.v1";
+const INTERACTIVE_ARTIFACTS_SCHEMA_VERSION: &str = "foundry.interactive.artifacts.v1";
+const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "foundry.interactive.workflow_dag.v1";
+const INTERACTIVE_SCHEDULES_SCHEMA_VERSION: &str = "foundry.interactive.schedules.v1";
+const INTERACTIVE_CONTEXT_MEMORY_SCHEMA_VERSION: &str = "foundry.interactive.context_memory.v1";
+const INTERACTIVE_OPERATING_CONTEXT_SCHEMA_VERSION: &str =
+    "foundry.interactive.operating_context.v1";
+const INTERACTIVE_IMPROVEMENT_LOOP_SCHEMA_VERSION: &str = "foundry.interactive.improvement_loop.v1";
+const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "foundry.interactive.readiness.v1";
+const INTERACTIVE_RELEASE_GATES_SCHEMA_VERSION: &str = "foundry.interactive.release_gates.v1";
+const INTERACTIVE_HARNESS_SCHEMA_VERSION: &str = "foundry.interactive.harness.v1";
+const INTERACTIVE_TOKEN_USAGE_SCHEMA_VERSION: &str = "foundry.interactive.token_usage.v1";
+const INTERACTIVE_SESSIONS_SCHEMA_VERSION: &str = "foundry.interactive.sessions.v1";
+const INTERACTIVE_COMMAND_PALETTE_SCHEMA_VERSION: &str = "foundry.interactive.command_palette.v1";
 const INTERACTIVE_COMMAND_PALETTE_ACTION_PLAN_SCHEMA_VERSION: &str =
-    "forge.interactive.command_palette_action_plan.v1";
-const INTERACTIVE_ACTION_REGISTRY_SCHEMA_VERSION: &str = "forge.interactive.action_registry.v1";
-const INTERACTIVE_ACTION_INVOCATION_SCHEMA_VERSION: &str = "forge.interactive.action_invocation.v1";
-const INTERACTIVE_ACTION_DISPATCH_SCHEMA_VERSION: &str = "forge.interactive.action_dispatch.v1";
+    "foundry.interactive.command_palette_action_plan.v1";
+const INTERACTIVE_ACTION_REGISTRY_SCHEMA_VERSION: &str = "foundry.interactive.action_registry.v1";
+const INTERACTIVE_ACTION_INVOCATION_SCHEMA_VERSION: &str =
+    "foundry.interactive.action_invocation.v1";
+const INTERACTIVE_ACTION_DISPATCH_SCHEMA_VERSION: &str = "foundry.interactive.action_dispatch.v1";
 const INTERACTIVE_ACTION_HOOK_CONTRACT_SCHEMA_VERSION: &str =
-    "forge.interactive.action_hook_contract.v1";
+    "foundry.interactive.action_hook_contract.v1";
 const INTERACTIVE_WORKFLOW_HOOK_CONTRACT_SCHEMA_VERSION: &str =
-    "forge.interactive.workflow_hook_contract.v1";
+    "foundry.interactive.workflow_hook_contract.v1";
 const INTERACTIVE_BRAIN_HOOK_CONTRACT_SCHEMA_VERSION: &str =
-    "forge.interactive.brain_hook_contract.v1";
-const INTERACTIVE_AUTOCOMPLETE_SCHEMA_VERSION: &str = "forge.interactive.autocomplete.v1";
-const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "forge.interactive.patch_workbench.v1";
+    "foundry.interactive.brain_hook_contract.v1";
+const INTERACTIVE_AUTOCOMPLETE_SCHEMA_VERSION: &str = "foundry.interactive.autocomplete.v1";
+const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "foundry.interactive.patch_workbench.v1";
 const INTERACTIVE_ADDON_ACTION_CONTRACT_SCHEMA_VERSION: &str =
-    "forge.interactive.addon_action_contract.v1";
+    "foundry.interactive.addon_action_contract.v1";
 const INTERACTIVE_PATCH_ADDON_CONTRACT_SCHEMA_VERSION: &str =
-    "forge.interactive.patch_addon_contract.v1";
-const INTERACTIVE_PATCH_EDIT_INTAKE_SCHEMA_VERSION: &str = "forge.interactive.patch_edit_intake.v1";
+    "foundry.interactive.patch_addon_contract.v1";
+const INTERACTIVE_PATCH_EDIT_INTAKE_SCHEMA_VERSION: &str =
+    "foundry.interactive.patch_edit_intake.v1";
 const INTERACTIVE_PATCH_FILE_ACTION_HINT_SCHEMA_VERSION: &str =
-    "forge.interactive.patch_file_action_hint.v1";
-const INTERACTIVE_PERMISSIONS_SCHEMA_VERSION: &str = "forge.interactive.permissions.v1";
-const INTERACTIVE_IDENTITY_SCHEMA_VERSION: &str = "forge.interactive.identity.v1";
-const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
+    "foundry.interactive.patch_file_action_hint.v1";
+const INTERACTIVE_PERMISSIONS_SCHEMA_VERSION: &str = "foundry.interactive.permissions.v1";
+const INTERACTIVE_IDENTITY_SCHEMA_VERSION: &str = "foundry.interactive.identity.v1";
+const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "foundry.interactive.navigation.v1";
 const INTERACTIVE_OPERATIONAL_COCKPIT_SCHEMA_VERSION: &str =
-    "forge.interactive.operational_cockpit.v1";
+    "foundry.interactive.operational_cockpit.v1";
 const INTERACTIVE_OPERATIONAL_MODIFIER_LANE_SCHEMA_VERSION: &str =
-    "forge.interactive.operational_modifier_lane.v1";
-const INTERACTIVE_WORKFLOW_MUTATION_SCHEMA_VERSION: &str = "forge.interactive.workflow_mutation.v1";
-const INTERACTIVE_GUIDED_COCKPIT_SCHEMA_VERSION: &str = "forge.interactive.guided_cockpit.v1";
-const INTERACTIVE_ADDON_CAPABILITY_SCHEMA_VERSION: &str = "forge.interactive.addon_capability.v1";
-const INTERACTIVE_CORE_BOUNDARY_SCHEMA_VERSION: &str = "forge.interactive.core_boundary.v1";
+    "foundry.interactive.operational_modifier_lane.v1";
+const INTERACTIVE_WORKFLOW_MUTATION_SCHEMA_VERSION: &str =
+    "foundry.interactive.workflow_mutation.v1";
+const INTERACTIVE_GUIDED_COCKPIT_SCHEMA_VERSION: &str = "foundry.interactive.guided_cockpit.v1";
+const INTERACTIVE_ADDON_CAPABILITY_SCHEMA_VERSION: &str = "foundry.interactive.addon_capability.v1";
+const INTERACTIVE_CORE_BOUNDARY_SCHEMA_VERSION: &str = "foundry.interactive.core_boundary.v1";
 const INTERACTIVE_ARCHITECTURE_COMPASS_SCHEMA_VERSION: &str =
-    "forge.interactive.architecture_compass.v1";
-const OPERATIONAL_TUI_SMOKE_SCHEMA_VERSION: &str = "forge.smoke.operational_tui.v1";
-const FORGE_FIRST_HARNESS_SMOKE_SCHEMA_VERSION: &str = "forge.smoke.forge_first_harness.v1";
+    "foundry.interactive.architecture_compass.v1";
+const OPERATIONAL_TUI_SMOKE_SCHEMA_VERSION: &str = "foundry.smoke.operational_tui.v1";
+const FOUNDRY_FIRST_HARNESS_SMOKE_SCHEMA_VERSION: &str = "foundry.smoke.foundry_first_harness.v1";
 const REPLACEMENT_CLI_EVIDENCE_SMOKE_SCHEMA_VERSION: &str =
-    "forge.smoke.replacement_cli_evidence.v1";
+    "foundry.smoke.replacement_cli_evidence.v1";
 const MULTIMODAL_RUNTIME_EVIDENCE_SMOKE_SCHEMA_VERSION: &str =
-    "forge.smoke.multimodal_runtime_evidence.v1";
-const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
-const INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION: &str = "forge.interactive.structured_logs.v1";
-const INTERACTIVE_EVENT_RUNTIME_SCHEMA_VERSION: &str = "forge.interactive.event_runtime.v1";
+    "foundry.smoke.multimodal_runtime_evidence.v1";
+const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "foundry.interactive.ui_composition.v1";
+const INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION: &str = "foundry.interactive.structured_logs.v1";
+const INTERACTIVE_EVENT_RUNTIME_SCHEMA_VERSION: &str = "foundry.interactive.event_runtime.v1";
 const INTERACTIVE_EVENT_WORKFLOW_LIFECYCLE_SCHEMA_VERSION: &str =
-    "forge.interactive.event_workflow_lifecycle.v1";
-const SLASH_COMMANDS_SCHEMA_VERSION: &str = "forge.interactive.slash_commands.v1";
-const INTERACTIVE_ROUTE_SCHEMA_VERSION: &str = "forge.interactive.route.v1";
+    "foundry.interactive.event_workflow_lifecycle.v1";
+const SLASH_COMMANDS_SCHEMA_VERSION: &str = "foundry.interactive.slash_commands.v1";
+const INTERACTIVE_ROUTE_SCHEMA_VERSION: &str = "foundry.interactive.route.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InteractiveHomeReport {
@@ -194,7 +198,7 @@ pub struct InteractiveDashboard {
     pub validation_failures: usize,
     pub executor_availability: String,
     pub brain_router: String,
-    pub forge_controlled_surfaces: Vec<String>,
+    pub foundry_controlled_surfaces: Vec<String>,
     pub shell_entrypoints: Vec<String>,
     pub harness_panel: InteractiveHarnessPanel,
     pub token_usage_panel: InteractiveTokenUsagePanel,
@@ -358,7 +362,7 @@ pub struct InteractiveArchitectureTrack {
 pub struct InteractiveArchitectureBenchmarkSource {
     pub source: String,
     pub absorbed_concept: String,
-    pub forge_boundary: String,
+    pub foundry_boundary: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -412,7 +416,7 @@ pub struct InteractiveOperationalCockpitPanel {
     pub due_workflow_count: usize,
     pub selected_brain: String,
     pub ready_session_count: usize,
-    pub forge_first_ready: bool,
+    pub foundry_first_ready: bool,
     pub headroom_operational_status: String,
     pub event_count: usize,
     pub estimated_cost_total_usd: f64,
@@ -1000,10 +1004,10 @@ pub struct InteractiveReadinessPanel {
     pub needs_runtime_approval: bool,
     pub brain_count: usize,
     pub selected_brain: String,
-    pub forge_controlled_surface_count: usize,
-    pub forge_controlled_surfaces: Vec<String>,
+    pub foundry_controlled_surface_count: usize,
+    pub foundry_controlled_surfaces: Vec<String>,
     pub shell_count: usize,
-    pub forge_first_shell_count: usize,
+    pub foundry_first_shell_count: usize,
     pub shell_entrypoints: Vec<String>,
     pub harness_mode: HarnessModeReport,
     pub harness_doctor: HarnessDoctorReport,
@@ -1367,7 +1371,7 @@ pub struct InteractiveHarnessOptions {
     pub executor: String,
     pub shim_dir: PathBuf,
     pub project_root: Option<PathBuf>,
-    pub forge_first: bool,
+    pub foundry_first: bool,
     pub observe_only: bool,
     pub workflow_id: Option<String>,
     pub task_id: Option<String>,
@@ -1382,7 +1386,7 @@ impl InteractiveHarnessOptions {
             executor: "codex".to_string(),
             shim_dir: default_interactive_harness_shim_dir(),
             project_root: Some(env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
-            forge_first: false,
+            foundry_first: false,
             observe_only: false,
             workflow_id: None,
             task_id: None,
@@ -1400,7 +1404,7 @@ pub struct InteractiveHarnessPanel {
     pub executor: String,
     pub project_root: String,
     pub shim_dir: String,
-    pub forge_first_ready: bool,
+    pub foundry_first_ready: bool,
     pub token_headroom_ready: bool,
     pub shim_ready: bool,
     pub lineage_policy_ready: bool,
@@ -1412,7 +1416,7 @@ pub struct InteractiveHarnessPanel {
     pub headroom_plan: HarnessHeadroomPlanReport,
     pub adoption_plan: HarnessAdoptionPlanReport,
     pub activation_profile: HarnessActivationProfileReport,
-    pub forge_first_adoption_readiness: InteractiveHarnessForgeFirstAdoptionReadiness,
+    pub foundry_first_adoption_readiness: InteractiveHarnessFoundryFirstAdoptionReadiness,
     pub headroom_stats: HeadroomStatsReport,
     pub headroom_operational_status: String,
     pub headroom_recommended_action: String,
@@ -1425,11 +1429,11 @@ pub struct InteractiveHarnessPanel {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct InteractiveHarnessForgeFirstAdoptionReadiness {
+pub struct InteractiveHarnessFoundryFirstAdoptionReadiness {
     pub schema_version: String,
     pub status: String,
     pub executor: String,
-    pub forge_first_default_active: bool,
+    pub foundry_first_default_active: bool,
     pub ready_to_use_as_default: bool,
     pub token_headroom_ready: bool,
     pub token_headroom_required: bool,
@@ -1535,7 +1539,7 @@ pub struct InteractiveSessionCard {
     pub provider_kind: String,
     pub readiness: String,
     pub launch_mode: String,
-    pub forge_first_ready: bool,
+    pub foundry_first_ready: bool,
     pub lifecycle_state: String,
     pub recorded_plan_count: usize,
     pub lifecycle_event_count: usize,
@@ -2516,7 +2520,7 @@ pub struct InteractiveImprovementLoopCommands {
 }
 
 pub fn build_interactive_improvement_loop(
-    store: &ForgeStore,
+    store: &FoundryStore,
 ) -> Result<InteractiveImprovementLoopPanel> {
     let workflows = list_workflows_with_filters(
         store,
@@ -2673,7 +2677,7 @@ fn build_improvement_loop_panel(
         next_actions: improvement_loop_next_actions(&status, candidates.candidate_count),
         notes: vec![
             "This panel is read-only; mutations still go through explicit improve, request, workflow or event-policy commands.".to_string(),
-            "Use it before self-improvement so Forge ranks work from logs, cost, validation, context quality and outcome evidence.".to_string(),
+            "Use it before self-improvement so Foundry ranks work from logs, cost, validation, context quality and outcome evidence.".to_string(),
         ],
     }
 }
@@ -2745,42 +2749,42 @@ fn improvement_loop_status(
 fn improvement_loop_commands() -> InteractiveImprovementLoopCommands {
     InteractiveImprovementLoopCommands {
         refresh: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "interactive".to_string(),
             "improvement-loop".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
         candidates: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "improve".to_string(),
             "candidates".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
         cost_ledger: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "cost".to_string(),
             "ledger".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
         structured_logs: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "interactive".to_string(),
             "structured-logs".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
         task_board: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "interactive".to_string(),
             "task-board".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
         validate: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "validate".to_string(),
             "--workflow".to_string(),
             "<workflow-id>".to_string(),
@@ -2788,7 +2792,7 @@ fn improvement_loop_commands() -> InteractiveImprovementLoopCommands {
             "json".to_string(),
         ],
         apply_event_policy: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "improve".to_string(),
             "apply-event-policy".to_string(),
             "--workflow".to_string(),
@@ -2802,7 +2806,7 @@ fn improvement_loop_commands() -> InteractiveImprovementLoopCommands {
             "json".to_string(),
         ],
         benchmark_event_policy: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "improve".to_string(),
             "benchmark-event-policy".to_string(),
             "--workflow".to_string(),
@@ -2813,7 +2817,7 @@ fn improvement_loop_commands() -> InteractiveImprovementLoopCommands {
             "json".to_string(),
         ],
         promote_event_policy: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "improve".to_string(),
             "promote-event-policy".to_string(),
             "--workflow".to_string(),
@@ -2830,10 +2834,10 @@ fn improvement_loop_commands() -> InteractiveImprovementLoopCommands {
 
 fn improvement_loop_next_actions(status: &str, candidate_count: usize) -> Vec<String> {
     let mut actions = vec![
-        "forge interactive improvement-loop --output json".to_string(),
-        "forge improve candidates --output json".to_string(),
-        "forge interactive structured-logs --output json".to_string(),
-        "forge cost ledger --output json".to_string(),
+        "foundry interactive improvement-loop --output json".to_string(),
+        "foundry improve candidates --output json".to_string(),
+        "foundry interactive structured-logs --output json".to_string(),
+        "foundry cost ledger --output json".to_string(),
     ];
     if status == "improvement_loop_actionable" && candidate_count > 0 {
         actions.push(
@@ -3110,7 +3114,7 @@ pub struct OperationalTuiSmokeCheck {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ForgeFirstHarnessSmokeReport {
+pub struct FoundryFirstHarnessSmokeReport {
     pub schema_version: String,
     pub status: String,
     pub executor: String,
@@ -3129,6 +3133,9 @@ pub struct ForgeFirstHarnessSmokeReport {
     pub checks: Vec<OperationalTuiSmokeCheck>,
     pub commands: Vec<String>,
 }
+
+#[deprecated(since = "0.6.0", note = "use FoundryFirstHarnessSmokeReport")]
+pub type ForgeFirstHarnessSmokeReport = FoundryFirstHarnessSmokeReport; // foundry-brand-allow: legacy-compat
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReplacementCliEvidenceSmokeReport {
@@ -3157,19 +3164,19 @@ pub struct MultimodalRuntimeEvidenceSmokeReport {
     pub commands: Vec<String>,
 }
 
-pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeReport> {
+pub fn build_interactive_home(store: &FoundryStore) -> Result<InteractiveHomeReport> {
     build_interactive_home_with_options(store, InteractiveHomeOptions::default())
 }
 
 pub fn build_interactive_operational_cockpit(
-    store: &ForgeStore,
+    store: &FoundryStore,
 ) -> Result<InteractiveOperationalCockpitPanel> {
     let report = build_interactive_home(store)?;
     Ok(report.dashboard.operational_cockpit_panel)
 }
 
 pub fn build_interactive_ui_composition(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: Option<PathBuf>,
 ) -> Result<InteractiveUiCompositionPanel> {
     let report =
@@ -3178,7 +3185,7 @@ pub fn build_interactive_ui_composition(
 }
 
 pub fn build_interactive_event_runtime(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
 ) -> Result<InteractiveEventRuntimePanel> {
     let workflows = list_workflows_with_filters(
@@ -3193,7 +3200,7 @@ pub fn build_interactive_event_runtime(
 }
 
 pub fn build_interactive_architecture_compass(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: Option<PathBuf>,
 ) -> Result<InteractiveArchitectureCompassPanel> {
     let report =
@@ -3202,7 +3209,7 @@ pub fn build_interactive_architecture_compass(
 }
 
 pub fn build_interactive_operating_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
 ) -> Result<InteractiveOperatingContextPanel> {
     let identity_panel = build_interactive_identity(store, project_root)?;
@@ -3211,7 +3218,7 @@ pub fn build_interactive_operating_context(
 }
 
 pub fn build_interactive_home_with_options(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: InteractiveHomeOptions,
 ) -> Result<InteractiveHomeReport> {
     let workflows = list_workflows_with_filters(
@@ -3281,7 +3288,7 @@ pub fn build_interactive_home_with_options(
     let brain_router = format!(
         "{} controls {} surface(s) across {} brain adapter(s); selected brain: {}",
         executors.brain_router.controller,
-        executors.brain_router.forge_controlled_surfaces.len(),
+        executors.brain_router.foundry_controlled_surfaces.len(),
         executors.brain_router.brains.len(),
         executors
             .brain_router
@@ -3289,9 +3296,9 @@ pub fn build_interactive_home_with_options(
             .as_deref()
             .unwrap_or("none")
     );
-    let forge_controlled_surfaces = executors
+    let foundry_controlled_surfaces = executors
         .brain_router
-        .forge_controlled_surfaces
+        .foundry_controlled_surfaces
         .iter()
         .take(8)
         .cloned()
@@ -3323,7 +3330,7 @@ pub fn build_interactive_home_with_options(
             executor: "codex".to_string(),
             shim_dir: harness_shim_dir,
             project_root: Some(repository_context_path.clone()),
-            forge_first: false,
+            foundry_first: false,
             observe_only: false,
             workflow_id: None,
             task_id: None,
@@ -3470,7 +3477,7 @@ pub fn build_interactive_home_with_options(
             build_addon_view_renderer_report(&addon_views)
         })
         .unwrap_or_else(|| OpsAddonViewRendererReport {
-            schema_version: "forge.ops.addon_view_renderers.v1".to_string(),
+            schema_version: "foundry.ops.addon_view_renderers.v1".to_string(),
             status: "addon_renderers_unavailable".to_string(),
             renderer_count: 0,
             safe_renderer_count: 0,
@@ -3571,7 +3578,7 @@ pub fn build_interactive_home_with_options(
         schema_version: INTERACTIVE_HOME_SCHEMA_VERSION.to_string(),
         banner: InteractiveBanner {
             mark: anvil_mark().to_string(),
-            name: "forge".to_string(),
+            name: "foundry".to_string(),
         },
         dashboard: InteractiveDashboard {
             active_runs,
@@ -3586,7 +3593,7 @@ pub fn build_interactive_home_with_options(
             validation_failures,
             executor_availability,
             brain_router,
-            forge_controlled_surfaces,
+            foundry_controlled_surfaces,
             shell_entrypoints,
             harness_panel,
             token_usage_panel,
@@ -3599,7 +3606,7 @@ pub fn build_interactive_home_with_options(
             harness_doctor_panel,
             runtime_node_status,
             repository_context: repository_context_path.display().to_string(),
-            estimated_costs: "available per workflow via /costs or forge run --simulate"
+            estimated_costs: "available per workflow via /costs or foundry run --simulate"
                 .to_string(),
             scheduler_worker_status,
             workflow_focus,
@@ -3632,52 +3639,52 @@ pub fn build_interactive_home_with_options(
             addon_renderer_panel,
             attention_actions,
             useful_next_commands: vec![
-                "forge".to_string(),
-                "forge interactive guided-cockpit --output json".to_string(),
-                "forge list".to_string(),
-                "forge inspect <workflow-id>".to_string(),
-                "forge request list".to_string(),
-                "forge interactive workflow-sidebar --output json".to_string(),
+                "foundry".to_string(),
+                "foundry interactive guided-cockpit --output json".to_string(),
+                "foundry list".to_string(),
+                "foundry inspect <workflow-id>".to_string(),
+                "foundry request list".to_string(),
+                "foundry interactive workflow-sidebar --output json".to_string(),
                 format!(
-                    "forge interactive architecture --project-root {repository_context_display} --output json"
+                    "foundry interactive architecture --project-root {repository_context_display} --output json"
                 ),
-                "forge interactive core-boundary --output json".to_string(),
+                "foundry interactive core-boundary --output json".to_string(),
                 format!(
-                    "forge interactive replacement-cli --project-root {repository_context_display} --output json"
-                ),
-                format!(
-                    "forge interactive multimodal-runtime --project-root {repository_context_display} --output json"
-                ),
-                "forge schedule list".to_string(),
-                "forge interactive schedules --output json".to_string(),
-                "forge schedule worker-status".to_string(),
-                format!(
-                    "forge interactive harness --project-root {repository_context_display} --output json"
-                ),
-                "forge interactive token-usage --output json".to_string(),
-                format!(
-                    "forge harness headroom-plan --executor codex --project-root {repository_context_display} --output json"
-                ),
-                "forge harness headroom-stats --output json".to_string(),
-                format!(
-                    "forge harness adoption-plan --executor codex --shim-dir $HOME/.forge/bin --project-root {repository_context_display} --output json"
+                    "foundry interactive replacement-cli --project-root {repository_context_display} --output json"
                 ),
                 format!(
-                    "forge harness bootstrap --executor codex --shim-dir $HOME/.forge/bin --project-root {repository_context_display} --apply --approved-by <operator> --output json"
+                    "foundry interactive multimodal-runtime --project-root {repository_context_display} --output json"
                 ),
-                "forge interactive sessions --output json".to_string(),
-                "forge interactive action-registry --output json".to_string(),
-                "forge interactive artifacts --output json".to_string(),
-                "forge interactive workflow-mutation --output json".to_string(),
-                "forge interactive improvement-loop --output json".to_string(),
-                "forge improve candidates --output json".to_string(),
-                "forge interactive addon-capabilities --output json".to_string(),
-                "forge interactive context-memory --output json".to_string(),
-                "forge addons observability --output json".to_string(),
-                "forge interactive release-gates --output json".to_string(),
-                "forge interactive patch-workbench --output json".to_string(),
-                "forge interactive permissions --output json".to_string(),
-                "forge interactive identity --output json".to_string(),
+                "foundry schedule list".to_string(),
+                "foundry interactive schedules --output json".to_string(),
+                "foundry schedule worker-status".to_string(),
+                format!(
+                    "foundry interactive harness --project-root {repository_context_display} --output json"
+                ),
+                "foundry interactive token-usage --output json".to_string(),
+                format!(
+                    "foundry harness headroom-plan --executor codex --project-root {repository_context_display} --output json"
+                ),
+                "foundry harness headroom-stats --output json".to_string(),
+                format!(
+                    "foundry harness adoption-plan --executor codex --shim-dir $HOME/.foundry/bin --project-root {repository_context_display} --output json"
+                ),
+                format!(
+                    "foundry harness bootstrap --executor codex --shim-dir $HOME/.foundry/bin --project-root {repository_context_display} --apply --approved-by <operator> --output json"
+                ),
+                "foundry interactive sessions --output json".to_string(),
+                "foundry interactive action-registry --output json".to_string(),
+                "foundry interactive artifacts --output json".to_string(),
+                "foundry interactive workflow-mutation --output json".to_string(),
+                "foundry interactive improvement-loop --output json".to_string(),
+                "foundry improve candidates --output json".to_string(),
+                "foundry interactive addon-capabilities --output json".to_string(),
+                "foundry interactive context-memory --output json".to_string(),
+                "foundry addons observability --output json".to_string(),
+                "foundry interactive release-gates --output json".to_string(),
+                "foundry interactive patch-workbench --output json".to_string(),
+                "foundry interactive permissions --output json".to_string(),
+                "foundry interactive identity --output json".to_string(),
             ],
             quick_actions: vec![
                 "/guided-cockpit".to_string(),
@@ -3821,10 +3828,10 @@ fn build_architecture_compass_panel(
     let replacement_cli_missing_count = replacement_cli_missing_kinds.len();
     let mut harness_evidence_refs = vec![
         format!(
-            "harness:{} headroom={} forge_first_status={}",
+            "harness:{} headroom={} foundry_first_status={}",
             inputs.harness_panel.status,
             inputs.harness_panel.token_headroom_ready,
-            inputs.harness_panel.forge_first_adoption_readiness.status
+            inputs.harness_panel.foundry_first_adoption_readiness.status
         ),
         format!(
             "replacement_cli:ready={}/{} readiness={}%",
@@ -3851,10 +3858,10 @@ fn build_architecture_compass_panel(
     ));
     let mut harness_gaps = inputs
         .harness_panel
-        .forge_first_adoption_readiness
+        .foundry_first_adoption_readiness
         .blocked_reasons
         .iter()
-        .map(|reason| format!("Forge-first default blocked by {reason}."))
+        .map(|reason| format!("Foundry-first default blocked by {reason}."))
         .collect::<Vec<_>>();
     if !replacement_cli_promotion_ready {
         if replacement_cli_missing_kinds
@@ -3879,7 +3886,7 @@ fn build_architecture_compass_panel(
     }
     let harness_next_increment = if !inputs
         .harness_panel
-        .forge_first_adoption_readiness
+        .foundry_first_adoption_readiness
         .ready_to_use_as_default
     {
         "Instalar e ativar shims aprovados mantendo headroom reversível e execução externa auditável."
@@ -4120,7 +4127,7 @@ fn build_architecture_compass_panel(
                 ),
             ],
             tenant_gaps,
-            "Usar forge interactive operating-context para decidir identity, memory policy, prompt-packet gates e handoff readiness antes de executar brains.",
+            "Usar foundry interactive operating-context para decidir identity, memory policy, prompt-packet gates e handoff readiness antes de executar brains.",
             "Core decide escopo/isolamento; personas, brand assets e dados de domínio ficam em contexto/Addons.",
         ),
         architecture_track(
@@ -4129,14 +4136,14 @@ fn build_architecture_compass_panel(
             &["goal1:Fase 1", "goal1:Fase 2", "headroom benchmark"],
             architecture_status(
                 inputs.harness_panel.token_headroom_ready
-                    && inputs.harness_panel.forge_first_adoption_readiness.ready_to_use_as_default,
+                    && inputs.harness_panel.foundry_first_adoption_readiness.ready_to_use_as_default,
                 inputs.harness_panel.token_headroom_ready
                     || inputs.replacement_cli_panel.ready_surface_count > 0,
             ),
             harness_evidence_refs,
             harness_gaps,
             harness_next_increment,
-            "Forge controla contexto, memória, permissões, custos e sessões; CLIs executam como brains substituíveis.",
+            "Foundry controla contexto, memória, permissões, custos e sessões; CLIs executam como brains substituíveis.",
         ),
         architecture_track(
             "human_ai_visual_copilot",
@@ -4228,7 +4235,7 @@ fn build_architecture_compass_panel(
                 "Ligar validação de outcome final a gates de promoção automatizados no painel."
                     .to_string(),
             ],
-            "Usar forge interactive improvement-loop para decidir recover, parallelize, normalize AI cost ou event-policy experiment antes de mutações.",
+            "Usar foundry interactive improvement-loop para decidir recover, parallelize, normalize AI cost ou event-policy experiment antes de mutações.",
             "Core mede e valida; políticas de otimização específicas devem ser configuráveis.",
         ),
     ];
@@ -4276,9 +4283,9 @@ fn build_architecture_compass_panel(
         execution_plan,
         dependencies: vec![
             architecture_dependency(
-                "Forge-first CLI adoption",
+                "Foundry-first CLI adoption",
                 &["harness_headroom_cli_brains", "tenant_identity_personality_context"],
-                "CLI shims must preserve Forge-owned lineage, memory, permissions and token headroom before becoming a default entrypoint.",
+                "CLI shims must preserve Foundry-owned lineage, memory, permissions and token headroom before becoming a default entrypoint.",
             ),
             architecture_dependency(
                 "Persistent event runtime",
@@ -4314,19 +4321,19 @@ fn build_architecture_compass_panel(
         ],
         next_commands: vec![
             format!(
-                "forge interactive architecture --project-root {} --output json",
+                "foundry interactive architecture --project-root {} --output json",
                 operating_context_project_root
             ),
             format!(
-                "forge interactive home --project-root {} --output json",
+                "foundry interactive home --project-root {} --output json",
                 operating_context_project_root
             ),
-            "forge interactive operational-cockpit --output json".to_string(),
-            "forge interactive addon-capabilities --output json".to_string(),
-            "forge interactive improvement-loop --output json".to_string(),
-            "forge interactive harness --output json".to_string(),
-            "forge smoke operational-tui --output json".to_string(),
-            "forge smoke forge-first-harness --output json".to_string(),
+            "foundry interactive operational-cockpit --output json".to_string(),
+            "foundry interactive addon-capabilities --output json".to_string(),
+            "foundry interactive improvement-loop --output json".to_string(),
+            "foundry interactive harness --output json".to_string(),
+            "foundry smoke operational-tui --output json".to_string(),
+            "foundry smoke foundry-first-harness --output json".to_string(),
         ],
     }
 }
@@ -4335,7 +4342,7 @@ fn architecture_operating_context_summary(
     panel: &InteractiveOperatingContextPanel,
 ) -> InteractiveArchitectureOperatingContextSummary {
     InteractiveArchitectureOperatingContextSummary {
-        schema_version: "forge.interactive.architecture_operating_context.v1".to_string(),
+        schema_version: "foundry.interactive.architecture_operating_context.v1".to_string(),
         project_root: panel.project_root.clone(),
         status: panel.status.clone(),
         context_status: panel.context_status.clone(),
@@ -4364,15 +4371,15 @@ fn architecture_operating_context_summary(
         memory_policy_status: panel.memory_policy_status.clone(),
         evidence_commands: vec![
             format!(
-                "forge interactive operating-context --project-root {} --output json",
+                "foundry interactive operating-context --project-root {} --output json",
                 panel.project_root
             ),
             format!(
-                "forge interactive identity --project-root {} --output json",
+                "foundry interactive identity --project-root {} --output json",
                 panel.project_root
             ),
             format!(
-                "forge interactive context-memory --project-root {} --output json",
+                "foundry interactive context-memory --project-root {} --output json",
                 panel.project_root
             ),
         ],
@@ -4387,7 +4394,7 @@ fn architecture_execution_plan(
         architecture_increment(
             "stabilize_operational_tui",
             1,
-            "TUI operacional como entrada padrão do Forge",
+            "TUI operacional como entrada padrão do Foundry",
             architecture_increment_status(tracks, &["world_class_tui", "observability_cost_validation"]),
             &["goal1:Fase 2", "goal1:Fase 6", "goal1:Critério 10"],
             &["core_addons_domain_agnostic"],
@@ -4398,14 +4405,14 @@ fn architecture_execution_plan(
             "Core pode renderizar cockpit, navegação, task-board, DAG, logs, custos e composição; não pode embutir UX específica de domínio.",
             "Addons fornecem widgets especializados e ações de domínio através de views/capabilities, mantendo o Core genérico.",
             &[
-                "`forge` abre uma superfície operacional útil em TTY e em snapshot sem TTY.",
-                "`forge smoke operational-tui --output json` passa todos os checks obrigatórios.",
+                "`foundry` abre uma superfície operacional útil em TTY e em snapshot sem TTY.",
+                "`foundry smoke operational-tui --output json` passa todos os checks obrigatórios.",
                 "A home mostra Architecture Compass e execução incremental sem mutar workflow.",
             ],
             &[
-                "forge",
-                "forge interactive home --output json",
-                "forge smoke operational-tui --output json",
+                "foundry",
+                "foundry interactive home --output json",
+                "foundry smoke operational-tui --output json",
             ],
             &[
                 "Não criar atalhos de domínio no Core.",
@@ -4439,11 +4446,11 @@ fn architecture_execution_plan(
                 "Replanejamento preserva revisions, checkpoints e auditoria.",
             ],
             &[
-                "forge interactive workflow-mutation --output json",
-                "forge interactive workflow-dag --output json",
-                "forge interactive schedules --output json",
-                "forge interactive structured-logs --output json",
-                "forge events runtime-reconcile --project-root . --output json",
+                "foundry interactive workflow-mutation --output json",
+                "foundry interactive workflow-dag --output json",
+                "foundry interactive schedules --output json",
+                "foundry interactive structured-logs --output json",
+                "foundry events runtime-reconcile --project-root . --output json",
             ],
             &[
                 "Não confundir agente permanente com primitive separada de workflow.",
@@ -4474,9 +4481,9 @@ fn architecture_execution_plan(
                 "Addon views compõem UI sem recompilar Core.",
             ],
             &[
-                "forge interactive addon-capabilities --output json",
-                "forge addons catalog --output json",
-                "forge addons resolve --goal \"operate a logistics workflow\" --output json",
+                "foundry interactive addon-capabilities --output json",
+                "foundry addons catalog --output json",
+                "foundry addons resolve --goal \"operate a logistics workflow\" --output json",
             ],
             &[
                 "Rejeitar novas features de domínio no Core quando puderem ser Addon.",
@@ -4508,10 +4515,10 @@ fn architecture_execution_plan(
                 "Tenant policy bloqueia leitura/mutação fora da organização ativa.",
             ],
             &[
-                "forge interactive identity --output json",
-                "forge interactive context-memory --output json",
-                "forge memory policy --project-root . --output json",
-                "forge context --workflow <id> --task <task-id> --project-root . --strict --view compact --output json",
+                "foundry interactive identity --output json",
+                "foundry interactive context-memory --output json",
+                "foundry memory policy --project-root . --output json",
+                "foundry context --workflow <id> --task <task-id> --project-root . --strict --view compact --output json",
             ],
             &[
                 "Não vazar memória privada para contexto global ou público.",
@@ -4519,9 +4526,9 @@ fn architecture_execution_plan(
             ],
         ),
         architecture_increment(
-            "forge_first_harness_headroom",
+            "foundry_first_harness_headroom",
             5,
-            "Harness Forge-first com headroom, wrappers e brains substituíveis",
+            "Harness Foundry-first com headroom, wrappers e brains substituíveis",
             architecture_increment_status(tracks, &["harness_headroom_cli_brains"]),
             &["goal1:Fase 1", "goal1:Fase 4", "headroom benchmark"],
             &["tenant_personality_memory_os"],
@@ -4532,15 +4539,15 @@ fn architecture_execution_plan(
             "Core controla routing, sessions, shell lifecycle, harness policy, headroom receipts e retrieval refs.",
             "Brains e CLIs continuam externos e substituíveis; integrações específicas entram por manifestos ou Addons.",
             &[
-                "`forge smoke forge-first-harness --output json` prova headroom, shim, bootstrap dry-run e exec dry-run.",
+                "`foundry smoke foundry-first-harness --output json` prova headroom, shim, bootstrap dry-run e exec dry-run.",
                 "Wrapper nunca executa CLI externa em smoke sem aprovação explícita.",
                 "Compressão preserva original recuperável por retrieval ref e audit trail.",
             ],
             &[
-                "forge interactive harness --output json",
-                "forge harness headroom-plan --executor codex --project-root . --output json",
-                "forge harness wrap-plan --executor codex --cmd codex --project-root . --output json",
-                "forge smoke forge-first-harness --output json",
+                "foundry interactive harness --output json",
+                "foundry harness headroom-plan --executor codex --project-root . --output json",
+                "foundry harness wrap-plan --executor codex --cmd codex --project-root . --output json",
+                "foundry smoke foundry-first-harness --output json",
             ],
             &[
                 "Não esconder perda de contexto por sumarização opaca.",
@@ -4555,7 +4562,7 @@ fn architecture_execution_plan(
             &["goal1:Fase 7", "goal2:Fase 7.8", "goal3:UI Composition Engine"],
             &["activate_dynamic_event_runtime", "tenant_personality_memory_os"],
             &[
-                "Operador e Forge co-criam artefatos, whiteboards, DAGs, wireframes, flows, docs e backlogs.",
+                "Operador e Foundry co-criam artefatos, whiteboards, DAGs, wireframes, flows, docs e backlogs.",
                 "Mudanças humanas podem virar eventos que atualizam workflows e artefatos relacionados.",
             ],
             "Core guarda artifacts, digital twin, modifier lane, UI composition e eventos de colaboração.",
@@ -4566,10 +4573,10 @@ fn architecture_execution_plan(
                 "Modifier lane registra propostas e aplicação com auditoria.",
             ],
             &[
-                "forge interactive operational-cockpit --output json",
-                "forge interactive workflow-mutation --output json",
-                "forge interactive task-board --output json",
-                "forge interactive artifacts --output json",
+                "foundry interactive operational-cockpit --output json",
+                "foundry interactive workflow-mutation --output json",
+                "foundry interactive task-board --output json",
+                "foundry interactive artifacts --output json",
             ],
             &[
                 "Não fixar UI por domínio.",
@@ -4582,9 +4589,9 @@ fn architecture_execution_plan(
             "Observabilidade, custos e auto-melhoria controlada",
             architecture_increment_status(tracks, &["observability_cost_validation"]),
             &["goal1:Fase 4", "goal1:Fase 6"],
-            &["activate_dynamic_event_runtime", "forge_first_harness_headroom"],
+            &["activate_dynamic_event_runtime", "foundry_first_harness_headroom"],
             &[
-                "Forge mede eventos, contexto, memória, custo, tempo, tokens, validação e outcomes.",
+                "Foundry mede eventos, contexto, memória, custo, tempo, tokens, validação e outcomes.",
                 "Auto-melhoria escolhe candidatos por evidência, custo e repetição, não por intuição.",
             ],
             "Core mede, rankeia, valida, gera experimento e exige benchmark/aprovação antes de promoção.",
@@ -4595,10 +4602,10 @@ fn architecture_execution_plan(
                 "Improve promote exige benchmark, validação e aprovação explícita.",
             ],
             &[
-                "forge interactive improvement-loop --output json",
-                "forge interactive structured-logs --output json",
-                "forge cost ledger --project-root . --output json",
-                "forge improve candidates --output json",
+                "foundry interactive improvement-loop --output json",
+                "foundry interactive structured-logs --output json",
+                "foundry cost ledger --project-root . --output json",
+                "foundry improve candidates --output json",
             ],
             &[
                 "Não auto-promover mudanças de política sem benchmark.",
@@ -4617,14 +4624,14 @@ fn architecture_execution_plan(
     };
 
     InteractiveArchitectureExecutionPlan {
-        schema_version: "forge.interactive.architecture_execution_plan.v1".to_string(),
+        schema_version: "foundry.interactive.architecture_execution_plan.v1".to_string(),
         status: status.to_string(),
         strategy: "architecture_correctness_first".to_string(),
         selection_rule: "Ship the smallest increment that strengthens a universal Core primitive or an Addon escape hatch, preserves workflow/event/tenant boundaries, and has executable evidence gates.".to_string(),
         increments,
         acceptance_policy: "An increment is accepted only when its evidence commands prove the stated gates without adding domain-specific behavior to Core.".to_string(),
         next_command: format!(
-            "forge interactive architecture --project-root {project_root} --output json"
+            "foundry interactive architecture --project-root {project_root} --output json"
         ),
     }
 }
@@ -4770,7 +4777,7 @@ fn architecture_benchmark_sources(
                 "Keyboard-first operator shell, command palette, session lifecycle and replacement-grade readiness; current CLI readiness {}%.",
                 inputs.replacement_cli_panel.readiness_percent
             ),
-            "Forge owns workflow, context, memory, permissions, costs and sessions; CLIs stay replaceable brains.",
+            "Foundry owns workflow, context, memory, permissions, costs and sessions; CLIs stay replaceable brains.",
         ),
         architecture_benchmark_source(
             "OpenClaw",
@@ -4778,7 +4785,7 @@ fn architecture_benchmark_sources(
                 "Async interface separation and operator-visible work state; current cockpit status {}.",
                 inputs.operational_cockpit_panel.status
             ),
-            "Forge exposes durable panels and MCP contracts instead of coupling orchestration to one UI.",
+            "Foundry exposes durable panels and MCP contracts instead of coupling orchestration to one UI.",
         ),
         architecture_benchmark_source(
             "Hermes Agents",
@@ -4786,13 +4793,13 @@ fn architecture_benchmark_sources(
                 "File-first scoped memory and semantic retrieval boundaries; current memory policy {}.",
                 inputs.context_memory_panel.memory_policy_status
             ),
-            "Forge routes memory by tenant, audience and workflow rather than giving brains broad history.",
+            "Foundry routes memory by tenant, audience and workflow rather than giving brains broad history.",
         ),
         architecture_benchmark_source(
             "OpenSquad",
             "Multiple specialized agents mapped to node-brain routing, session records and parallel-ready handoffs."
                 .to_string(),
-            "Forge coordinates agents through workflows and leases, not through a fixed agent team model.",
+            "Foundry coordinates agents through workflows and leases, not through a fixed agent team model.",
         ),
         architecture_benchmark_source(
             "Open Design / Penpot",
@@ -4800,13 +4807,13 @@ fn architecture_benchmark_sources(
                 "Design tokens, components, wireframes and UI composition; current renderer families {}.",
                 inputs.ui_composition_panel.addon_renderer_families.join("+")
             ),
-            "Forge stores creative artifacts and tokens; specialized editors can attach through Addon/UI surfaces.",
+            "Foundry stores creative artifacts and tokens; specialized editors can attach through Addon/UI surfaces.",
         ),
         architecture_benchmark_source(
             "Paperclip",
             "Company-work framing: product, technical, finance, admin, marketing, communication and delivery decisions in prompt packets."
                 .to_string(),
-            "Forge keeps the operating checklist domain-agnostic and tenant-aware.",
+            "Foundry keeps the operating checklist domain-agnostic and tenant-aware.",
         ),
         architecture_benchmark_source(
             "Remotion",
@@ -4823,7 +4830,7 @@ fn architecture_benchmark_sources(
                 inputs.addon_capability_panel.event_adapter_count,
                 inputs.schedule_panel.workflows.len()
             ),
-            "Forge keeps workflow state, policy and validation central while Addons provide nodes/adapters.",
+            "Foundry keeps workflow state, policy and validation central while Addons provide nodes/adapters.",
         ),
         architecture_benchmark_source(
             "headroom",
@@ -4831,7 +4838,7 @@ fn architecture_benchmark_sources(
                 "Token headroom, reversible compression and wrapper interception; current headroom status {}.",
                 inputs.harness_panel.headroom_operational_status
             ),
-            "Forge compresses context/output through auditable receipts and retrieval refs, not lossy hidden summarization.",
+            "Foundry compresses context/output through auditable receipts and retrieval refs, not lossy hidden summarization.",
         ),
     ]
 }
@@ -4839,23 +4846,23 @@ fn architecture_benchmark_sources(
 fn architecture_benchmark_source(
     source: &str,
     absorbed_concept: String,
-    forge_boundary: &str,
+    foundry_boundary: &str,
 ) -> InteractiveArchitectureBenchmarkSource {
     InteractiveArchitectureBenchmarkSource {
         source: source.to_string(),
         absorbed_concept,
-        forge_boundary: forge_boundary.to_string(),
+        foundry_boundary: foundry_boundary.to_string(),
     }
 }
 
 pub fn build_operational_tui_smoke(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: Option<&Path>,
     origin: &str,
 ) -> Result<OperationalTuiSmokeReport> {
     let request = start_async_request(
         store,
-        "Demonstrate Forge operational TUI with active workflows, events, schedules, Addons/capabilities, costs, handoffs and approvals",
+        "Demonstrate Foundry operational TUI with active workflows, events, schedules, Addons/capabilities, costs, handoffs and approvals",
         origin,
     )?;
     let scheduled = create_daily_goal_research_workflow(
@@ -4881,6 +4888,7 @@ pub fn build_operational_tui_smoke(
                 choices: &choices,
                 timeout_seconds: Some(3600),
                 origin,
+                expected_revision: None,
             },
         )?;
         create_modifier_proposal(
@@ -4894,7 +4902,7 @@ pub fn build_operational_tui_smoke(
                 rationale:
                     "The smoke must prove human+AI assisted runtime mutation is visible in the TUI.",
                 proposed_goal: Some(
-                    "Demonstrate Forge operational TUI with visible workflow mutation evidence",
+                    "Demonstrate Foundry operational TUI with visible workflow mutation evidence",
                 ),
                 proposed_title: None,
                 proposed_expected_output: None,
@@ -4911,12 +4919,12 @@ pub fn build_operational_tui_smoke(
         "summary": "Operational TUI smoke created workflow, schedule, event, approval and dashboard evidence."
     });
     let tenant_context = serde_json::json!({
-        "organization_id": "forge",
-        "brand_id": "forge",
-        "product_id": "forge-core"
+        "organization_id": "foundry",
+        "brand_id": "foundry",
+        "product_id": "foundry-core"
     });
     let event_id = store.record_global_event(GlobalEventWrite {
-        source: "forge.smoke.operational_tui",
+        source: "foundry.smoke.operational_tui",
         source_id: &request.run_id,
         workflow_id: Some(&request.workflow_id),
         kind: "operational_tui_smoke",
@@ -4935,8 +4943,8 @@ pub fn build_operational_tui_smoke(
     let d = &home.dashboard;
     let readme = include_str!("../README.md");
     let default_tui_report =
-        crate::opencode_tui::build_forge_tui(store, project_root.map(Path::to_path_buf))?;
-    let default_tui_preview = crate::opencode_tui::render_forge_tui(&default_tui_report);
+        crate::opencode_tui::build_foundry_tui(store, project_root.map(Path::to_path_buf))?;
+    let default_tui_preview = crate::opencode_tui::render_foundry_tui(&default_tui_report);
     let dashboard = OperationalTuiSmokeDashboard {
         active_runs: d.active_runs,
         workflow_count: d.task_board_panel.workflow_count,
@@ -4961,9 +4969,9 @@ pub fn build_operational_tui_smoke(
     let checks = vec![
         operational_tui_smoke_check(
             "opens_useful_tui",
-            "forge opens the operational TUI",
-            default_tui_report.status == "forge_tui_ready"
-                && default_tui_preview.contains("Forge chat TUI - OpenCode-style")
+            "foundry opens the operational TUI",
+            default_tui_report.status == "foundry_tui_ready"
+                && default_tui_preview.contains("Foundry chat TUI - OpenCode-style")
                 && default_tui_preview.contains("History and input stay on the live terminal surface."),
             format!(
                 "{}; cockpit {}; capabilities {}; default render {} bytes",
@@ -4972,21 +4980,21 @@ pub fn build_operational_tui_smoke(
                 default_tui_report.capabilities.len(),
                 default_tui_preview.len()
             ),
-            "forge",
+            "foundry",
         ),
         operational_tui_smoke_check(
             "opens_opencode_style_chat_first_tui_by_default",
-            "forge opens the OpenCode-style chat-first TUI by default",
-            default_tui_report.schema_version == "forge.tui.opencode_orchestrator.v1"
+            "foundry opens the OpenCode-style chat-first TUI by default",
+            default_tui_report.schema_version == "foundry.tui.opencode_orchestrator.v1"
                 && default_tui_report.layout == "opencode_style_orchestrator_first_tui"
                 && default_tui_report.orchestrator.default_interaction
-                    == "conversation_with_forge_orchestrator"
+                    == "conversation_with_foundry_orchestrator"
                 && default_tui_report.orchestrator.decision_policy
                     == "direct_answer_or_create_workflow"
-                && default_tui_report.orchestrator.plan_mode == "forge_workflow"
-                && default_tui_report.orchestrator.build_mode == "forge_workflow"
+                && default_tui_report.orchestrator.plan_mode == "foundry_workflow"
+                && default_tui_report.orchestrator.build_mode == "foundry_workflow"
                 && default_tui_report.shell.prefix == "!"
-                && default_tui_preview.contains("Forge chat TUI - OpenCode-style")
+                && default_tui_preview.contains("Foundry chat TUI - OpenCode-style")
                 && default_tui_preview.contains("Prompt:")
                 && !default_tui_preview.contains("Workflows:")
                 && !default_tui_preview.contains("Agents:")
@@ -5001,7 +5009,7 @@ pub fn build_operational_tui_smoke(
                 dashboard.guided_cockpit_step_count,
                 default_tui_preview.len()
             ),
-            "forge",
+            "foundry",
         ),
         operational_tui_smoke_check(
             "shows_active_workflows",
@@ -5011,7 +5019,7 @@ pub fn build_operational_tui_smoke(
                 "{} active runs; {} workflow lanes",
                 dashboard.active_runs, dashboard.workflow_count
             ),
-            "forge interactive task-board --output json",
+            "foundry interactive task-board --output json",
         ),
         operational_tui_smoke_check(
             "shows_events_and_schedules",
@@ -5021,7 +5029,7 @@ pub fn build_operational_tui_smoke(
                 "{} events; {} scheduled workflows",
                 dashboard.event_count, dashboard.schedule_workflow_count
             ),
-            "forge interactive schedules --output json",
+            "foundry interactive schedules --output json",
         ),
         operational_tui_smoke_check(
             "shows_event_workflow_lifecycle",
@@ -5047,7 +5055,7 @@ pub fn build_operational_tui_smoke(
                     .validated_action_count,
                 d.event_runtime_panel.workflow_lifecycle.action_count
             ),
-            "forge interactive event-runtime --output json",
+            "foundry interactive event-runtime --output json",
         ),
         operational_tui_smoke_check(
             "shows_addons_and_capabilities",
@@ -5057,7 +5065,7 @@ pub fn build_operational_tui_smoke(
                 "{}; {} addons; {} capabilities",
                 d.addon_capability_panel.status, dashboard.addon_count, dashboard.capability_count
             ),
-            "forge interactive addon-capabilities --output json",
+            "foundry interactive addon-capabilities --output json",
         ),
         operational_tui_smoke_check(
             "shows_core_boundary_audit",
@@ -5075,7 +5083,7 @@ pub fn build_operational_tui_smoke(
                 d.core_boundary_panel.domain_specific_core_leak_count,
                 d.core_boundary_panel.compatibility_boundary_count
             ),
-            "forge interactive core-boundary --output json",
+            "foundry interactive core-boundary --output json",
         ),
         operational_tui_smoke_check(
             "shows_costs",
@@ -5087,7 +5095,7 @@ pub fn build_operational_tui_smoke(
                 d.cost_panel.estimated_task_cost_total_usd,
                 d.cost_panel.observed_event_cost_total_usd
             ),
-            "forge cost ledger --output json",
+            "foundry cost ledger --output json",
         ),
         operational_tui_smoke_check(
             "shows_improvement_loop",
@@ -5103,7 +5111,7 @@ pub fn build_operational_tui_smoke(
                 dashboard.structured_log_count,
                 d.improvement_loop_panel.validation_failure_count
             ),
-            "forge interactive improvement-loop --output json",
+            "foundry interactive improvement-loop --output json",
         ),
         operational_tui_smoke_check(
             "shows_workflow_mutation_replanning",
@@ -5123,7 +5131,7 @@ pub fn build_operational_tui_smoke(
                 dashboard.pending_mutation_proposal_count,
                 d.workflow_mutation_panel.mutable_workflow_count
             ),
-            "forge interactive workflow-mutation --output json",
+            "foundry interactive workflow-mutation --output json",
         ),
         operational_tui_smoke_check(
             "shows_handoffs_and_approvals",
@@ -5133,7 +5141,7 @@ pub fn build_operational_tui_smoke(
                 "{} ready handoffs; {} pending approvals",
                 dashboard.ready_handoff_count, dashboard.pending_approval_count
             ),
-            "forge interactive permissions --output json",
+            "foundry interactive permissions --output json",
         ),
         operational_tui_smoke_check(
             "shows_operating_context",
@@ -5165,7 +5173,7 @@ pub fn build_operational_tui_smoke(
                     .required_gates
                     .join(",")
             ),
-            "forge interactive operating-context --output json",
+            "foundry interactive operating-context --output json",
         ),
         operational_tui_smoke_check(
             "runs_end_to_end_demo_flow",
@@ -5178,13 +5186,13 @@ pub fn build_operational_tui_smoke(
                 "workflow {}; run {}; scheduled {}; event {}",
                 request.workflow_id, request.run_id, scheduled.workflow_id, event_id
             ),
-            "forge smoke operational-tui --output json",
+            "foundry smoke operational-tui --output json",
         ),
         operational_tui_smoke_check(
             "readme_five_minute_intro",
-            "README explains Forge in five minutes",
-            readme.contains("## Forge em 5 minutos")
-                && readme.contains("forge smoke operational-tui"),
+            "README explains Foundry in five minutes",
+            readme.contains("## Foundry em 5 minutos")
+                && readme.contains("foundry smoke operational-tui"),
             "README contains the five-minute intro and operational smoke command".to_string(),
             "README.md",
         ),
@@ -5205,38 +5213,38 @@ pub fn build_operational_tui_smoke(
         dashboard,
         checks,
         commands: vec![
-            "forge".to_string(),
-            "forge tui --output json".to_string(),
-            "forge interactive guided-cockpit --output json".to_string(),
-            "forge interactive home --output json".to_string(),
-            "forge interactive operational-cockpit --output json".to_string(),
-            "forge interactive task-board --output json".to_string(),
-            "forge interactive schedules --output json".to_string(),
-            "forge interactive event-runtime --output json".to_string(),
-            "forge interactive structured-logs --output json".to_string(),
-            "forge interactive improvement-loop --output json".to_string(),
-            "forge interactive workflow-mutation --output json".to_string(),
-            "forge interactive addon-capabilities --output json".to_string(),
-            "forge interactive operating-context --output json".to_string(),
-            "forge cost ledger --output json".to_string(),
-            "forge smoke operational-tui --output json".to_string(),
+            "foundry".to_string(),
+            "foundry tui --output json".to_string(),
+            "foundry interactive guided-cockpit --output json".to_string(),
+            "foundry interactive home --output json".to_string(),
+            "foundry interactive operational-cockpit --output json".to_string(),
+            "foundry interactive task-board --output json".to_string(),
+            "foundry interactive schedules --output json".to_string(),
+            "foundry interactive event-runtime --output json".to_string(),
+            "foundry interactive structured-logs --output json".to_string(),
+            "foundry interactive improvement-loop --output json".to_string(),
+            "foundry interactive workflow-mutation --output json".to_string(),
+            "foundry interactive addon-capabilities --output json".to_string(),
+            "foundry interactive operating-context --output json".to_string(),
+            "foundry cost ledger --output json".to_string(),
+            "foundry smoke operational-tui --output json".to_string(),
         ],
     })
 }
 
-pub fn build_forge_first_harness_smoke(
-    store: &ForgeStore,
+pub fn build_foundry_first_harness_smoke(
+    store: &FoundryStore,
     project_root: Option<&Path>,
     executor: &str,
     real_cmd: Option<&str>,
-) -> Result<ForgeFirstHarnessSmokeReport> {
+) -> Result<FoundryFirstHarnessSmokeReport> {
     let executor = executor.trim();
     let executor = if executor.is_empty() {
         "codex"
     } else {
         executor
     };
-    let smoke_root = forge_harness_smoke_root();
+    let smoke_root = foundry_harness_smoke_root();
     let shim_dir = smoke_root.join("bin");
     let smoke_project_root = project_root
         .map(Path::to_path_buf)
@@ -5247,17 +5255,17 @@ pub fn build_forge_first_harness_smoke(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
-        .unwrap_or_else(default_forge_harness_smoke_real_cmd);
+        .unwrap_or_else(default_foundry_harness_smoke_real_cmd);
     let context_budget = 120usize;
     let context_budget_source = "smoke_default";
     let token_headroom_source = "smoke_default";
-    let require_token_headroom_for_forge_first = true;
-    let headroom_content = forge_harness_smoke_headroom_content();
+    let require_token_headroom_for_foundry_first = true;
+    let headroom_content = foundry_harness_smoke_headroom_content();
     let headroom = analyze_token_headroom(
         &headroom_content,
         Some("log"),
         context_budget,
-        "forge_first_harness_smoke",
+        "foundry_first_harness_smoke",
         true,
     );
     let headroom = persist_token_headroom_report(store, headroom, &headroom_content)?;
@@ -5265,7 +5273,7 @@ pub fn build_forge_first_harness_smoke(
     let adoption_plan = build_harness_adoption_plan(HarnessAdoptionPlanOptions {
         shim_dir: &shim_dir,
         executor,
-        forge_first: true,
+        foundry_first: true,
         observe_only: false,
         project_root: Some(&smoke_project_root),
         workflow_id: None,
@@ -5275,7 +5283,7 @@ pub fn build_forge_first_harness_smoke(
         context_budget_source,
         token_headroom: true,
         token_headroom_source,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
     })?;
     let bootstrap_plan = build_harness_bootstrap_report(HarnessBootstrapOptions {
         shim_dir: &shim_dir,
@@ -5295,8 +5303,8 @@ pub fn build_forge_first_harness_smoke(
         executor,
         real_cmd: Some(&real_cmd),
         store_path: None,
-        forge_first: true,
-        forge_first_source: "smoke_explicit",
+        foundry_first: true,
+        foundry_first_source: "smoke_explicit",
         workflow_id: None,
         task_id: None,
         run_id: None,
@@ -5308,7 +5316,7 @@ pub fn build_forge_first_harness_smoke(
         shim_dir: &shim_dir,
         executor,
     })?;
-    let activated_path = forge_first_harness_smoke_activation_path(&shim_dir);
+    let activated_path = foundry_first_harness_smoke_activation_path(&shim_dir);
     let activated_shim_status = inspect_cli_harness_shim_status_with_path(
         CliShimStatusOptions {
             shim_dir: &shim_dir,
@@ -5316,13 +5324,13 @@ pub fn build_forge_first_harness_smoke(
         },
         Some(activated_path.as_os_str()),
     )?;
-    let exec_command = vec![real_cmd.clone(), "forge-first-harness-smoke".to_string()];
+    let exec_command = vec![real_cmd.clone(), "foundry-first-harness-smoke".to_string()];
     let exec_receipt = run_cli_harness_exec(CliHarnessExecOptions {
         store: Some(store),
         executor,
         command: &exec_command,
-        forge_first: true,
-        forge_first_source: "smoke_explicit",
+        foundry_first: true,
+        foundry_first_source: "smoke_explicit",
         workflow_id: None,
         task_id: None,
         run_id: None,
@@ -5330,7 +5338,7 @@ pub fn build_forge_first_harness_smoke(
         context_budget_source,
         token_headroom: true,
         token_headroom_source,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
         dry_run: true,
         allow_exec: false,
         secret_env: &[],
@@ -5353,15 +5361,15 @@ pub fn build_forge_first_harness_smoke(
                 headroom.persisted,
                 headroom.retrieval_available
             ),
-            "forge harness token-headroom --persist --output json",
+            "foundry harness token-headroom --persist --output json",
         ),
         operational_tui_smoke_check(
             "adoption_plan_ready",
-            "Forge-first adoption plan is read-only and complete",
+            "Foundry-first adoption plan is read-only and complete",
             adoption_plan.status == "harness_adoption_plan_ready"
                 && !adoption_plan.mutates_state
                 && !adoption_plan.executes_child
-                && adoption_plan.recommended_project_config.default_mode == "forge_first",
+                && adoption_plan.recommended_project_config.default_mode == "foundry_first",
             format!(
                 "{}; mutates {}; executes {}; next {}",
                 adoption_plan.status,
@@ -5369,7 +5377,7 @@ pub fn build_forge_first_harness_smoke(
                 adoption_plan.executes_child,
                 adoption_plan.next_action
             ),
-            "forge harness adoption-plan --forge-first --token-headroom --output json",
+            "foundry harness adoption-plan --foundry-first --token-headroom --output json",
         ),
         operational_tui_smoke_check(
             "bootstrap_dry_run",
@@ -5382,14 +5390,14 @@ pub fn build_forge_first_harness_smoke(
                 "{}; config {}; applied {}",
                 bootstrap_plan.status, bootstrap_plan.config_write.status, bootstrap_plan.applied
             ),
-            "forge harness bootstrap --output json",
+            "foundry harness bootstrap --output json",
         ),
         operational_tui_smoke_check(
             "shim_installed_in_smoke_dir",
-            "Forge-owned shim can be installed in an isolated directory",
+            "Foundry-owned shim can be installed in an isolated directory",
             shim_install.status == "shim_install_ready"
                 && shim_install.blocked_count == 0
-                && shim_install.forge_first
+                && shim_install.foundry_first
                 && shim_install.token_headroom
                 && shim_install
                     .shims
@@ -5403,29 +5411,29 @@ pub fn build_forge_first_harness_smoke(
                 shim_install.updated_count,
                 shim_install.blocked_count
             ),
-            "forge harness install-shims --real-cmd <safe-command> --output json",
+            "foundry harness install-shims --real-cmd <safe-command> --output json",
         ),
         operational_tui_smoke_check(
             "shim_audit_safe",
             "Shim audit proves ownership and no recursion without changing PATH",
             shim_status.shim_exists
-                && shim_status.forge_owned
+                && shim_status.foundry_owned
                 && shim_status.executable
                 && !shim_status.would_recurse,
             format!(
-                "{}; path {}; exists {}; forge_owned {}; executable {}; recurse {}",
+                "{}; path {}; exists {}; foundry_owned {}; executable {}; recurse {}",
                 shim_status.status,
                 shim_status.path_precedence,
                 shim_status.shim_exists,
-                shim_status.forge_owned,
+                shim_status.foundry_owned,
                 shim_status.executable,
                 shim_status.would_recurse
             ),
-            "forge harness shim-status --output json",
+            "foundry harness shim-status --output json",
         ),
         operational_tui_smoke_check(
             "one_shot_activation_ready",
-            "One-shot PATH activation makes the Forge-owned shim first without shell rc writes",
+            "One-shot PATH activation makes the Foundry-owned shim first without shell rc writes",
             activated_shim_status.status == "shim_status_ready"
                 && activated_shim_status.path_precedence == "shim_first"
                 && activated_shim_status.activation_diagnostic.status == "shim_activation_active"
@@ -5440,24 +5448,24 @@ pub fn build_forge_first_harness_smoke(
                 activated_shim_status.activation_diagnostic.status,
                 activated_shim_status.would_recurse
             ),
-            "PATH=<shim-dir>:$PATH forge harness shim-status --output json",
+            "PATH=<shim-dir>:$PATH foundry harness shim-status --output json",
         ),
         operational_tui_smoke_check(
-            "exec_dry_run_forge_first",
-            "Harness exec remains dry-run while projecting Forge-first policy",
+            "exec_dry_run_foundry_first",
+            "Harness exec remains dry-run while projecting Foundry-first policy",
             exec_receipt.status == "harness_exec_dry_run"
                 && exec_receipt.dry_run
                 && !exec_receipt.executed
-                && exec_receipt.forge_first
+                && exec_receipt.foundry_first
                 && exec_receipt.output_headroom_enabled,
             format!(
-                "{}; executed {}; forge_first {}; headroom {}",
+                "{}; executed {}; foundry_first {}; headroom {}",
                 exec_receipt.status,
                 exec_receipt.executed,
-                exec_receipt.forge_first,
+                exec_receipt.foundry_first,
                 exec_receipt.output_headroom_enabled
             ),
-            "forge harness exec --dry-run --output json",
+            "foundry harness exec --dry-run --output json",
         ),
         operational_tui_smoke_check(
             "external_cli_not_executed_or_modified",
@@ -5473,17 +5481,17 @@ pub fn build_forge_first_harness_smoke(
                 exec_receipt.executed,
                 shim_dir.display()
             ),
-            "forge smoke forge-first-harness --output json",
+            "foundry smoke foundry-first-harness --output json",
         ),
     ];
     let status = if checks.iter().all(|check| check.passed) {
-        "forge_first_harness_smoke_passed"
+        "foundry_first_harness_smoke_passed"
     } else {
-        "forge_first_harness_smoke_failed"
+        "foundry_first_harness_smoke_failed"
     };
 
-    Ok(ForgeFirstHarnessSmokeReport {
-        schema_version: FORGE_FIRST_HARNESS_SMOKE_SCHEMA_VERSION.to_string(),
+    Ok(FoundryFirstHarnessSmokeReport {
+        schema_version: FOUNDRY_FIRST_HARNESS_SMOKE_SCHEMA_VERSION.to_string(),
         status: status.to_string(),
         executor: executor.to_string(),
         project_root: smoke_project_root.display().to_string(),
@@ -5500,19 +5508,31 @@ pub fn build_forge_first_harness_smoke(
         exec_receipt,
         checks,
         commands: vec![
-            "forge smoke forge-first-harness --output json".to_string(),
-            "forge harness token-headroom --persist --output json".to_string(),
-            "forge harness adoption-plan --forge-first --token-headroom --output json".to_string(),
-            "forge harness bootstrap --output json".to_string(),
-            "forge harness install-shims --real-cmd <safe-command> --output json".to_string(),
-            "forge harness shim-status --output json".to_string(),
-            "forge harness exec --dry-run --output json".to_string(),
+            "foundry smoke foundry-first-harness --output json".to_string(),
+            "foundry harness token-headroom --persist --output json".to_string(),
+            "foundry harness adoption-plan --foundry-first --token-headroom --output json"
+                .to_string(),
+            "foundry harness bootstrap --output json".to_string(),
+            "foundry harness install-shims --real-cmd <safe-command> --output json".to_string(),
+            "foundry harness shim-status --output json".to_string(),
+            "foundry harness exec --dry-run --output json".to_string(),
         ],
     })
 }
 
+#[deprecated(since = "0.6.0", note = "use build_foundry_first_harness_smoke")]
+// foundry-brand-allow: legacy-compat
+pub fn build_forge_first_harness_smoke(
+    store: &FoundryStore,
+    project_root: Option<&Path>,
+    executor: &str,
+    real_cmd: Option<&str>,
+) -> Result<FoundryFirstHarnessSmokeReport> {
+    build_foundry_first_harness_smoke(store, project_root, executor, real_cmd)
+}
+
 pub fn build_replacement_cli_evidence_smoke(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: Option<&Path>,
     approved_by: &str,
     origin: &str,
@@ -5520,16 +5540,16 @@ pub fn build_replacement_cli_evidence_smoke(
     let smoke_project_root = project_root
         .map(Path::to_path_buf)
         .unwrap_or_else(replacement_cli_evidence_smoke_root);
-    std::fs::create_dir_all(smoke_project_root.join(".forge"))?;
+    std::fs::create_dir_all(smoke_project_root.join(".foundry"))?;
     let approved_by = approved_by.trim();
     let approved_by = if approved_by.is_empty() {
-        "forge_smoke"
+        "foundry_smoke"
     } else {
         approved_by
     };
     let origin = origin.trim();
     let origin = if origin.is_empty() {
-        "forge_smoke"
+        "foundry_smoke"
     } else {
         origin
     };
@@ -5625,7 +5645,7 @@ pub fn build_replacement_cli_evidence_smoke(
                 collect_ready.skipped_count,
                 collect_ready.failed_count
             ),
-            "forge milestone collect-ready-evidence --version 0.5 --project-root <project-root> --output json",
+            "foundry milestone collect-ready-evidence --version 0.5 --project-root <project-root> --output json",
         ),
         operational_tui_smoke_check(
             "collects_terminal_file_editing_ux",
@@ -5640,7 +5660,7 @@ pub fn build_replacement_cli_evidence_smoke(
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind terminal_file_editing_ux --output json",
+            "foundry milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind terminal_file_editing_ux --output json",
         ),
         operational_tui_smoke_check(
             "external_provider_evidence_manifest_state",
@@ -5654,7 +5674,7 @@ pub fn build_replacement_cli_evidence_smoke(
                 collect_ready.skipped_count,
                 collect_ready.next_action
             ),
-            "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --output json",
+            "foundry milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --output json",
         ),
         operational_tui_smoke_check(
             "skips_multimodal_until_runtime_ready",
@@ -5667,11 +5687,11 @@ pub fn build_replacement_cli_evidence_smoke(
                 "skipped {} item(s); failed {}",
                 collect_ready.skipped_count, collect_ready.failed_count
             ),
-            "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --output json",
+            "foundry milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --output json",
         ),
         operational_tui_smoke_check(
             "release_gate_tracks_replacement_cli_evidence_state",
-            "Release gate shows the current replacement CLI evidence state without overclaiming Forge 0.5 promotion",
+            "Release gate shows the current replacement CLI evidence state without overclaiming Foundry 0.5 promotion",
             replacement_gate_state_ok,
             replacement_gate
                 .map(|gate| {
@@ -5684,11 +5704,11 @@ pub fn build_replacement_cli_evidence_smoke(
                     )
                 })
                 .unwrap_or_else(|| "replacement_grade_cli gate missing".to_string()),
-            "forge interactive release-gates --version 0.5 --output json",
+            "foundry interactive release-gates --version 0.5 --output json",
         ),
         operational_tui_smoke_check(
             "preserves_core_promotion_decision",
-            "Optional evidence collection preserves the promotable Forge 0.5 core decision",
+            "Optional evidence collection preserves the promotable Foundry 0.5 core decision",
             collect_ready.promotion_ready_after_collection
                 && release_gates.promotion_ready
                 && release_gates.promotion_decision.decision == "promote",
@@ -5698,7 +5718,7 @@ pub fn build_replacement_cli_evidence_smoke(
                 release_gates.promotion_ready,
                 release_gates.promotion_decision.decision
             ),
-            "forge milestone manifest --version 0.5 --output json",
+            "foundry milestone manifest --version 0.5 --output json",
         ),
     ];
     let status = if checks.iter().all(|check| check.passed) {
@@ -5715,17 +5735,17 @@ pub fn build_replacement_cli_evidence_smoke(
         release_gates,
         checks,
         commands: vec![
-            "forge smoke replacement-cli-evidence --output json".to_string(),
-            "forge milestone collect-ready-evidence --version 0.5 --project-root <project-root> --approved-by <operator> --origin codex --output json".to_string(),
-            "forge interactive release-gates --version 0.5 --output json".to_string(),
-            "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --output json".to_string(),
-            "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --output json".to_string(),
+            "foundry smoke replacement-cli-evidence --output json".to_string(),
+            "foundry milestone collect-ready-evidence --version 0.5 --project-root <project-root> --approved-by <operator> --origin codex --output json".to_string(),
+            "foundry interactive release-gates --version 0.5 --output json".to_string(),
+            "foundry milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --output json".to_string(),
+            "foundry milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --output json".to_string(),
         ],
     })
 }
 
 pub fn build_multimodal_runtime_evidence_smoke(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: Option<&Path>,
     connected_runtime: Option<&str>,
     approved_by: &str,
@@ -5734,20 +5754,20 @@ pub fn build_multimodal_runtime_evidence_smoke(
     let smoke_project_root = project_root
         .map(Path::to_path_buf)
         .unwrap_or_else(multimodal_runtime_evidence_smoke_root);
-    std::fs::create_dir_all(smoke_project_root.join(".forge"))?;
+    std::fs::create_dir_all(smoke_project_root.join(".foundry"))?;
     let connected_runtime = connected_runtime
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     let approved_by = approved_by.trim();
     let approved_by = if approved_by.is_empty() {
-        "forge_smoke"
+        "foundry_smoke"
     } else {
         approved_by
     };
     let origin = origin.trim();
     let origin = if origin.is_empty() {
-        "forge_smoke"
+        "foundry_smoke"
     } else {
         origin
     };
@@ -5831,7 +5851,7 @@ pub fn build_multimodal_runtime_evidence_smoke(
     } else {
         !evidence_plan.ready_to_collect_evidence && manifest_templates_visible
     };
-    let addon_boundary_visible = multimodal_runtime_panel.addon_id == "forge.addon.multimodal"
+    let addon_boundary_visible = multimodal_runtime_panel.addon_id == "foundry.addon.multimodal"
         && multimodal_runtime_panel.capability_id == "experimental_multimodal_runtime"
         && multimodal_runtime_panel.addon_view_id == "multimodal.benchmark_center"
         && !multimodal_runtime_panel.installs_performed
@@ -5857,7 +5877,7 @@ pub fn build_multimodal_runtime_evidence_smoke(
                 multimodal_runtime_panel.device_access_performed,
                 multimodal_runtime_panel.network_access_performed
             ),
-            "forge interactive multimodal-runtime --project-root <project-root> --output json",
+            "foundry interactive multimodal-runtime --project-root <project-root> --output json",
         ),
         operational_tui_smoke_check(
             "runtime_evidence_manifest_state",
@@ -5878,7 +5898,7 @@ pub fn build_multimodal_runtime_evidence_smoke(
                     .map(|report| report.configured_evidence_source.clone())
                     .unwrap_or_else(|| "not_collected".to_string())
             ),
-            "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --output json",
+            "foundry milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --output json",
         ),
         operational_tui_smoke_check(
             "release_gate_tracks_multimodal_state",
@@ -5895,7 +5915,7 @@ pub fn build_multimodal_runtime_evidence_smoke(
                     )
                 })
                 .unwrap_or_else(|| "experimental_multimodal_runtime gate missing".to_string()),
-            "forge interactive release-gates --version 0.5 --output json",
+            "foundry interactive release-gates --version 0.5 --output json",
         ),
         operational_tui_smoke_check(
             "does_not_auto_promote",
@@ -5911,7 +5931,7 @@ pub fn build_multimodal_runtime_evidence_smoke(
                     .map(|report| report.promotion_impact.clone())
                     .unwrap_or_else(|| "planning_only_not_auto_promoted".to_string())
             ),
-            "forge milestone manifest --version 0.5 --output json",
+            "foundry milestone manifest --version 0.5 --output json",
         ),
     ];
     let status = if checks.iter().all(|check| check.passed) {
@@ -5932,29 +5952,29 @@ pub fn build_multimodal_runtime_evidence_smoke(
         multimodal_runtime_panel,
         checks,
         commands: vec![
-            "forge smoke multimodal-runtime-evidence --output json".to_string(),
-            "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --output json".to_string(),
-            "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --kind production_runtime_benchmark --project-root <project-root> --connected-runtime <runtime-id> --approved-by <operator> --origin codex --output json".to_string(),
-            "forge interactive multimodal-runtime --project-root <project-root> --output json".to_string(),
-            "forge interactive release-gates --version 0.5 --output json".to_string(),
+            "foundry smoke multimodal-runtime-evidence --output json".to_string(),
+            "foundry milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --output json".to_string(),
+            "foundry milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --kind production_runtime_benchmark --project-root <project-root> --connected-runtime <runtime-id> --approved-by <operator> --origin codex --output json".to_string(),
+            "foundry interactive multimodal-runtime --project-root <project-root> --output json".to_string(),
+            "foundry interactive release-gates --version 0.5 --output json".to_string(),
         ],
     })
 }
 
-fn forge_harness_smoke_root() -> PathBuf {
+fn foundry_harness_smoke_root() -> PathBuf {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
     env::temp_dir().join(format!(
-        "forge-first-harness-smoke-{}-{now}",
+        "foundry-first-harness-smoke-{}-{now}",
         std::process::id()
     ))
 }
 
-fn forge_first_harness_smoke_activation_path(shim_dir: &Path) -> std::ffi::OsString {
+fn foundry_first_harness_smoke_activation_path(shim_dir: &Path) -> std::ffi::OsString {
     let mut paths = vec![shim_dir.to_path_buf()];
-    if let Some(current_path) = env::var_os("PATH") {
+    if let Some(current_path) = crate::brand::env_var_os("PATH") {
         paths.extend(env::split_paths(&current_path));
     }
     env::join_paths(paths).unwrap_or_else(|_| shim_dir.as_os_str().to_os_string())
@@ -5966,7 +5986,7 @@ fn replacement_cli_evidence_smoke_root() -> PathBuf {
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
     env::temp_dir().join(format!(
-        "forge-replacement-cli-evidence-smoke-{}-{now}",
+        "foundry-replacement-cli-evidence-smoke-{}-{now}",
         std::process::id()
     ))
 }
@@ -5977,29 +5997,29 @@ fn multimodal_runtime_evidence_smoke_root() -> PathBuf {
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
     env::temp_dir().join(format!(
-        "forge-multimodal-runtime-evidence-smoke-{}-{now}",
+        "foundry-multimodal-runtime-evidence-smoke-{}-{now}",
         std::process::id()
     ))
 }
 
-fn default_forge_harness_smoke_real_cmd() -> String {
+fn default_foundry_harness_smoke_real_cmd() -> String {
     ["/bin/echo", "/usr/bin/printf", "/usr/bin/env"]
         .iter()
         .find(|candidate| Path::new(candidate).exists())
         .map(|candidate| (*candidate).to_string())
         .unwrap_or_else(|| {
             env::current_exe()
-                .unwrap_or_else(|_| PathBuf::from("forge"))
+                .unwrap_or_else(|_| PathBuf::from("foundry"))
                 .display()
                 .to_string()
         })
 }
 
-fn forge_harness_smoke_headroom_content() -> String {
+fn foundry_harness_smoke_headroom_content() -> String {
     (0..80)
         .map(|index| {
             format!(
-                "warning[{index}]: repeated executor output can be compressed by Forge headroom while original bytes remain retrievable"
+                "warning[{index}]: repeated executor output can be compressed by Foundry headroom while original bytes remain retrievable"
             )
         })
         .collect::<Vec<_>>()
@@ -6052,7 +6072,7 @@ pub fn render_operational_tui_smoke(report: &OperationalTuiSmokeReport) -> Strin
     )
 }
 
-pub fn render_forge_first_harness_smoke(report: &ForgeFirstHarnessSmokeReport) -> String {
+pub fn render_foundry_first_harness_smoke(report: &FoundryFirstHarnessSmokeReport) -> String {
     let checks = report
         .checks
         .iter()
@@ -6060,7 +6080,7 @@ pub fn render_forge_first_harness_smoke(report: &ForgeFirstHarnessSmokeReport) -
         .collect::<Vec<_>>()
         .join(" | ");
     format!(
-        "Forge-first harness smoke: {status}; executor {executor}; project {project_root}; shim {shim_dir}; real_cmd {real_cmd}\nHeadroom: {headroom_status}; saved {saved_tokens} tokens; persisted {persisted}; retrieval {retrieval_available}\nAdoption: {adoption_status}; bootstrap {bootstrap_status}; shim install {shim_install_status}; shim audit {shim_status} ({shim_path_precedence}); one-shot activation {activated_status} ({activated_path_precedence}); exec {exec_status}; external mutated {mutates_external_cli}; external executed {executes_external_cli}\nchecks: {checks}\ncommands: {commands}\n",
+        "Foundry-first harness smoke: {status}; executor {executor}; project {project_root}; shim {shim_dir}; real_cmd {real_cmd}\nHeadroom: {headroom_status}; saved {saved_tokens} tokens; persisted {persisted}; retrieval {retrieval_available}\nAdoption: {adoption_status}; bootstrap {bootstrap_status}; shim install {shim_install_status}; shim audit {shim_status} ({shim_path_precedence}); one-shot activation {activated_status} ({activated_path_precedence}); exec {exec_status}; external mutated {mutates_external_cli}; external executed {executes_external_cli}\nchecks: {checks}\ncommands: {commands}\n",
         status = report.status,
         executor = report.executor,
         project_root = report.project_root,
@@ -6083,6 +6103,12 @@ pub fn render_forge_first_harness_smoke(report: &ForgeFirstHarnessSmokeReport) -
         checks = checks,
         commands = report.commands.join(" | "),
     )
+}
+
+#[deprecated(since = "0.6.0", note = "use render_foundry_first_harness_smoke")]
+// foundry-brand-allow: legacy-compat
+pub fn render_forge_first_harness_smoke(report: &FoundryFirstHarnessSmokeReport) -> String {
+    render_foundry_first_harness_smoke(report)
 }
 
 pub fn render_replacement_cli_evidence_smoke(report: &ReplacementCliEvidenceSmokeReport) -> String {
@@ -6176,16 +6202,16 @@ pub fn slash_command_catalog() -> SlashCommandCatalogReport {
 }
 
 pub fn build_interactive_harness(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: InteractiveHarnessOptions,
 ) -> Result<InteractiveHarnessPanel> {
     let project_root = options
         .project_root
         .clone()
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let (effective_forge_first, forge_first_source) =
-        resolve_harness_forge_first_source_for_project(
-            options.forge_first,
+    let (effective_foundry_first, foundry_first_source) =
+        resolve_harness_foundry_first_source_for_project(
+            options.foundry_first,
             options.observe_only,
             Some(&project_root),
         );
@@ -6195,18 +6221,18 @@ pub fn build_interactive_harness(
         context_budget_source: "interactive_input",
         token_headroom: options.token_headroom,
         token_headroom_source: "interactive_input",
-        forge_first: effective_forge_first,
+        foundry_first: effective_foundry_first,
         default_context_budget: 1200,
     });
     let mode = build_harness_mode_report(HarnessModeOptions {
-        forge_first: options.forge_first,
+        foundry_first: options.foundry_first,
         observe_only: options.observe_only,
         project_root: Some(&project_root),
     });
     let doctor = build_harness_doctor_report(HarnessDoctorOptions {
         shim_dir: &options.shim_dir,
         executor: &options.executor,
-        forge_first: options.forge_first,
+        foundry_first: options.foundry_first,
         observe_only: options.observe_only,
         project_root: Some(&project_root),
         workflow_id: options.workflow_id.as_deref(),
@@ -6216,8 +6242,8 @@ pub fn build_interactive_harness(
         context_budget_source: &runtime_policy.context_budget_source,
         token_headroom: runtime_policy.token_headroom,
         token_headroom_source: &runtime_policy.token_headroom_source,
-        require_token_headroom_for_forge_first: runtime_policy
-            .require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first: runtime_policy
+            .require_token_headroom_for_foundry_first,
     })?;
     let shim_status = inspect_cli_harness_shim_status(CliShimStatusOptions {
         shim_dir: &options.shim_dir,
@@ -6227,8 +6253,8 @@ pub fn build_interactive_harness(
     let headroom_plan = build_harness_headroom_plan(HarnessHeadroomPlanOptions {
         executor: &options.executor,
         command: &command,
-        forge_first: mode.forge_first,
-        forge_first_source: &mode.forge_first_source,
+        foundry_first: mode.foundry_first,
+        foundry_first_source: &mode.foundry_first_source,
         project_root: Some(&project_root),
         workflow_id: options.workflow_id.as_deref(),
         task_id: options.task_id.as_deref(),
@@ -6237,8 +6263,8 @@ pub fn build_interactive_harness(
         context_budget_source: &runtime_policy.context_budget_source,
         token_headroom: runtime_policy.token_headroom,
         token_headroom_source: &runtime_policy.token_headroom_source,
-        require_token_headroom_for_forge_first: runtime_policy
-            .require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first: runtime_policy
+            .require_token_headroom_for_foundry_first,
     });
     let wrapper_plan = headroom_plan.wrapper_plan.clone();
     let session_lifecycle_plan = headroom_plan.session_lifecycle_plan.clone();
@@ -6249,14 +6275,14 @@ pub fn build_interactive_harness(
         workflow_id: options.workflow_id.as_deref(),
         task_id: options.task_id.as_deref(),
         run_id: options.run_id.as_deref(),
-        forge_first: options.forge_first,
+        foundry_first: options.foundry_first,
         observe_only: options.observe_only,
         context_budget: runtime_policy.context_budget,
         context_budget_source: &runtime_policy.context_budget_source,
         token_headroom: runtime_policy.token_headroom,
         token_headroom_source: &runtime_policy.token_headroom_source,
-        require_token_headroom_for_forge_first: runtime_policy
-            .require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first: runtime_policy
+            .require_token_headroom_for_foundry_first,
     })?;
     let activation_profile = build_harness_activation_profile(HarnessActivationProfileOptions {
         shim_dir: &options.shim_dir,
@@ -6271,7 +6297,7 @@ pub fn build_interactive_harness(
         approved_by: None,
     })?;
     let headroom_preview = analyze_token_headroom(
-        "Forge harness preview: route bounded context, shell receipts, logs, tool output and CLI stdout through local token headroom while preserving retrieval references.",
+        "Foundry harness preview: route bounded context, shell receipts, logs, tool output and CLI stdout through local token headroom while preserving retrieval references.",
         Some("text"),
         runtime_policy.context_budget,
         "interactive_harness_preview",
@@ -6302,15 +6328,16 @@ pub fn build_interactive_harness(
         &wrapper_plan,
         &session_lifecycle_plan,
     );
-    let forge_first_adoption_readiness = build_interactive_harness_forge_first_adoption_readiness(
-        &options.executor,
-        &mode,
-        &doctor,
-        &shim_status,
-        &wrapper_plan,
-        &session_lifecycle_plan,
-        &commands,
-    );
+    let foundry_first_adoption_readiness =
+        build_interactive_harness_foundry_first_adoption_readiness(
+            &options.executor,
+            &mode,
+            &doctor,
+            &shim_status,
+            &wrapper_plan,
+            &session_lifecycle_plan,
+            &commands,
+        );
     let mut next_actions = doctor.next_actions.clone();
     next_actions.push(format!(
         "headroom recommended action: {}",
@@ -6324,8 +6351,8 @@ pub fn build_interactive_harness(
         "executor compatibility next action: {}",
         executor_compatibility.next_action
     ));
-    next_actions.push("forge interactive readiness --output json".to_string());
-    next_actions.push("forge interactive home --output json".to_string());
+    next_actions.push("foundry interactive readiness --output json".to_string());
+    next_actions.push("foundry interactive home --output json".to_string());
 
     Ok(InteractiveHarnessPanel {
         schema_version: INTERACTIVE_HARNESS_SCHEMA_VERSION.to_string(),
@@ -6333,7 +6360,7 @@ pub fn build_interactive_harness(
         executor: options.executor,
         project_root: project_root.display().to_string(),
         shim_dir: options.shim_dir.display().to_string(),
-        forge_first_ready: doctor.forge_first_ready,
+        foundry_first_ready: doctor.foundry_first_ready,
         token_headroom_ready: doctor.token_headroom_ready,
         shim_ready: doctor.shim_ready,
         lineage_policy_ready: doctor.lineage_policy_ready,
@@ -6345,7 +6372,7 @@ pub fn build_interactive_harness(
         headroom_plan,
         adoption_plan,
         activation_profile,
-        forge_first_adoption_readiness,
+        foundry_first_adoption_readiness,
         headroom_stats,
         headroom_operational_status,
         headroom_recommended_action,
@@ -6354,17 +6381,17 @@ pub fn build_interactive_harness(
         headroom_preview,
         next_actions,
         notes: vec![
-            format!("Forge-first source: {forge_first_source}"),
+            format!("Foundry-first source: {foundry_first_source}"),
             "This panel is read-only: it does not install shims or launch child CLIs."
                 .to_string(),
-            "Use wrap-plan before a Forge-controlled brain shell and exec only through guarded harness receipts."
+            "Use wrap-plan before a Foundry-controlled brain shell and exec only through guarded harness receipts."
                 .to_string(),
         ],
         commands,
     })
 }
 
-fn build_interactive_harness_forge_first_adoption_readiness(
+fn build_interactive_harness_foundry_first_adoption_readiness(
     executor: &str,
     mode: &HarnessModeReport,
     doctor: &HarnessDoctorReport,
@@ -6372,22 +6399,22 @@ fn build_interactive_harness_forge_first_adoption_readiness(
     wrapper_plan: &CliWrapperPlanReport,
     session_lifecycle_plan: &HarnessSessionLifecyclePlan,
     commands: &InteractiveHarnessCommands,
-) -> InteractiveHarnessForgeFirstAdoptionReadiness {
+) -> InteractiveHarnessFoundryFirstAdoptionReadiness {
     let mut blocked_reasons = Vec::new();
-    if !mode.forge_first {
-        blocked_reasons.push("forge_first_default_not_active".to_string());
+    if !mode.foundry_first {
+        blocked_reasons.push("foundry_first_default_not_active".to_string());
     }
     if !doctor.token_headroom_ready {
         blocked_reasons.push("token_headroom_not_ready".to_string());
     }
-    if mode.require_token_headroom_for_forge_first && !wrapper_plan.token_headroom_enabled {
+    if mode.require_token_headroom_for_foundry_first && !wrapper_plan.token_headroom_enabled {
         blocked_reasons.push("token_headroom_required_but_disabled".to_string());
     }
     if !doctor.shim_ready {
         if harness_shim_file_ready_for_activation(doctor) {
-            blocked_reasons.push("forge_shim_installed_but_path_not_active".to_string());
+            blocked_reasons.push("foundry_shim_installed_but_path_not_active".to_string());
         } else {
-            blocked_reasons.push("forge_owned_path_shim_not_ready".to_string());
+            blocked_reasons.push("foundry_owned_path_shim_not_ready".to_string());
         }
     }
     if !doctor.lineage_policy_ready {
@@ -6404,32 +6431,34 @@ fn build_interactive_harness_forge_first_adoption_readiness(
         .to_string();
 
     let mut next_commands = Vec::new();
-    if !mode.forge_first {
-        next_commands.push(interactive_forge_command_line(&commands.adoption_plan));
-        next_commands.push(interactive_forge_command_line(
+    if !mode.foundry_first {
+        next_commands.push(interactive_foundry_command_line(&commands.adoption_plan));
+        next_commands.push(interactive_foundry_command_line(
             &commands.bootstrap_project_harness,
         ));
     }
     if !doctor.shim_ready && harness_shim_file_ready_for_activation(doctor) {
-        next_commands.push(interactive_forge_command_line(&commands.activation_profile));
+        next_commands.push(interactive_foundry_command_line(
+            &commands.activation_profile,
+        ));
     } else if !doctor.shim_ready {
-        next_commands.push(interactive_forge_command_line(&commands.install_shims));
+        next_commands.push(interactive_foundry_command_line(&commands.install_shims));
     }
     if mode.require_lineage_for_exec && !session_lifecycle_plan.lineage_complete {
-        next_commands.push(interactive_forge_command_line(&commands.sessions));
-        next_commands.push(interactive_forge_command_line(&commands.lineage_plan));
-        next_commands.push(interactive_forge_command_line(
+        next_commands.push(interactive_foundry_command_line(&commands.sessions));
+        next_commands.push(interactive_foundry_command_line(&commands.lineage_plan));
+        next_commands.push(interactive_foundry_command_line(
             &commands.lineage_exec_dry_run,
         ));
     }
-    next_commands.push(interactive_forge_command_line(&commands.wrap_plan));
-    next_commands.push(interactive_forge_command_line(&commands.headroom_plan));
+    next_commands.push(interactive_foundry_command_line(&commands.wrap_plan));
+    next_commands.push(interactive_foundry_command_line(&commands.headroom_plan));
 
     let ready_to_use_as_default = blocked_reasons.is_empty();
     let status = if ready_to_use_as_default {
-        "forge_first_default_ready"
+        "foundry_first_default_ready"
     } else {
-        "forge_first_default_blocked"
+        "foundry_first_default_blocked"
     };
     let wrapper_interception_points = wrapper_plan
         .headroom_runtime_plan
@@ -6453,14 +6482,14 @@ fn build_interactive_harness_forge_first_adoption_readiness(
     next_commands.sort();
     next_commands.dedup();
 
-    InteractiveHarnessForgeFirstAdoptionReadiness {
-        schema_version: "forge.interactive.harness_forge_first_adoption.v1".to_string(),
+    InteractiveHarnessFoundryFirstAdoptionReadiness {
+        schema_version: "foundry.interactive.harness_foundry_first_adoption.v1".to_string(),
         status: status.to_string(),
         executor: executor.to_string(),
-        forge_first_default_active: mode.forge_first,
+        foundry_first_default_active: mode.foundry_first,
         ready_to_use_as_default,
         token_headroom_ready: doctor.token_headroom_ready,
-        token_headroom_required: mode.require_token_headroom_for_forge_first,
+        token_headroom_required: mode.require_token_headroom_for_foundry_first,
         shim_ready: doctor.shim_ready,
         activation_status: shim_status.activation_diagnostic.status.clone(),
         activation_required: shim_status.activation_diagnostic.activation_required,
@@ -6486,16 +6515,16 @@ fn build_interactive_harness_forge_first_adoption_readiness(
         notes: vec![
             "This contract is read-only and does not install shims, modify PATH or launch child CLIs."
                 .to_string(),
-            "Treat Codex, OpenCode, Gemini and Claude as replaceable execution brains; Forge remains the workflow, context, memory, permission, headroom and session control plane."
+            "Treat Codex, OpenCode, Gemini and Claude as replaceable execution brains; Foundry remains the workflow, context, memory, permission, headroom and session control plane."
                 .to_string(),
         ],
     }
 }
 
-fn interactive_forge_command_line(command: &[String]) -> String {
+fn interactive_foundry_command_line(command: &[String]) -> String {
     let mut parts = Vec::with_capacity(command.len() + 1);
-    if command.first().is_none_or(|part| part != "forge") {
-        parts.push("forge");
+    if command.first().is_none_or(|part| part != "foundry") {
+        parts.push("foundry");
     }
     parts.extend(command.iter().map(String::as_str));
     parts
@@ -6520,13 +6549,13 @@ fn interactive_shell_arg(arg: &str) -> String {
 
 fn harness_shim_file_ready_for_activation(doctor: &HarnessDoctorReport) -> bool {
     doctor.shim_status.shim_exists
-        && doctor.shim_status.forge_owned
+        && doctor.shim_status.foundry_owned
         && doctor.shim_status.executable
         && !doctor.shim_status.would_recurse
 }
 
 pub fn build_interactive_sessions(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: InteractiveSessionsOptions,
 ) -> Result<InteractiveSessionsPanel> {
     let executors = load_executors(store)?;
@@ -6546,8 +6575,8 @@ pub fn build_interactive_sessions(
         .collect::<Vec<_>>();
     let commands = interactive_sessions_commands(&session_report);
     let mut next_actions = session_report.next_actions.clone();
-    next_actions.push("forge interactive readiness --output json".to_string());
-    next_actions.push("forge interactive home --output json".to_string());
+    next_actions.push("foundry interactive readiness --output json".to_string());
+    next_actions.push("foundry interactive home --output json".to_string());
 
     Ok(InteractiveSessionsPanel {
         schema_version: INTERACTIVE_SESSIONS_SCHEMA_VERSION.to_string(),
@@ -6572,20 +6601,20 @@ pub fn build_interactive_sessions(
     })
 }
 
-pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveReadinessPanel> {
+pub fn build_interactive_readiness(store: &FoundryStore) -> Result<InteractiveReadinessPanel> {
     let executors = load_executors(store)?;
     let runtimes = load_runtimes(store)?;
     let repository_context_path = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let harness_shim_dir = default_interactive_harness_shim_dir();
     let harness_mode = build_harness_mode_report(HarnessModeOptions {
-        forge_first: false,
+        foundry_first: false,
         observe_only: false,
         project_root: Some(&repository_context_path),
     });
     let harness_doctor = build_harness_doctor_report(HarnessDoctorOptions {
         shim_dir: &harness_shim_dir,
         executor: "codex",
-        forge_first: false,
+        foundry_first: false,
         observe_only: false,
         project_root: Some(&repository_context_path),
         workflow_id: None,
@@ -6595,7 +6624,7 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
         context_budget_source: "interactive_default",
         token_headroom: true,
         token_headroom_source: "interactive_default",
-        require_token_headroom_for_forge_first: false,
+        require_token_headroom_for_foundry_first: false,
     })?;
     let harness_adoption_plan = build_harness_adoption_plan(HarnessAdoptionPlanOptions {
         shim_dir: &harness_shim_dir,
@@ -6604,13 +6633,13 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
         workflow_id: None,
         task_id: None,
         run_id: None,
-        forge_first: false,
+        foundry_first: false,
         observe_only: false,
         context_budget: 1200,
         context_budget_source: "interactive_default",
         token_headroom: true,
         token_headroom_source: "interactive_default",
-        require_token_headroom_for_forge_first: false,
+        require_token_headroom_for_foundry_first: false,
     })?;
     let headroom_stats = build_headroom_stats_report(
         store,
@@ -6636,11 +6665,11 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
             )
         })
         .collect::<Vec<_>>();
-    let forge_first_shell_count = executors
+    let foundry_first_shell_count = executors
         .brain_router
         .shell_sessions
         .iter()
-        .filter(|session| session.forge_first_ready)
+        .filter(|session| session.foundry_first_ready)
         .count();
     let mut next_actions = readiness_next_actions(
         executors.usable.is_empty(),
@@ -6676,10 +6705,10 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
             .selected_brain
             .clone()
             .unwrap_or_else(|| "none".to_string()),
-        forge_controlled_surface_count: executors.brain_router.forge_controlled_surfaces.len(),
-        forge_controlled_surfaces: executors.brain_router.forge_controlled_surfaces.clone(),
+        foundry_controlled_surface_count: executors.brain_router.foundry_controlled_surfaces.len(),
+        foundry_controlled_surfaces: executors.brain_router.foundry_controlled_surfaces.clone(),
         shell_count: executors.brain_router.shell_sessions.len(),
-        forge_first_shell_count,
+        foundry_first_shell_count,
         shell_entrypoints,
         harness_mode,
         harness_doctor,
@@ -6693,7 +6722,7 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
 }
 
 pub fn build_interactive_release_gates(
-    store: &ForgeStore,
+    store: &FoundryStore,
     version: &str,
     project_root: Option<&Path>,
 ) -> Result<InteractiveReleaseGatesPanel> {
@@ -6816,7 +6845,7 @@ pub fn build_interactive_release_gates(
 }
 
 fn interactive_release_gate_evidence_plan(
-    store: &ForgeStore,
+    store: &FoundryStore,
     version: &str,
     capability_id: &str,
     project_root: Option<&Path>,
@@ -6853,7 +6882,7 @@ fn interactive_release_gate_evidence_plan_from_report(
         .map(|template| template.target_path.clone())
         .collect::<Vec<_>>();
     InteractiveReleaseGateEvidencePlan {
-        schema_version: "forge.interactive.release_gate_evidence_plan.v1".to_string(),
+        schema_version: "foundry.interactive.release_gate_evidence_plan.v1".to_string(),
         status: plan.status,
         ready_to_collect_evidence: plan.ready_to_collect_evidence,
         project_root: plan.project_root,
@@ -6873,14 +6902,14 @@ fn interactive_release_gate_evidence_plan_from_report(
 }
 
 pub fn build_interactive_command_palette(
-    store: &ForgeStore,
+    store: &FoundryStore,
     query: Option<&str>,
 ) -> Result<InteractiveCommandPalettePanel> {
     build_interactive_command_palette_for_project(store, query, None)
 }
 
 pub fn build_interactive_command_palette_for_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     query: Option<&str>,
     project_root: Option<&Path>,
 ) -> Result<InteractiveCommandPalettePanel> {
@@ -6935,14 +6964,14 @@ pub fn build_interactive_command_palette_for_project(
 }
 
 pub fn build_interactive_action_registry(
-    store: &ForgeStore,
+    store: &FoundryStore,
     query: Option<&str>,
 ) -> Result<InteractiveActionRegistryPanel> {
     build_interactive_action_registry_for_project(store, query, None)
 }
 
 pub fn build_interactive_action_registry_for_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     query: Option<&str>,
     project_root: Option<&Path>,
 ) -> Result<InteractiveActionRegistryPanel> {
@@ -6954,14 +6983,14 @@ pub fn build_interactive_action_registry_for_project(
 }
 
 pub fn build_interactive_action_invocation(
-    store: &ForgeStore,
+    store: &FoundryStore,
     action_id: &str,
 ) -> Result<InteractiveActionInvocationReport> {
     build_interactive_action_invocation_for_project(store, action_id, None)
 }
 
 pub fn build_interactive_action_invocation_for_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     action_id: &str,
     project_root: Option<&Path>,
 ) -> Result<InteractiveActionInvocationReport> {
@@ -7121,7 +7150,7 @@ pub fn build_interactive_action_invocation_for_project(
 }
 
 pub fn dispatch_interactive_action_hooks_for_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     action_id: &str,
     project_root: Option<&Path>,
     origin: &str,
@@ -7233,11 +7262,11 @@ pub fn dispatch_interactive_action_hooks_for_project(
         let goal = action_workflow_hook_goal(&invocation, &hook, &payload);
         let request = start_async_request(store, &goal, &dispatch_origin)?;
         let artifact_ref = format!(
-            "forge://workflow/{}/action-hook/{}",
+            "foundry://workflow/{}/action-hook/{}",
             request.workflow_id, hook.id
         );
         let lineage_ref = format!(
-            "forge://event/interactive_action_workflow_hook_dispatched/{}/{}",
+            "foundry://event/interactive_action_workflow_hook_dispatched/{}/{}",
             request.workflow_id, hook.id
         );
         let receipt = InteractiveWorkflowHookDispatchReceipt {
@@ -7250,8 +7279,8 @@ pub fn dispatch_interactive_action_hooks_for_project(
             permission_id: hook.permission_id.clone(),
             invocation_mode: "start_async_request".to_string(),
             state: "workflow_dispatched".to_string(),
-            state_owner: "forge_workflow_runtime".to_string(),
-            execution_owner: "forge_workflow_runtime".to_string(),
+            state_owner: "foundry_workflow_runtime".to_string(),
+            execution_owner: "foundry_workflow_runtime".to_string(),
             mutates_workflow: hook.mutates_workflow,
             goal,
             payload: payload.clone(),
@@ -7296,7 +7325,7 @@ pub fn dispatch_interactive_action_hooks_for_project(
             workflow_id.clone()
         };
         let receipt = InteractiveBrainHookDispatchReceipt {
-            status: "brain_hook_routed_through_forge_harness".to_string(),
+            status: "brain_hook_routed_through_foundry_harness".to_string(),
             hook_id: hook.id.clone(),
             hook_type: hook.hook_type.clone(),
             tags: hook.tags.clone(),
@@ -7305,19 +7334,19 @@ pub fn dispatch_interactive_action_hooks_for_project(
             workflow_id: workflow_id.clone(),
             contract_id: hook.contract_id.clone(),
             permission_id: hook.permission_id.clone(),
-            execution_owner: "forge_harness".to_string(),
-            queue_owner: "forge_harness".to_string(),
+            execution_owner: "foundry_harness".to_string(),
+            queue_owner: "foundry_harness".to_string(),
             state: "queued_waiting_executor_policy".to_string(),
             execution_boundary: hook.execution_boundary.clone(),
-            dispatch_operation: "route_cli_brain_hook_through_forge_harness".to_string(),
+            dispatch_operation: "route_cli_brain_hook_through_foundry_harness".to_string(),
             quota_policy: brain_hook_quota_policy(),
             fallback_brains: brain_hook_fallback_brains(&hook.brain_id),
             not_executed: true,
             mutates_workflow: hook.mutates_workflow,
             command: action_brain_hook_command(&hook),
-            artifact_ref: format!("forge://workflow/{workflow_ref}/brain-hook/{}", hook.id),
+            artifact_ref: format!("foundry://workflow/{workflow_ref}/brain-hook/{}", hook.id),
             lineage_ref: format!(
-                "forge://event/interactive_action_brain_hook_queued/{workflow_ref}/{}",
+                "foundry://event/interactive_action_brain_hook_queued/{workflow_ref}/{}",
                 hook.id
             ),
             input_schema: hook.input_schema.clone(),
@@ -7475,7 +7504,7 @@ fn action_brain_hook_command(hook: &InteractiveBrainHookDispatchPlan) -> Vec<Str
 
 fn brain_hook_quota_policy() -> InteractiveBrainHookQuotaPolicy {
     InteractiveBrainHookQuotaPolicy {
-        schema_version: "forge.brain_hook_quota_policy.v1".to_string(),
+        schema_version: "foundry.brain_hook_quota_policy.v1".to_string(),
         ai_limits_required: true,
         ai_limits_command_template: vec![
             "executor-quota".to_string(),
@@ -7715,7 +7744,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             "navigation.home",
             "navigation",
             "Open interactive home",
-            "Inspect the full Forge operator dashboard.",
+            "Inspect the full Foundry operator dashboard.",
             "navigation_panel",
             None,
             &["interactive", "home", "--output", "json"],
@@ -7728,7 +7757,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             "navigation.guided_cockpit",
             "navigation",
             "Open guided cockpit",
-            "Open the Forge 0.5 guided cockpit with the end-to-end operator checklist, panes, previews and safe actions.",
+            "Open the Foundry 0.5 guided cockpit with the end-to-end operator checklist, panes, previews and safe actions.",
             "guided_cockpit_panel",
             None,
             &["interactive", "guided-cockpit", "--output", "json"],
@@ -7767,7 +7796,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             "readiness.open",
             "readiness",
             "Open interactive readiness",
-            "Audit executors, brains, shells, Forge-controlled surfaces and harness diagnostics.",
+            "Audit executors, brains, shells, Foundry-controlled surfaces and harness diagnostics.",
             "readiness_panel",
             None,
             &["interactive", "readiness", "--output", "json"],
@@ -7836,20 +7865,20 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             "harness.open",
             "harness",
             "Open harness center",
-            "Inspect Forge-first CLI controls, wrap plans, shims and token headroom.",
+            "Inspect Foundry-first CLI controls, wrap plans, shims and token headroom.",
             "harness_panel",
             None,
             &["interactive", "harness", "--output", "json"],
             false,
             false,
             "low",
-            &["harness", "shim", "forge-first", "brain", "cli"],
+            &["harness", "shim", "foundry-first", "brain", "cli"],
         ),
         command_palette_entry(
             "harness.headroom_plan",
             "harness",
             "Inspect headroom plan",
-            "Inspect token-headroom wrapper policy before opening Forge-controlled brain shells.",
+            "Inspect token-headroom wrapper policy before opening Foundry-controlled brain shells.",
             "harness_panel",
             None,
             &[
@@ -7871,7 +7900,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             "harness.activation_profile",
             "harness",
             "Inspect harness activation profile",
-            "Inspect reversible Forge-first shim activation commands before changing PATH or shell profiles.",
+            "Inspect reversible Foundry-first shim activation commands before changing PATH or shell profiles.",
             "harness_panel",
             None,
             &[
@@ -7880,7 +7909,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
                 "--executor",
                 "codex",
                 "--shim-dir",
-                "$HOME/.forge/bin",
+                "$HOME/.foundry/bin",
                 "--project-root",
                 ".",
                 "--output",
@@ -7895,7 +7924,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
                 "profile",
                 "path",
                 "shim",
-                "forge-first",
+                "foundry-first",
                 "headroom",
             ],
         ),
@@ -7903,7 +7932,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             "harness.apply_activation_profile",
             "harness",
             "Apply harness activation profile",
-            "Apply a Forge-managed shell profile block for Forge-first shims only after explicit approval and a selected shell rc path.",
+            "Apply a Foundry-managed shell profile block for Foundry-first shims only after explicit approval and a selected shell rc path.",
             "harness_panel",
             None,
             &[
@@ -7912,7 +7941,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
                 "--executor",
                 "codex",
                 "--shim-dir",
-                "$HOME/.forge/bin",
+                "$HOME/.foundry/bin",
                 "--project-root",
                 ".",
                 "--shell-rc",
@@ -7934,7 +7963,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
                 "shell-rc",
                 "path",
                 "shim",
-                "forge-first",
+                "foundry-first",
                 "rollback",
             ],
         ),
@@ -7942,7 +7971,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             "harness.adoption_plan",
             "harness",
             "Inspect harness adoption plan",
-            "Inspect the governed Forge-first adoption plan before writing project policy or shims.",
+            "Inspect the governed Foundry-first adoption plan before writing project policy or shims.",
             "harness_panel",
             None,
             &[
@@ -7951,7 +7980,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
                 "--executor",
                 "codex",
                 "--shim-dir",
-                "$HOME/.forge/bin",
+                "$HOME/.foundry/bin",
                 "--project-root",
                 ".",
                 "--output",
@@ -7960,13 +7989,13 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             false,
             false,
             "low",
-            &["harness", "adoption", "bootstrap", "forge-first", "shim", "plan"],
+            &["harness", "adoption", "bootstrap", "foundry-first", "shim", "plan"],
         ),
         command_palette_entry(
             "harness.lineage_plan",
             "harness",
             "Inspect lineage handoff plan",
-            "Inspect the Forge-first harness plan with workflow/task/run placeholders before a brain CLI handoff.",
+            "Inspect the Foundry-first harness plan with workflow/task/run placeholders before a brain CLI handoff.",
             "harness_panel",
             None,
             &[
@@ -7975,7 +8004,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
                 "--executor",
                 "codex",
                 "--shim-dir",
-                "$HOME/.forge/bin",
+                "$HOME/.foundry/bin",
                 "--project-root",
                 ".",
                 "--workflow",
@@ -8012,7 +8041,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
                 "exec",
                 "--executor",
                 "codex",
-                "--forge-first",
+                "--foundry-first",
                 "--project-root",
                 ".",
                 "--workflow",
@@ -8045,7 +8074,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             "harness.bootstrap_project_harness",
             "harness",
             "Bootstrap project harness",
-            "Apply the reviewed Forge-first harness policy and Forge-owned CLI shims with operator approval.",
+            "Apply the reviewed Foundry-first harness policy and Foundry-owned CLI shims with operator approval.",
             "harness_panel",
             None,
             &[
@@ -8054,7 +8083,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
                 "--executor",
                 "codex",
                 "--shim-dir",
-                "$HOME/.forge/bin",
+                "$HOME/.foundry/bin",
                 "--project-root",
                 ".",
                 "--apply",
@@ -8066,7 +8095,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             true,
             true,
             "medium",
-            &["harness", "bootstrap", "adoption", "forge-first", "shim", "apply"],
+            &["harness", "bootstrap", "adoption", "foundry-first", "shim", "apply"],
         ),
         command_palette_entry(
             "harness.headroom_stats",
@@ -8186,7 +8215,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             "observability.structured_logs",
             "observability",
             "Open structured logs",
-            "Inspect recent Forge event logs with workflow and correlation context.",
+            "Inspect recent Foundry event logs with workflow and correlation context.",
             "structured_logs_panel",
             None,
             &["interactive", "structured-logs", "--output", "json"],
@@ -8220,13 +8249,13 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
 }
 
 fn addon_command_palette_entries(
-    store: &ForgeStore,
+    store: &FoundryStore,
 ) -> Result<Vec<InteractiveCommandPaletteEntry>> {
     addon_command_palette_entries_for_project(store, None)
 }
 
 fn addon_command_palette_entries_for_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: Option<&Path>,
 ) -> Result<Vec<InteractiveCommandPaletteEntry>> {
     let addon_dirs = addon_dirs_for_project(project_root);
@@ -8426,7 +8455,7 @@ fn addon_action_hook_contract(action: &AddonViewAction) -> Option<InteractiveAct
         .collect::<Vec<_>>();
     Some(InteractiveActionHookContract {
         schema_version: INTERACTIVE_ACTION_HOOK_CONTRACT_SCHEMA_VERSION.to_string(),
-        state_owner: "forge_workflow_state".to_string(),
+        state_owner: "foundry_workflow_state".to_string(),
         hook_count: hooks.len(),
         invocation_policy: "plan_only_not_executed_by_registry".to_string(),
         hooks,
@@ -8448,10 +8477,10 @@ fn addon_action_workflow_hook_contract(
             workflow_id: action_hook_workflow_id(hook),
             contract_id: hook.contract_id.clone(),
             permission_id: hook.permission.clone(),
-            state_owner: "forge_workflow_runtime".to_string(),
-            execution_owner: "forge_workflow_runtime".to_string(),
+            state_owner: "foundry_workflow_runtime".to_string(),
+            execution_owner: "foundry_workflow_runtime".to_string(),
             execution_boundary: action_hook_execution_boundary(hook).to_string(),
-            dispatch_operation: "route_action_hook_to_forge_workflow".to_string(),
+            dispatch_operation: "route_action_hook_to_foundry_workflow".to_string(),
             not_executed: true,
             mutates_workflow: hook.mutates_workflow,
             command_template: hook.command_template.clone(),
@@ -8465,10 +8494,10 @@ fn addon_action_workflow_hook_contract(
 
     Some(InteractiveWorkflowHookContract {
         schema_version: INTERACTIVE_WORKFLOW_HOOK_CONTRACT_SCHEMA_VERSION.to_string(),
-        state_owner: "forge_workflow_runtime".to_string(),
-        hook_execution_owner: "forge_workflow_runtime".to_string(),
+        state_owner: "foundry_workflow_runtime".to_string(),
+        hook_execution_owner: "foundry_workflow_runtime".to_string(),
         workflow_hook_count: hooks.len(),
-        dispatch_policy: "forge_workflow_plan_only_not_executed".to_string(),
+        dispatch_policy: "foundry_workflow_plan_only_not_executed".to_string(),
         not_executed: true,
         hooks,
     })
@@ -8490,10 +8519,10 @@ fn addon_action_brain_hook_contract(
             workflow_id: hook.workflow_id.clone(),
             contract_id: hook.contract_id.clone(),
             permission_id: hook.permission.clone(),
-            state_owner: "forge_workflow_runtime".to_string(),
-            execution_owner: "forge_harness".to_string(),
+            state_owner: "foundry_workflow_runtime".to_string(),
+            execution_owner: "foundry_harness".to_string(),
             execution_boundary: action_hook_execution_boundary(hook).to_string(),
-            dispatch_operation: "route_cli_brain_hook_through_forge_harness".to_string(),
+            dispatch_operation: "route_cli_brain_hook_through_foundry_harness".to_string(),
             not_executed: true,
             mutates_workflow: hook.mutates_workflow,
             command_template: hook.command_template.clone(),
@@ -8507,10 +8536,10 @@ fn addon_action_brain_hook_contract(
 
     Some(InteractiveBrainHookContract {
         schema_version: INTERACTIVE_BRAIN_HOOK_CONTRACT_SCHEMA_VERSION.to_string(),
-        state_owner: "forge_workflow_runtime".to_string(),
-        hook_execution_owner: "forge_harness".to_string(),
+        state_owner: "foundry_workflow_runtime".to_string(),
+        hook_execution_owner: "foundry_harness".to_string(),
         brain_hook_count: hooks.len(),
-        dispatch_policy: "forge_first_plan_only_not_executed".to_string(),
+        dispatch_policy: "foundry_first_plan_only_not_executed".to_string(),
         not_executed: true,
         hooks,
     })
@@ -8518,9 +8547,9 @@ fn addon_action_brain_hook_contract(
 
 fn action_hook_execution_owner(hook_type: &str) -> &'static str {
     match hook_type {
-        "brain_cli" | "cli_brain" | "external_brain" => "forge_harness",
-        "runtime_contract" | "addon_runtime_contract" => "forge_addon_runtime",
-        _ => "forge",
+        "brain_cli" | "cli_brain" | "external_brain" => "foundry_harness",
+        "runtime_contract" | "addon_runtime_contract" => "foundry_addon_runtime",
+        _ => "foundry",
     }
 }
 
@@ -8529,9 +8558,9 @@ fn action_hook_execution_boundary(hook: &crate::addon::AddonViewActionHook) -> &
         return &hook.execution_boundary;
     }
     match hook.hook_type.as_str() {
-        "brain_cli" | "cli_brain" | "external_brain" => "forge_controlled_brain_hook_plan",
-        "runtime_contract" | "addon_runtime_contract" => "forge_runtime_contract_dispatch_plan",
-        _ => "forge_workflow_invocation_plan",
+        "brain_cli" | "cli_brain" | "external_brain" => "foundry_controlled_brain_hook_plan",
+        "runtime_contract" | "addon_runtime_contract" => "foundry_runtime_contract_dispatch_plan",
+        _ => "foundry_workflow_invocation_plan",
     }
 }
 
@@ -8628,7 +8657,7 @@ fn addon_action_command_template(action: &AddonViewAction) -> Vec<String> {
         .split_whitespace()
         .map(|part| part.to_string())
         .collect::<Vec<_>>();
-    if parts.first().map(|part| part == "forge").unwrap_or(false) {
+    if parts.first().map(|part| part == "foundry").unwrap_or(false) {
         parts.remove(0);
     }
     parts
@@ -8723,7 +8752,7 @@ fn workflow_mutation_command_palette_entries(
                 "--goal".to_string(),
                 "<new-goal>".to_string(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -8749,7 +8778,7 @@ fn workflow_mutation_command_palette_entries(
                 "--default-brain".to_string(),
                 "<brain>".to_string(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -8782,7 +8811,7 @@ fn workflow_mutation_command_palette_entries(
                 "--kind".to_string(),
                 "<kind>".to_string(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -9002,14 +9031,14 @@ fn command_palette_group_title(group_id: &str) -> &'static str {
 }
 
 pub fn build_interactive_autocomplete(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: &str,
 ) -> Result<InteractiveAutocompletePanel> {
     build_interactive_autocomplete_for_project(store, input, None)
 }
 
 pub fn build_interactive_autocomplete_for_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: &str,
     project_root: Option<&Path>,
 ) -> Result<InteractiveAutocompletePanel> {
@@ -9116,7 +9145,7 @@ fn slash_autocomplete_suggestions(query: &str) -> Vec<InteractiveAutocompleteSug
 }
 
 fn action_invocation_autocomplete_suggestions(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: &str,
     normalized_query: &str,
     project_root: Option<&Path>,
@@ -9313,7 +9342,7 @@ fn autocomplete_score(
 }
 
 pub fn build_interactive_patch_workbench(
-    store: &ForgeStore,
+    store: &FoundryStore,
 ) -> Result<InteractivePatchWorkbenchPanel> {
     let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let repository_path = git_command(&["rev-parse", "--show-toplevel"])
@@ -9401,17 +9430,17 @@ pub fn build_interactive_patch_workbench(
 fn patch_addon_contract() -> InteractivePatchAddonContract {
     InteractivePatchAddonContract {
         schema_version: INTERACTIVE_PATCH_ADDON_CONTRACT_SCHEMA_VERSION.to_string(),
-        source_addon: "forge.addon.software_development".to_string(),
+        source_addon: "foundry.addon.software_development".to_string(),
         capability_id: CAP_SOURCE_CODE_PATCH_LIFECYCLE.to_string(),
         permission_id: "source_code.patch".to_string(),
         view_id: "software.patch_workbench".to_string(),
         runtime_contract_id: "source_code_patch_lifecycle.executor".to_string(),
-        runtime: "forge_core_builtin".to_string(),
-        entrypoint: "forge.patch.lifecycle".to_string(),
+        runtime: "foundry_core_builtin".to_string(),
+        entrypoint: "foundry.patch.lifecycle".to_string(),
     }
 }
 
-pub fn build_interactive_permissions(store: &ForgeStore) -> Result<InteractivePermissionsPanel> {
+pub fn build_interactive_permissions(store: &FoundryStore) -> Result<InteractivePermissionsPanel> {
     let memberships_report = list_identity_memberships(store, None, None, None, None, None, None)?;
     let addon_permissions_report = list_addon_permission_authorizations(store, None, None, None)?;
     let human_interactions_report = list_human_interactions(store)?;
@@ -9530,7 +9559,7 @@ pub fn build_interactive_permissions(store: &ForgeStore) -> Result<InteractivePe
 }
 
 pub fn build_interactive_identity(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
 ) -> Result<InteractiveIdentityPanel> {
     let context = inspect_project_operating_context(project_root)?;
@@ -9673,7 +9702,7 @@ fn git_command_with_paths(args: &[&str], paths: &[String]) -> GitCommandOutput {
     }
 }
 
-fn patch_workbench_ignored_paths(store: &ForgeStore, repository_path: &str) -> BTreeSet<String> {
+fn patch_workbench_ignored_paths(store: &FoundryStore, repository_path: &str) -> BTreeSet<String> {
     let root = PathBuf::from(repository_path);
     let mut ignored = BTreeSet::new();
     let store_path = store.path().to_path_buf();
@@ -9838,7 +9867,7 @@ fn build_patch_diff_preview(
 
     let Some(path) = selected_path else {
         return InteractivePatchDiffPreview {
-            schema_version: "forge.interactive.patch_diff_preview.v1".to_string(),
+            schema_version: "foundry.interactive.patch_diff_preview.v1".to_string(),
             status: if diff_present {
                 "diff_preview_unavailable".to_string()
             } else {
@@ -9866,7 +9895,7 @@ fn build_patch_diff_preview(
 
     if !diff_output.success {
         return InteractivePatchDiffPreview {
-            schema_version: "forge.interactive.patch_diff_preview.v1".to_string(),
+            schema_version: "foundry.interactive.patch_diff_preview.v1".to_string(),
             status: "diff_preview_failed".to_string(),
             selected_path: Some(path),
             line_count: 0,
@@ -9887,7 +9916,7 @@ fn build_patch_diff_preview(
         "diff_preview_ready"
     };
     InteractivePatchDiffPreview {
-        schema_version: "forge.interactive.patch_diff_preview.v1".to_string(),
+        schema_version: "foundry.interactive.patch_diff_preview.v1".to_string(),
         status: status.to_string(),
         selected_path: Some(path),
         line_count: lines.len(),
@@ -9896,7 +9925,7 @@ fn build_patch_diff_preview(
         lines,
         notes: vec![
             "Inline diff preview is read-only, bounded and intended for TUI/web/MCP rendering before review approval.".to_string(),
-            "Use forge patch diff for full multi-file navigation and workflow artifact lineage.".to_string(),
+            "Use foundry patch diff for full multi-file navigation and workflow artifact lineage.".to_string(),
         ],
     }
 }
@@ -9973,7 +10002,7 @@ fn build_patch_diff_review_queue(
     };
 
     InteractivePatchDiffReviewQueue {
-        schema_version: "forge.interactive.patch_diff_review_queue.v1".to_string(),
+        schema_version: "foundry.interactive.patch_diff_review_queue.v1".to_string(),
         status: status.to_string(),
         selected_path,
         file_count,
@@ -10038,7 +10067,7 @@ fn build_patch_edit_intake(
             "Patch plan artifact",
             "artifact_id",
             true,
-            "forge_patch_plan",
+            "foundry_patch_plan",
             "artifact_patch_plan",
             "--plan-artifact",
         ),
@@ -10047,7 +10076,7 @@ fn build_patch_edit_intake(
             "Patch apply artifact",
             "artifact_id",
             true,
-            "forge_patch_apply",
+            "foundry_patch_apply",
             "artifact_patch_apply",
             "--apply-artifact",
         ),
@@ -10056,7 +10085,7 @@ fn build_patch_edit_intake(
             "Patch revert artifact",
             "artifact_id",
             true,
-            "forge_patch_revert",
+            "foundry_patch_revert",
             "artifact_patch_revert",
             "--revert-artifact",
         ),
@@ -10260,7 +10289,7 @@ fn build_patch_operation_plan(
     };
 
     InteractivePatchOperationPlan {
-        schema_version: "forge.interactive.patch_operation_plan.v1".to_string(),
+        schema_version: "foundry.interactive.patch_operation_plan.v1".to_string(),
         status: status.to_string(),
         current_step,
         step_count: steps.len(),
@@ -10488,7 +10517,7 @@ fn build_patch_approval_flow(
     };
 
     InteractivePatchApprovalFlow {
-        schema_version: "forge.interactive.patch_approval_flow.v1".to_string(),
+        schema_version: "foundry.interactive.patch_approval_flow.v1".to_string(),
         status: status.to_string(),
         current_gate: current_gate.to_string(),
         requires_human_approval: !clean,
@@ -10569,7 +10598,7 @@ fn patch_workbench_commands() -> InteractivePatchWorkbenchCommands {
             "--path".to_string(),
             "<path>".to_string(),
             "--origin".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -10583,7 +10612,7 @@ fn patch_workbench_commands() -> InteractivePatchWorkbenchCommands {
             "--path".to_string(),
             "<path>".to_string(),
             "--origin".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -10615,7 +10644,7 @@ fn patch_workbench_commands() -> InteractivePatchWorkbenchCommands {
             "--plan-artifact".to_string(),
             "<plan-artifact>".to_string(),
             "--origin".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -10629,7 +10658,7 @@ fn patch_workbench_commands() -> InteractivePatchWorkbenchCommands {
             "--apply-artifact".to_string(),
             "<apply-artifact>".to_string(),
             "--origin".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -10646,7 +10675,7 @@ fn patch_workbench_commands() -> InteractivePatchWorkbenchCommands {
             "<operator>".to_string(),
             "--confirm-restore".to_string(),
             "--origin".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -10667,7 +10696,7 @@ fn patch_workbench_file_commands(path: &str) -> InteractivePatchWorkbenchFileCom
             "--path".to_string(),
             path.to_string(),
             "--origin".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -10681,7 +10710,7 @@ fn patch_workbench_file_commands(path: &str) -> InteractivePatchWorkbenchFileCom
             "--path".to_string(),
             path.to_string(),
             "--origin".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -10881,7 +10910,7 @@ fn identity_alias_commands(
             "--right-id".to_string(),
             link.right_id.clone(),
             "--source".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -10952,7 +10981,7 @@ fn identity_membership_commands(
             "--grant".to_string(),
             "<permission>".to_string(),
             "--source".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -11006,7 +11035,7 @@ fn permission_membership_commands(
             "--grant".to_string(),
             "<permission>".to_string(),
             "--source".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -11073,7 +11102,7 @@ fn approval_item_commands(workflow_id: &str, task_id: &str) -> InteractiveApprov
             "--selected".to_string(),
             "<choice-id>".to_string(),
             "--origin".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -11085,14 +11114,14 @@ fn approval_item_commands(workflow_id: &str, task_id: &str) -> InteractiveApprov
             "--task".to_string(),
             task_id.to_string(),
             "--origin".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
     }
 }
 
-pub fn build_interactive_task_board(store: &ForgeStore) -> Result<InteractiveTaskBoardPanel> {
+pub fn build_interactive_task_board(store: &FoundryStore) -> Result<InteractiveTaskBoardPanel> {
     let workflows = list_workflows_with_filters(
         store,
         WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
@@ -11101,21 +11130,21 @@ pub fn build_interactive_task_board(store: &ForgeStore) -> Result<InteractiveTas
 }
 
 pub fn build_interactive_workflow_mutation(
-    store: &ForgeStore,
+    store: &FoundryStore,
 ) -> Result<InteractiveWorkflowMutationPanel> {
     let home = build_interactive_home(store)?;
     Ok(home.dashboard.workflow_mutation_panel)
 }
 
 pub fn build_interactive_guided_cockpit(
-    store: &ForgeStore,
+    store: &FoundryStore,
 ) -> Result<InteractiveGuidedCockpitPanel> {
     let home = build_interactive_home(store)?;
     Ok(home.dashboard.guided_cockpit_panel)
 }
 
 pub fn build_interactive_workflow_sidebar(
-    store: &ForgeStore,
+    store: &FoundryStore,
 ) -> Result<InteractiveWorkflowSidebarPanel> {
     let workflows = list_workflows_with_filters(
         store,
@@ -11125,7 +11154,7 @@ pub fn build_interactive_workflow_sidebar(
 }
 
 pub fn build_interactive_replacement_cli(
-    store: &ForgeStore,
+    store: &FoundryStore,
 ) -> Result<InteractiveReplacementCliPanel> {
     build_interactive_replacement_cli_with_options(
         store,
@@ -11134,7 +11163,7 @@ pub fn build_interactive_replacement_cli(
 }
 
 pub fn build_interactive_replacement_cli_with_options(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: InteractiveReplacementCliOptions,
 ) -> Result<InteractiveReplacementCliPanel> {
     let project_root = options
@@ -11237,9 +11266,9 @@ pub fn build_interactive_replacement_cli_with_options(
             ],
             &[],
             &[
-                "forge",
-                &format!("forge interactive home --project-root {project_root_display} --output json"),
-                "forge interactive slash-commands --output json",
+                "foundry",
+                &format!("foundry interactive home --project-root {project_root_display} --output json"),
+                "foundry interactive slash-commands --output json",
             ],
         ),
         replacement_cli_surface(
@@ -11259,9 +11288,9 @@ pub fn build_interactive_replacement_cli_with_options(
             ],
             &[],
             &[
-                "forge interactive workflow-sidebar --output json",
-                "forge interactive task-board --output json",
-                "forge interactive workflow-dag --output json",
+                "foundry interactive workflow-sidebar --output json",
+                "foundry interactive task-board --output json",
+                "foundry interactive workflow-dag --output json",
             ],
         ),
         replacement_cli_surface(
@@ -11280,9 +11309,9 @@ pub fn build_interactive_replacement_cli_with_options(
             ],
             &[],
             &[
-                "forge interactive patch-workbench --output json",
-                "forge patch plan --workflow <workflow-id> --task <task-id> --intent <intent> --path <path> --output json",
-                "forge patch review --workflow <workflow-id> --task <task-id> --path <path> --output json",
+                "foundry interactive patch-workbench --output json",
+                "foundry patch plan --workflow <workflow-id> --task <task-id> --intent <intent> --path <path> --output json",
+                "foundry patch review --workflow <workflow-id> --task <task-id> --path <path> --output json",
             ],
         ),
         replacement_cli_surface(
@@ -11304,9 +11333,9 @@ pub fn build_interactive_replacement_cli_with_options(
             ],
             &[],
             &[
-                "forge interactive command-palette --output json",
-                "forge interactive action-registry --output json",
-                "forge interactive autocomplete --input /pa --output json",
+                "foundry interactive command-palette --output json",
+                "foundry interactive action-registry --output json",
+                "foundry interactive autocomplete --input /pa --output json",
             ],
         ),
         replacement_cli_surface(
@@ -11314,22 +11343,22 @@ pub fn build_interactive_replacement_cli_with_options(
             "Brain, harness and session control",
             &harness.status,
             sessions.session_count > 0
-                && harness.headroom_plan.schema_version == "forge.harness.headroom_plan.v1",
+                && harness.headroom_plan.schema_version == "foundry.harness.headroom_plan.v1",
             &[
                 "harness_panel",
                 "sessions_panel",
                 "readiness_panel",
             ],
             &[
-                "forge_first_harness_controls_available",
+                "foundry_first_harness_controls_available",
                 "headroom_plan_and_stats_available",
                 "session_lifecycle_operation_plans_available",
             ],
             &[],
             &[
-                "forge interactive harness --output json",
-                "forge interactive sessions --output json",
-                "forge interactive readiness --output json",
+                "foundry interactive harness --output json",
+                "foundry interactive sessions --output json",
+                "foundry interactive readiness --output json",
             ],
         ),
         replacement_cli_surface(
@@ -11350,9 +11379,9 @@ pub fn build_interactive_replacement_cli_with_options(
             ],
             &[],
             &[
-                "forge interactive structured-logs --output json",
-                "forge cost ledger --output json",
-                "forge interactive home --output json",
+                "foundry interactive structured-logs --output json",
+                "foundry cost ledger --output json",
+                "foundry interactive home --output json",
             ],
         ),
         replacement_cli_surface(
@@ -11372,9 +11401,9 @@ pub fn build_interactive_replacement_cli_with_options(
             ],
             &[],
             &[
-                "forge interactive permissions --output json",
-                "forge interaction list --output json",
-                "forge interactive release-gates --output json",
+                "foundry interactive permissions --output json",
+                "foundry interaction list --output json",
+                "foundry interactive release-gates --output json",
             ],
         ),
     ];
@@ -11394,10 +11423,10 @@ pub fn build_interactive_replacement_cli_with_options(
         ),
         blockers.clone(),
         vec![
-            "forge milestone cli-demo --origin codex --output json".to_string(),
-            format!("forge {}", replacement_commands.evidence_plan.join(" ")),
+            "foundry milestone cli-demo --origin codex --output json".to_string(),
+            format!("foundry {}", replacement_commands.evidence_plan.join(" ")),
             format!(
-                "forge {}",
+                "foundry {}",
                 replacement_commands
                     .collect_external_brain_evidence
                     .join(" ")
@@ -11544,7 +11573,7 @@ fn replacement_cli_provider_readiness(
                 readiness: candidate.readiness.clone(),
                 version_status: candidate.version_status.clone(),
                 wrapper_required: candidate.readiness == "cli_detected_wrapper_required",
-                required_output_schema: "forge.connected_external_brain.provider_output.v1"
+                required_output_schema: "foundry.connected_external_brain.provider_output.v1"
                     .to_string(),
                 manifest_provider_template: candidate.manifest_provider_template.clone(),
                 evidence_blocker: candidate.evidence_blocker.clone(),
@@ -11561,14 +11590,14 @@ fn replacement_cli_provider_wrapper_plans(
     project_root: &Path,
 ) -> Vec<InteractiveReplacementCliProviderWrapperPlan> {
     let wrapper_manifest_path = project_root
-        .join(".forge")
+        .join(".foundry")
         .join("connected-brain-runtimes.json")
         .display()
         .to_string();
     candidates
         .iter()
         .map(|candidate| {
-            let required_output_schema = "forge.connected_external_brain.provider_output.v1";
+            let required_output_schema = "foundry.connected_external_brain.provider_output.v1";
             let evidence_plan_command =
                 replacement_cli_provider_command(&commands.evidence_plan, &candidate.provider_id);
             let prepare_evidence_inputs_command = replacement_cli_provider_command(
@@ -11581,7 +11610,7 @@ fn replacement_cli_provider_wrapper_plans(
             );
             InteractiveReplacementCliProviderWrapperPlan {
                 schema_version:
-                    "forge.interactive.replacement_cli.provider_wrapper_plan.v1".to_string(),
+                    "foundry.interactive.replacement_cli.provider_wrapper_plan.v1".to_string(),
                 provider_id: candidate.provider_id.clone(),
                 brain_id: candidate.brain_id.clone(),
                 binary: candidate.binary.clone(),
@@ -11605,7 +11634,7 @@ fn replacement_cli_provider_wrapper_plans(
                     "This read-only plan does not execute a model or call the provider CLI."
                         .to_string(),
                     "Only prepare-evidence-inputs --apply may materialize secret-free templates, and it still does not count as release evidence.".to_string(),
-                    "External brain evidence requires an operator-approved wrapper that emits forge.connected_external_brain.provider_output.v1.".to_string(),
+                    "External brain evidence requires an operator-approved wrapper that emits foundry.connected_external_brain.provider_output.v1.".to_string(),
                     "Credential values must stay in credential-vault or environment injection and must not be printed in the manifest.".to_string(),
                 ],
                 next_action: if candidate.installed {
@@ -11631,7 +11660,7 @@ fn replacement_cli_provider_wrapper_manifest_audit(
     project_root: &Path,
 ) -> InteractiveReplacementCliProviderWrapperManifestAudit {
     let manifest_path = project_root
-        .join(".forge")
+        .join(".foundry")
         .join("connected-brain-runtimes.json");
     let manifest_path_display = manifest_path.display().to_string();
     let mut audit = replacement_cli_empty_manifest_audit(
@@ -11776,7 +11805,7 @@ fn replacement_cli_empty_manifest_audit(
 ) -> InteractiveReplacementCliProviderWrapperManifestAudit {
     InteractiveReplacementCliProviderWrapperManifestAudit {
         schema_version:
-            "forge.interactive.replacement_cli.provider_wrapper_manifest_audit.v1".to_string(),
+            "foundry.interactive.replacement_cli.provider_wrapper_manifest_audit.v1".to_string(),
         status: status.to_string(),
         manifest_path: manifest_path.to_string(),
         manifest_present: false,
@@ -12062,11 +12091,11 @@ fn replacement_cli_evidence_blockers(
 fn replacement_cli_missing_evidence_blocker(kind: &str) -> String {
     match kind {
         "external_brain_provider_execution" => {
-            "missing attached evidence kind: external_brain_provider_execution; approve a connected brain provider wrapper that emits forge.connected_external_brain.provider_output.v1 with real/model execution evidence"
+            "missing attached evidence kind: external_brain_provider_execution; approve a connected brain provider wrapper that emits foundry.connected_external_brain.provider_output.v1 with real/model execution evidence"
                 .to_string()
         }
         "broader_project_coding_research_workflow" => {
-            "missing attached evidence kind: broader_project_coding_research_workflow; collect the deterministic Forge-owned multi-file coding/research workflow receipt"
+            "missing attached evidence kind: broader_project_coding_research_workflow; collect the deterministic Foundry-owned multi-file coding/research workflow receipt"
                 .to_string()
         }
         "terminal_file_editing_ux" => {
@@ -12080,19 +12109,20 @@ fn replacement_cli_missing_evidence_blocker(kind: &str) -> String {
 fn replacement_cli_next_actions(promotion_ready: bool, missing: &[String]) -> Vec<String> {
     if promotion_ready {
         return vec![
-            "Inspect forge milestone manifest --version 0.5 before claiming replacement-grade CLI promotion."
+            "Inspect foundry milestone manifest --version 0.5 before claiming replacement-grade CLI promotion."
                 .to_string(),
         ];
     }
     let mut actions = vec![
-        "Run forge milestone cli-demo and inspect the replacement-grade flow evidence.".to_string(),
+        "Run foundry milestone cli-demo and inspect the replacement-grade flow evidence."
+            .to_string(),
     ];
     if missing
         .iter()
         .any(|kind| kind == "external_brain_provider_execution")
     {
         actions.push(
-            "Create or approve .forge/connected-brain-runtimes.json with a safe provider wrapper, then collect external_brain_provider_execution evidence."
+            "Create or approve .foundry/connected-brain-runtimes.json with a safe provider wrapper, then collect external_brain_provider_execution evidence."
                 .to_string(),
         );
     }
@@ -12101,7 +12131,7 @@ fn replacement_cli_next_actions(promotion_ready: bool, missing: &[String]) -> Ve
         .any(|kind| kind == "broader_project_coding_research_workflow")
     {
         actions.push(
-            "Collect broader_project_coding_research_workflow evidence through Forge milestone evidence collection."
+            "Collect broader_project_coding_research_workflow evidence through Foundry milestone evidence collection."
                 .to_string(),
         );
     }
@@ -12116,7 +12146,7 @@ fn replacement_cli_next_actions(promotion_ready: bool, missing: &[String]) -> Ve
     }
     if actions.len() == 1 {
         actions.push(
-            "Inspect forge interactive release-gates --version 0.5 --output json for the remaining non-evidence blocker."
+            "Inspect foundry interactive release-gates --version 0.5 --output json for the remaining non-evidence blocker."
                 .to_string(),
         );
     }
@@ -12257,11 +12287,11 @@ fn replacement_cli_commands(project_root: &Path) -> InteractiveReplacementCliCom
 }
 
 pub fn build_interactive_multimodal_runtime(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     enable_experimental: bool,
 ) -> Result<InteractiveMultimodalRuntimePanel> {
-    let addon_id = "forge.addon.multimodal";
+    let addon_id = "foundry.addon.multimodal";
     let addon_view_id = "multimodal.benchmark_center";
     let capability_id = "experimental_multimodal_runtime";
     let runtime_contract_id = "multimodal_runtime_benchmark.executor";
@@ -12385,12 +12415,12 @@ pub fn build_interactive_multimodal_runtime(
             benchmark_template.status.as_str(),
             "benchmark_template_ready" | "plan_only"
         )
-        && readiness.schema_version == "forge.multimodal.readiness.v1";
+        && readiness.schema_version == "foundry.multimodal.readiness.v1";
     let guarded_runtime_ready = has_runtime_contract
         && guard.status == "denied"
         && guard.requires_human_approval
         && !guard.allowed;
-    let demo_plan_ready = demo_plan.schema_version == "forge.multimodal.demo_plan.v1"
+    let demo_plan_ready = demo_plan.schema_version == "foundry.multimodal.demo_plan.v1"
         && !demo_plan.stages.is_empty()
         && demo_plan.requires_human_approval_before_execution;
     let addon_view_ready = has_view && view_action_count >= 2;
@@ -12415,8 +12445,8 @@ pub fn build_interactive_multimodal_runtime(
                 has_runtime_contract,
             ),
             &[
-                "forge interactive addon-capabilities --output json",
-                "forge addons views --addon forge.addon.multimodal --output json",
+                "foundry interactive addon-capabilities --output json",
+                "foundry addons views --addon foundry.addon.multimodal --output json",
             ],
         ),
         multimodal_runtime_surface(
@@ -12432,8 +12462,8 @@ pub fn build_interactive_multimodal_runtime(
             ],
             &[],
             &[
-                "forge multimodal status --project-root <project-root> --output json",
-                "forge multimodal guard --capability image_understanding --action runtime_benchmark --project-root <project-root> --output json",
+                "foundry multimodal status --project-root <project-root> --output json",
+                "foundry multimodal guard --capability image_understanding --action runtime_benchmark --project-root <project-root> --output json",
             ],
         ),
         multimodal_runtime_surface(
@@ -12448,7 +12478,7 @@ pub fn build_interactive_multimodal_runtime(
                 "model_storage_policy_visible",
             ],
             &[],
-            &["forge multimodal status --project-root <project-root> --output json"],
+            &["foundry multimodal status --project-root <project-root> --output json"],
         ),
         multimodal_runtime_surface(
             "benchmark_templates",
@@ -12467,9 +12497,9 @@ pub fn build_interactive_multimodal_runtime(
             ],
             &[],
             &[
-                "forge multimodal install-plan --capability image_understanding --project-root <project-root> --output json",
-                "forge multimodal readiness --capability image_understanding --project-root <project-root> --output json",
-                "forge multimodal benchmark-template --capability image_understanding --project-root <project-root> --output json",
+                "foundry multimodal install-plan --capability image_understanding --project-root <project-root> --output json",
+                "foundry multimodal readiness --capability image_understanding --project-root <project-root> --output json",
+                "foundry multimodal benchmark-template --capability image_understanding --project-root <project-root> --output json",
             ],
         ),
         multimodal_runtime_surface(
@@ -12485,8 +12515,8 @@ pub fn build_interactive_multimodal_runtime(
             ],
             &[],
             &[
-                "forge multimodal runtime-benchmark --capability image_understanding --fixture static_image_labels --project-root <project-root> --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
-                "forge addons dispatch-contract --addon forge.addon.multimodal --runtime-contract multimodal_runtime_benchmark.executor --output json",
+                "foundry multimodal runtime-benchmark --capability image_understanding --fixture static_image_labels --project-root <project-root> --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
+                "foundry addons dispatch-contract --addon foundry.addon.multimodal --runtime-contract multimodal_runtime_benchmark.executor --output json",
             ],
         ),
         multimodal_runtime_surface(
@@ -12502,8 +12532,8 @@ pub fn build_interactive_multimodal_runtime(
             ],
             &[],
             &[
-                "forge multimodal demo-plan --demo local_image_recognition --project-root <project-root> --output json",
-                "forge multimodal demo-receipt --demo local_image_recognition --fixture static_image_labels --project-root <project-root> --approved-by <operator> --confirm-local-fixture --allow-model --output json",
+                "foundry multimodal demo-plan --demo local_image_recognition --project-root <project-root> --output json",
+                "foundry multimodal demo-receipt --demo local_image_recognition --fixture static_image_labels --project-root <project-root> --approved-by <operator> --confirm-local-fixture --allow-model --output json",
             ],
         ),
         multimodal_runtime_surface(
@@ -12519,8 +12549,8 @@ pub fn build_interactive_multimodal_runtime(
             ],
             &[],
             &[
-                "forge addons views --addon forge.addon.multimodal --surface ops_console --output json",
-                "forge interactive command-palette --query multimodal --output json",
+                "foundry addons views --addon foundry.addon.multimodal --surface ops_console --output json",
+                "foundry interactive command-palette --query multimodal --output json",
             ],
         ),
         multimodal_runtime_surface_owned(
@@ -12543,8 +12573,8 @@ pub fn build_interactive_multimodal_runtime(
             ),
             blockers.clone(),
             vec![
-                "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --output json".to_string(),
-                "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --approved-by <operator> --output json".to_string(),
+                "foundry milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --output json".to_string(),
+                "foundry milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --approved-by <operator> --output json".to_string(),
             ],
         ),
     ];
@@ -12633,7 +12663,7 @@ fn multimodal_missing_addon_blockers(
 ) -> Vec<&'static str> {
     let mut blockers = Vec::new();
     if !has_addon {
-        blockers.push("missing forge.addon.multimodal");
+        blockers.push("missing foundry.addon.multimodal");
     }
     if !has_capability {
         blockers.push("missing multimodal_runtime capability");
@@ -12802,7 +12832,7 @@ fn multimodal_runtime_next_actions(
 ) -> Vec<String> {
     if promotion_ready {
         return vec![
-            "Inspect forge milestone manifest --version 0.5 before claiming multimodal runtime promotion."
+            "Inspect foundry milestone manifest --version 0.5 before claiming multimodal runtime promotion."
                 .to_string(),
         ];
     }
@@ -12812,7 +12842,7 @@ fn multimodal_runtime_next_actions(
             && matches!(check.status.as_str(), "missing" | "blocked" | "invalid")
     }) {
         actions.push(
-            "Enable the project-scoped .forge/multimodal.json feature flag only after operator approval."
+            "Enable the project-scoped .foundry/multimodal.json feature flag only after operator approval."
                 .to_string(),
         );
     }
@@ -12821,7 +12851,7 @@ fn multimodal_runtime_next_actions(
             && matches!(check.status.as_str(), "missing" | "blocked" | "invalid")
     }) {
         actions.push(
-            "Prepare .forge/multimodal-runtimes.json with approved connected runtime metadata."
+            "Prepare .foundry/multimodal-runtimes.json with approved connected runtime metadata."
                 .to_string(),
         );
     }
@@ -12845,7 +12875,7 @@ fn multimodal_runtime_next_actions(
     }
     if actions.is_empty() {
         actions.push(
-            "Inspect forge interactive release-gates --version 0.5 --output json for the remaining multimodal blocker."
+            "Inspect foundry interactive release-gates --version 0.5 --output json for the remaining multimodal blocker."
                 .to_string(),
         );
     }
@@ -12980,11 +13010,11 @@ fn multimodal_runtime_commands(project_root: &Path) -> InteractiveMultimodalRunt
     }
 }
 
-pub fn build_interactive_token_usage(store: &ForgeStore) -> Result<InteractiveTokenUsagePanel> {
+pub fn build_interactive_token_usage(store: &FoundryStore) -> Result<InteractiveTokenUsagePanel> {
     build_token_usage_panel(store)
 }
 
-pub fn build_interactive_artifacts(store: &ForgeStore) -> Result<InteractiveArtifactPanel> {
+pub fn build_interactive_artifacts(store: &FoundryStore) -> Result<InteractiveArtifactPanel> {
     let workflows = list_workflows_with_filters(
         store,
         WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
@@ -12992,7 +13022,7 @@ pub fn build_interactive_artifacts(store: &ForgeStore) -> Result<InteractiveArti
     build_artifact_panel(store, &workflows.workflows)
 }
 
-pub fn build_interactive_workflow_dag(store: &ForgeStore) -> Result<InteractiveWorkflowDagPanel> {
+pub fn build_interactive_workflow_dag(store: &FoundryStore) -> Result<InteractiveWorkflowDagPanel> {
     let workflows = list_workflows_with_filters(
         store,
         WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
@@ -13001,7 +13031,7 @@ pub fn build_interactive_workflow_dag(store: &ForgeStore) -> Result<InteractiveW
 }
 
 pub fn build_interactive_context_memory(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
 ) -> Result<InteractiveContextMemoryPanel> {
     let workflows = list_workflows_with_filters(
@@ -13016,21 +13046,21 @@ pub fn build_interactive_context_memory(
     ))
 }
 
-pub fn build_interactive_schedules(store: &ForgeStore) -> InteractiveSchedulePanel {
-    build_schedule_worker_status(store, "forge-scheduler", 1, 300)
+pub fn build_interactive_schedules(store: &FoundryStore) -> InteractiveSchedulePanel {
+    build_schedule_worker_status(store, "foundry-scheduler", 1, 300)
         .map(interactive_schedule_panel_from_worker_status)
         .unwrap_or_else(|_| empty_interactive_schedule_panel())
 }
 
 pub fn build_interactive_structured_logs(
-    store: &ForgeStore,
+    store: &FoundryStore,
 ) -> Result<InteractiveStructuredLogsPanel> {
     let timeline = build_global_event_timeline(store, None, None, None, None, Some(20), None)?;
     Ok(build_structured_logs_panel(&timeline))
 }
 
 fn build_context_memory_panel_from_summary(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     context_actions: &RegistryContextActionSummary,
     context_quality: &RegistryContextQualitySummary,
@@ -13064,7 +13094,7 @@ fn build_context_memory_panel_from_summary(
 }
 
 fn build_operating_context_panel(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     identity: &InteractiveIdentityPanel,
     context_memory: &InteractiveContextMemoryPanel,
@@ -13078,7 +13108,7 @@ fn build_operating_context_panel(
         "company_work_decision_required".to_string(),
     ];
     let prompt_packet_contract = InteractiveOperatingPromptPacketContract {
-        schema_version: "forge.interactive.operating_prompt_packet_contract.v1".to_string(),
+        schema_version: "foundry.interactive.operating_prompt_packet_contract.v1".to_string(),
         status: "prompt_packet_gates_declared".to_string(),
         required_gates: required_gates.clone(),
         organization_context_required: required_gates
@@ -13091,12 +13121,12 @@ fn build_operating_context_panel(
             .iter()
             .any(|gate| gate == "company_work_decision_required"),
         evidence_commands: vec![
-            "forge context --workflow <workflow-id> --task <task-id> --project-root <project-root> --strict --view compact --output json".to_string(),
-            "forge task handoff --workflow <workflow-id> --task <task-id> --executor <executor> --project-root <project-root> --view compact --output json".to_string(),
+            "foundry context --workflow <workflow-id> --task <task-id> --project-root <project-root> --strict --view compact --output json".to_string(),
+            "foundry task handoff --workflow <workflow-id> --task <task-id> --executor <executor> --project-root <project-root> --view compact --output json".to_string(),
         ],
     };
     let company_work_contract = InteractiveOperatingCompanyWorkContract {
-        schema_version: "forge.interactive.company_work_contract.v1".to_string(),
+        schema_version: "foundry.interactive.company_work_contract.v1".to_string(),
         status: "company_work_decision_required".to_string(),
         operating_depth: "compact_multidisciplinary_review".to_string(),
         departments: vec![
@@ -13215,7 +13245,7 @@ fn build_operating_context_panel(
             identity.active_membership_count,
         ),
         notes: vec![
-            "This panel is read-only and composes identity, memory policy, personality routing and prompt-packet gates from existing Forge state.".to_string(),
+            "This panel is read-only and composes identity, memory policy, personality routing and prompt-packet gates from existing Foundry state.".to_string(),
             "Organization context, personality decision and company-work decision are enforced in generated context and handoff packets, not delegated to a brain prompt alone.".to_string(),
         ],
     })
@@ -13246,7 +13276,7 @@ fn operating_context_personality_status(personality_scope: &str) -> String {
 }
 
 fn operating_context_prompt_packet_sample(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     context: &OperatingContextSpec,
     tenant_path: &str,
@@ -13268,7 +13298,7 @@ fn operating_context_prompt_packet_sample(
 
     let Some((workflow, task, has_persona)) = selected else {
         return Ok(InteractiveOperatingPromptPacketSample {
-            schema_version: "forge.interactive.operating_prompt_packet_sample.v1".to_string(),
+            schema_version: "foundry.interactive.operating_prompt_packet_sample.v1".to_string(),
             status: "missing_workflow_task_sample".to_string(),
             source: "store_workflows".to_string(),
             workflow_id: None,
@@ -13304,7 +13334,7 @@ fn operating_context_prompt_packet_sample(
     };
 
     Ok(InteractiveOperatingPromptPacketSample {
-        schema_version: "forge.interactive.operating_prompt_packet_sample.v1".to_string(),
+        schema_version: "foundry.interactive.operating_prompt_packet_sample.v1".to_string(),
         status: format!("prompt_packet_sample_ready_{explicit_persona_suffix}"),
         source: "context_engine".to_string(),
         workflow_id: Some(workflow.id.clone()),
@@ -13367,7 +13397,7 @@ fn operating_context_memory_isolation_evidence(
     };
 
     InteractiveOperatingMemoryIsolationEvidence {
-        schema_version: "forge.interactive.operating_memory_isolation.v1".to_string(),
+        schema_version: "foundry.interactive.operating_memory_isolation.v1".to_string(),
         status: status.to_string(),
         tenant_path: tenant_path.to_string(),
         organization_id: context.organization.id.clone(),
@@ -13379,7 +13409,7 @@ fn operating_context_memory_isolation_evidence(
         project_governance_status: project_governance_status.to_string(),
         isolation_keys: isolation_keys.into_iter().collect(),
         governed_search_command: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "memory".to_string(),
             "search".to_string(),
             "--organization".to_string(),
@@ -13400,7 +13430,7 @@ fn operating_context_commands(project_root: &Path) -> InteractiveOperatingContex
     let project_root = project_root.display().to_string();
     InteractiveOperatingContextCommands {
         refresh: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "interactive".to_string(),
             "operating-context".to_string(),
             "--project-root".to_string(),
@@ -13409,7 +13439,7 @@ fn operating_context_commands(project_root: &Path) -> InteractiveOperatingContex
             "json".to_string(),
         ],
         identity: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "interactive".to_string(),
             "identity".to_string(),
             "--project-root".to_string(),
@@ -13418,7 +13448,7 @@ fn operating_context_commands(project_root: &Path) -> InteractiveOperatingContex
             "json".to_string(),
         ],
         context_memory: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "interactive".to_string(),
             "context-memory".to_string(),
             "--project-root".to_string(),
@@ -13427,7 +13457,7 @@ fn operating_context_commands(project_root: &Path) -> InteractiveOperatingContex
             "json".to_string(),
         ],
         memory_policy: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "memory".to_string(),
             "policy".to_string(),
             "--project-root".to_string(),
@@ -13436,7 +13466,7 @@ fn operating_context_commands(project_root: &Path) -> InteractiveOperatingContex
             "json".to_string(),
         ],
         context_packet: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "context".to_string(),
             "--workflow".to_string(),
             "<workflow-id>".to_string(),
@@ -13451,7 +13481,7 @@ fn operating_context_commands(project_root: &Path) -> InteractiveOperatingContex
             "json".to_string(),
         ],
         task_handoff: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "task".to_string(),
             "handoff".to_string(),
             "--workflow".to_string(),
@@ -13478,16 +13508,16 @@ fn operating_context_next_actions(
     let mut actions = Vec::new();
     if status == "operating_context_defaulted" || !warnings.is_empty() {
         actions.push(
-            "Create .forge/operating-context.yaml when this project needs non-default organization, brand, product or policy.".to_string(),
+            "Create .foundry/operating-context.yaml when this project needs non-default organization, brand, product or policy.".to_string(),
         );
     }
     if active_membership_count == 0 {
         actions.push(
-            "Run forge identity sync --project-root <project-root> --output json to materialize the current tenant and active operator membership.".to_string(),
+            "Run foundry identity sync --project-root <project-root> --output json to materialize the current tenant and active operator membership.".to_string(),
         );
     }
     actions.push(
-        "Use forge context --workflow <id> --task <id> --project-root <project-root> --strict --view compact --output json before external brain handoff.".to_string(),
+        "Use foundry context --workflow <id> --task <id> --project-root <project-root> --strict --view compact --output json before external brain handoff.".to_string(),
     );
     actions
 }
@@ -13564,14 +13594,14 @@ fn context_memory_context_commands(project_root: &Path) -> BTreeMap<String, Vec<
 fn context_memory_next_actions(project_root: &Path) -> Vec<String> {
     let project_root = project_root.display();
     vec![
-        format!("forge memory policy --project-root {project_root} --output json"),
+        format!("foundry memory policy --project-root {project_root} --output json"),
         format!(
-        "forge context --workflow <workflow-id> --task <task-id> --project-root {project_root} --budget 1200 --strict --view compact --output json"
+        "foundry context --workflow <workflow-id> --task <task-id> --project-root {project_root} --budget 1200 --strict --view compact --output json"
         ),
         format!(
-            "forge memory search --workflow <workflow-id> --query <query> --project-root {project_root} --output json"
+            "foundry memory search --workflow <workflow-id> --query <query> --project-root {project_root} --output json"
         ),
-        "forge interactive context-memory --output json".to_string(),
+        "foundry interactive context-memory --output json".to_string(),
     ]
 }
 
@@ -13650,11 +13680,11 @@ fn interactive_schedule_panel_from_worker_status(
             })
             .collect(),
         commands: vec![
-            "forge interactive schedules --output json".to_string(),
-            "forge schedule worker-status --output json".to_string(),
-            "forge schedule scan-due --output json".to_string(),
-            "forge schedule list --output json".to_string(),
-            "forge interactive structured-logs --output json".to_string(),
+            "foundry interactive schedules --output json".to_string(),
+            "foundry schedule worker-status --output json".to_string(),
+            "foundry schedule scan-due --output json".to_string(),
+            "foundry schedule list --output json".to_string(),
+            "foundry interactive structured-logs --output json".to_string(),
         ],
     }
 }
@@ -13679,7 +13709,7 @@ fn empty_interactive_schedule_panel() -> InteractiveSchedulePanel {
     InteractiveSchedulePanel {
         schema_version: INTERACTIVE_SCHEDULES_SCHEMA_VERSION.to_string(),
         status: "no_scheduled_workflows".to_string(),
-        executor: "forge-scheduler".to_string(),
+        executor: "foundry-scheduler".to_string(),
         observed_at: String::new(),
         ttl_seconds: 300,
         scanned_workflows: 0,
@@ -13701,7 +13731,7 @@ fn empty_interactive_schedule_panel() -> InteractiveSchedulePanel {
             deterministic: true,
         },
         assignment_plan: InteractiveScheduleAssignmentPlan {
-            schema_version: "forge.schedule.assignment_plan.v1".to_string(),
+            schema_version: "foundry.schedule.assignment_plan.v1".to_string(),
             max_workers: 1,
             assigned_count: 0,
             queued_count: 0,
@@ -13727,24 +13757,24 @@ fn empty_interactive_schedule_panel() -> InteractiveSchedulePanel {
         ],
         workflows: Vec::new(),
         commands: vec![
-            "forge interactive schedules --output json".to_string(),
-            "forge schedule worker-status --output json".to_string(),
-            "forge schedule scan-due --output json".to_string(),
-            "forge schedule list --output json".to_string(),
-            "forge interactive structured-logs --output json".to_string(),
+            "foundry interactive schedules --output json".to_string(),
+            "foundry schedule worker-status --output json".to_string(),
+            "foundry schedule scan-due --output json".to_string(),
+            "foundry schedule list --output json".to_string(),
+            "foundry interactive structured-logs --output json".to_string(),
         ],
     }
 }
 
 pub fn build_interactive_addon_capabilities_default(
-    store: &ForgeStore,
+    store: &FoundryStore,
 ) -> InteractiveAddonCapabilityPanel {
     build_interactive_addon_capabilities_for_project(store, None)
 }
 
 fn addon_dirs_for_project(project_root: Option<&Path>) -> Vec<PathBuf> {
     project_root
-        .map(|root| vec![root.join(".forge/addons"), root.join("addons")])
+        .map(|root| vec![root.join(".foundry/addons"), root.join("addons")])
         .unwrap_or_else(default_addon_dirs)
 }
 
@@ -13782,7 +13812,7 @@ fn shell_quote_command_value(value: &str) -> String {
 }
 
 pub fn build_interactive_addon_capabilities_for_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: Option<&Path>,
 ) -> InteractiveAddonCapabilityPanel {
     let addon_dirs = addon_dirs_for_project(project_root);
@@ -13791,14 +13821,14 @@ pub fn build_interactive_addon_capabilities_for_project(
 }
 
 pub fn build_interactive_addon_capabilities(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: Option<&AddonCatalog>,
 ) -> InteractiveAddonCapabilityPanel {
     build_interactive_addon_capabilities_with_project(store, catalog, None)
 }
 
 pub fn build_interactive_addon_capabilities_with_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: Option<&AddonCatalog>,
     project_root: Option<&Path>,
 ) -> InteractiveAddonCapabilityPanel {
@@ -13824,8 +13854,8 @@ pub fn build_interactive_addon_capabilities_with_project(
         .map(|index| {
             let mut capabilities = index.capabilities.iter().collect::<Vec<_>>();
             capabilities.sort_by(|left, right| {
-                let left_core = left.addon_id == "forge.core.kernel";
-                let right_core = right.addon_id == "forge.core.kernel";
+                let left_core = left.addon_id == "foundry.core.kernel";
+                let right_core = right.addon_id == "foundry.core.kernel";
                 right_core
                     .cmp(&left_core)
                     .then_with(|| {
@@ -13967,22 +13997,22 @@ pub fn build_interactive_addon_capabilities_with_project(
         event_extension_registry,
         capabilities,
         commands: vec![
-            "forge addons capabilities --output json".to_string(),
-            "forge addons observability --output json".to_string(),
-            "forge events adapters --output json".to_string(),
-            "forge addons views --surface tui --output json".to_string(),
-            format!("forge interactive addon-capabilities{project_root_arg} --output json"),
-            "forge interactive action-registry --query addon --output json".to_string(),
+            "foundry addons capabilities --output json".to_string(),
+            "foundry addons observability --output json".to_string(),
+            "foundry events adapters --output json".to_string(),
+            "foundry addons views --surface tui --output json".to_string(),
+            format!("foundry interactive addon-capabilities{project_root_arg} --output json"),
+            "foundry interactive action-registry --query addon --output json".to_string(),
         ],
     }
 }
 
-pub fn build_interactive_core_boundary(store: &ForgeStore) -> InteractiveCoreBoundaryPanel {
+pub fn build_interactive_core_boundary(store: &FoundryStore) -> InteractiveCoreBoundaryPanel {
     build_interactive_core_boundary_for_project(store, None)
 }
 
 pub fn build_interactive_core_boundary_for_project(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: Option<&Path>,
 ) -> InteractiveCoreBoundaryPanel {
     let addon_dirs = addon_dirs_for_project(project_root);
@@ -13994,7 +14024,7 @@ pub fn build_interactive_core_boundary_for_project(
     let core_addon = catalog
         .addons
         .iter()
-        .find(|addon| addon.id == "forge.core.kernel");
+        .find(|addon| addon.id == "foundry.core.kernel");
     let core_capabilities = core_addon
         .map(|addon| {
             addon
@@ -14037,7 +14067,7 @@ pub fn build_interactive_core_boundary_for_project(
     let addon_boundaries = catalog
         .addons
         .iter()
-        .filter(|addon| addon.id != "forge.core.kernel")
+        .filter(|addon| addon.id != "foundry.core.kernel")
         .map(interactive_addon_boundary_card)
         .collect::<Vec<_>>();
     let domain_addon_count = addon_boundaries.len();
@@ -14048,14 +14078,14 @@ pub fn build_interactive_core_boundary_for_project(
     let compatibility_boundaries = catalog
         .addons
         .iter()
-        .filter(|addon| addon.id != "forge.core.kernel")
+        .filter(|addon| addon.id != "foundry.core.kernel")
         .flat_map(interactive_compatibility_boundaries)
         .collect::<Vec<_>>();
     let compatibility_boundary_count = compatibility_boundaries.len();
     let event_extension_count = catalog
         .addons
         .iter()
-        .filter(|addon| addon.id != "forge.core.kernel")
+        .filter(|addon| addon.id != "foundry.core.kernel")
         .map(|addon| {
             addon.event_types.len()
                 + addon.event_channels.len()
@@ -14072,13 +14102,13 @@ pub fn build_interactive_core_boundary_for_project(
     let addon_view_count = catalog
         .addons
         .iter()
-        .filter(|addon| addon.id != "forge.core.kernel")
+        .filter(|addon| addon.id != "foundry.core.kernel")
         .map(|addon| addon.views.len())
         .sum::<usize>();
     let permission_count = catalog
         .addons
         .iter()
-        .filter(|addon| addon.id != "forge.core.kernel")
+        .filter(|addon| addon.id != "foundry.core.kernel")
         .map(|addon| addon.permissions.len())
         .sum::<usize>();
     let indexed_capability_count = capability_index
@@ -14095,7 +14125,7 @@ pub fn build_interactive_core_boundary_for_project(
                 core_capabilities.len(),
                 domain_specific_core_leak_count
             ),
-            "forge interactive core-boundary --output json",
+            "foundry interactive core-boundary --output json",
         ),
         core_boundary_gate(
             "domain_capabilities_are_addon_owned",
@@ -14105,7 +14135,7 @@ pub fn build_interactive_core_boundary_for_project(
                 "{} non-core Addons own {} capabilities",
                 domain_addon_count, addon_owned_capability_count
             ),
-            "forge interactive addon-capabilities --output json",
+            "foundry interactive addon-capabilities --output json",
         ),
         core_boundary_gate(
             "addon_manifests_are_source_of_truth",
@@ -14115,21 +14145,21 @@ pub fn build_interactive_core_boundary_for_project(
                 "{} Addons and {} capabilities loaded from the catalog",
                 catalog.addon_count, catalog.capability_count
             ),
-            "forge addons catalog --output json",
+            "foundry addons catalog --output json",
         ),
         core_boundary_gate(
             "capability_registry_is_queryable",
             "Capability registry can be queried independently of the TUI",
             indexed_capability_count > 0,
             format!("{indexed_capability_count} capabilities indexed in the store"),
-            "forge addons capabilities --output json",
+            "foundry addons capabilities --output json",
         ),
         core_boundary_gate(
             "ui_composition_is_core_plus_addons",
             "UI composition can render Core widgets and Addon-owned views",
             addon_view_count > 0,
             format!("{addon_view_count} Addon TUI views are available for composition"),
-            "forge interactive home --output json",
+            "foundry interactive home --output json",
         ),
         core_boundary_gate(
             "runtime_contracts_route_specific_execution",
@@ -14139,14 +14169,14 @@ pub fn build_interactive_core_boundary_for_project(
                 "{} runtime contracts; {} compatibility boundaries still visible",
                 runtime_contract_count, compatibility_boundary_count
             ),
-            "forge addons runtime-contracts --output json",
+            "foundry addons runtime-contracts --output json",
         ),
         core_boundary_gate(
             "event_extensions_are_addon_owned",
             "Domain events, channels and adapters are attached through Addons",
             event_extension_count > 0,
             format!("{event_extension_count} non-core event extension declarations"),
-            "forge events adapters --output json",
+            "foundry events adapters --output json",
         ),
         core_boundary_gate(
             "permissions_lifecycle_observability_are_visible",
@@ -14157,7 +14187,7 @@ pub fn build_interactive_core_boundary_for_project(
                     .iter()
                     .any(|addon| addon.lifecycle == "enabled"),
             format!("{permission_count} non-core permissions with lifecycle metadata"),
-            "forge addons observability --output json",
+            "foundry addons observability --output json",
         ),
     ];
     let status = if core_addon.is_none() {
@@ -14189,16 +14219,16 @@ pub fn build_interactive_core_boundary_for_project(
         notes: vec![
             "This panel is read-only and does not migrate capabilities automatically.".to_string(),
             "Compatibility executors are allowed only when the capability is still owned by an Addon contract.".to_string(),
-            "A clean Core boundary is evidence for goal3, not proof that the whole Forge objective is complete.".to_string(),
+            "A clean Core boundary is evidence for goal3, not proof that the whole Foundry objective is complete.".to_string(),
         ],
         commands: vec![
-            format!("forge interactive core-boundary{project_root_arg} --output json"),
-            format!("forge interactive addon-capabilities{project_root_arg} --output json"),
-            "forge addons catalog --output json".to_string(),
-            "forge addons capabilities --output json".to_string(),
-            "forge addons runtime-contracts --output json".to_string(),
-            "forge addons observability --output json".to_string(),
-            "forge interactive release-gates --output json".to_string(),
+            format!("foundry interactive core-boundary{project_root_arg} --output json"),
+            format!("foundry interactive addon-capabilities{project_root_arg} --output json"),
+            "foundry addons catalog --output json".to_string(),
+            "foundry addons capabilities --output json".to_string(),
+            "foundry addons runtime-contracts --output json".to_string(),
+            "foundry addons observability --output json".to_string(),
+            "foundry interactive release-gates --output json".to_string(),
         ],
     }
 }
@@ -14237,8 +14267,8 @@ fn interactive_compatibility_boundaries(
         .iter()
         .filter(|contract| {
             addon.source.contains("compat")
-                || contract.runtime == "forge_core_builtin"
-                || contract.entrypoint.starts_with("forge.")
+                || crate::addon::addon_runtime_is_core_builtin(&contract.runtime)
+                || contract.entrypoint.starts_with("foundry.")
                 || contract.entrypoint.starts_with("planner:")
         })
         .map(|contract| InteractiveCompatibilityBoundary {
@@ -14364,10 +14394,10 @@ fn render_addon_event_extension_entries(
 }
 
 fn default_interactive_harness_shim_dir() -> PathBuf {
-    env::var_os("HOME")
+    crate::brand::env_var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".forge/bin")
+        .join(".foundry/bin")
 }
 
 fn readiness_next_actions(
@@ -14377,7 +14407,7 @@ fn readiness_next_actions(
     harness_doctor: &HarnessDoctorReport,
 ) -> Vec<String> {
     let mut actions = vec![
-        "forge sync all --home $HOME --shim-dir $HOME/.forge/bin --allow codex --allow opencode --output json".to_string(),
+        "foundry sync all --home $HOME --shim-dir $HOME/.foundry/bin --allow codex --allow opencode --output json".to_string(),
     ];
     if no_usable_executors || needs_executor_approval {
         actions.push("review executor approvals before handoff".to_string());
@@ -14385,18 +14415,18 @@ fn readiness_next_actions(
     if needs_runtime_approval {
         actions.push("review runtime approvals before async substrate use".to_string());
     }
-    if !harness_doctor.forge_first_ready || !harness_doctor.shim_ready {
+    if !harness_doctor.foundry_first_ready || !harness_doctor.shim_ready {
         actions.push(
-            "forge harness adoption-plan --executor codex --shim-dir $HOME/.forge/bin --project-root . --output json"
+            "foundry harness adoption-plan --executor codex --shim-dir $HOME/.foundry/bin --project-root . --output json"
                 .to_string(),
         );
         actions.push(
-            "forge harness bootstrap --executor codex --shim-dir $HOME/.forge/bin --project-root . --apply --approved-by <operator> --output json"
+            "foundry harness bootstrap --executor codex --shim-dir $HOME/.foundry/bin --project-root . --apply --approved-by <operator> --output json"
                 .to_string(),
         );
     }
     actions.push(
-        "forge harness doctor --executor codex --shim-dir $HOME/.forge/bin --project-root . --output json"
+        "foundry harness doctor --executor codex --shim-dir $HOME/.foundry/bin --project-root . --output json"
             .to_string(),
     );
     actions
@@ -14523,7 +14553,7 @@ fn interactive_harness_commands(
             "exec".to_string(),
             "--executor".to_string(),
             executor.to_string(),
-            "--forge-first".to_string(),
+            "--foundry-first".to_string(),
             "--project-root".to_string(),
             project_root.clone(),
             "--workflow".to_string(),
@@ -14641,7 +14671,7 @@ fn interactive_session_card(session: &BrainSessionState) -> InteractiveSessionCa
         provider_kind: session.provider_kind.clone(),
         readiness: session.readiness.clone(),
         launch_mode: session.launch_mode.clone(),
-        forge_first_ready: session.forge_first_ready,
+        foundry_first_ready: session.foundry_first_ready,
         lifecycle_state: session.lifecycle_state.clone(),
         recorded_plan_count: session.recorded_plan_count,
         lifecycle_event_count: session.lifecycle_event_count,
@@ -14667,7 +14697,7 @@ fn interactive_session_card(session: &BrainSessionState) -> InteractiveSessionCa
                 "--state".to_string(),
                 "<opened|attached|detached|closed|failed|abandoned>".to_string(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -14684,7 +14714,7 @@ fn interactive_session_card(session: &BrainSessionState) -> InteractiveSessionCa
                 session.provider_id.clone(),
                 "--record-session".to_string(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -14749,7 +14779,7 @@ fn readiness_commands() -> InteractiveReadinessCommands {
             "--home".to_string(),
             "$HOME".to_string(),
             "--shim-dir".to_string(),
-            "$HOME/.forge/bin".to_string(),
+            "$HOME/.foundry/bin".to_string(),
             "--allow".to_string(),
             "codex".to_string(),
             "--allow".to_string(),
@@ -14788,7 +14818,7 @@ fn readiness_commands() -> InteractiveReadinessCommands {
             "--executor".to_string(),
             "codex".to_string(),
             "--shim-dir".to_string(),
-            "$HOME/.forge/bin".to_string(),
+            "$HOME/.foundry/bin".to_string(),
             "--project-root".to_string(),
             ".".to_string(),
             "--output".to_string(),
@@ -14800,7 +14830,7 @@ fn readiness_commands() -> InteractiveReadinessCommands {
             "--executor".to_string(),
             "codex".to_string(),
             "--shim-dir".to_string(),
-            "$HOME/.forge/bin".to_string(),
+            "$HOME/.foundry/bin".to_string(),
             "--project-root".to_string(),
             ".".to_string(),
             "--output".to_string(),
@@ -14812,7 +14842,7 @@ fn readiness_commands() -> InteractiveReadinessCommands {
             "--executor".to_string(),
             "codex".to_string(),
             "--shim-dir".to_string(),
-            "$HOME/.forge/bin".to_string(),
+            "$HOME/.foundry/bin".to_string(),
             "--project-root".to_string(),
             ".".to_string(),
             "--apply".to_string(),
@@ -14888,30 +14918,30 @@ fn release_gate_commands(version: &str) -> InteractiveReleaseGateCommands {
 fn release_gate_next_commands(capability_id: &str) -> Vec<String> {
     match capability_id {
         "replacement_grade_cli" => vec![
-            "forge milestone prepare-evidence-inputs --version 0.5 --capability replacement_grade_cli --project-root <project-root> --connected-brain <provider-id> --apply --approved-by <operator> --output json".to_string(),
-            "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --connected-brain <provider-id> --output json".to_string(),
-            "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root <project-root> --connected-brain <provider-id> --approved-by <operator> --origin codex --output json".to_string(),
-            "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind broader_project_coding_research_workflow --project-root <project-root> --approved-by <operator> --origin codex --output json".to_string(),
-            "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind terminal_file_editing_ux --project-root <project-root> --approved-by <operator> --origin codex --output json".to_string(),
-            "forge milestone cli-demo --origin codex --output json".to_string(),
-            "forge milestone attach-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --summary \"Operator-approved provider receipt.\" --artifact <path> --approved-by <operator> --output json".to_string(),
-            "forge interactive replacement-cli --output json".to_string(),
-            "forge interactive harness --output json".to_string(),
-            "forge interactive patch-workbench --output json".to_string(),
+            "foundry milestone prepare-evidence-inputs --version 0.6 --capability replacement_grade_cli --project-root <project-root> --connected-brain <provider-id> --apply --approved-by <operator> --output json".to_string(),
+            "foundry milestone evidence-plan --version 0.6 --capability replacement_grade_cli --project-root <project-root> --connected-brain <provider-id> --output json".to_string(),
+            "foundry milestone collect-evidence --version 0.6 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root <project-root> --connected-brain <provider-id> --approved-by <operator> --origin codex --output json".to_string(),
+            "foundry milestone collect-evidence --version 0.6 --capability replacement_grade_cli --kind broader_project_coding_research_workflow --project-root <project-root> --approved-by <operator> --origin codex --output json".to_string(),
+            "foundry milestone collect-evidence --version 0.6 --capability replacement_grade_cli --kind terminal_file_editing_ux --project-root <project-root> --approved-by <operator> --origin codex --output json".to_string(),
+            "foundry milestone cli-demo --origin codex --output json".to_string(),
+            "foundry milestone attach-evidence --version 0.6 --capability replacement_grade_cli --kind external_brain_provider_execution --summary \"Operator-approved provider receipt.\" --artifact <path> --approved-by <operator> --output json".to_string(),
+            "foundry interactive replacement-cli --output json".to_string(),
+            "foundry interactive harness --output json".to_string(),
+            "foundry interactive patch-workbench --output json".to_string(),
         ],
         "experimental_multimodal_runtime" => vec![
-            "forge milestone prepare-evidence-inputs --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --apply --approved-by <operator> --output json".to_string(),
-            "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --output json".to_string(),
-            "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --approved-by <operator> --output json".to_string(),
-            "forge multimodal status --output json".to_string(),
-            "forge multimodal readiness --capability image_understanding --output json".to_string(),
-            "forge multimodal benchmark-template --capability image_understanding --output json"
+            "foundry milestone prepare-evidence-inputs --version 0.6 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --apply --approved-by <operator> --output json".to_string(),
+            "foundry milestone evidence-plan --version 0.6 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --output json".to_string(),
+            "foundry milestone collect-evidence --version 0.6 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --approved-by <operator> --output json".to_string(),
+            "foundry multimodal status --output json".to_string(),
+            "foundry multimodal readiness --capability image_understanding --output json".to_string(),
+            "foundry multimodal benchmark-template --capability image_understanding --output json"
                 .to_string(),
-            "forge milestone attach-evidence --version 0.5 --capability experimental_multimodal_runtime --kind production_runtime_benchmark --summary \"Operator-approved runtime receipt.\" --artifact <path> --approved-by <operator> --output json".to_string(),
+            "foundry milestone attach-evidence --version 0.6 --capability experimental_multimodal_runtime --kind production_runtime_benchmark --summary \"Operator-approved runtime receipt.\" --artifact <path> --approved-by <operator> --output json".to_string(),
         ],
         _ => vec![
-            "forge milestone status --version 0.5 --output json".to_string(),
-            "forge milestone manifest --version 0.5 --output json".to_string(),
+            "foundry milestone status --version 0.6 --output json".to_string(),
+            "foundry milestone manifest --version 0.6 --output json".to_string(),
         ],
     }
 }
@@ -14936,7 +14966,7 @@ fn release_gate_attached_evidence_state(
 }
 
 pub fn route_interactive_input(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: &str,
     origin: &str,
 ) -> Result<InteractiveRouteReport> {
@@ -14944,7 +14974,7 @@ pub fn route_interactive_input(
 }
 
 pub fn route_interactive_input_with_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: &str,
     origin: &str,
     conversation_context: &[String],
@@ -15052,23 +15082,23 @@ pub fn route_interactive_input_with_context(
 }
 
 fn deterministic_direct_interactive_answer(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: &str,
     conversation_context: &[String],
 ) -> Option<String> {
     let lower = input.trim().to_lowercase();
     if lower.is_empty() {
-        return Some("Diga o que você quer saber ou executar no Forge.".to_string());
+        return Some("Diga o que você quer saber ou executar no Foundry.".to_string());
     }
-    if is_forge_status_question(&lower) {
+    if is_foundry_status_question(&lower) {
         let status = render_interactive_status_for_store(store).unwrap_or_else(|_| {
-            "Forge está disponível, mas não consegui renderizar o snapshot de status agora."
+            "Foundry está disponível, mas não consegui renderizar o snapshot de status agora."
                 .to_string()
         });
-        return Some(format!("Status do Forge:\n{status}"));
+        return Some(format!("Status do Foundry:\n{status}"));
     }
     if is_greeting_question(&lower) {
-        return Some("Olá. Sou o Forge, o orquestrador de workflows deste ambiente.".to_string());
+        return Some("Olá. Sou o Foundry, o orquestrador de workflows deste ambiente.".to_string());
     }
     if is_date_question(&lower) {
         return Some(format!("Hoje é {} em UTC.", Utc::now().date_naive()));
@@ -15088,7 +15118,7 @@ fn deterministic_direct_interactive_answer(
             return Some(format!("Seu nome é {name}."));
         }
         return Some(
-            "Eu conheço o contexto operacional desta sessão pelo Forge, mas não invento dados pessoais que não estejam registrados no runtime."
+            "Eu conheço o contexto operacional desta sessão pelo Foundry, mas não invento dados pessoais que não estejam registrados no runtime."
                 .to_string(),
         );
     }
@@ -15115,8 +15145,8 @@ fn declared_user_name(input: &str) -> Option<String> {
     valid.then(|| name.to_string())
 }
 
-fn is_forge_status_question(lower: &str) -> bool {
-    let mentions_forge = lower.contains("forge");
+fn is_foundry_status_question(lower: &str) -> bool {
+    let mentions_foundry = lower.contains("foundry");
     let status_term = lower.contains("status")
         || lower.contains("estado")
         || lower.contains("situação")
@@ -15127,8 +15157,8 @@ fn is_forge_status_question(lower: &str) -> bool {
         || lower.starts_with("como ")
         || lower.starts_with("show ")
         || lower.starts_with("mostre ")
-        || lower == "forge status";
-    mentions_forge && status_term && asks_or_requests_status
+        || lower == "foundry status";
+    mentions_foundry && status_term && asks_or_requests_status
 }
 
 fn is_greeting_question(lower: &str) -> bool {
@@ -15175,7 +15205,7 @@ fn local_exit_route(input: &str) -> InteractiveRouteReport {
         input_kind: "local_command".to_string(),
         routing_decision: "exit_repl".to_string(),
         routing_explanation:
-            "Local operator exit command; Forge closes the REPL without creating workflow state."
+            "Local operator exit command; Foundry closes the REPL without creating workflow state."
                 .to_string(),
         workflow_created: false,
         run_id: None,
@@ -15189,7 +15219,7 @@ fn local_exit_route(input: &str) -> InteractiveRouteReport {
             equivalent_command: Vec::new(),
             mutates_workflow: false,
             risk_level: "low".to_string(),
-            execution_boundary: "local_repl_exit_not_executed_by_forge".to_string(),
+            execution_boundary: "local_repl_exit_not_executed_by_foundry".to_string(),
         }),
         product_decision_id: None,
         product_decision_revision: None,
@@ -15206,7 +15236,7 @@ fn parse_pm_goal(input: &str) -> Option<&str> {
 }
 
 fn route_pm_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     pm_goal: &str,
     origin: &str,
 ) -> Result<InteractiveRouteReport> {
@@ -15256,7 +15286,7 @@ fn route_pm_workflow(
             input_arguments: vec![pm_goal.to_string()],
             input_argument_text: pm_goal.to_string(),
             equivalent_command: vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "interactive".to_string(),
                 "route".to_string(),
                 "--input".to_string(),
@@ -15269,7 +15299,7 @@ fn route_pm_workflow(
         product_decision_id: Some(decision.decision_id),
         product_decision_revision: Some(decision.revision),
         retention_decision: RetentionDecision {
-            schema_version: "forge.interactive.retention_decision.v1".to_string(),
+            schema_version: "foundry.interactive.retention_decision.v1".to_string(),
             action: "retain".to_string(),
             reason: "Product/PM workflow contains durable product decision state and should remain inspectable.".to_string(),
             confidence: 0.91,
@@ -15282,10 +15312,10 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     let d = &report.dashboard;
     let quick_actions = d.quick_actions.join(" ");
     let next_commands = d.useful_next_commands.join(" | ");
-    let forge_controlled_surfaces = if d.forge_controlled_surfaces.is_empty() {
+    let foundry_controlled_surfaces = if d.foundry_controlled_surfaces.is_empty() {
         "none".to_string()
     } else {
-        d.forge_controlled_surfaces.join(", ")
+        d.foundry_controlled_surfaces.join(", ")
     };
     let shell_entrypoints = if d.shell_entrypoints.is_empty() {
         "none".to_string()
@@ -15414,7 +15444,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     };
     format!(
         "{mark}\n{name}\n\n\
-         Forge operational TUI\n\
+         Foundry operational TUI\n\
          Guided cockpit: {guided_cockpit_status}; visual {guided_cockpit_visual}; steps {guided_completed}/{guided_total}; current {guided_current}; blocked {guided_blocked}; confirmations {guided_confirmations}; panes {guided_panes}; next {guided_next}\n\
          Guided steps: {guided_steps}\n\
          Safe actions: {guided_policy}\n\
@@ -15428,7 +15458,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Architecture compass: {architecture_status}; tracks {architecture_track_count}, docs {architecture_doc_count}; {architecture_tracks}\n\
          Core boundary: {core_boundary}\n\
          Architecture execution plan: {architecture_execution_plan}\n\
-         Smoke test: forge smoke operational-tui --output json\n\n\
+         Smoke test: foundry smoke operational-tui --output json\n\n\
          Active runs: {active_runs}\n\
          {run_ids_line}\
          Operational cockpit: {cockpit_attention}; {cockpit_priority}; active work {cockpit_active_work}, ready handoffs {cockpit_ready_handoffs}, human waits {cockpit_human_waits}, due workflows {cockpit_due_workflows}, brain {cockpit_selected_brain}; sections {cockpit_sections}\n\
@@ -15445,9 +15475,9 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Validation failures: {validation_failures}\n\
          Executor availability: {executor_availability}\n\
          Brain router: {brain_router}\n\
-         Forge-controlled surfaces: {forge_controlled_surfaces}\n\
+         Foundry-controlled surfaces: {foundry_controlled_surfaces}\n\
          Shell entrypoints: {shell_entrypoints}\n\
-         Harness center: {harness_center_status}; executor {harness_center_executor}; forge-first {harness_center_forge_first}; token headroom {harness_center_token_headroom}; shim {harness_center_shim}; action {harness_center_command}\n\
+         Harness center: {harness_center_status}; executor {harness_center_executor}; foundry-first {harness_center_foundry_first}; token headroom {harness_center_token_headroom}; shim {harness_center_shim}; action {harness_center_command}\n\
          Token usage panel: {token_usage_status}; blobs {token_usage_blobs}, original tokens {token_usage_original_tokens}, compressed tokens {token_usage_compressed_tokens}, saved tokens {token_usage_saved_tokens}, savings {token_usage_savings:.2}%, over budget {token_usage_over_budget}; primary {token_usage_primary_source}/{token_usage_primary_kind}; sources {token_usage_sources}; retrieve {token_usage_retrieve}\n\
          Session center: {sessions_status}; sessions {sessions_count}, ready {sessions_ready}, planned events {sessions_planned_events}, lifecycle events {sessions_lifecycle_events}; {session_cards}\n\
          Harness mode: {harness_effective_mode} from {harness_source}; project config {harness_project_status}; audit {harness_audit_command}\n\
@@ -15526,14 +15556,14 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         validation_failures = d.validation_failures,
         executor_availability = d.executor_availability,
         brain_router = d.brain_router,
-        forge_controlled_surfaces = forge_controlled_surfaces,
+        foundry_controlled_surfaces = foundry_controlled_surfaces,
         shell_entrypoints = shell_entrypoints,
         harness_center_status = d.harness_panel.status,
         harness_center_executor = d.harness_panel.executor,
-        harness_center_forge_first = d.harness_panel.forge_first_ready,
+        harness_center_foundry_first = d.harness_panel.foundry_first_ready,
         harness_center_token_headroom = d.harness_panel.token_headroom_ready,
         harness_center_shim = d.harness_panel.shim_status.status,
-        harness_center_command = "forge interactive harness --output json",
+        harness_center_command = "foundry interactive harness --output json",
         token_usage_status = d.token_usage_panel.status,
         token_usage_blobs = d.token_usage_panel.total_headroom_blobs,
         token_usage_original_tokens = d.token_usage_panel.total_original_tokens,
@@ -15552,14 +15582,14 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         sessions_lifecycle_events = d.sessions_panel.lifecycle_event_count,
         session_cards = session_cards,
         harness_effective_mode = d.harness_mode_panel.effective_mode,
-        harness_source = d.harness_mode_panel.forge_first_source,
+        harness_source = d.harness_mode_panel.foundry_first_source,
         harness_project_status = d.harness_mode_panel.project_config_status,
-        harness_audit_command = "forge harness mode --output json",
+        harness_audit_command = "foundry harness mode --output json",
         harness_doctor_status = d.harness_doctor_panel.status,
         harness_doctor_executor = d.harness_doctor_panel.executor,
         harness_doctor_shim_dir = d.harness_doctor_panel.shim_dir,
         harness_doctor_checks = harness_doctor_checks,
-        harness_doctor_command = "forge harness doctor --executor codex --shim-dir $HOME/.forge/bin --project-root . --output json",
+        harness_doctor_command = "foundry harness doctor --executor codex --shim-dir $HOME/.foundry/bin --project-root . --output json",
         runtime_node_status = d.runtime_node_status,
         scheduler_worker_status = d.scheduler_worker_status,
         workflow_sidebar = workflow_sidebar,
@@ -16208,13 +16238,13 @@ pub fn render_interactive_replacement_cli(panel: &InteractiveReplacementCliPanel
             panel.blockers.join("; ")
         },
         commands = [
-            format!("forge {}", panel.commands.refresh.join(" ")),
-            format!("forge {}", panel.commands.patch_workbench.join(" ")),
-            format!("forge {}", panel.commands.harness.join(" ")),
-            format!("forge {}", panel.commands.cli_demo.join(" ")),
-            format!("forge {}", panel.commands.evidence_plan.join(" ")),
+            format!("foundry {}", panel.commands.refresh.join(" ")),
+            format!("foundry {}", panel.commands.patch_workbench.join(" ")),
+            format!("foundry {}", panel.commands.harness.join(" ")),
+            format!("foundry {}", panel.commands.cli_demo.join(" ")),
+            format!("foundry {}", panel.commands.evidence_plan.join(" ")),
             format!(
-                "forge {}",
+                "foundry {}",
                 panel.commands.collect_external_brain_evidence.join(" ")
             ),
         ]
@@ -16307,10 +16337,10 @@ pub fn render_interactive_multimodal_runtime(panel: &InteractiveMultimodalRuntim
             panel.blockers.join("; ")
         },
         commands = [
-            format!("forge {}", panel.commands.refresh.join(" ")),
-            format!("forge {}", panel.commands.status.join(" ")),
-            format!("forge {}", panel.commands.runtime_benchmark.join(" ")),
-            format!("forge {}", panel.commands.evidence_plan.join(" ")),
+            format!("foundry {}", panel.commands.refresh.join(" ")),
+            format!("foundry {}", panel.commands.status.join(" ")),
+            format!("foundry {}", panel.commands.runtime_benchmark.join(" ")),
+            format!("foundry {}", panel.commands.evidence_plan.join(" ")),
         ]
         .join(" | "),
         notes = if panel.notes.is_empty() {
@@ -16786,12 +16816,12 @@ pub fn render_interactive_readiness(panel: &InteractiveReadinessPanel) -> String
         panel.next_actions.join(" | ")
     };
     format!(
-        "Interactive readiness: {status}; executors {usable_executor_count}/{executor_count}, brains {brain_count}, shells {forge_first_shell_count}/{shell_count} Forge-first, selected brain {selected_brain}\nHarness mode: {harness_mode}; harness doctor: {harness_doctor}; adoption-plan {harness_adoption_plan}; bootstrap {bootstrap_action}; headroom {headroom_status}; headroom action {headroom_action}; usable executors: {usable_executors}\nNext actions: {next_actions}\n",
+        "Interactive readiness: {status}; executors {usable_executor_count}/{executor_count}, brains {brain_count}, shells {foundry_first_shell_count}/{shell_count} Foundry-first, selected brain {selected_brain}\nHarness mode: {harness_mode}; harness doctor: {harness_doctor}; adoption-plan {harness_adoption_plan}; bootstrap {bootstrap_action}; headroom {headroom_status}; headroom action {headroom_action}; usable executors: {usable_executors}\nNext actions: {next_actions}\n",
         status = panel.status,
         usable_executor_count = panel.usable_executor_count,
         executor_count = panel.executor_count,
         brain_count = panel.brain_count,
-        forge_first_shell_count = panel.forge_first_shell_count,
+        foundry_first_shell_count = panel.foundry_first_shell_count,
         shell_count = panel.shell_count,
         selected_brain = panel.selected_brain,
         harness_mode = panel.harness_mode.status,
@@ -16972,7 +17002,7 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         panel.next_actions.join(" | ")
     };
     format!(
-        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; adoption-plan {adoption_plan}; forge-first readiness {forge_first_readiness}; compatibility {compatibility_status}; headroom-stats {headroom_stats} ({headroom_blob_count} blobs); headroom action {headroom_action}; adoption action {adoption_action}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | adoption-plan | lineage-plan | lineage-exec-dry-run | bootstrap | headroom-stats | install-shims | exec\nWrapper plan: {wrapper_plan}\nForge-first adoption: {forge_first_adoption}\nHeadroom runtime: {headroom_runtime}\nOrchestration: {orchestration}\nCompatibility: {compatibility}\nLifecycle gates: {lifecycle_gates}\nHeadroom stats: {headroom_details}\nNext actions: {next_actions}\n",
+        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; adoption-plan {adoption_plan}; foundry-first readiness {foundry_first_readiness}; compatibility {compatibility_status}; headroom-stats {headroom_stats} ({headroom_blob_count} blobs); headroom action {headroom_action}; adoption action {adoption_action}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | adoption-plan | lineage-plan | lineage-exec-dry-run | bootstrap | headroom-stats | install-shims | exec\nWrapper plan: {wrapper_plan}\nFoundry-first adoption: {foundry_first_adoption}\nHeadroom runtime: {headroom_runtime}\nOrchestration: {orchestration}\nCompatibility: {compatibility}\nLifecycle gates: {lifecycle_gates}\nHeadroom stats: {headroom_details}\nNext actions: {next_actions}\n",
         status = panel.status,
         executor = panel.executor,
         mode = panel.mode.effective_mode,
@@ -16981,7 +17011,7 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         headroom = panel.headroom_preview.status,
         headroom_plan = panel.headroom_plan.status,
         adoption_plan = panel.adoption_plan.status,
-        forge_first_readiness = panel.forge_first_adoption_readiness.status,
+        foundry_first_readiness = panel.foundry_first_adoption_readiness.status,
         compatibility_status = panel.executor_compatibility.status,
         headroom_stats = panel.headroom_stats.status,
         headroom_blob_count = panel.headroom_stats.total_blobs,
@@ -16992,8 +17022,8 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         project_root = panel.project_root,
         shim_dir = panel.shim_dir,
         wrapper_plan = render_harness_wrapper_plan(&panel.wrapper_plan),
-        forge_first_adoption = render_harness_forge_first_adoption(
-            &panel.forge_first_adoption_readiness
+        foundry_first_adoption = render_harness_foundry_first_adoption(
+            &panel.foundry_first_adoption_readiness
         ),
         headroom_runtime = render_harness_headroom_runtime(&panel.wrapper_plan),
         orchestration = render_harness_orchestration(&panel.wrapper_plan),
@@ -17004,14 +17034,14 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
     )
 }
 
-fn render_harness_forge_first_adoption(
-    readiness: &InteractiveHarnessForgeFirstAdoptionReadiness,
+fn render_harness_foundry_first_adoption(
+    readiness: &InteractiveHarnessFoundryFirstAdoptionReadiness,
 ) -> String {
     format!(
         "{} ready {}; active {}; shim {}; activation {} reason {} possible {}; headroom {}; lineage {}; blockers {}; next {}; routes {}",
         readiness.schema_version,
         readiness.ready_to_use_as_default,
-        readiness.forge_first_default_active,
+        readiness.foundry_first_default_active,
         readiness.shim_ready,
         readiness.activation_status,
         readiness.activation_reason,
@@ -17055,17 +17085,17 @@ fn render_harness_wrapper_plan(plan: &CliWrapperPlanReport) -> String {
         .filter(|item| {
             matches!(
                 item.name.as_str(),
-                "FORGE_HARNESS"
-                    | "FORGE_PROMPT_PACKET_REQUIRED"
-                    | "FORGE_CONTEXT_ROUTING"
-                    | "FORGE_MEMORY_ROUTING"
-                    | "FORGE_SKILL_ROUTING"
-                    | "FORGE_MCP_ROUTING"
-                    | "FORGE_HEADROOM_RUNTIME_PLAN"
-                    | "FORGE_HEADROOM_INTERCEPT"
-                    | "FORGE_TOKEN_HEADROOM_REQUIRED"
-                    | "FORGE_SESSION_LIFECYCLE"
-                    | "FORGE_EVENT_RECEIPTS"
+                "FOUNDRY_HARNESS"
+                    | "FOUNDRY_PROMPT_PACKET_REQUIRED"
+                    | "FOUNDRY_CONTEXT_ROUTING"
+                    | "FOUNDRY_MEMORY_ROUTING"
+                    | "FOUNDRY_SKILL_ROUTING"
+                    | "FOUNDRY_MCP_ROUTING"
+                    | "FOUNDRY_HEADROOM_RUNTIME_PLAN"
+                    | "FOUNDRY_HEADROOM_INTERCEPT"
+                    | "FOUNDRY_TOKEN_HEADROOM_REQUIRED"
+                    | "FOUNDRY_SESSION_LIFECYCLE"
+                    | "FOUNDRY_EVENT_RECEIPTS"
             )
         })
         .map(|item| format!("{}={}", item.name, item.value))
@@ -17073,8 +17103,8 @@ fn render_harness_wrapper_plan(plan: &CliWrapperPlanReport) -> String {
         .join(", ");
     let provider_wrapper = &plan.connected_brain_provider_wrapper;
     format!(
-        "forge_first {}; strategy {}; launch {}; provider wrapper {} {}; env {}",
-        plan.forge_first,
+        "foundry_first {}; strategy {}; launch {}; provider wrapper {} {}; env {}",
+        plan.foundry_first,
         plan.wrapper_strategy,
         plan.launch_command.join(" "),
         provider_wrapper.status,
@@ -17177,7 +17207,7 @@ fn render_harness_executor_compatibility(report: &HarnessExecutorCompatibilityRe
         report.selected_executor,
         report.selected_adapter_family,
         selected.adoption_posture,
-        selected.ready_as_forge_first_default,
+        selected.ready_as_foundry_first_default,
         selected.readiness_score_percent,
         selected.native_entrypoint,
         if surfaces.is_empty() {
@@ -17689,10 +17719,10 @@ pub fn render_interactive_structured_logs(panel: &InteractiveStructuredLogsPanel
 fn render_context_memory_command_summary(panel: &InteractiveContextMemoryPanel) -> String {
     let mut commands = Vec::new();
     for (name, command) in &panel.memory_commands {
-        commands.push(format!("memory {name}: forge {}", command.join(" ")));
+        commands.push(format!("memory {name}: foundry {}", command.join(" ")));
     }
     for (name, command) in &panel.context_commands {
-        commands.push(format!("context {name}: forge {}", command.join(" ")));
+        commands.push(format!("context {name}: foundry {}", command.join(" ")));
     }
     if commands.is_empty() {
         "none".to_string()
@@ -17762,7 +17792,7 @@ fn build_interactive_event_panel(timeline: &GlobalEventTimelineReport) -> Intera
 }
 
 fn build_event_runtime_panel(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     workflows: &[WorkflowRegistryRow],
 ) -> InteractiveEventRuntimePanel {
@@ -17967,7 +17997,7 @@ fn build_event_workflow_lifecycle_panel(
                 required_payload_fields: &["workflow_id"],
                 example_input: r#"{"workflow_id":"<workflow-id>"}"#,
                 acceptance_gates: &[
-                "workflow status is changed through Forge-owned workflow mutation",
+                "workflow status is changed through Foundry-owned workflow mutation",
                 "pause revision is persisted",
                 "event routing records the originating adapter policy",
             ],
@@ -17983,7 +18013,7 @@ fn build_event_workflow_lifecycle_panel(
                 required_payload_fields: &["workflow_id"],
                 example_input: r#"{"workflow_id":"<workflow-id>"}"#,
                 acceptance_gates: &[
-                "workflow status is restored through Forge-owned workflow mutation",
+                "workflow status is restored through Foundry-owned workflow mutation",
                 "resume revision is persisted",
                 "event routing records the originating adapter policy",
             ],
@@ -18092,10 +18122,10 @@ fn event_workflow_lifecycle_action(
             .iter()
             .map(|field| (*field).to_string())
             .collect(),
-        core_boundary: "Forge Core routes lifecycle actions and persists workflow/event lineage; it does not embed channel-specific handlers.".to_string(),
+        core_boundary: "Foundry Core routes lifecycle actions and persists workflow/event lineage; it does not embed channel-specific handlers.".to_string(),
         addon_boundary: "Ingress channels, auth verification, schema mapping, permissions and external delivery stay in Addons/adapters.".to_string(),
         primary_command: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "events".to_string(),
             "ingest".to_string(),
             "--origin".to_string(),
@@ -18110,10 +18140,10 @@ fn event_workflow_lifecycle_action(
             "json".to_string(),
         ],
         evidence_commands: vec![
-            "forge events route --event <event-id> --project-root <project-root> --output json".to_string(),
-            "forge events inbox --status routed --project-root <project-root> --output json".to_string(),
-            "forge interactive event-runtime --project-root <project-root> --output json".to_string(),
-            "forge interactive structured-logs --output json".to_string(),
+            "foundry events route --event <event-id> --project-root <project-root> --output json".to_string(),
+            "foundry events inbox --status routed --project-root <project-root> --output json".to_string(),
+            "foundry interactive event-runtime --project-root <project-root> --output json".to_string(),
+            "foundry interactive structured-logs --output json".to_string(),
         ],
         acceptance_gates: spec
             .acceptance_gates
@@ -18123,7 +18153,7 @@ fn event_workflow_lifecycle_action(
         risk_controls: vec![
             "adapter policy must allow the normalized action when a matching Addon adapter is declared".to_string(),
             "tenant policy is enforced before exposing or mutating tenant-bound workflows".to_string(),
-            "mutations are persisted through Forge-owned workflow APIs, never directly by channel handlers".to_string(),
+            "mutations are persisted through Foundry-owned workflow APIs, never directly by channel handlers".to_string(),
         ],
     }
 }
@@ -18131,7 +18161,7 @@ fn event_workflow_lifecycle_action(
 fn event_runtime_commands(project_root: &str) -> InteractiveEventRuntimeCommands {
     InteractiveEventRuntimeCommands {
         inbox: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "events".to_string(),
             "inbox".to_string(),
             "--status".to_string(),
@@ -18142,7 +18172,7 @@ fn event_runtime_commands(project_root: &str) -> InteractiveEventRuntimeCommands
             "json".to_string(),
         ],
         runtime_reconcile: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "events".to_string(),
             "runtime-reconcile".to_string(),
             "--project-root".to_string(),
@@ -18153,7 +18183,7 @@ fn event_runtime_commands(project_root: &str) -> InteractiveEventRuntimeCommands
             "json".to_string(),
         ],
         service_supervise: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "events".to_string(),
             "service-supervise".to_string(),
             "--kind".to_string(),
@@ -18170,7 +18200,7 @@ fn event_runtime_commands(project_root: &str) -> InteractiveEventRuntimeCommands
             "json".to_string(),
         ],
         webhook_ingress: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "events".to_string(),
             "webhook-ingress".to_string(),
             "--host".to_string(),
@@ -18185,7 +18215,7 @@ fn event_runtime_commands(project_root: &str) -> InteractiveEventRuntimeCommands
             "json".to_string(),
         ],
         services: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "events".to_string(),
             "services".to_string(),
             "--project-root".to_string(),
@@ -18318,10 +18348,10 @@ fn build_navigation_panel() -> InteractiveNavigationPanel {
             "detailed".to_string(),
             "focus".to_string(),
         ],
-        active_theme: "forge_dark".to_string(),
+        active_theme: "foundry_dark".to_string(),
         themes: vec![
-            "forge_dark".to_string(),
-            "forge_light".to_string(),
+            "foundry_dark".to_string(),
+            "foundry_light".to_string(),
             "high_contrast".to_string(),
         ],
         keybindings: vec![
@@ -18411,7 +18441,7 @@ fn build_operational_cockpit_panel(
         || task_board.pending_human_interactions > 0
         || task_board.ready_handoffs > 0
         || schedule.due_workflows > 0
-        || !harness.forge_first_ready
+        || !harness.foundry_first_ready
         || modifier_lane.pending_count > 0
         || event_runtime.action_required
     {
@@ -18445,10 +18475,10 @@ fn build_operational_cockpit_panel(
             format!(
                 "{runs_needing_attention} runs need attention; {validation_failures} validation failures"
             ),
-            "forge request list --status needs_attention",
+            "foundry request list --status needs_attention",
             vec![
-                "forge request list --status stale".to_string(),
-                "forge interactive structured-logs --output json".to_string(),
+                "foundry request list --status stale".to_string(),
+                "foundry interactive structured-logs --output json".to_string(),
             ],
         ),
         operational_cockpit_section(
@@ -18459,10 +18489,10 @@ fn build_operational_cockpit_panel(
             format!(
                 "{active_runs} active, {scheduled_workflows} scheduled, {looping_workflows} looping, {paused_idle_workflows} paused or idle"
             ),
-            "forge list",
+            "foundry list",
             vec![
-                "forge schedule list --output json".to_string(),
-                "forge interactive workflow-dag --output json".to_string(),
+                "foundry schedule list --output json".to_string(),
+                "foundry interactive workflow-dag --output json".to_string(),
             ],
         ),
         operational_cockpit_section(
@@ -18480,10 +18510,10 @@ fn build_operational_cockpit_panel(
                 context_memory.blocked_tasks,
                 task_board.checkpoint_resume_candidates
             ),
-            "forge interactive task-board --output json",
+            "foundry interactive task-board --output json",
             vec![
-                "forge interactive readiness --output json".to_string(),
-                "forge context --workflow <workflow-id> --task <task-id> --strict --view compact --output json"
+                "foundry interactive readiness --output json".to_string(),
+                "foundry context --workflow <workflow-id> --task <task-id> --strict --view compact --output json"
                     .to_string(),
             ],
         ),
@@ -18500,10 +18530,10 @@ fn build_operational_cockpit_panel(
                 "{pending_approvals} pending approvals; {} human waits",
                 task_board.pending_human_interactions
             ),
-            "forge interactive permissions --output json",
+            "foundry interactive permissions --output json",
             vec![
-                "forge interactive identity --output json".to_string(),
-                "forge interactions list --output json".to_string(),
+                "foundry interactive identity --output json".to_string(),
+                "foundry interactions list --output json".to_string(),
             ],
         ),
         operational_cockpit_section(
@@ -18523,9 +18553,9 @@ fn build_operational_cockpit_panel(
                 modifier_lane.applied_count,
                 modifier_panel.operation_mode
             ),
-            "forge interactive operational-cockpit --output json",
+            "foundry interactive operational-cockpit --output json",
             vec![
-                "forge ops serve --project-root . --host 127.0.0.1 --port 8765"
+                "foundry ops serve --project-root . --host 127.0.0.1 --port 8765"
                     .to_string(),
                 "POST /api/modifier/propose-goal".to_string(),
                 "POST /api/modifier/apply".to_string(),
@@ -18549,11 +18579,11 @@ fn build_operational_cockpit_panel(
                 event_runtime.running_service_count,
                 event_runtime.recommended_action
             ),
-            "forge events runtime-reconcile --project-root . --recover-stale-services --scan-schedules --output json",
+            "foundry events runtime-reconcile --project-root . --recover-stale-services --scan-schedules --output json",
             vec![
-                "forge events inbox --status pending --project-root . --output json".to_string(),
-                "forge events service-supervise --kind worker --project-root . --status pending --limit 20 --max-runs 12 --output json".to_string(),
-                "forge events services --project-root . --output json".to_string(),
+                "foundry events inbox --status pending --project-root . --output json".to_string(),
+                "foundry events service-supervise --kind worker --project-root . --status pending --limit 20 --max-runs 12 --output json".to_string(),
+                "foundry events services --project-root . --output json".to_string(),
             ],
         ),
         operational_cockpit_section(
@@ -18564,15 +18594,15 @@ fn build_operational_cockpit_panel(
             } else {
                 "needs_sync"
             },
-            sessions.ready_session_count + usize::from(harness.forge_first_ready),
+            sessions.ready_session_count + usize::from(harness.foundry_first_ready),
             format!(
                 "selected brain {selected_brain}; {} ready sessions; harness {}; headroom {}",
                 sessions.ready_session_count, harness.doctor.status, harness.headroom_operational_status
             ),
-            "forge interactive sessions --output json",
+            "foundry interactive sessions --output json",
             vec![
-                "forge interactive readiness --output json".to_string(),
-                "forge interactive harness --output json".to_string(),
+                "foundry interactive readiness --output json".to_string(),
+                "foundry interactive harness --output json".to_string(),
             ],
         ),
         operational_cockpit_section(
@@ -18591,10 +18621,10 @@ fn build_operational_cockpit_panel(
                 schedule.due_workflows,
                 cost.estimated_task_cost_total_usd
             ),
-            "forge interactive structured-logs --output json",
+            "foundry interactive structured-logs --output json",
             vec![
-                "forge schedule worker-status --output json".to_string(),
-                "forge cost ledger --output json".to_string(),
+                "foundry schedule worker-status --output json".to_string(),
+                "foundry cost ledger --output json".to_string(),
             ],
         ),
     ];
@@ -18615,7 +18645,7 @@ fn build_operational_cockpit_panel(
         due_workflow_count: schedule.due_workflows,
         selected_brain,
         ready_session_count: sessions.ready_session_count,
-        forge_first_ready: harness.forge_first_ready,
+        foundry_first_ready: harness.foundry_first_ready,
         headroom_operational_status: harness.headroom_operational_status.clone(),
         event_count: structured_logs.total_event_count,
         estimated_cost_total_usd: cost.estimated_task_cost_total_usd,
@@ -18623,14 +18653,14 @@ fn build_operational_cockpit_panel(
         modifier_lane: modifier_panel,
         event_runtime: event_runtime.clone(),
         next_actions: vec![
-            "forge interactive operational-cockpit --output json".to_string(),
-            "forge interactive task-board --output json".to_string(),
-            "forge interactive readiness --output json".to_string(),
-            "forge ops serve --project-root . --host 127.0.0.1 --port 8765".to_string(),
-            "forge events runtime-reconcile --project-root . --recover-stale-services --scan-schedules --output json".to_string(),
-            "forge interactive action-registry --query operational --output json".to_string(),
-            "forge interactive structured-logs --output json".to_string(),
-            "forge interactive sessions --output json".to_string(),
+            "foundry interactive operational-cockpit --output json".to_string(),
+            "foundry interactive task-board --output json".to_string(),
+            "foundry interactive readiness --output json".to_string(),
+            "foundry ops serve --project-root . --host 127.0.0.1 --port 8765".to_string(),
+            "foundry events runtime-reconcile --project-root . --recover-stale-services --scan-schedules --output json".to_string(),
+            "foundry interactive action-registry --query operational --output json".to_string(),
+            "foundry interactive structured-logs --output json".to_string(),
+            "foundry interactive sessions --output json".to_string(),
         ],
     }
 }
@@ -18652,7 +18682,7 @@ fn build_operational_modifier_lane_panel(
         .map(operational_modifier_proposal_card)
         .collect::<Vec<_>>();
     let mut next_actions = vec![
-        "forge ops serve --project-root . --host 127.0.0.1 --port 8765".to_string(),
+        "foundry ops serve --project-root . --host 127.0.0.1 --port 8765".to_string(),
         "POST /api/modifier/propose-goal".to_string(),
         "POST /api/modifier/propose-task".to_string(),
     ];
@@ -18674,7 +18704,7 @@ fn build_operational_modifier_lane_panel(
         proposal_cards,
         commands: InteractiveOperationalModifierLaneCommands {
             serve_console: vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "ops".to_string(),
                 "serve".to_string(),
                 "--project-root".to_string(),
@@ -18685,7 +18715,7 @@ fn build_operational_modifier_lane_panel(
                 "8765".to_string(),
             ],
             refresh_cockpit: vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "interactive".to_string(),
                 "operational-cockpit".to_string(),
                 "--output".to_string(),
@@ -18722,7 +18752,7 @@ fn operational_modifier_proposal_card(
         applied_revision: proposal.applied_revision,
         apply_route: "/api/modifier/apply".to_string(),
         inspect_command: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "inspect".to_string(),
             "--workflow".to_string(),
             proposal.workflow_id.clone(),
@@ -18794,13 +18824,13 @@ fn build_guided_cockpit_panel(inputs: GuidedCockpitInputs<'_>) -> InteractiveGui
             },
             format!("{workflow_count} workflows tracked by the task board"),
             "workflow_sidebar_panel",
-            "forge interactive route --input \"<objective>\" --origin forge_cli --output json",
-            "forge plan --goal \"<objective>\" --output json",
+            "foundry interactive route --input \"<objective>\" --origin foundry_cli --output json",
+            "foundry plan --goal \"<objective>\" --output json",
             "medium",
             !has_workflow,
             !has_workflow,
             !has_workflow,
-            Some("forge request cancel --run <run-id> --output json"),
+            Some("foundry request cancel --run <run-id> --output json"),
         ),
         guided_step(
             2,
@@ -18818,8 +18848,8 @@ fn build_guided_cockpit_panel(inputs: GuidedCockpitInputs<'_>) -> InteractiveGui
                 inputs.dag_panel.node_count, inputs.dag_panel.edge_count, inputs.dag_panel.human_wait_count
             ),
             "dag_panel",
-            "forge interactive workflow-dag --output json",
-            "forge inspect <workflow-id> --verbose --output json",
+            "foundry interactive workflow-dag --output json",
+            "foundry inspect <workflow-id> --verbose --output json",
             "low",
             false,
             false,
@@ -18839,13 +18869,13 @@ fn build_guided_cockpit_panel(inputs: GuidedCockpitInputs<'_>) -> InteractiveGui
             },
             format!("{} active runs", inputs.active_runs),
             "operational_cockpit_panel",
-            "forge request start --goal \"<objective>\" --origin forge_cli --output json",
-            "forge interactive guided-cockpit --output json",
+            "foundry request start --goal \"<objective>\" --origin foundry_cli --output json",
+            "foundry interactive guided-cockpit --output json",
             "medium",
             has_workflow && !has_active_run,
             has_workflow && !has_active_run,
             has_workflow && !has_active_run,
-            Some("forge request cancel --run <run-id> --output json"),
+            Some("foundry request cancel --run <run-id> --output json"),
         ),
         guided_step(
             4,
@@ -18863,8 +18893,8 @@ fn build_guided_cockpit_panel(inputs: GuidedCockpitInputs<'_>) -> InteractiveGui
                 task_count, inputs.task_board_panel.ready_handoffs, inputs.task_board_panel.pending_human_interactions
             ),
             "task_board_panel",
-            "forge interactive task-board --output json",
-            "forge interactive operating-context --output json",
+            "foundry interactive task-board --output json",
+            "foundry interactive operating-context --output json",
             "low",
             false,
             false,
@@ -18887,13 +18917,13 @@ fn build_guided_cockpit_panel(inputs: GuidedCockpitInputs<'_>) -> InteractiveGui
                 inputs.pending_approvals, inputs.task_board_panel.pending_human_interactions
             ),
             "permissions_panel",
-            "forge interactive permissions --output json",
-            "forge interaction list --output json",
+            "foundry interactive permissions --output json",
+            "foundry interaction list --output json",
             "medium",
             has_approval,
             has_approval,
             has_approval,
-            Some("forge interaction expire --workflow <workflow-id> --task <task-id> --origin forge_cli --output json"),
+            Some("foundry interaction expire --workflow <workflow-id> --task <task-id> --origin foundry_cli --output json"),
         ),
         guided_step(
             6,
@@ -18911,8 +18941,8 @@ fn build_guided_cockpit_panel(inputs: GuidedCockpitInputs<'_>) -> InteractiveGui
                 inputs.artifact_panel.artifact_count, inputs.artifact_panel.workflow_count
             ),
             "artifact_panel",
-            "forge interactive artifacts --output json",
-            "forge interactive task-board --output json",
+            "foundry interactive artifacts --output json",
+            "foundry interactive task-board --output json",
             "low",
             false,
             false,
@@ -18937,8 +18967,8 @@ fn build_guided_cockpit_panel(inputs: GuidedCockpitInputs<'_>) -> InteractiveGui
                 inputs.cost_panel.estimated_task_cost_total_usd
             ),
             "structured_logs_panel",
-            "forge interactive structured-logs --output json",
-            "forge cost ledger --output json",
+            "foundry interactive structured-logs --output json",
+            "foundry cost ledger --output json",
             "low",
             false,
             false,
@@ -18963,13 +18993,13 @@ fn build_guided_cockpit_panel(inputs: GuidedCockpitInputs<'_>) -> InteractiveGui
                 inputs.workflow_mutation_panel.pending_modifier_proposal_count
             ),
             "improvement_loop_panel",
-            "forge workflow validate --workflow <workflow-id> --output json",
-            "forge interactive improvement-loop --output json",
+            "foundry workflow validate --workflow <workflow-id> --output json",
+            "foundry interactive improvement-loop --output json",
             "medium",
             has_workflow && !close_ready,
             has_workflow && !close_ready,
             has_workflow && !close_ready,
-            Some("forge workflow ensure-final-audit --workflow <workflow-id> --output json"),
+            Some("foundry workflow ensure-final-audit --workflow <workflow-id> --output json"),
         ),
     ];
 
@@ -19000,11 +19030,11 @@ fn build_guided_cockpit_panel(inputs: GuidedCockpitInputs<'_>) -> InteractiveGui
             }
             commands
         })
-        .unwrap_or_else(|| vec!["forge smoke operational-tui --output json".to_string()]);
+        .unwrap_or_else(|| vec!["foundry smoke operational-tui --output json".to_string()]);
     let next_command = current_commands
         .first()
         .cloned()
-        .unwrap_or_else(|| "forge smoke operational-tui --output json".to_string());
+        .unwrap_or_else(|| "foundry smoke operational-tui --output json".to_string());
     let status = if confirmation_step_count > 0 {
         "guided_cockpit_waiting_confirmation"
     } else if blocked_step_count > 0 {
@@ -19019,7 +19049,7 @@ fn build_guided_cockpit_panel(inputs: GuidedCockpitInputs<'_>) -> InteractiveGui
     InteractiveGuidedCockpitPanel {
         schema_version: INTERACTIVE_GUIDED_COCKPIT_SCHEMA_VERSION.to_string(),
         status: status.to_string(),
-        title: "Forge 0.5 guided cockpit".to_string(),
+        title: "Foundry 0.5 guided cockpit".to_string(),
         visual_mode: "three_column_focus_timeline".to_string(),
         completed_step_count,
         total_step_count,
@@ -19069,7 +19099,7 @@ fn build_guided_cockpit_panel(inputs: GuidedCockpitInputs<'_>) -> InteractiveGui
         next_command,
         next_commands: current_commands,
         notes: vec![
-            "`forge` opens the OpenCode-style orchestrator-first TUI; this guided cockpit remains available as a detailed legacy panel.".to_string(),
+            "`foundry` opens the OpenCode-style orchestrator-first TUI; this guided cockpit remains available as a detailed legacy panel.".to_string(),
             "The eight steps turn the README five-minute flow into an operator checklist.".to_string(),
             "The panel is read-only; actions are surfaced as explicit commands with preview and recovery.".to_string(),
         ],
@@ -19150,7 +19180,7 @@ fn build_ui_composition_panel(
             "standard",
             "full",
             vec![format!(
-                "forge interactive addon-capabilities {project_root_arg} --output json"
+                "foundry interactive addon-capabilities {project_root_arg} --output json"
             )],
         ),
         core_ui_widget(
@@ -19160,7 +19190,7 @@ fn build_ui_composition_panel(
             "data_list_renderer",
             "standard",
             "full",
-            vec!["forge addons views --output json".to_string()],
+            vec!["foundry addons views --output json".to_string()],
         ),
     ];
     addon_region_widgets.append(&mut addon_widgets);
@@ -19180,7 +19210,7 @@ fn build_ui_composition_panel(
                     "compact",
                     "full",
                     vec![format!(
-                        "forge interactive home --project-root {project_root_text} --output json"
+                        "foundry interactive home --project-root {project_root_text} --output json"
                     )],
                 ),
                 core_ui_widget(
@@ -19191,7 +19221,7 @@ fn build_ui_composition_panel(
                     "compact",
                     "full",
                     vec![format!(
-                        "forge interactive command-palette {project_root_arg} --output json"
+                        "foundry interactive command-palette {project_root_arg} --output json"
                     )],
                 ),
                 core_ui_widget(
@@ -19202,7 +19232,7 @@ fn build_ui_composition_panel(
                     "compact",
                     "full",
                     vec![format!(
-                        "forge interactive action-registry {project_root_arg} --output json"
+                        "foundry interactive action-registry {project_root_arg} --output json"
                     )],
                 ),
                 core_ui_widget(
@@ -19214,7 +19244,7 @@ fn build_ui_composition_panel(
                     "full",
                     vec![
                         format!(
-                            "forge interactive autocomplete --input <input> {project_root_arg} --output json"
+                            "foundry interactive autocomplete --input <input> {project_root_arg} --output json"
                         ),
                     ],
                 ),
@@ -19226,7 +19256,7 @@ fn build_ui_composition_panel(
                     "standard",
                     "full",
                     vec![format!(
-                        "forge interactive harness --project-root {project_root_text} --output json"
+                        "foundry interactive harness --project-root {project_root_text} --output json"
                     )],
                 ),
                 core_ui_widget(
@@ -19237,7 +19267,7 @@ fn build_ui_composition_panel(
                     "detailed",
                     "full",
                     vec![format!(
-                        "forge interactive replacement-cli --project-root {project_root_text} --output json"
+                        "foundry interactive replacement-cli --project-root {project_root_text} --output json"
                     )],
                 ),
                 core_ui_widget(
@@ -19248,7 +19278,7 @@ fn build_ui_composition_panel(
                     "detailed",
                     "full",
                     vec![format!(
-                        "forge interactive architecture --project-root {project_root_text} --output json"
+                        "foundry interactive architecture --project-root {project_root_text} --output json"
                     )],
                 ),
                 core_ui_widget(
@@ -19259,7 +19289,7 @@ fn build_ui_composition_panel(
                     "detailed",
                     "full",
                     vec![format!(
-                        "forge interactive multimodal-runtime --project-root {project_root_text} --output json"
+                        "foundry interactive multimodal-runtime --project-root {project_root_text} --output json"
                     )],
                 ),
                 core_ui_widget(
@@ -19269,7 +19299,7 @@ fn build_ui_composition_panel(
                     "session_lifecycle_renderer",
                     "standard",
                     "full",
-                    vec!["forge interactive sessions --output json".to_string()],
+                    vec!["foundry interactive sessions --output json".to_string()],
                 ),
                 core_ui_widget(
                     "harness_mode_panel",
@@ -19278,7 +19308,7 @@ fn build_ui_composition_panel(
                     "status_renderer",
                     "compact",
                     "half",
-                    vec!["forge harness mode --output json".to_string()],
+                    vec!["foundry harness mode --output json".to_string()],
                 ),
                 core_ui_widget(
                     "harness_doctor_panel",
@@ -19288,7 +19318,7 @@ fn build_ui_composition_panel(
                     "compact",
                     "half",
                     vec![
-                        "forge harness doctor --executor codex --shim-dir $HOME/.forge/bin --project-root . --output json"
+                        "foundry harness doctor --executor codex --shim-dir $HOME/.foundry/bin --project-root . --output json"
                             .to_string(),
                     ],
                 ),
@@ -19307,7 +19337,7 @@ fn build_ui_composition_panel(
                     "guided_cockpit_renderer",
                     "detailed",
                     "full",
-                    vec!["forge interactive guided-cockpit --output json".to_string()],
+                    vec!["foundry interactive guided-cockpit --output json".to_string()],
                 ),
                 core_ui_widget(
                     "workflow_sidebar_panel",
@@ -19316,7 +19346,7 @@ fn build_ui_composition_panel(
                     "navigation_list_renderer",
                     "compact",
                     "third",
-                    vec!["forge interactive workflow-sidebar --output json".to_string()],
+                    vec!["foundry interactive workflow-sidebar --output json".to_string()],
                 ),
                 core_ui_widget(
                     "operational_cockpit_panel",
@@ -19325,7 +19355,7 @@ fn build_ui_composition_panel(
                     "cockpit_renderer",
                     "detailed",
                     "full",
-                    vec!["forge interactive operational-cockpit --output json".to_string()],
+                    vec!["foundry interactive operational-cockpit --output json".to_string()],
                 ),
                 core_ui_widget(
                     "digital_twin_panel",
@@ -19334,7 +19364,7 @@ fn build_ui_composition_panel(
                     "dashboard_renderer",
                     "detailed",
                     "full",
-                    vec!["forge ops snapshot --output json".to_string()],
+                    vec!["foundry ops snapshot --output json".to_string()],
                 ),
                 core_ui_widget(
                     "dag_panel",
@@ -19343,7 +19373,7 @@ fn build_ui_composition_panel(
                     "graph_renderer",
                     "detailed",
                     "full",
-                    vec!["forge interactive workflow-dag --output json".to_string()],
+                    vec!["foundry interactive workflow-dag --output json".to_string()],
                 ),
                 core_ui_widget(
                     "task_board_panel",
@@ -19352,7 +19382,7 @@ fn build_ui_composition_panel(
                     "task_board_renderer",
                     "detailed",
                     "full",
-                    vec!["forge interactive task-board --output json".to_string()],
+                    vec!["foundry interactive task-board --output json".to_string()],
                 ),
                 core_ui_widget(
                     "workflow_mutation_panel",
@@ -19361,7 +19391,7 @@ fn build_ui_composition_panel(
                     "workflow_mutation_renderer",
                     "detailed",
                     "full",
-                    vec!["forge interactive workflow-mutation --output json".to_string()],
+                    vec!["foundry interactive workflow-mutation --output json".to_string()],
                 ),
                 core_ui_widget(
                     "patch_workbench_panel",
@@ -19370,7 +19400,7 @@ fn build_ui_composition_panel(
                     "diff_review_renderer",
                     "detailed",
                     "full",
-                    vec!["forge interactive patch-workbench --output json".to_string()],
+                    vec!["foundry interactive patch-workbench --output json".to_string()],
                 ),
             ],
         ),
@@ -19387,7 +19417,7 @@ fn build_ui_composition_panel(
                     "timeline_renderer",
                     "standard",
                     "half",
-                    vec!["forge interactive schedules --output json".to_string()],
+                    vec!["foundry interactive schedules --output json".to_string()],
                 ),
                 core_ui_widget(
                     "event_panel",
@@ -19396,7 +19426,7 @@ fn build_ui_composition_panel(
                     "timeline_renderer",
                     "standard",
                     "half",
-                    vec!["forge events timeline --output json".to_string()],
+                    vec!["foundry events timeline --output json".to_string()],
                 ),
                 core_ui_widget(
                     "structured_logs_panel",
@@ -19405,7 +19435,7 @@ fn build_ui_composition_panel(
                     "log_renderer",
                     "standard",
                     "half",
-                    vec!["forge interactive structured-logs --output json".to_string()],
+                    vec!["foundry interactive structured-logs --output json".to_string()],
                 ),
                 core_ui_widget(
                     "token_usage_panel",
@@ -19414,7 +19444,7 @@ fn build_ui_composition_panel(
                     "token_usage_renderer",
                     "standard",
                     "half",
-                    vec!["forge interactive token-usage --output json".to_string()],
+                    vec!["foundry interactive token-usage --output json".to_string()],
                 ),
                 core_ui_widget(
                     "artifact_panel",
@@ -19423,7 +19453,7 @@ fn build_ui_composition_panel(
                     "artifact_evidence_renderer",
                     "standard",
                     "half",
-                    vec!["forge interactive artifacts --output json".to_string()],
+                    vec!["foundry interactive artifacts --output json".to_string()],
                 ),
                 core_ui_widget(
                     "release_gates_panel",
@@ -19432,7 +19462,7 @@ fn build_ui_composition_panel(
                     "release_gate_renderer",
                     "standard",
                     "half",
-                    vec!["forge interactive release-gates --output json".to_string()],
+                    vec!["foundry interactive release-gates --output json".to_string()],
                 ),
                 core_ui_widget(
                     "core_boundary_panel",
@@ -19441,7 +19471,7 @@ fn build_ui_composition_panel(
                     "boundary_audit_renderer",
                     "standard",
                     "half",
-                    vec!["forge interactive core-boundary --output json".to_string()],
+                    vec!["foundry interactive core-boundary --output json".to_string()],
                 ),
                 core_ui_widget(
                     "cost_panel",
@@ -19450,7 +19480,7 @@ fn build_ui_composition_panel(
                     "metric_renderer",
                     "standard",
                     "half",
-                    vec!["forge cost ledger --output json".to_string()],
+                    vec!["foundry cost ledger --output json".to_string()],
                 ),
                 core_ui_widget(
                     "improvement_loop_panel",
@@ -19459,7 +19489,7 @@ fn build_ui_composition_panel(
                     "improvement_loop_renderer",
                     "detailed",
                     "full",
-                    vec!["forge interactive improvement-loop --output json".to_string()],
+                    vec!["foundry interactive improvement-loop --output json".to_string()],
                 ),
                 core_ui_widget(
                     "context_memory_panel",
@@ -19468,7 +19498,7 @@ fn build_ui_composition_panel(
                     "policy_renderer",
                     "standard",
                     "half",
-                    vec!["forge interactive context-memory --output json".to_string()],
+                    vec!["foundry interactive context-memory --output json".to_string()],
                 ),
                 core_ui_widget(
                     "operating_context_panel",
@@ -19477,7 +19507,7 @@ fn build_ui_composition_panel(
                     "tenant_context_renderer",
                     "standard",
                     "full",
-                    vec!["forge interactive operating-context --output json".to_string()],
+                    vec!["foundry interactive operating-context --output json".to_string()],
                 ),
                 core_ui_widget(
                     "permissions_panel",
@@ -19486,7 +19516,7 @@ fn build_ui_composition_panel(
                     "permission_center_renderer",
                     "standard",
                     "half",
-                    vec!["forge interactive permissions --output json".to_string()],
+                    vec!["foundry interactive permissions --output json".to_string()],
                 ),
                 core_ui_widget(
                     "identity_panel",
@@ -19495,7 +19525,7 @@ fn build_ui_composition_panel(
                     "identity_center_renderer",
                     "standard",
                     "half",
-                    vec!["forge interactive identity --output json".to_string()],
+                    vec!["foundry interactive identity --output json".to_string()],
                 ),
             ],
         ),
@@ -20055,7 +20085,7 @@ fn render_architecture_benchmark_summary(panel: &InteractiveArchitectureCompassP
         .benchmark_sources
         .iter()
         .take(6)
-        .map(|source| format!("{} -> {}", source.source, source.forge_boundary))
+        .map(|source| format!("{} -> {}", source.source, source.foundry_boundary))
         .collect::<Vec<_>>()
         .join(" | ")
 }
@@ -20206,11 +20236,11 @@ fn prioritized_task_board_card_commands(card: &InteractiveTaskBoardTaskCard) -> 
     }
 
     let preferred = if card.next_action == "answer_human_interaction" {
-        Some("forge interaction list")
+        Some("foundry interaction list")
     } else if card.next_action == "resume_from_checkpoint" {
-        Some("forge context ")
+        Some("foundry context ")
     } else if card.ready_for_handoff || card.next_action.contains("handoff") {
-        Some("forge task handoff ")
+        Some("foundry task handoff ")
     } else {
         None
     };
@@ -20682,7 +20712,7 @@ fn workflow_sidebar_item(
 }
 
 fn build_artifact_panel(
-    store: &ForgeStore,
+    store: &FoundryStore,
     rows: &[WorkflowRegistryRow],
 ) -> Result<InteractiveArtifactPanel> {
     let mut artifact_count = 0;
@@ -20796,7 +20826,7 @@ fn build_artifact_panel(
     })
 }
 
-fn build_token_usage_panel(store: &ForgeStore) -> Result<InteractiveTokenUsagePanel> {
+fn build_token_usage_panel(store: &FoundryStore) -> Result<InteractiveTokenUsagePanel> {
     let headroom_stats = build_headroom_stats_report(
         store,
         HeadroomStatsOptions {
@@ -20917,7 +20947,7 @@ fn build_token_usage_panel(store: &ForgeStore) -> Result<InteractiveTokenUsagePa
 }
 
 fn build_workflow_dag_panel(
-    store: &ForgeStore,
+    store: &FoundryStore,
     rows: &[WorkflowRegistryRow],
 ) -> Result<InteractiveWorkflowDagPanel> {
     let mut node_count = 0;
@@ -21061,7 +21091,7 @@ fn build_workflow_dag(row: &WorkflowRegistryRow, tasks: &[AtomicTask]) -> Intera
 }
 
 fn build_task_board_panel(
-    store: &ForgeStore,
+    store: &FoundryStore,
     rows: &[WorkflowRegistryRow],
 ) -> Result<InteractiveTaskBoardPanel> {
     let mut ready_handoffs = 0;
@@ -21169,12 +21199,12 @@ fn build_workflow_mutation_panel(
         .cloned()
         .collect();
     let mut next_actions = vec![
-        "forge interactive workflow-mutation --output json".to_string(),
-        "forge interactive task-board --output json".to_string(),
-        "forge interactive workflow-dag --output json".to_string(),
-        "forge interactive operational-cockpit --output json".to_string(),
-        "forge ops serve --project-root . --host 127.0.0.1 --port 8765".to_string(),
-        "forge interactive action-registry --query workflow --output json".to_string(),
+        "foundry interactive workflow-mutation --output json".to_string(),
+        "foundry interactive task-board --output json".to_string(),
+        "foundry interactive workflow-dag --output json".to_string(),
+        "foundry interactive operational-cockpit --output json".to_string(),
+        "foundry ops serve --project-root . --host 127.0.0.1 --port 8765".to_string(),
+        "foundry interactive action-registry --query workflow --output json".to_string(),
     ];
     if modifier_lane.pending_count > 0 {
         next_actions.insert(
@@ -21184,7 +21214,7 @@ fn build_workflow_mutation_panel(
         );
     } else if workflow_cards.is_empty() {
         next_actions.push(
-            "start a workflow with forge request start --goal \"...\" --origin forge_cli"
+            "start a workflow with foundry request start --goal \"...\" --origin foundry_cli"
                 .to_string(),
         );
     } else {
@@ -21265,7 +21295,7 @@ fn build_workflow_mutation_panel(
                 "--goal".to_string(),
                 "<new-goal>".to_string(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -21279,7 +21309,7 @@ fn build_workflow_mutation_panel(
                 "--default-brain".to_string(),
                 "<brain>".to_string(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -21293,7 +21323,7 @@ fn build_workflow_mutation_panel(
                 "--kind".to_string(),
                 "<kind>".to_string(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -21339,7 +21369,7 @@ fn build_workflow_mutation_panel(
         },
         next_actions,
         notes: vec![
-            "The panel is read-only; every mutation must still go through Forge workflow/ops APIs so revisions, origin and validation remain auditable.".to_string(),
+            "The panel is read-only; every mutation must still go through Foundry workflow/ops APIs so revisions, origin and validation remain auditable.".to_string(),
             "Use it to keep DAG, task board, modifier lane, handoffs, costs and logs in one replanning routine while a workflow keeps running.".to_string(),
         ],
     }
@@ -21465,7 +21495,7 @@ fn workflow_mutation_card(
                 "--goal".to_string(),
                 "<new-goal>".to_string(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -21479,7 +21509,7 @@ fn workflow_mutation_card(
                 "--default-brain".to_string(),
                 "<brain>".to_string(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -21493,7 +21523,7 @@ fn workflow_mutation_card(
                 "--kind".to_string(),
                 "<kind>".to_string(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -21531,7 +21561,7 @@ fn task_board_next_actions(
     row: &WorkflowRegistryRow,
     checkpoints: &[TaskCheckpoint],
 ) -> Vec<String> {
-    let mut actions = vec![format!("forge inspect {}", row.workflow_id)];
+    let mut actions = vec![format!("foundry inspect {}", row.workflow_id)];
 
     if let Some(handoff) = row
         .context_action_refs
@@ -21539,7 +21569,7 @@ fn task_board_next_actions(
         .find(|action| action.ready_for_handoff)
     {
         actions.push(format!(
-            "forge task handoff --workflow {} --task {} --executor {}",
+            "foundry task handoff --workflow {} --task {} --executor {}",
             row.workflow_id, handoff.task_id, handoff.executor
         ));
     }
@@ -21549,24 +21579,24 @@ fn task_board_next_actions(
         .map(|checkpoint| checkpoint.task_id.as_str())
     {
         actions.push(format!(
-            "forge context --workflow {} --task {}",
+            "foundry context --workflow {} --task {}",
             row.workflow_id, task_id
         ));
     }
 
     if row.human_interaction_summary.pending_required > 0 {
-        actions.push("forge interaction list".to_string());
+        actions.push("foundry interaction list".to_string());
     }
 
     if row.artifact_count > 0 {
-        actions.push(format!("forge artifacts --workflow {}", row.workflow_id));
+        actions.push(format!("foundry artifacts --workflow {}", row.workflow_id));
     }
 
     actions
 }
 
 fn load_task_board_checkpoints(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
 ) -> Result<Vec<TaskCheckpoint>> {
     store
@@ -21578,7 +21608,7 @@ fn load_task_board_checkpoints(
 }
 
 fn build_task_board_task_cards(
-    store: &ForgeStore,
+    store: &FoundryStore,
     row: &WorkflowRegistryRow,
     checkpoints: &[TaskCheckpoint],
 ) -> Result<Vec<InteractiveTaskBoardTaskCard>> {
@@ -21734,7 +21764,7 @@ fn task_board_task_commands(
     checkpoint: Option<&TaskCheckpoint>,
 ) -> Vec<String> {
     let mut commands = vec![format!(
-        "forge inspect {} --task {}",
+        "foundry inspect {} --task {}",
         row.workflow_id, task.id
     )];
 
@@ -21743,13 +21773,13 @@ fn task_board_task_commands(
         .as_ref()
         .is_some_and(|interaction| interaction.required && interaction.state == "pending")
     {
-        commands.push("forge interaction list".to_string());
+        commands.push("foundry interaction list".to_string());
     }
 
     if let Some(action) = action_ref {
         if action.ready_for_handoff {
             commands.push(format!(
-                "forge task handoff --workflow {} --task {} --executor {}",
+                "foundry task handoff --workflow {} --task {} --executor {}",
                 row.workflow_id, task.id, action.executor
             ));
         }
@@ -21761,7 +21791,7 @@ fn task_board_task_commands(
             .is_some()
     {
         commands.push(format!(
-            "forge context --workflow {} --task {}",
+            "foundry context --workflow {} --task {}",
             row.workflow_id, task.id
         ));
     }
@@ -21808,16 +21838,19 @@ fn build_attention_actions(attention_runs: &[&crate::request::RequestListRow]) -
     }
 
     let mut actions = vec![
-        "forge request list --status needs_attention".to_string(),
-        "forge request list --status stale".to_string(),
+        "foundry request list --status needs_attention".to_string(),
+        "foundry request list --status stale".to_string(),
     ];
     for run in attention_runs.iter().take(3) {
-        actions.push(format!("forge request status --run {}", run.run_id));
+        actions.push(format!("foundry request status --run {}", run.run_id));
         if run.activity.heartbeat_status == "stale" {
-            actions.push(format!("forge request recover-stale --run {}", run.run_id));
+            actions.push(format!(
+                "foundry request recover-stale --run {}",
+                run.run_id
+            ));
         } else if run.status == "needs_attention" {
-            actions.push(format!("forge request resume --run {}", run.run_id));
-            actions.push(format!("forge request cancel --run {}", run.run_id));
+            actions.push(format!("foundry request resume --run {}", run.run_id));
+            actions.push(format!("foundry request cancel --run {}", run.run_id));
         }
     }
     actions
@@ -21870,7 +21903,7 @@ fn route_slash_command(trimmed: &str) -> InteractiveRouteReport {
             input_arguments,
             input_argument_text,
             equivalent_command: vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "interactive".to_string(),
                 "slash-commands".to_string(),
             ],
@@ -21885,9 +21918,9 @@ fn route_slash_command(trimmed: &str) -> InteractiveRouteReport {
         input_kind: "slash_command".to_string(),
         routing_decision: "slash_command".to_string(),
         routing_explanation: if recognized {
-            "Explicit slash command selected; Forge keeps this in command mode.".to_string()
+            "Explicit slash command selected; Foundry keeps this in command mode.".to_string()
         } else {
-            "Unknown slash command; Forge exposes the command catalog instead of guessing."
+            "Unknown slash command; Foundry exposes the command catalog instead of guessing."
                 .to_string()
         },
         workflow_created: false,
@@ -21903,7 +21936,7 @@ fn route_slash_command(trimmed: &str) -> InteractiveRouteReport {
 
 fn direct_chat_response_with_context(input: &str, conversation_context: &[String]) -> String {
     let mut prompt = String::from(
-        "Você é o Forge, o orquestrador desta interface. Responda em português, curto e direto, sem mencionar políticas internas. Use o contexto recente da conversa quando ele existir. Se a resposta exigir ação durável, explique brevemente o próximo passo que o Forge pode executar, em vez de inventar um procedimento local.\n\n",
+        "Você é o Foundry, o orquestrador desta interface. Responda em português, curto e direto, sem mencionar políticas internas. Use o contexto recente da conversa quando ele existir. Se a resposta exigir ação durável, explique brevemente o próximo passo que o Foundry pode executar, em vez de inventar um procedimento local.\n\n",
     );
     let recent_context = conversation_context
         .iter()
@@ -21940,16 +21973,16 @@ struct BrainInteractiveRouteDecision {
 }
 
 fn brain_route_interactive_input(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: &str,
     conversation_context: &[String],
 ) -> Option<BrainInteractiveRouteDecision> {
     let brain_context = build_brain_route_context(store);
     let mut prompt = String::from(
-        "Você é o brain/router do Forge, operando como um grafo de decisão estilo LangGraph com nós e caminhos dinâmicos. Decida se a entrada deve ser respondida diretamente ou virar workflow durável. Responda SOMENTE com JSON válido no formato {\"decision\":\"direct_answer|new_workflow\",\"answer\":string|null,\"reason\":string}. Decida semanticamente, sem usar regras fixas por palavra-chave. Use direct_answer para conversa, explicações e dúvidas curtas que podem ser resolvidas em uma resposta. Use new_workflow quando a solicitação pedir execução, alteração, automação, agendamento, validação, integração, artefato, publicação, entrega externa, reutilização de subworkflow, ou qualquer trabalho que se beneficie de um workflow, skill, plugin, addon, tool ou agente dedicado. Se o usuário estiver pedindo algo que as skills/plugins/addons conseguem fazer melhor como processo, prefira new_workflow. Os CLIs de brain como Codex, Gemini, Claude e OpenCode devem agir com capacidade nativa de workflow embutida na fonte, não apenas como consumidores de skills externas. Antes de criar um workflow novo, verifique os workflows existentes e prefira reutilizar, copiar ou compor um subworkflow quando isso diminuir custo, risco ou duplicação. O Forge controla memória, skills, plugins, MCPs, shells e workflows; os brains são executores substituíveis. Se o contexto recente indicar continuidade de conversa, leve isso em conta.\n\n",
+        "Você é o brain/router do Foundry, operando como um grafo de decisão estilo LangGraph com nós e caminhos dinâmicos. Decida se a entrada deve ser respondida diretamente ou virar workflow durável. Responda SOMENTE com JSON válido no formato {\"decision\":\"direct_answer|new_workflow\",\"answer\":string|null,\"reason\":string}. Decida semanticamente, sem usar regras fixas por palavra-chave. Use direct_answer para conversa, explicações e dúvidas curtas que podem ser resolvidas em uma resposta. Use new_workflow quando a solicitação pedir execução, alteração, automação, agendamento, validação, integração, artefato, publicação, entrega externa, reutilização de subworkflow, ou qualquer trabalho que se beneficie de um workflow, skill, plugin, addon, tool ou agente dedicado. Se o usuário estiver pedindo algo que as skills/plugins/addons conseguem fazer melhor como processo, prefira new_workflow. Os CLIs de brain como Codex, Gemini, Claude e OpenCode devem agir com capacidade nativa de workflow embutida na fonte, não apenas como consumidores de skills externas. Antes de criar um workflow novo, verifique os workflows existentes e prefira reutilizar, copiar ou compor um subworkflow quando isso diminuir custo, risco ou duplicação. O Foundry controla memória, skills, plugins, MCPs, shells e workflows; os brains são executores substituíveis. Se o contexto recente indicar continuidade de conversa, leve isso em conta.\n\n",
     );
     if !brain_context.is_empty() {
-        prompt.push_str("Capacidades ativas do Forge:\n");
+        prompt.push_str("Capacidades ativas do Foundry:\n");
         prompt.push_str(&brain_context);
         prompt.push('\n');
     }
@@ -21975,7 +22008,7 @@ fn brain_route_interactive_input(
     parse_brain_route_decision(&output)
 }
 
-fn build_brain_route_context(store: &ForgeStore) -> String {
+fn build_brain_route_context(store: &FoundryStore) -> String {
     let mut lines = Vec::new();
     if let Ok(report) = load_executors(store) {
         let selected_brain = report
@@ -22206,7 +22239,7 @@ fn command_available(command: &str) -> bool {
         return fs::metadata(command).is_ok_and(|meta| meta.is_file());
     }
 
-    if let Some(path) = std::env::var_os("PATH") {
+    if let Some(path) = crate::brand::env_var_os("PATH") {
         return std::env::split_paths(&path).any(|dir| {
             let candidate = dir.join(command);
             candidate.exists()
@@ -22228,7 +22261,7 @@ fn unique_brain_output_path(label: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    std::env::temp_dir().join(format!("forge-{label}-{pid}-{nanos}.md"))
+    std::env::temp_dir().join(format!("foundry-{label}-{pid}-{nanos}.md"))
 }
 
 struct BrainCommandOutput {
@@ -22279,7 +22312,7 @@ fn run_brain_command(
 
 fn classify_workflow_reason(input: &str) -> String {
     let _ = input;
-    "The brain selected a workflow so Forge can keep this request in a durable orchestration path."
+    "The brain selected a workflow so Foundry can keep this request in a durable orchestration path."
         .to_string()
 }
 
@@ -22303,7 +22336,7 @@ fn decide_retention(input: &str, workflow_created: bool) -> RetentionDecision {
 
     if asks_delete && (has_artifact || has_side_effect) {
         return RetentionDecision {
-            schema_version: "forge.interactive.retention_decision.v1".to_string(),
+            schema_version: "foundry.interactive.retention_decision.v1".to_string(),
             action: "keep_until_approved".to_string(),
             reason:
                 "Deletion requested, but the workflow mentions artifact lineage or external side effect evidence; human approval is required before deletion."
@@ -22315,7 +22348,7 @@ fn decide_retention(input: &str, workflow_created: bool) -> RetentionDecision {
 
     if recurring || has_artifact || has_side_effect {
         return RetentionDecision {
-            schema_version: "forge.interactive.retention_decision.v1".to_string(),
+            schema_version: "foundry.interactive.retention_decision.v1".to_string(),
             action: "retain".to_string(),
             reason:
                 "Workflow has likely reuse, recurring schedule, artifact value or delivery evidence."
@@ -22326,7 +22359,7 @@ fn decide_retention(input: &str, workflow_created: bool) -> RetentionDecision {
     }
 
     RetentionDecision {
-        schema_version: "forge.interactive.retention_decision.v1".to_string(),
+        schema_version: "foundry.interactive.retention_decision.v1".to_string(),
         action: "archive".to_string(),
         reason: "Workflow is execution-backed but not obviously recurring; archive after answer unless promoted.".to_string(),
         confidence: 0.68,
@@ -22336,7 +22369,7 @@ fn decide_retention(input: &str, workflow_created: bool) -> RetentionDecision {
 
 fn no_retention_decision() -> RetentionDecision {
     RetentionDecision {
-        schema_version: "forge.interactive.retention_decision.v1".to_string(),
+        schema_version: "foundry.interactive.retention_decision.v1".to_string(),
         action: "none".to_string(),
         reason: "No durable workflow state was created.".to_string(),
         confidence: 1.0,
@@ -22350,15 +22383,15 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/help",
             "Help",
             "Show interactive commands.",
-            &["forge", "interactive", "slash-commands"],
+            &["foundry", "interactive", "slash-commands"],
             false,
             "low",
         ),
         slash(
             "/guided-cockpit",
             "Guided Cockpit",
-            "Show the Forge 0.5 guided cockpit with the end-to-end operator checklist.",
-            &["forge", "interactive", "guided-cockpit"],
+            "Show the Foundry 0.5 guided cockpit with the end-to-end operator checklist.",
+            &["foundry", "interactive", "guided-cockpit"],
             false,
             "low",
         ),
@@ -22366,7 +22399,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/guide",
             "Guide",
             "Alias for the guided cockpit.",
-            &["forge", "interactive", "guided-cockpit"],
+            &["foundry", "interactive", "guided-cockpit"],
             false,
             "low",
         ),
@@ -22374,7 +22407,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/ui-composition",
             "UI Composition",
             "Show dynamic Core and Addon widget composition for TUI, web and agent dashboards.",
-            &["forge", "interactive", "ui-composition"],
+            &["foundry", "interactive", "ui-composition"],
             false,
             "low",
         ),
@@ -22382,7 +22415,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/status",
             "Status",
             "Show workflow or runtime status.",
-            &["forge", "status", "--workflow", "<workflow-id>"],
+            &["foundry", "status", "--workflow", "<workflow-id>"],
             false,
             "low",
         ),
@@ -22390,7 +22423,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/list",
             "List",
             "List workflows.",
-            &["forge", "list"],
+            &["foundry", "list"],
             false,
             "low",
         ),
@@ -22398,7 +22431,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/inspect",
             "Inspect",
             "Inspect a workflow graph.",
-            &["forge", "inspect", "<workflow-id>"],
+            &["foundry", "inspect", "<workflow-id>"],
             false,
             "low",
         ),
@@ -22406,7 +22439,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/runs",
             "Runs",
             "List async requests.",
-            &["forge", "request", "list"],
+            &["foundry", "request", "list"],
             false,
             "low",
         ),
@@ -22414,7 +22447,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/workflows",
             "Workflows",
             "Show the workflow sidebar for operator navigation.",
-            &["forge", "interactive", "workflow-sidebar"],
+            &["foundry", "interactive", "workflow-sidebar"],
             false,
             "low",
         ),
@@ -22422,7 +22455,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/workflow-sidebar",
             "Workflow Sidebar",
             "Show grouped workflow navigation with selected workflow and drill-down commands.",
-            &["forge", "interactive", "workflow-sidebar"],
+            &["foundry", "interactive", "workflow-sidebar"],
             false,
             "low",
         ),
@@ -22430,7 +22463,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/replacement-cli",
             "Replacement CLI",
             "Show replacement-grade CLI readiness across TUI, actions, patch UX, harness, sessions and milestone evidence.",
-            &["forge", "interactive", "replacement-cli"],
+            &["foundry", "interactive", "replacement-cli"],
             false,
             "low",
         ),
@@ -22439,7 +22472,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Multimodal Runtime",
             "Show Addon-owned multimodal runtime readiness, guards, templates and production evidence blockers.",
             &[
-                "forge",
+                "foundry",
                 "interactive",
                 "multimodal-runtime",
                 "--project-root",
@@ -22452,7 +22485,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/artifacts",
             "Artifacts",
             "Show workflow artifacts and evidence from the interactive panel.",
-            &["forge", "interactive", "artifacts"],
+            &["foundry", "interactive", "artifacts"],
             false,
             "low",
         ),
@@ -22460,7 +22493,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/tokens",
             "Tokens",
             "Show token usage, context compression and headroom savings.",
-            &["forge", "interactive", "token-usage"],
+            &["foundry", "interactive", "token-usage"],
             false,
             "low",
         ),
@@ -22468,7 +22501,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/task-board",
             "Task Board",
             "Show operational workflow lanes with handoffs, checkpoints, human waits and artifacts.",
-            &["forge", "interactive", "task-board"],
+            &["foundry", "interactive", "task-board"],
             false,
             "low",
         ),
@@ -22476,7 +22509,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/workflow-mutation",
             "Workflow Mutation",
             "Show the replanning surface that combines DAG, task-board, modifier lane, handoffs, costs and safe mutation commands.",
-            &["forge", "interactive", "workflow-mutation"],
+            &["foundry", "interactive", "workflow-mutation"],
             false,
             "low",
         ),
@@ -22484,7 +22517,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/cockpit",
             "Operational Cockpit",
             "Show the dedicated operational cockpit for attention, handoffs, waits, brain readiness and observability.",
-            &["forge", "interactive", "operational-cockpit"],
+            &["foundry", "interactive", "operational-cockpit"],
             false,
             "low",
         ),
@@ -22492,7 +22525,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/architecture",
             "Architecture Compass",
             "Show source-of-truth architecture tracks, implementation evidence, gaps, dependencies and benchmark boundaries.",
-            &["forge", "interactive", "architecture"],
+            &["foundry", "interactive", "architecture"],
             false,
             "low",
         ),
@@ -22500,7 +22533,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/core-boundary",
             "Core Boundary",
             "Audit whether the Core kernel remains universal and domain capabilities stay Addon-owned.",
-            &["forge", "interactive", "core-boundary"],
+            &["foundry", "interactive", "core-boundary"],
             false,
             "low",
         ),
@@ -22508,7 +22541,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/boundary",
             "Boundary",
             "Alias for the Core boundary audit.",
-            &["forge", "interactive", "core-boundary"],
+            &["foundry", "interactive", "core-boundary"],
             false,
             "low",
         ),
@@ -22516,7 +22549,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/readiness",
             "Readiness",
             "Show executor, brain, shell and harness readiness before operational handoff.",
-            &["forge", "interactive", "readiness"],
+            &["foundry", "interactive", "readiness"],
             false,
             "low",
         ),
@@ -22524,7 +22557,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/schedules",
             "Schedules",
             "Show scheduled workflows, due work, worker capacity, sleep plan and deterministic assignment queue.",
-            &["forge", "interactive", "schedules"],
+            &["foundry", "interactive", "schedules"],
             false,
             "low",
         ),
@@ -22532,7 +22565,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/addons",
             "Addons/Capabilities",
             "Show Addons, capabilities, permission gates, runtime contracts, views and dispatch state.",
-            &["forge", "interactive", "addon-capabilities"],
+            &["foundry", "interactive", "addon-capabilities"],
             false,
             "low",
         ),
@@ -22540,7 +22573,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/costs",
             "Costs",
             "Inspect or simulate workflow costs.",
-            &["forge", "run", "--workflow", "<workflow-id>", "--simulate"],
+            &["foundry", "run", "--workflow", "<workflow-id>", "--simulate"],
             false,
             "medium",
         ),
@@ -22548,15 +22581,15 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/improvement-loop",
             "Improvement Loop",
             "Show self-improvement candidates with log, cost, validation and outcome evidence.",
-            &["forge", "interactive", "improvement-loop"],
+            &["foundry", "interactive", "improvement-loop"],
             false,
             "low",
         ),
         slash(
             "/config",
             "Config",
-            "Inspect Forge-owned config surfaces.",
-            &["forge", "executors"],
+            "Inspect Foundry-owned config surfaces.",
+            &["foundry", "executors"],
             false,
             "low",
         ),
@@ -22564,7 +22597,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/sync",
             "Sync",
             "Sync executor and runtime availability.",
-            &["forge", "sync", "all"],
+            &["foundry", "sync", "all"],
             true,
             "medium",
         ),
@@ -22572,32 +22605,32 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/executors",
             "Executors",
             "List executor policy.",
-            &["forge", "executors"],
+            &["foundry", "executors"],
             false,
             "low",
         ),
         slash(
             "/brains",
             "Brains",
-            "List Forge-controlled execution brains and routing boundaries.",
-            &["forge", "brains"],
+            "List Foundry-controlled execution brains and routing boundaries.",
+            &["foundry", "brains"],
             false,
             "low",
         ),
         slash(
             "/sessions",
             "Sessions",
-            "Inspect Forge-controlled provider and shell session management state.",
-            &["forge", "sessions", "--output", "json"],
+            "Inspect Foundry-controlled provider and shell session management state.",
+            &["foundry", "sessions", "--output", "json"],
             false,
             "low",
         ),
         slash(
             "/sessions history",
             "Session History",
-            "Inspect one Forge-controlled shell session's chronological launch and lifecycle audit.",
+            "Inspect one Foundry-controlled shell session's chronological launch and lifecycle audit.",
             &[
-                "forge",
+                "foundry",
                 "sessions",
                 "history",
                 "--session",
@@ -22611,9 +22644,9 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
         slash(
             "/sessions lifecycle",
             "Session Lifecycle",
-            "Record an auditable lifecycle state for a Forge-controlled shell session.",
+            "Record an auditable lifecycle state for a Foundry-controlled shell session.",
             &[
-                "forge",
+                "foundry",
                 "sessions",
                 "lifecycle",
                 "--session",
@@ -22629,7 +22662,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Actions",
             "List governed interactive actions from the stable registry. Use: /actions [query]",
             &[
-                "forge",
+                "foundry",
                 "interactive",
                 "action-registry",
                 "--query",
@@ -22645,7 +22678,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Action",
             "Resolve one selected interactive action into a safe invocation plan without executing it. Use: /action <action-id>",
             &[
-                "forge",
+                "foundry",
                 "interactive",
                 "action-invocation",
                 "--action",
@@ -22659,25 +22692,25 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
         slash(
             "/shells",
             "Shells",
-            "List Forge-controlled TUI and external brain shell entrypoints.",
-            &["forge", "brains"],
+            "List Foundry-controlled TUI and external brain shell entrypoints.",
+            &["foundry", "brains"],
             false,
             "low",
         ),
         slash(
             "/harness",
             "Harness",
-            "Audit the effective Forge-first CLI harness mode before opening brain shells.",
-            &["forge", "harness", "mode", "--output", "json"],
+            "Audit the effective Foundry-first CLI harness mode before opening brain shells.",
+            &["foundry", "harness", "mode", "--output", "json"],
             false,
             "low",
         ),
         slash(
             "/harness doctor",
             "Harness Doctor",
-            "Audit full Forge-first CLI readiness for one brain before opening or handing off shells.",
+            "Audit full Foundry-first CLI readiness for one brain before opening or handing off shells.",
             &[
-                "forge",
+                "foundry",
                 "harness",
                 "doctor",
                 "--executor",
@@ -22695,9 +22728,9 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
         slash(
             "/harness headroom-plan",
             "Harness Headroom Plan",
-            "Inspect token-headroom wrapper policy before opening Forge-controlled brain shells.",
+            "Inspect token-headroom wrapper policy before opening Foundry-controlled brain shells.",
             &[
-                "forge",
+                "foundry",
                 "harness",
                 "headroom-plan",
                 "--executor",
@@ -22714,16 +22747,16 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/harness headroom-stats",
             "Harness Headroom Stats",
             "Inspect persisted token-headroom savings and retrieval evidence for CLI output.",
-            &["forge", "harness", "headroom-stats", "--output", "json"],
+            &["foundry", "harness", "headroom-stats", "--output", "json"],
             false,
             "low",
         ),
         slash(
             "/harness adoption-plan",
             "Harness Adoption Plan",
-            "Inspect the governed Forge-first adoption plan before writing project policy or shims.",
+            "Inspect the governed Foundry-first adoption plan before writing project policy or shims.",
             &[
-                "forge",
+                "foundry",
                 "harness",
                 "adoption-plan",
                 "--executor",
@@ -22741,9 +22774,9 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
         slash(
             "/harness bootstrap",
             "Harness Bootstrap",
-            "Apply the reviewed Forge-first harness policy and Forge-owned CLI shims after operator approval.",
+            "Apply the reviewed Foundry-first harness policy and Foundry-owned CLI shims after operator approval.",
             &[
-                "forge",
+                "foundry",
                 "harness",
                 "bootstrap",
                 "--executor",
@@ -22765,7 +22798,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/runtimes",
             "Runtimes",
             "List runtime policy.",
-            &["forge", "runtimes"],
+            &["foundry", "runtimes"],
             false,
             "low",
         ),
@@ -22773,7 +22806,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/validate",
             "Validate",
             "Run validation gate projection.",
-            &["forge", "validate", "--workflow", "<workflow-id>"],
+            &["foundry", "validate", "--workflow", "<workflow-id>"],
             false,
             "medium",
         ),
@@ -22782,7 +22815,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Approve",
             "Approve a pending human gate.",
             &[
-                "forge",
+                "foundry",
                 "workflow",
                 "update-goal",
                 "--workflow",
@@ -22796,7 +22829,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Reject",
             "Reject or return a gate to work.",
             &[
-                "forge",
+                "foundry",
                 "workflow",
                 "update-goal",
                 "--workflow",
@@ -22810,7 +22843,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Goal",
             "Mutate a workflow goal with revision trace.",
             &[
-                "forge",
+                "foundry",
                 "workflow",
                 "update-goal",
                 "--workflow",
@@ -22824,7 +22857,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Attach",
             "Attach an artifact to a workflow.",
             &[
-                "forge",
+                "foundry",
                 "workflow",
                 "attach-artifact",
                 "--workflow",
@@ -22837,7 +22870,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/resume",
             "Resume",
             "Resume an async run.",
-            &["forge", "request", "resume", "--run", "<run-id>"],
+            &["foundry", "request", "resume", "--run", "<run-id>"],
             true,
             "medium",
         ),
@@ -22846,7 +22879,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Pause",
             "Pause a loop node.",
             &[
-                "forge",
+                "foundry",
                 "schedule",
                 "pause",
                 "--workflow",
@@ -22862,7 +22895,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Stop",
             "Stop a loop node or run.",
             &[
-                "forge",
+                "foundry",
                 "schedule",
                 "stop",
                 "--workflow",
@@ -22878,7 +22911,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Delete",
             "Request deletion under retention policy.",
             &[
-                "forge",
+                "foundry",
                 "interactive",
                 "route",
                 "--input",
@@ -22891,7 +22924,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/export",
             "Export",
             "Export workflow state or artifacts.",
-            &["forge", "artifacts", "--workflow", "<workflow-id>"],
+            &["foundry", "artifacts", "--workflow", "<workflow-id>"],
             false,
             "low",
         ),
@@ -22899,16 +22932,16 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/logs",
             "Logs",
             "Inspect run and validation logs.",
-            &["forge", "request", "status", "--run", "<run-id>"],
+            &["foundry", "request", "status", "--run", "<run-id>"],
             false,
             "low",
         ),
         slash(
             "/manifest",
             "Manifest",
-            "Show Forge 0.5 milestone manifest with promotion decision.",
+            "Show Foundry 0.5 milestone manifest with promotion decision.",
             &[
-                "forge",
+                "foundry",
                 "milestone",
                 "manifest",
                 "--version",
@@ -22922,9 +22955,9 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
         slash(
             "/milestone",
             "Milestone",
-            "Show Forge 0.5 milestone status and boundary gates.",
+            "Show Foundry 0.5 milestone status and boundary gates.",
             &[
-                "forge",
+                "foundry",
                 "milestone",
                 "status",
                 "--version",
@@ -22938,9 +22971,9 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
         slash(
             "/research",
             "Research",
-            "Show Forge 0.5 milestone research artifact summary.",
+            "Show Foundry 0.5 milestone research artifact summary.",
             &[
-                "forge",
+                "foundry",
                 "milestone",
                 "research",
                 "--version",
@@ -22954,8 +22987,8 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
         slash(
             "/update",
             "Update",
-            "Update/sync Forge surfaces.",
-            &["forge", "sync", "all"],
+            "Update/sync Foundry surfaces.",
+            &["foundry", "sync", "all"],
             true,
             "medium",
         ),
@@ -22963,7 +22996,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/workers",
             "Workers",
             "Show scheduler worker status.",
-            &["forge", "schedule", "worker-status"],
+            &["foundry", "schedule", "worker-status"],
             false,
             "low",
         ),
@@ -22971,7 +23004,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/operating-context",
             "Operating Context",
             "Show tenant identity, memory policy, personality routing and prompt-packet gates before executor handoff.",
-            &["forge", "interactive", "operating-context"],
+            &["foundry", "interactive", "operating-context"],
             false,
             "low",
         ),
@@ -22979,7 +23012,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/context-memory",
             "Context/Memory",
             "Show context readiness, routing quality and project memory governance without building a task packet.",
-            &["forge", "interactive", "context-memory"],
+            &["foundry", "interactive", "context-memory"],
             false,
             "low",
         ),
@@ -22988,7 +23021,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Context",
             "Build a bounded, versioned task context package before executor handoff. Use: /context --workflow <id> --task <id> --budget 1200 --strict",
             &[
-                "forge",
+                "foundry",
                 "context",
                 "--workflow",
                 "<workflow-id>",
@@ -23006,7 +23039,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Handoff",
             "Acquire a task lease and prepare an executor handoff packet after explicit approval. Use: /handoff --workflow <id> --task <id> --executor codex",
             &[
-                "forge",
+                "foundry",
                 "task",
                 "handoff",
                 "--workflow",
@@ -23025,7 +23058,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/patch",
             "Patch",
             "File editing workflow: /patch plan --workflow <id> --task <id> --intent \"...\" --path <path>. Subcommands: plan, diff, review, apply, revert, restore.",
-            &["forge", "patch", "plan", "--workflow", "<workflow-id>"],
+            &["foundry", "patch", "plan", "--workflow", "<workflow-id>"],
             true,
             "high",
         ),
@@ -23033,7 +23066,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/patch plan",
             "Patch Plan",
             "Plan a bounded file edit with permission gates, diff review and file snapshots. Use: /patch plan --workflow <id> --task <id> --intent \"...\" --path <path>",
-            &["forge", "patch", "plan", "--workflow", "<workflow-id>", "--task", "<task-id>", "--intent", "...", "--path", "<path>"],
+            &["foundry", "patch", "plan", "--workflow", "<workflow-id>", "--task", "<task-id>", "--intent", "...", "--path", "<path>"],
             false,
             "medium",
         ),
@@ -23041,7 +23074,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/patch diff",
             "Patch Diff",
             "Navigate current multi-file diffs without editing files. Use: /patch diff --workflow <id> --task <id> --path <path> --file-index 0 --hunk-index 0",
-            &["forge", "patch", "diff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>"],
+            &["foundry", "patch", "diff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>"],
             false,
             "medium",
         ),
@@ -23049,7 +23082,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/patch apply",
             "Patch Apply",
             "Apply a planned patch after diff review and human approval. Use: /patch apply --workflow <id> --task <id> --path <path>",
-            &["forge", "patch", "apply", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>"],
+            &["foundry", "patch", "apply", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>"],
             true,
             "high",
         ),
@@ -23057,7 +23090,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/patch review",
             "Patch Review",
             "Review current file diffs for a bounded patch without editing files. Use: /patch review --workflow <id> --task <id> --path <path>",
-            &["forge", "patch", "review", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>"],
+            &["foundry", "patch", "review", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>"],
             false,
             "medium",
         ),
@@ -23065,7 +23098,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/patch revert",
             "Patch Revert",
             "Record a guarded revert proposal without silently restoring files. Use: /patch revert --workflow <id> --task <id> --apply-artifact <id>",
-            &["forge", "patch", "revert", "--workflow", "<workflow-id>", "--task", "<task-id>", "--apply-artifact", "<artifact-id>"],
+            &["foundry", "patch", "revert", "--workflow", "<workflow-id>", "--task", "<task-id>", "--apply-artifact", "<artifact-id>"],
             true,
             "high",
         ),
@@ -23073,7 +23106,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/patch restore",
             "Patch Restore",
             "Execute an explicitly approved file restore from a revert artifact. Use: /patch restore --workflow <id> --task <id> --revert-artifact <id> --approved-by <operator> --confirm-restore",
-            &["forge", "patch", "restore", "--workflow", "<workflow-id>", "--task", "<task-id>", "--revert-artifact", "<artifact-id>", "--approved-by", "<operator>", "--confirm-restore"],
+            &["foundry", "patch", "restore", "--workflow", "<workflow-id>", "--task", "<task-id>", "--revert-artifact", "<artifact-id>", "--approved-by", "<operator>", "--confirm-restore"],
             true,
             "high",
         ),
@@ -23081,7 +23114,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/pm",
             "PM Mode",
             "Start a human-guided product management session to clarify goals, risks and MVP boundaries.",
-            &["forge", "interactive", "route", "--input", "start pm session"],
+            &["foundry", "interactive", "route", "--input", "start pm session"],
             true,
             "medium",
         ),
@@ -23089,7 +23122,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/decision",
             "Product Decision",
             "Record a durable product decision with rationale and impact trace. Use: /decision --workflow <id> --title \"...\" --rationale \"...\" [--alternative \"...\"] [--trade-off \"...\"] [--success-metric \"...\"] [--backlog-mutation \"...\"]",
-            &["forge", "workflow", "decision", "--workflow", "<workflow-id>", "--title", "...", "--rationale", "..."],
+            &["foundry", "workflow", "decision", "--workflow", "<workflow-id>", "--title", "...", "--rationale", "..."],
             true,
             "medium",
         ),
@@ -23154,7 +23187,7 @@ fn render_interactive_tui_frame(
     let sidebar = &dashboard.workflow_sidebar_panel;
     let event_runtime = &dashboard.event_runtime_panel;
     let title = format!(
-        "Forge advanced operational TUI | Forge operational TUI | {} | {}/{} steps | current {}",
+        "Foundry advanced operational TUI | Foundry operational TUI | {} | {}/{} steps | current {}",
         guided.status, guided.completed_step_count, guided.total_step_count, guided.current_step_id
     );
     let focus_line = state.focus_status_line();
@@ -23235,7 +23268,7 @@ fn render_interactive_tui_frame(
             "Useful next commands: {}",
             tui_join_limited(&dashboard.useful_next_commands, 3, "none")
         ),
-        "Smoke test: forge smoke operational-tui --output json | Quick actions: /status /cockpit /task-board".to_string(),
+        "Smoke test: foundry smoke operational-tui --output json | Quick actions: /status /cockpit /task-board".to_string(),
     ];
 
     let workflows = vec![
@@ -23375,7 +23408,7 @@ fn render_interactive_tui_frame(
 }
 
 fn tui_terminal_width() -> usize {
-    env::var("COLUMNS")
+    crate::brand::env_var("COLUMNS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .map(|width| width.clamp(80, 160))
@@ -23480,7 +23513,7 @@ struct InteractiveEntrypointSnapshot {
 }
 
 fn build_interactive_entrypoint_snapshot(
-    store: &ForgeStore,
+    store: &FoundryStore,
 ) -> Result<InteractiveEntrypointSnapshot> {
     const ENTRYPOINT_WORKFLOW_SAMPLE_LIMIT: usize = 48;
     const ENTRYPOINT_RUN_SAMPLE_LIMIT: usize = 64;
@@ -23678,13 +23711,13 @@ fn build_interactive_entrypoint_snapshot(
         selected_workflow_id,
         workflow_samples,
         useful_next_commands: vec![
-            "forge".to_string(),
-            "forge interactive guided-cockpit --output json".to_string(),
-            "forge interactive home --output json".to_string(),
-            "forge list".to_string(),
-            "forge request list".to_string(),
-            "forge interactive workflow-sidebar --output json".to_string(),
-            "forge smoke operational-tui --output json".to_string(),
+            "foundry".to_string(),
+            "foundry interactive guided-cockpit --output json".to_string(),
+            "foundry interactive home --output json".to_string(),
+            "foundry list".to_string(),
+            "foundry request list".to_string(),
+            "foundry interactive workflow-sidebar --output json".to_string(),
+            "foundry smoke operational-tui --output json".to_string(),
         ],
         quick_actions: vec![
             "/status".to_string(),
@@ -23713,7 +23746,7 @@ fn render_interactive_entrypoint_frame(
 ) -> String {
     let width = tui_terminal_width();
     let title = format!(
-        "Forge advanced operational TUI | Forge operational TUI | {} | 0/8 steps | current create_workflow",
+        "Foundry advanced operational TUI | Foundry operational TUI | {} | 0/8 steps | current create_workflow",
         snapshot.status
     );
     let focus_line = state.focus_status_line();
@@ -23725,7 +23758,7 @@ fn render_interactive_entrypoint_frame(
     let attention_actions = tui_join_limited(&snapshot.attention_actions, 3, "none");
     let compatibility_lines = vec![
         "Entrypoint snapshot: bounded first screen; detailed panels load on demand with enter or slash commands.".to_string(),
-        "Guided cockpit: guided_cockpit_in_progress; visual three_column_focus_timeline; steps 0/8; current create_workflow; next forge plan --goal \"<objective>\"".to_string(),
+        "Guided cockpit: guided_cockpit_in_progress; visual three_column_focus_timeline; steps 0/8; current create_workflow; next foundry plan --goal \"<objective>\"".to_string(),
         "Guided steps: create_workflow to close_outcome; total 8; blocked 6; confirmations 0".to_string(),
         "Safe actions: read-only panels open directly; mutating actions require preview, confirmation and visible rollback.".to_string(),
         format!(
@@ -23763,9 +23796,9 @@ fn render_interactive_entrypoint_frame(
             snapshot.pending_human_interactions
         ),
         "Architecture compass: architecture_compass_actionable; tracks 8, docs 3, conflicts 3".to_string(),
-        "Architecture execution plan: incremental_plan_actionable; increments 7, next forge interactive architecture --project-root . --output json".to_string(),
+        "Architecture execution plan: incremental_plan_actionable; increments 7, next foundry interactive architecture --project-root . --output json".to_string(),
         format!("Useful next commands: {useful_next}"),
-        "Smoke test: forge smoke operational-tui --output json | Quick actions: /status /cockpit /task-board".to_string(),
+        "Smoke test: foundry smoke operational-tui --output json | Quick actions: /status /cockpit /task-board".to_string(),
     ];
 
     let workflows = vec![
@@ -23793,7 +23826,7 @@ fn render_interactive_entrypoint_frame(
             }
         ),
         "release deferred | replacement loads on /replacement-cli".to_string(),
-        "shells forge-tui: forge | brain router loads on /brains".to_string(),
+        "shells foundry-tui: foundry | brain router loads on /brains".to_string(),
     ];
     let execution = vec![
         "guided three_column_focus_timeline | blocked 6 | confirms 0".to_string(),
@@ -23809,7 +23842,7 @@ fn render_interactive_entrypoint_frame(
             "blocked {} | failed {} | running {}",
             snapshot.blocked_tasks, snapshot.failed_tasks, snapshot.running_tasks
         ),
-        "next forge plan --goal \"<objective>\"".to_string(),
+        "next foundry plan --goal \"<objective>\"".to_string(),
         "open focused pane with enter".to_string(),
     ];
     let realtime = vec![
@@ -23844,7 +23877,7 @@ fn render_interactive_entrypoint_frame(
         format!("quick {quick_actions}"),
         format!("attention {attention_actions}"),
         format!("commands {useful_next}"),
-        "detailed panels load on demand; this keeps `forge` usable in large workflow stores"
+        "detailed panels load on demand; this keeps `foundry` usable in large workflow stores"
             .to_string(),
     ];
 
@@ -23883,7 +23916,7 @@ fn render_interactive_entrypoint_frame(
 
 pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
     if !std::io::stdin().is_terminal() {
-        let store = ForgeStore::open(store_path)?;
+        let store = FoundryStore::open(store_path)?;
         let snapshot = build_interactive_entrypoint_snapshot(&store)?;
         let repl_state = InteractiveReplState::entrypoint();
         println!(
@@ -23893,7 +23926,7 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
         return Ok(0);
     }
 
-    let store = ForgeStore::open(store_path)?;
+    let store = FoundryStore::open(store_path)?;
     let snapshot = build_interactive_entrypoint_snapshot(&store)?;
     let mut repl_state = InteractiveReplState::entrypoint();
     println!(
@@ -23902,7 +23935,7 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
     );
 
     loop {
-        print!("forge> ");
+        print!("foundry> ");
         std::io::Write::flush(&mut std::io::stdout())?;
 
         let mut line = String::new();
@@ -23995,7 +24028,7 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
             continue;
         }
 
-        let route_result = route_interactive_input(&store, trimmed, "forge_repl")?;
+        let route_result = route_interactive_input(&store, trimmed, "foundry_repl")?;
         println!(
             "  Routing: {decision}",
             decision = route_result.routing_decision
@@ -24048,8 +24081,8 @@ impl InteractiveReplState {
             ],
             display_mode_index: 1,
             themes: vec![
-                "forge_dark".to_string(),
-                "forge_light".to_string(),
+                "foundry_dark".to_string(),
+                "foundry_light".to_string(),
                 "high_contrast".to_string(),
             ],
             theme_index: 0,
@@ -24074,8 +24107,8 @@ impl InteractiveReplState {
             .unwrap_or(0);
         let themes = if navigation.themes.is_empty() {
             vec![
-                "forge_dark".to_string(),
-                "forge_light".to_string(),
+                "foundry_dark".to_string(),
+                "foundry_light".to_string(),
                 "high_contrast".to_string(),
             ]
         } else {
@@ -24229,7 +24262,7 @@ fn repl_focus_panels() -> Vec<InteractiveReplFocusPanel> {
 }
 
 fn dispatch_repl_navigation_key(
-    store: &ForgeStore,
+    store: &FoundryStore,
     state: &mut InteractiveReplState,
     input: &str,
 ) -> Result<Option<String>> {
@@ -24271,7 +24304,7 @@ fn dispatch_repl_navigation_key(
     }
 }
 
-fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<String> {
+fn render_repl_focused_panel(store: &FoundryStore, panel_id: &str) -> Result<String> {
     match panel_id {
         "guided_cockpit_panel" => {
             let panel = build_interactive_guided_cockpit(store)?;
@@ -24383,7 +24416,7 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
     }
 }
 
-fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<bool> {
+fn dispatch_read_only_panel_command(store: &FoundryStore, input: &str) -> Result<bool> {
     match input.trim() {
         "/guided-cockpit" | "/guide" => {
             let panel = build_interactive_guided_cockpit(store)?;
@@ -24554,12 +24587,12 @@ fn render_interactive_status_snapshot(snapshot: &InteractiveEntrypointSnapshot) 
     )
 }
 
-pub(crate) fn render_interactive_status_for_store(store: &ForgeStore) -> Result<String> {
+pub(crate) fn render_interactive_status_for_store(store: &FoundryStore) -> Result<String> {
     let snapshot = build_interactive_entrypoint_snapshot(store)?;
     Ok(render_interactive_status_snapshot(&snapshot))
 }
 
-fn dispatch_actions_command(store: &ForgeStore, input: &str) -> Result<()> {
+fn dispatch_actions_command(store: &FoundryStore, input: &str) -> Result<()> {
     let rest = input.trim().strip_prefix("/actions").unwrap_or("").trim();
     let query = rest
         .strip_prefix("--query")
@@ -24571,7 +24604,7 @@ fn dispatch_actions_command(store: &ForgeStore, input: &str) -> Result<()> {
     Ok(())
 }
 
-fn dispatch_action_command(store: &ForgeStore, input: &str) -> Result<()> {
+fn dispatch_action_command(store: &FoundryStore, input: &str) -> Result<()> {
     let rest = input.trim().strip_prefix("/action").unwrap_or("").trim();
     let mut tokens = rest.split_whitespace();
     let action_id = match tokens.next() {
@@ -24583,7 +24616,7 @@ fn dispatch_action_command(store: &ForgeStore, input: &str) -> Result<()> {
     let Some(action_id) = action_id else {
         println!("  Usage: /action <action-id>");
         println!(
-            "  Discover actions with: /actions [query] or forge interactive action-registry --output json"
+            "  Discover actions with: /actions [query] or foundry interactive action-registry --output json"
         );
         return Ok(());
     };
@@ -24594,7 +24627,7 @@ fn dispatch_action_command(store: &ForgeStore, input: &str) -> Result<()> {
 }
 
 fn dispatch_patch_command(
-    _store: &ForgeStore,
+    _store: &FoundryStore,
     input: &str,
     store_path: &std::path::Path,
 ) -> Result<()> {
@@ -24608,7 +24641,7 @@ fn dispatch_patch_command(
             let plan_output = Command::new(
                 std::env::args()
                     .next()
-                    .unwrap_or_else(|| "forge".to_string()),
+                    .unwrap_or_else(|| "foundry".to_string()),
             )
             .args(["--store", &store_str, "patch", "plan"])
             .args(rest.split_whitespace().skip(1).collect::<Vec<_>>())
@@ -24671,7 +24704,7 @@ fn dispatch_patch_command(
             let apply_output = Command::new(
                 std::env::args()
                     .next()
-                    .unwrap_or_else(|| "forge".to_string()),
+                    .unwrap_or_else(|| "foundry".to_string()),
             )
             .args(["--store", &store_str, "patch", "apply"])
             .args(rest.split_whitespace().skip(1).collect::<Vec<_>>())
@@ -24709,7 +24742,7 @@ fn dispatch_patch_command(
             let review_output = Command::new(
                 std::env::args()
                     .next()
-                    .unwrap_or_else(|| "forge".to_string()),
+                    .unwrap_or_else(|| "foundry".to_string()),
             )
             .args(["--store", &store_str, "patch", "review"])
             .args(rest.split_whitespace().skip(1).collect::<Vec<_>>())
@@ -24763,7 +24796,7 @@ fn dispatch_patch_command(
             let diff_output = Command::new(
                 std::env::args()
                     .next()
-                    .unwrap_or_else(|| "forge".to_string()),
+                    .unwrap_or_else(|| "foundry".to_string()),
             )
             .args(["--store", &store_str, "patch", "diff"])
             .args(rest.split_whitespace().skip(1).collect::<Vec<_>>())
@@ -24828,7 +24861,7 @@ fn dispatch_patch_command(
             let revert_output = Command::new(
                 std::env::args()
                     .next()
-                    .unwrap_or_else(|| "forge".to_string()),
+                    .unwrap_or_else(|| "foundry".to_string()),
             )
             .args(["--store", &store_str, "patch", "revert"])
             .args(rest.split_whitespace().skip(1).collect::<Vec<_>>())
@@ -24876,7 +24909,7 @@ fn dispatch_patch_command(
             let restore_output = Command::new(
                 std::env::args()
                     .next()
-                    .unwrap_or_else(|| "forge".to_string()),
+                    .unwrap_or_else(|| "foundry".to_string()),
             )
             .args(["--store", &store_str, "patch", "restore"])
             .args(args.iter().map(String::as_str))
@@ -24939,7 +24972,7 @@ fn dispatch_context_command(input: &str, store_path: &std::path::Path) -> Result
     let output = Command::new(
         std::env::args()
             .next()
-            .unwrap_or_else(|| "forge".to_string()),
+            .unwrap_or_else(|| "foundry".to_string()),
     )
     .args(["--store", &store_str, "context"])
     .args(args.iter().map(String::as_str))
@@ -24991,7 +25024,7 @@ fn dispatch_context_command(input: &str, store_path: &std::path::Path) -> Result
     Ok(())
 }
 
-fn dispatch_pm_command(store: &ForgeStore, input: &str) -> Result<()> {
+fn dispatch_pm_command(store: &FoundryStore, input: &str) -> Result<()> {
     let objective = input.trim().strip_prefix("/pm ").unwrap_or("").trim();
     if objective.is_empty() {
         println!("  Usage: /pm <broad objective>");
@@ -24999,7 +25032,7 @@ fn dispatch_pm_command(store: &ForgeStore, input: &str) -> Result<()> {
     }
 
     println!("  PM Mode: starting human-guided product management session...");
-    let report = crate::request::start_pm_session(store, objective, "forge_repl")?;
+    let report = crate::request::start_pm_session(store, objective, "foundry_repl")?;
     println!("  Status: {}", report.status);
     println!("  Run ID: {}", report.run_id);
     println!("  Workflow ID: {}", report.workflow_id);
@@ -25009,7 +25042,7 @@ fn dispatch_pm_command(store: &ForgeStore, input: &str) -> Result<()> {
 }
 
 fn dispatch_decision_command(
-    _store: &ForgeStore,
+    _store: &FoundryStore,
     input: &str,
     store_path: &std::path::Path,
 ) -> Result<()> {
@@ -25024,7 +25057,7 @@ fn dispatch_decision_command(
     let decision_output = Command::new(
         std::env::args()
             .next()
-            .unwrap_or_else(|| "forge".to_string()),
+            .unwrap_or_else(|| "foundry".to_string()),
     )
     .args(["--store", &store_str, "workflow", "decision"])
     .args(parse_repl_args(rest)?)
@@ -25121,7 +25154,7 @@ fn dispatch_handoff_command(input: &str, store_path: &std::path::Path) -> Result
     let output = Command::new(
         std::env::args()
             .next()
-            .unwrap_or_else(|| "forge".to_string()),
+            .unwrap_or_else(|| "foundry".to_string()),
     )
     .args(["--store", &store_str, "task", "handoff"])
     .args(args.iter().map(String::as_str))
@@ -25195,12 +25228,12 @@ mod tests {
     #[test]
     fn default_terminal_entrypoint_renders_advanced_cockpit_frame() {
         let temp = tempfile::tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let report = build_interactive_home(&store).unwrap();
         let state = InteractiveReplState::from_home(&report);
         let frame = render_interactive_tui_frame(&report, &state);
 
-        assert!(frame.contains("Forge advanced operational TUI"));
+        assert!(frame.contains("Foundry advanced operational TUI"));
         assert!(frame.contains("Workflows"));
         assert!(frame.contains("Execution"));
         assert!(frame.contains("Realtime"));
@@ -25218,7 +25251,7 @@ mod tests {
         assert!(!decision.requires_human_approval);
         assert_eq!(
             decision.schema_version,
-            "forge.interactive.retention_decision.v1"
+            "foundry.interactive.retention_decision.v1"
         );
 
         let decision = decide_retention("Daily report with cron", true);
@@ -25292,7 +25325,7 @@ mod tests {
         assert_eq!(
             route.equivalent_command,
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "harness".to_string(),
                 "mode".to_string(),
                 "--output".to_string(),
@@ -25304,7 +25337,7 @@ mod tests {
     #[test]
     fn route_slash_command_recognizes_harness_doctor_audit() {
         let report = route_slash_command(
-            "/harness doctor --executor codex --shim-dir /tmp/forge-bin --project-root /repo",
+            "/harness doctor --executor codex --shim-dir /tmp/foundry-bin --project-root /repo",
         );
         assert_eq!(report.input_kind, "slash_command");
         assert_eq!(report.routing_decision, "slash_command");
@@ -25316,7 +25349,7 @@ mod tests {
         assert_eq!(
             route.equivalent_command,
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "harness".to_string(),
                 "doctor".to_string(),
                 "--executor".to_string(),
@@ -25334,7 +25367,7 @@ mod tests {
     #[test]
     fn interactive_home_surfaces_sessions_quick_action() {
         let temp = tempfile::tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let report = build_interactive_home(&store).unwrap();
         assert!(report
             .dashboard
@@ -25355,7 +25388,7 @@ mod tests {
         assert_eq!(
             route.equivalent_command,
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "sessions".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
@@ -25378,7 +25411,7 @@ mod tests {
         assert_eq!(
             route.equivalent_command,
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "sessions".to_string(),
                 "lifecycle".to_string(),
                 "--session".to_string(),
@@ -25402,7 +25435,7 @@ mod tests {
         assert_eq!(
             route.equivalent_command,
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "sessions".to_string(),
                 "history".to_string(),
                 "--session".to_string(),
@@ -25472,7 +25505,7 @@ mod tests {
     #[test]
     fn greeting_and_date_questions_answer_directly_without_workflow() {
         let temp = tempfile::tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
 
         let hello = route_interactive_input(&store, "Olá!", "test").unwrap();
         assert!(!hello.workflow_created);
@@ -25488,7 +25521,7 @@ mod tests {
     #[test]
     fn identity_questions_answer_directly_without_workflow() {
         let temp = tempfile::tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
 
         let name = route_interactive_input(&store, "Você sabe meu nome?", "test").unwrap();
         assert!(!name.workflow_created);
@@ -25501,7 +25534,7 @@ mod tests {
     #[test]
     fn declared_name_stays_in_direct_conversation_context_without_workflow() {
         let temp = tempfile::tempdir().unwrap();
-        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let introduction =
             route_interactive_input_with_context(&store, "Meu nome é Arthur.", "test", &[])
                 .unwrap();
@@ -25531,7 +25564,7 @@ mod tests {
         let route = report.slash_command.unwrap();
         assert_eq!(route.name, "/patch plan");
         assert!(route.recognized);
-        assert!(route.equivalent_command.contains(&"forge".to_string()));
+        assert!(route.equivalent_command.contains(&"foundry".to_string()));
     }
 
     #[test]

@@ -43,7 +43,7 @@ use crate::patch::{
 use crate::request::{heartbeat_request, start_async_request, RunActivity};
 use crate::schedule::{create_daily_goal_research_workflow, run_daily_goal_research_smoke};
 use crate::security::{sanitize_prompt_secrets, SecretSanitizationOptions};
-use crate::storage::{ForgeStore, GlobalEventWrite};
+use crate::storage::{FoundryStore, GlobalEventWrite};
 use crate::validation::validate_workflow;
 use crate::workflow::{
     attach_creative_artifact, attach_workflow_artifact, set_workflow_token_collection,
@@ -60,30 +60,31 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-const MILESTONE_STATUS_SCHEMA_VERSION: &str = "forge.milestone.status.v1";
-const MILESTONE_MANIFEST_SCHEMA_VERSION: &str = "forge.milestone.manifest.v1";
-const MILESTONE_ATTACHED_EVIDENCE_SCHEMA_VERSION: &str = "forge.milestone.attached_evidence.v1";
+const MILESTONE_STATUS_SCHEMA_VERSION: &str = "foundry.milestone.status.v1";
+const MILESTONE_MANIFEST_SCHEMA_VERSION: &str = "foundry.milestone.manifest.v1";
+const MILESTONE_ATTACHED_EVIDENCE_SCHEMA_VERSION: &str = "foundry.milestone.attached_evidence.v1";
 const MILESTONE_ATTACHED_EVIDENCE_EVENT_KIND: &str = "milestone_evidence_attached";
-const SUPPORTED_MILESTONE: &str = "0.5";
+const SUPPORTED_MILESTONE: &str = "0.6";
+const LEGACY_MILESTONE_QUERY_ALIAS: &str = "0.5";
 pub const PRODUCTION_READINESS_MANIFEST_SCHEMA_VERSION: &str =
-    "forge.milestone.production_readiness_manifest.v1";
+    "foundry.milestone.production_readiness_manifest.v1";
 pub const PRODUCTION_READINESS_REPORT_SCHEMA_VERSION: &str =
-    "forge.milestone.production_readiness.v1";
+    "foundry.milestone.production_readiness.v1";
 pub const PRODUCTION_READINESS_PLAN_SCHEMA_VERSION: &str =
-    "forge.milestone.production_readiness_plan.v1";
+    "foundry.milestone.production_readiness_plan.v1";
 pub const PRODUCTION_EVIDENCE_DRAFT_SCHEMA_VERSION: &str =
-    "forge.milestone.production_evidence_draft.v1";
+    "foundry.milestone.production_evidence_draft.v1";
 pub const PRODUCTION_EVIDENCE_TEMPLATE_REPORT_SCHEMA_VERSION: &str =
-    "forge.milestone.production_evidence_template.v1";
+    "foundry.milestone.production_evidence_template.v1";
 pub const PRODUCTION_EVIDENCE_ASSEMBLY_REPORT_SCHEMA_VERSION: &str =
-    "forge.milestone.production_evidence_assembly.v1";
+    "foundry.milestone.production_evidence_assembly.v1";
 pub const PRODUCTION_SOURCE_EVIDENCE_SCHEMA_PREFIX: &str =
-    "forge.milestone.production_source_evidence";
+    "foundry.milestone.production_source_evidence";
 pub const PRODUCTION_MISSION_LIFECYCLE_RECEIPT_SCHEMA_VERSION: &str =
-    "forge.milestone.mission_lifecycle.v1";
+    "foundry.milestone.mission_lifecycle.v1";
 pub const PRODUCTION_READINESS_REQUIRED_GATE_COUNT: usize = 11;
 pub const PRODUCTION_READINESS_REQUIRED_RECEIPT_COUNT: usize = 14;
-const PRODUCTION_PROFILE: &str = "single_host_linux_v0.5";
+const PRODUCTION_PROFILE: &str = "single_host_linux_v0.6";
 const LAST_LEGACY_PRODUCTION_RECEIPT_VERSION: &str = "0.5.2";
 const MAX_PRODUCTION_EVIDENCE_AGE_SECONDS: u64 = 86_400;
 const MAX_PRODUCTION_EVIDENCE_BYTES: u64 = 16 * 1024 * 1024;
@@ -120,6 +121,8 @@ const PRODUCTION_EVIDENCE_ASSEMBLY_KINDS: [&str; 13] = [
 pub struct MilestoneStatusReport {
     pub schema_version: String,
     pub milestone: String,
+    pub requested_milestone: String,
+    pub compatibility_mode: String,
     pub release_line_boundary: String,
     pub status_vocabulary: Vec<String>,
     pub summary: MilestoneStatusSummary,
@@ -215,8 +218,9 @@ pub struct ProductionOffHostBackupEvidence {
     pub disposable_restore_passed: bool,
     pub restored_store_check_passed: bool,
     pub off_host_retention_enabled: bool,
-    pub forge_key_isolated_from_uploader: bool,
-    pub uploader_credentials_isolated_from_forge: bool,
+    #[serde(alias = "forge_key_isolated_from_uploader")] // foundry-brand-allow: legacy-compat
+    pub foundry_key_isolated_from_uploader: bool,
+    pub uploader_credentials_isolated_from_foundry: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -543,15 +547,26 @@ pub struct ProductionEvidenceReceipt {
 pub struct MilestoneManifestReport {
     pub schema_version: String,
     pub milestone: String,
+    pub requested_milestone: String,
+    pub compatibility_mode: String,
     pub release_line_boundary: String,
     pub requirements: Vec<MilestoneRequirement>,
     pub completed_capabilities: Vec<MilestoneManifestCapability>,
     pub missing_capabilities: Vec<MilestoneManifestCapability>,
     pub validation_evidence: Vec<MilestoneManifestEvidence>,
     pub attached_evidence: Vec<MilestoneAttachedEvidence>,
+    pub evidence_provenance: Vec<MilestoneEvidenceProvenance>,
     pub demos: Vec<MilestoneManifestDemo>,
     pub known_gaps: Vec<MilestoneManifestGap>,
     pub promotion_decision: MilestonePromotionDecision,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneEvidenceProvenance {
+    pub source_milestone: String,
+    pub evidence_count: usize,
+    pub usage: String,
+    pub auto_migrated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -874,7 +889,7 @@ pub struct MilestoneResearchSource {
     pub label: String,
     pub url_or_path: String,
     pub evidence: String,
-    pub forge_implication: String,
+    pub foundry_implication: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -883,7 +898,7 @@ pub struct MilestoneResearchFinding {
     pub title: String,
     pub source_labels: Vec<String>,
     pub finding: String,
-    pub forge_runtime_rule: String,
+    pub foundry_runtime_rule: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -913,13 +928,29 @@ pub struct MilestoneLeanDecision {
     pub evidence_metric: String,
 }
 
-pub fn build_milestone_status(version: &str) -> Result<MilestoneStatusReport> {
-    let version = version.trim();
-    if version != SUPPORTED_MILESTONE {
-        bail!("unsupported milestone {version}; currently supported: {SUPPORTED_MILESTONE}");
+fn canonical_milestone_version(version: &str) -> Result<&'static str> {
+    match version.trim() {
+        SUPPORTED_MILESTONE => Ok(SUPPORTED_MILESTONE),
+        LEGACY_MILESTONE_QUERY_ALIAS => Ok(SUPPORTED_MILESTONE),
+        version => bail!(
+            "unsupported milestone {version}; currently supported: {SUPPORTED_MILESTONE} (legacy query alias: {LEGACY_MILESTONE_QUERY_ALIAS})"
+        ),
     }
+}
 
-    let capabilities = forge_05_capabilities();
+fn milestone_compatibility_mode(requested_version: &str) -> &'static str {
+    if requested_version.trim() == LEGACY_MILESTONE_QUERY_ALIAS {
+        "legacy_query_alias"
+    } else {
+        "canonical"
+    }
+}
+
+pub fn build_milestone_status(version: &str) -> Result<MilestoneStatusReport> {
+    let requested_milestone = version.trim().to_string();
+    let version = canonical_milestone_version(&requested_milestone)?;
+
+    let capabilities = foundry_06_capabilities();
     let summary = summarize_capabilities(&capabilities);
     let blocked_by = capabilities
         .iter()
@@ -932,9 +963,11 @@ pub fn build_milestone_status(version: &str) -> Result<MilestoneStatusReport> {
 
     Ok(MilestoneStatusReport {
         schema_version: MILESTONE_STATUS_SCHEMA_VERSION.to_string(),
-        milestone: SUPPORTED_MILESTONE.to_string(),
+        milestone: version.to_string(),
+        requested_milestone: requested_milestone.clone(),
+        compatibility_mode: milestone_compatibility_mode(&requested_milestone).to_string(),
         release_line_boundary:
-            "0.5 is the first production-supported single-host Forge Core line. Replacement-grade CLI and multimodal runtimes remain optional adoption capabilities and do not block the secure orchestration core."
+            "0.6 is the canonical Foundry Core production line. Valid 0.5 evidence may be consumed read-only with its source milestone preserved; no receipt is rewritten or auto-promoted. Replacement-grade CLI and multimodal runtimes remain optional adoption capabilities and do not block the secure orchestration core."
                 .to_string(),
         status_vocabulary: status_vocabulary(),
         summary,
@@ -948,17 +981,17 @@ pub fn build_milestone_status(version: &str) -> Result<MilestoneStatusReport> {
             production_evidence_evaluated: false,
             blocked_by,
             reason: if promotable {
-                "All required Forge 0.5 capabilities have implementation and validation evidence. This capability decision does not assert operational production readiness."
+                "All required Foundry 0.6 capabilities have implementation and validation evidence. This capability decision does not assert operational production readiness."
                     .to_string()
             } else {
-                "Forge 0.5 promotion is blocked while any required capability remains planned, blocked or only groundwork."
+                "Foundry 0.6 promotion is blocked while any required capability remains planned, blocked or only groundwork."
                     .to_string()
             },
             next_action: if promotable {
                 "Evaluate the separate fail-closed production-readiness manifest before publishing or installing the release."
                     .to_string()
             } else {
-                "Close the next required core capability with tests and milestone evidence before reconsidering 0.5 promotion."
+                "Close the next required core capability with tests and milestone evidence before reconsidering 0.6 promotion."
                     .to_string()
             },
         },
@@ -1444,7 +1477,7 @@ pub fn assemble_production_evidence(
         infrastructure_commands_executed: 0,
         infrastructure_mutations_performed: false,
         next_action: format!(
-            "Run `forge milestone production-readiness --version {} --manifest {} --evidence-root <same-root> --output json`; assembly does not promote readiness.",
+            "Run `foundry milestone production-readiness --version {} --manifest {} --evidence-root <same-root> --output json`; assembly does not promote readiness.",
             options.version, manifest_path_string
         ),
     })
@@ -1500,8 +1533,8 @@ fn production_evidence_draft_template(version: &str, release_version: &str) -> s
             "disposable_restore_passed": null,
             "restored_store_check_passed": null,
             "off_host_retention_enabled": null,
-            "forge_key_isolated_from_uploader": null,
-            "uploader_credentials_isolated_from_forge": null
+            "foundry_key_isolated_from_uploader": null,
+            "uploader_credentials_isolated_from_foundry": null
         },
         "key_escrow": {
             "encrypted": null,
@@ -1564,12 +1597,10 @@ fn validate_production_evidence_release_identity(
     version: &str,
     release_version: &str,
 ) -> Result<()> {
-    if version != SUPPORTED_MILESTONE {
-        bail!("unsupported production milestone `{version}`; expected `{SUPPORTED_MILESTONE}`");
-    }
+    let version = canonical_milestone_version(version)?;
     if release_version != env!("CARGO_PKG_VERSION") {
         bail!(
-            "production evidence release version `{release_version}` must match running Forge version `{}`",
+            "production evidence release version `{release_version}` must match running Foundry version `{}`",
             env!("CARGO_PKG_VERSION")
         );
     }
@@ -1850,11 +1881,11 @@ fn validate_production_source_evidence(
 }
 
 fn production_source_bound_receipt_schema(kind: &str) -> String {
-    format!("forge.milestone.production_evidence.{kind}.v2")
+    format!("foundry.milestone.production_evidence.{kind}.v2")
 }
 
 fn legacy_production_receipt_schema(kind: &str) -> String {
-    format!("forge.milestone.production_evidence.{kind}.v1")
+    format!("foundry.milestone.production_evidence.{kind}.v1")
 }
 
 fn production_receipt_schema_supported(kind: &str, schema: &str, subject_version: &str) -> bool {
@@ -2255,7 +2286,7 @@ pub fn production_mission_operational_claims_sha256(
 }
 
 pub fn build_production_mission_lifecycle_evidence(
-    store: &ForgeStore,
+    store: &FoundryStore,
     release_version: &str,
     mission_id: &str,
     execution_receipt_id: &str,
@@ -2435,7 +2466,7 @@ pub fn build_production_mission_lifecycle_evidence(
         tests_failed: handoff.delivery.tests_failed,
     };
     let submit_report = MissionSubmitReport {
-        schema_version: "forge.mission.submit.v1".to_string(),
+        schema_version: "foundry.mission.submit.v1".to_string(),
         status: "queued".to_string(),
         mission_id: mission.id.clone(),
         handoff_id: handoff.id.clone(),
@@ -2445,11 +2476,12 @@ pub fn build_production_mission_lifecycle_evidence(
         accepted: false,
     };
     let resume_report = MissionDriveReport {
-        schema_version: "forge.mission.drive.v1".to_string(),
+        schema_version: "foundry.mission.drive.v1".to_string(),
         status: format!("{:?}", resume_snapshot.status).to_lowercase(),
         action: "handoff_consumed".to_string(),
         mission_id: mission.id.clone(),
         revision: resume_snapshot.revision,
+        assignments: Vec::new(),
         assignment: None,
         handoff_id: Some(handoff.id.clone()),
         mission: resume_snapshot,
@@ -2527,7 +2559,7 @@ pub fn build_production_mission_lifecycle_evidence(
     let artifact_bytes = serde_json::to_vec(&artifact)?;
     manifest_section.evidence.artifact_sha256 = hex_sha256(&artifact_bytes);
     Ok(ProductionMissionLifecycleEvidencePackage {
-        schema_version: "forge.milestone.mission_lifecycle_evidence_package.v1".to_string(),
+        schema_version: "foundry.milestone.mission_lifecycle_evidence_package.v1".to_string(),
         status: "ready".to_string(),
         manifest_section,
         artifact,
@@ -2571,8 +2603,8 @@ pub fn production_readiness_claims_value(
             "disposable_restore_passed": manifest.off_host_backup.disposable_restore_passed,
             "restored_store_check_passed": manifest.off_host_backup.restored_store_check_passed,
             "off_host_retention_enabled": manifest.off_host_backup.off_host_retention_enabled,
-            "forge_key_isolated_from_uploader": manifest.off_host_backup.forge_key_isolated_from_uploader,
-            "uploader_credentials_isolated_from_forge": manifest.off_host_backup.uploader_credentials_isolated_from_forge,
+            "foundry_key_isolated_from_uploader": manifest.off_host_backup.foundry_key_isolated_from_uploader,
+            "uploader_credentials_isolated_from_foundry": manifest.off_host_backup.uploader_credentials_isolated_from_foundry,
         }),
         "key_escrow" => serde_json::json!({
             "encrypted": manifest.key_escrow.encrypted,
@@ -2866,8 +2898,8 @@ pub fn evaluate_production_readiness(
         production_check(
             "installed_version",
             manifest.installation.installed_version == manifest.release_version,
-            "installed Forge version matches the evaluated release",
-            "installed Forge version does not match the evaluated release",
+            "installed Foundry version matches the evaluated release",
+            "installed Foundry version does not match the evaluated release",
         ),
         production_check(
             "installed_binary",
@@ -2880,20 +2912,20 @@ pub fn evaluate_production_readiness(
         production_check(
             "ops_service_active",
             manifest.installation.ops_service_active,
-            "Forge Ops service is active",
-            "Forge Ops service is inactive",
+            "Foundry Ops service is active",
+            "Foundry Ops service is inactive",
         ),
         production_check(
             "runtime_service_active",
             manifest.installation.runtime_service_active,
-            "Forge runtime service is active",
-            "Forge runtime service is inactive",
+            "Foundry runtime service is active",
+            "Foundry runtime service is inactive",
         ),
         production_check(
             "request_supervisor_service_active",
             manifest.installation.request_supervisor_service_active,
-            "Forge request-supervisor service is active",
-            "Forge request-supervisor service is inactive",
+            "Foundry request-supervisor service is active",
+            "Foundry request-supervisor service is inactive",
         ),
         production_check(
             "store_check",
@@ -2955,12 +2987,12 @@ pub fn evaluate_production_readiness(
         ),
         production_check(
             "credential_isolation",
-            manifest.off_host_backup.forge_key_isolated_from_uploader
+            manifest.off_host_backup.foundry_key_isolated_from_uploader
                 && manifest
                     .off_host_backup
-                    .uploader_credentials_isolated_from_forge,
-            "Forge vault key and uploader authority stayed mutually isolated",
-            "Forge vault key or uploader authority isolation was not proven",
+                    .uploader_credentials_isolated_from_foundry,
+            "Foundry vault key and uploader authority stayed mutually isolated",
+            "Foundry vault key or uploader authority isolation was not proven",
         ),
     ]);
     gates.push(production_gate(
@@ -3248,7 +3280,7 @@ pub fn evaluate_production_readiness(
                 .submission
                 .validations
                 .contains(&expected_execution_digest)
-            && receipt.submit_report.schema_version == "forge.mission.submit.v1"
+            && receipt.submit_report.schema_version == "foundry.mission.submit.v1"
             && receipt.submit_report.status == "queued"
             && receipt.submit_report.mission_id == execute.mission_id
             && !receipt.submit_report.handoff_id.trim().is_empty()
@@ -3264,7 +3296,7 @@ pub fn evaluate_production_readiness(
         ));
 
         let resume_links_submission = receipt.resume_report.schema_version
-            == "forge.mission.drive.v1"
+            == "foundry.mission.drive.v1"
             && receipt.resume_report.action == "handoff_consumed"
             && receipt.resume_report.mission_id == execute.mission_id
             && receipt.resume_report.handoff_id.as_deref()
@@ -3380,8 +3412,8 @@ pub fn evaluate_production_readiness(
         production_check(
             "mission_operational_lifecycle.schemas",
             lifecycle.execute_receipt_schema_version == MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION
-                && lifecycle.submit_receipt_schema_version == "forge.mission.submit.v1"
-                && lifecycle.resume_receipt_schema_version == "forge.mission.drive.v1",
+                && lifecycle.submit_receipt_schema_version == "foundry.mission.submit.v1"
+                && lifecycle.resume_receipt_schema_version == "foundry.mission.drive.v1",
             "execute, submit and resume receipts use canonical runtime schemas",
             "one or more operational lifecycle receipt schemas are unsupported",
         ),
@@ -3405,7 +3437,7 @@ pub fn evaluate_production_readiness(
         ),
         production_check(
             "mission_operational_lifecycle.submit",
-            lifecycle.submit_receipt_schema_version == "forge.mission.submit.v1"
+            lifecycle.submit_receipt_schema_version == "foundry.mission.submit.v1"
                 && lifecycle.submit_status == "queued"
                 && lifecycle.submit_queued
                 && lifecycle.submitted_execute_receipt_sha256
@@ -4050,6 +4082,7 @@ fn mission_lifecycle_store_checks(
 
     let mission_json = connection
         .query_row(
+            // foundry-brand-allow: legacy-compat
             "SELECT data_json FROM forge_missions WHERE id=?1",
             [&execute.mission_id],
             |row| row.get::<_, String>(0),
@@ -4378,19 +4411,16 @@ fn release_version_matches_milestone(release_version: &str, milestone: &str) -> 
 }
 
 pub fn build_milestone_research(version: &str) -> Result<MilestoneResearchReport> {
-    let version = version.trim();
-    if version != SUPPORTED_MILESTONE {
-        bail!("unsupported milestone {version}; currently supported: {SUPPORTED_MILESTONE}");
-    }
+    let version = canonical_milestone_version(version)?;
 
     let sources = research_sources();
     let local_skill_inputs = local_research_inputs();
 
     Ok(MilestoneResearchReport {
-        schema_version: "forge.milestone.research.v1".to_string(),
+        schema_version: "foundry.milestone.research.v1".to_string(),
         status: "validated".to_string(),
-        milestone: SUPPORTED_MILESTONE.to_string(),
-        artifact_path: "docs/research/forge-0.5-creative-runtime-source-research.md".to_string(),
+        milestone: version.to_string(),
+        artifact_path: "docs/research/foundry-0.5-creative-runtime-source-research.md".to_string(),
         source_count: sources.len() + local_skill_inputs.len(),
         sources,
         local_skill_inputs,
@@ -4399,7 +4429,7 @@ pub fn build_milestone_research(version: &str) -> Result<MilestoneResearchReport
         workflow_templates: research_workflow_templates(),
         lean_governance: research_lean_decisions(),
         promotion_impact:
-            "The required Forge 0.5 research baseline is now source-grounded and converted into Forge-owned gates and templates; promotion remains controlled by the full milestone manifest rather than by this report alone."
+            "The historical Foundry 0.5 research baseline is retained as source provenance for the canonical 0.6 gates and templates; promotion remains controlled by the full 0.6 milestone manifest rather than by this report alone."
                 .to_string(),
     })
 }
@@ -4410,7 +4440,7 @@ pub fn build_milestone_manifest(version: &str) -> Result<MilestoneManifestReport
 
 pub fn build_milestone_manifest_with_store(
     version: &str,
-    store: Option<&ForgeStore>,
+    store: Option<&FoundryStore>,
 ) -> Result<MilestoneManifestReport> {
     let status = build_milestone_status(version)?;
     let attached_evidence = if let Some(store) = store {
@@ -4418,6 +4448,22 @@ pub fn build_milestone_manifest_with_store(
     } else {
         Vec::new()
     };
+    let evidence_provenance = [SUPPORTED_MILESTONE, LEGACY_MILESTONE_QUERY_ALIAS]
+        .into_iter()
+        .map(|source_milestone| MilestoneEvidenceProvenance {
+            source_milestone: source_milestone.to_string(),
+            evidence_count: attached_evidence
+                .iter()
+                .filter(|evidence| evidence.milestone == source_milestone)
+                .count(),
+            usage: if source_milestone == SUPPORTED_MILESTONE {
+                "canonical".to_string()
+            } else {
+                "read_only_legacy_compatibility".to_string()
+            },
+            auto_migrated: false,
+        })
+        .collect::<Vec<_>>();
     let attached_evidence_kind_map = attached_evidence_kind_map(&attached_evidence);
     let validated_attached_evidence_kind_map = if let Some(store) = store {
         validated_attached_evidence_kind_map(store, &attached_evidence)
@@ -4508,17 +4554,17 @@ pub fn build_milestone_manifest_with_store(
         production_evidence_evaluated: false,
         blocked_by,
         reason: if promotable {
-            "All required Forge 0.5 capabilities have implementation, validation or operator-approved attached evidence. This capability decision does not assert operational production readiness."
+            "All required Foundry 0.6 capabilities have implementation, validation or operator-approved attached evidence. This capability decision does not assert operational production readiness."
                 .to_string()
         } else {
-            "Forge 0.5 promotion is blocked while required capabilities remain planned, blocked, groundwork-only or missing required attached evidence."
+            "Foundry 0.6 promotion is blocked while required capabilities remain planned, blocked, groundwork-only or missing required attached evidence."
                 .to_string()
         },
         next_action: if promotable {
             "Evaluate the separate fail-closed production-readiness manifest before an explicit human-controlled release promotion."
                 .to_string()
         } else {
-            "Collect and attach the missing required milestone evidence kinds before reconsidering 0.5 promotion."
+            "Collect and attach the missing required milestone evidence kinds before reconsidering 0.6 promotion."
                 .to_string()
         },
     };
@@ -4526,12 +4572,15 @@ pub fn build_milestone_manifest_with_store(
     Ok(MilestoneManifestReport {
         schema_version: MILESTONE_MANIFEST_SCHEMA_VERSION.to_string(),
         milestone: status.milestone,
+        requested_milestone: status.requested_milestone,
+        compatibility_mode: status.compatibility_mode,
         release_line_boundary: status.release_line_boundary,
         requirements,
         completed_capabilities,
         missing_capabilities,
         validation_evidence,
         attached_evidence,
+        evidence_provenance,
         demos,
         known_gaps,
         promotion_decision,
@@ -4539,15 +4588,13 @@ pub fn build_milestone_manifest_with_store(
 }
 
 pub fn attach_milestone_evidence(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: MilestoneAttachEvidenceOptions<'_>,
 ) -> Result<MilestoneAttachedEvidence> {
-    let version = normalize_required(options.version, "version")?;
-    if version != SUPPORTED_MILESTONE {
-        bail!("unsupported milestone {version}; currently supported: {SUPPORTED_MILESTONE}");
-    }
+    let requested_version = normalize_required(options.version, "version")?;
+    let version = canonical_milestone_version(&requested_version)?.to_string();
     let capability_id = normalize_required(options.capability_id, "capability")?;
-    if !forge_05_capabilities()
+    if !foundry_06_capabilities()
         .iter()
         .any(|capability| capability.id == capability_id)
     {
@@ -4614,9 +4661,9 @@ pub fn attach_milestone_evidence(
     };
     let event_payload = serde_json::to_value(&evidence)?;
     let tenant_context = serde_json::json!({
-        "organization": {"id": "forge"},
-        "brand": {"id": "forge"},
-        "product": {"id": "forge"},
+        "organization": {"id": "foundry"},
+        "brand": {"id": "foundry"},
+        "product": {"id": "foundry"},
         "user": {"id": evidence.approved_by},
         "channel": {"id": "milestone"}
     });
@@ -4635,10 +4682,10 @@ pub fn attach_milestone_evidence(
 }
 
 pub fn load_milestone_attached_evidence(
-    store: &ForgeStore,
+    store: &FoundryStore,
     version: &str,
 ) -> Result<Vec<MilestoneAttachedEvidence>> {
-    let version = version.trim();
+    let version = canonical_milestone_version(version)?;
     let mut evidence = Vec::new();
     for event in store.load_global_events()? {
         if event.kind != MILESTONE_ATTACHED_EVIDENCE_EVENT_KIND {
@@ -4648,7 +4695,10 @@ pub fn load_milestone_attached_evidence(
             Ok(attached) => attached,
             Err(_) => continue,
         };
-        if attached.milestone != version {
+        if attached.milestone != version
+            && !(version == SUPPORTED_MILESTONE
+                && attached.milestone == LEGACY_MILESTONE_QUERY_ALIAS)
+        {
             continue;
         }
         attached.global_event_id = Some(event.id);
@@ -4662,15 +4712,13 @@ pub fn load_milestone_attached_evidence(
 }
 
 pub fn build_milestone_evidence_plan(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: MilestoneEvidencePlanOptions<'_>,
 ) -> Result<MilestoneEvidencePlanReport> {
-    let version = normalize_required(options.version, "version")?;
-    if version != SUPPORTED_MILESTONE {
-        bail!("unsupported milestone {version}; currently supported: {SUPPORTED_MILESTONE}");
-    }
+    let requested_version = normalize_required(options.version, "version")?;
+    let version = canonical_milestone_version(&requested_version)?.to_string();
     let capability_id = normalize_required(options.capability_id, "capability")?;
-    if !forge_05_capabilities()
+    if !foundry_06_capabilities()
         .iter()
         .any(|capability| capability.id == capability_id)
     {
@@ -4771,13 +4819,13 @@ pub fn build_milestone_evidence_plan(
     let next_action = if ready_to_collect_evidence {
         "Run the evidence collection command, inspect the generated receipt, then attach it with the matching milestone evidence kind.".to_string()
     } else {
-        "Create or fix the required project .forge manifests before collecting milestone evidence."
+        "Create or fix the required project .foundry manifests before collecting milestone evidence."
             .to_string()
     };
     let promotion_gate_templates = milestone_promotion_gate_templates(&capability_id);
 
     Ok(MilestoneEvidencePlanReport {
-        schema_version: "forge.milestone.evidence_plan.v1".to_string(),
+        schema_version: "foundry.milestone.evidence_plan.v1".to_string(),
         milestone: version,
         capability_id,
         status: status.to_string(),
@@ -4799,7 +4847,7 @@ pub fn build_milestone_evidence_plan(
 }
 
 pub fn prepare_milestone_evidence_inputs(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: MilestonePrepareEvidenceInputsOptions<'_>,
 ) -> Result<MilestonePrepareEvidenceInputsReport> {
     let plan = build_milestone_evidence_plan(
@@ -4915,7 +4963,7 @@ pub fn prepare_milestone_evidence_inputs(
     };
 
     Ok(MilestonePrepareEvidenceInputsReport {
-        schema_version: "forge.milestone.prepare_evidence_inputs.v1".to_string(),
+        schema_version: "foundry.milestone.prepare_evidence_inputs.v1".to_string(),
         milestone: plan.milestone.clone(),
         capability_id: plan.capability_id.clone(),
         status: status.to_string(),
@@ -5025,15 +5073,13 @@ fn normalize_connected_brain_provider_command_path(
 }
 
 pub fn collect_milestone_evidence(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: MilestoneCollectEvidenceOptions<'_>,
 ) -> Result<MilestoneCollectEvidenceReport> {
-    let version = normalize_required(options.version, "version")?;
-    if version != SUPPORTED_MILESTONE {
-        bail!("unsupported milestone {version}; currently supported: {SUPPORTED_MILESTONE}");
-    }
+    let requested_version = normalize_required(options.version, "version")?;
+    let version = canonical_milestone_version(&requested_version)?.to_string();
     let capability_id = normalize_required(options.capability_id, "capability")?;
-    if !forge_05_capabilities()
+    if !foundry_06_capabilities()
         .iter()
         .any(|capability| capability.id == capability_id)
     {
@@ -5113,7 +5159,7 @@ pub fn collect_milestone_evidence(
     )?;
 
     Ok(MilestoneCollectEvidenceReport {
-        schema_version: "forge.milestone.collect_evidence.v1".to_string(),
+        schema_version: "foundry.milestone.collect_evidence.v1".to_string(),
         milestone: version,
         capability_id,
         kind: collected.kind,
@@ -5128,19 +5174,17 @@ pub fn collect_milestone_evidence(
         attached_evidence,
         promotion_impact: "collected_and_attached_not_auto_promoted".to_string(),
         next_action:
-            "Inspect `forge milestone manifest --version 0.5 --output json`; promotion remains gated by all required evidence."
+            "Inspect `foundry milestone manifest --version 0.6 --output json`; promotion remains gated by all required evidence."
                 .to_string(),
     })
 }
 
 pub fn collect_ready_milestone_evidence(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: MilestoneCollectReadyEvidenceOptions<'_>,
 ) -> Result<MilestoneCollectReadyEvidenceReport> {
-    let version = normalize_required(options.version, "version")?;
-    if version != SUPPORTED_MILESTONE {
-        bail!("unsupported milestone {version}; currently supported: {SUPPORTED_MILESTONE}");
-    }
+    let requested_version = normalize_required(options.version, "version")?;
+    let version = canonical_milestone_version(&requested_version)?.to_string();
     let approved_by = normalize_required(options.approved_by, "approved-by")?;
     let origin = normalize_required(options.origin, "origin")?;
     let project_root = options
@@ -5148,7 +5192,7 @@ pub fn collect_ready_milestone_evidence(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let targets = forge_05_capabilities()
+    let targets = foundry_06_capabilities()
         .into_iter()
         .flat_map(|capability| {
             milestone_required_attached_evidence_kinds(&capability.id)
@@ -5237,7 +5281,7 @@ pub fn collect_ready_milestone_evidence(
         .iter()
         .map(|item| {
             format!(
-                "forge milestone evidence-plan --version {} --capability {} --project-root {} --output json",
+                "foundry milestone evidence-plan --version {} --capability {} --project-root {} --output json",
                 version,
                 item.capability_id,
                 project_root.display()
@@ -5246,7 +5290,7 @@ pub fn collect_ready_milestone_evidence(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    next_commands.push("forge milestone manifest --version 0.5 --output json".to_string());
+    next_commands.push("foundry milestone manifest --version 0.6 --output json".to_string());
     let next_action = if promotion_decision_after_collection.promotable {
         "Inspect the manifest and run an explicit human-controlled release promotion; this command only collected evidence."
             .to_string()
@@ -5262,7 +5306,7 @@ pub fn collect_ready_milestone_evidence(
     };
 
     Ok(MilestoneCollectReadyEvidenceReport {
-        schema_version: "forge.milestone.collect_ready_evidence.v1".to_string(),
+        schema_version: "foundry.milestone.collect_ready_evidence.v1".to_string(),
         milestone: version,
         status: status.to_string(),
         project_root: project_root.display().to_string(),
@@ -5346,7 +5390,7 @@ fn milestone_collection_kind_requires_project_plan(capability_id: &str, kind: &s
 }
 
 fn collect_replacement_grade_cli_evidence(
-    store: &ForgeStore,
+    store: &FoundryStore,
     version: &str,
     project_root: &Path,
     kind: &str,
@@ -5380,7 +5424,7 @@ fn collect_replacement_grade_cli_evidence(
 }
 
 fn collect_replacement_grade_cli_provider_evidence(
-    store: &ForgeStore,
+    store: &FoundryStore,
     version: &str,
     project_root: &Path,
     connected_brain: Option<&str>,
@@ -5410,7 +5454,7 @@ fn collect_replacement_grade_cli_provider_evidence(
         milestone_promotion_gate(
             "output_schema_valid",
             provider_contract.output_schema_valid,
-            "provider output uses the expected Forge provider-output schema",
+            "provider output uses the expected Foundry provider-output schema",
         ),
         milestone_promotion_gate(
             "real_provider_execution_performed",
@@ -5425,7 +5469,7 @@ fn collect_replacement_grade_cli_provider_evidence(
         milestone_promotion_gate(
             "harness_exec_event_recorded",
             external_brain.exec_event_recorded,
-            "external brain execution was recorded through Forge harness lineage",
+            "external brain execution was recorded through Foundry harness lineage",
         ),
         milestone_promotion_gate(
             "external_resources_untouched",
@@ -5437,17 +5481,17 @@ fn collect_replacement_grade_cli_provider_evidence(
         provider_contract.promotion_ready && milestone_promotion_gates_passed(&promotion_gates);
     let collection_summary = if collection_promotion_ready {
         format!(
-            "Connected external brain provider `{}` executed through Forge and produced promotion-ready provider evidence.",
+            "Connected external brain provider `{}` executed through Foundry and produced promotion-ready provider evidence.",
             provider_contract.provider_id
         )
     } else {
         format!(
-            "Connected external brain provider `{}` executed through Forge but did not satisfy the promotion-ready provider contract.",
+            "Connected external brain provider `{}` executed through Foundry but did not satisfy the promotion-ready provider contract.",
             provider_contract.provider_id
         )
     };
     let payload = serde_json::json!({
-        "schema_version": "forge.milestone.collection.external_brain_provider_execution.v1",
+        "schema_version": "foundry.milestone.collection.external_brain_provider_execution.v1",
         "milestone": version,
         "capability_id": "replacement_grade_cli",
         "kind": "external_brain_provider_execution",
@@ -5484,7 +5528,7 @@ fn collect_replacement_grade_cli_provider_evidence(
 }
 
 fn collect_replacement_grade_cli_real_project_evidence(
-    store: &ForgeStore,
+    store: &FoundryStore,
     version: &str,
     project_root: &Path,
     origin: &str,
@@ -5504,9 +5548,9 @@ fn collect_replacement_grade_cli_real_project_evidence(
         .context("real-project coding/research flow is missing its evidence payload")?;
     let promotion_gates = vec![
         milestone_promotion_gate(
-            "completed_through_forge",
-            flow.completed_through_forge,
-            "flow completed through Forge-owned workflow semantics",
+            "completed_through_foundry",
+            flow.completed_through_foundry,
+            "flow completed through Foundry-owned workflow semantics",
         ),
         milestone_promotion_gate(
             "real_project_demo_completed",
@@ -5521,7 +5565,7 @@ fn collect_replacement_grade_cli_real_project_evidence(
         milestone_promotion_gate(
             "exec_event_recorded",
             real_project.exec_event_recorded,
-            "Forge harness recorded workflow/task/run lineage for the project execution",
+            "Foundry harness recorded workflow/task/run lineage for the project execution",
         ),
         milestone_promotion_gate(
             "validated_multi_file_artifacts",
@@ -5540,12 +5584,12 @@ fn collect_replacement_grade_cli_real_project_evidence(
     ];
     let collection_promotion_ready = milestone_promotion_gates_passed(&promotion_gates);
     let collection_summary = if collection_promotion_ready {
-        "Replacement-grade CLI real-project coding and research workflow produced validated multi-file evidence under Forge lineage.".to_string()
+        "Replacement-grade CLI real-project coding and research workflow produced validated multi-file evidence under Foundry lineage.".to_string()
     } else {
         "Replacement-grade CLI real-project coding and research workflow did not satisfy all collection gates.".to_string()
     };
     let payload = serde_json::json!({
-        "schema_version": "forge.milestone.collection.broader_project_coding_research_workflow.v1",
+        "schema_version": "foundry.milestone.collection.broader_project_coding_research_workflow.v1",
         "milestone": version,
         "capability_id": "replacement_grade_cli",
         "kind": "broader_project_coding_research_workflow",
@@ -5578,7 +5622,7 @@ fn collect_replacement_grade_cli_real_project_evidence(
 }
 
 fn collect_replacement_grade_cli_terminal_editing_evidence(
-    store: &ForgeStore,
+    store: &FoundryStore,
     version: &str,
     project_root: &Path,
     origin: &str,
@@ -5596,9 +5640,9 @@ fn collect_replacement_grade_cli_terminal_editing_evidence(
         .context("coding-task flow is missing patch lifecycle evidence")?;
     let promotion_gates = vec![
         milestone_promotion_gate(
-            "completed_through_forge",
-            flow.completed_through_forge,
-            "terminal editing flow completed through Forge-owned workflow semantics",
+            "completed_through_foundry",
+            flow.completed_through_foundry,
+            "terminal editing flow completed through Foundry-owned workflow semantics",
         ),
         milestone_promotion_gate(
             "patch_lifecycle_ready",
@@ -5647,7 +5691,7 @@ fn collect_replacement_grade_cli_terminal_editing_evidence(
         "Replacement-grade CLI terminal file-editing UX did not satisfy all patch lifecycle collection gates.".to_string()
     };
     let payload = serde_json::json!({
-        "schema_version": "forge.milestone.collection.terminal_file_editing_ux.v1",
+        "schema_version": "foundry.milestone.collection.terminal_file_editing_ux.v1",
         "milestone": version,
         "capability_id": "replacement_grade_cli",
         "kind": "terminal_file_editing_ux",
@@ -5680,7 +5724,7 @@ fn collect_replacement_grade_cli_terminal_editing_evidence(
 }
 
 fn collect_experimental_multimodal_runtime_evidence(
-    store: &ForgeStore,
+    store: &FoundryStore,
     version: &str,
     project_root: &Path,
     connected_runtime: Option<&str>,
@@ -5739,7 +5783,7 @@ fn collect_experimental_multimodal_runtime_evidence(
         )
     };
     let payload = serde_json::json!({
-        "schema_version": "forge.milestone.collection.production_runtime_benchmark.v1",
+        "schema_version": "foundry.milestone.collection.production_runtime_benchmark.v1",
         "milestone": version,
         "capability_id": "experimental_multimodal_runtime",
         "kind": "production_runtime_benchmark",
@@ -5775,7 +5819,8 @@ fn selected_multimodal_runtime_capability(
     project_root: &Path,
     connected_runtime: Option<&str>,
 ) -> Result<(String, String)> {
-    let manifest_path = project_root.join(".forge/multimodal-runtimes.json");
+    let manifest_path =
+        crate::brand::project_config_path_for_read(project_root, "multimodal-runtimes.json");
     let manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path)?)
         .with_context(|| {
             format!(
@@ -5817,7 +5862,7 @@ fn selected_multimodal_runtime_capability(
 }
 
 fn write_milestone_collection_artifact<T: Serialize>(
-    store: &ForgeStore,
+    store: &FoundryStore,
     version: &str,
     capability_id: &str,
     kind: &str,
@@ -5882,19 +5927,19 @@ fn milestone_promotion_gate_templates(capability_id: &str) -> Vec<MilestonePromo
             milestone_promotion_gate_template(
                 "broader_project_coding_research_workflow",
                 &[
-                    "completed_through_forge",
+                    "completed_through_foundry",
                     "real_project_demo_completed",
                     "handoff_ready",
                     "exec_event_recorded",
                     "validated_multi_file_artifacts",
                     "external_resources_untouched",
                 ],
-                "Broader project evidence must prove Forge-owned handoff, harness lineage, validated multi-file code/research artifacts and no external mutation.",
+                "Broader project evidence must prove Foundry-owned handoff, harness lineage, validated multi-file code/research artifacts and no external mutation.",
             ),
             milestone_promotion_gate_template(
                 "terminal_file_editing_ux",
                 &[
-                    "completed_through_forge",
+                    "completed_through_foundry",
                     "patch_lifecycle_ready",
                     "review_before_apply",
                     "restore_approval_recorded",
@@ -5939,7 +5984,8 @@ fn plan_replacement_grade_cli_evidence(
     configured_evidence_sources: &mut Vec<String>,
     evidence_collection_commands: &mut Vec<String>,
 ) -> Result<()> {
-    let manifest_path = project_root.join(CONNECTED_BRAIN_RUNTIMES_RELATIVE_PATH);
+    let manifest_path =
+        crate::brand::project_config_path_for_read(project_root, "connected-brain-runtimes.json");
     if !manifest_path.is_file() {
         manifest_templates.push(connected_brain_manifest_template(
             project_root,
@@ -5956,7 +6002,7 @@ fn plan_replacement_grade_cli_evidence(
             ),
         });
         evidence_collection_commands.push(format!(
-            "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root {} --connected-brain <provider-id> --approved-by <operator> --origin codex --output json",
+            "foundry milestone collect-evidence --version 0.6 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root {} --connected-brain <provider-id> --approved-by <operator> --origin codex --output json",
             project_root.display()
         ));
         push_replacement_grade_cli_demo_collection_commands(
@@ -5964,7 +6010,7 @@ fn plan_replacement_grade_cli_evidence(
             evidence_collection_commands,
         );
         evidence_collection_commands.push(format!(
-            "forge milestone cli-demo --origin codex --project-root {} --connected-brain <provider-id> --output json",
+            "foundry milestone cli-demo --origin codex --project-root {} --connected-brain <provider-id> --output json",
             project_root.display()
         ));
         return Ok(());
@@ -6072,13 +6118,13 @@ fn plan_replacement_grade_cli_evidence(
         .push("replacement_cli_demo:real_project_coding_research".to_string());
     configured_evidence_sources.push("replacement_cli_demo:patch_lifecycle".to_string());
     evidence_collection_commands.push(format!(
-        "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root {} --connected-brain {} --approved-by <operator> --origin codex --output json",
+        "foundry milestone collect-evidence --version 0.6 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root {} --connected-brain {} --approved-by <operator> --origin codex --output json",
         project_root.display(),
         provider.id
     ));
     push_replacement_grade_cli_demo_collection_commands(project_root, evidence_collection_commands);
     evidence_collection_commands.push(format!(
-        "forge milestone cli-demo --origin codex --project-root {} --connected-brain {} --output json",
+        "foundry milestone cli-demo --origin codex --project-root {} --connected-brain {} --output json",
         project_root.display(),
         provider.id
     ));
@@ -6154,7 +6200,7 @@ fn milestone_connected_brain_command_path_status(command_path: Option<&str>) -> 
     }
     (
         "ready".to_string(),
-        "Connected brain provider adapter command exists and is executable; evidence collection still requires explicit approval and will run through Forge harness lineage.".to_string(),
+        "Connected brain provider adapter command exists and is executable; evidence collection still requires explicit approval and will run through Foundry harness lineage.".to_string(),
     )
 }
 
@@ -6216,7 +6262,7 @@ fn replacement_cli_provider_candidate(
             "--brain-cli",
             command_hint,
             "--emit",
-            "forge.connected_external_brain.provider_output.v1"
+            "foundry.connected_external_brain.provider_output.v1"
         ],
         "approved_by": "<operator>",
         "approval_ref": "<approval-or-change-record>",
@@ -6226,7 +6272,7 @@ fn replacement_cli_provider_candidate(
         "external_resources_mutated": false
     });
     MilestoneEvidenceProviderCandidate {
-        schema_version: "forge.milestone.evidence_provider_candidate.v1".to_string(),
+        schema_version: "foundry.milestone.evidence_provider_candidate.v1".to_string(),
         provider_id: provider_id.to_string(),
         brain_id: provider_id.to_string(),
         binary: binary.to_string(),
@@ -6240,11 +6286,11 @@ fn replacement_cli_provider_candidate(
         readiness: readiness.to_string(),
         manifest_provider_template,
         evidence_blocker:
-            "A detected CLI path or version command is not release evidence. Promotion requires an approved provider adapter that runs the model and emits forge.connected_external_brain.provider_output.v1 with real_provider_execution_performed=true and model_execution_performed=true."
+            "A detected CLI path or version command is not release evidence. Promotion requires an approved provider adapter that runs the model and emits foundry.connected_external_brain.provider_output.v1 with real_provider_execution_performed=true and model_execution_performed=true."
                 .to_string(),
         next_action: if installed {
             format!(
-                "Run the version command only through an approved/synced Forge adapter, then create an approved provider adapter for `{provider_id}` in .forge/connected-brain-runtimes.json before collecting external_brain_provider_execution."
+                "Run the version command only through an approved/synced Foundry adapter, then create an approved provider adapter for `{provider_id}` in .foundry/connected-brain-runtimes.json before collecting external_brain_provider_execution."
             )
         } else {
             format!(
@@ -6255,7 +6301,7 @@ fn replacement_cli_provider_candidate(
 }
 
 fn resolve_binary_from_path(binary: &str) -> Option<String> {
-    let path_var = env::var_os("PATH")?;
+    let path_var = crate::brand::env_var_os("PATH")?;
     for dir in env::split_paths(&path_var) {
         let candidate = dir.join(binary);
         if candidate.is_file() {
@@ -6290,14 +6336,14 @@ fn connected_brain_manifest_template(
         }]
     });
     MilestoneEvidencePlanManifestTemplate {
-        schema_version: "forge.milestone.manifest_template.v1".to_string(),
+        schema_version: "foundry.milestone.manifest_template.v1".to_string(),
         id: "connected_brain_runtime_manifest".to_string(),
         status: "template_ready".to_string(),
         target_path: target_path.display().to_string(),
         secret_free: true,
         template_json,
         preparation_commands: vec![
-            format!("mkdir -p {}", project_root.join(".forge").display()),
+            format!("mkdir -p {}", project_root.join(".foundry").display()),
             format!(
                 "write {} with the provided template_json after replacing placeholders; do not store secrets in this file",
                 target_path.display()
@@ -6305,12 +6351,12 @@ fn connected_brain_manifest_template(
         ],
         validation_commands: vec![
             format!(
-                "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root {} --connected-brain {} --output json",
+                "foundry milestone evidence-plan --version 0.6 --capability replacement_grade_cli --project-root {} --connected-brain {} --output json",
                 project_root.display(),
                 provider_id
             ),
             format!(
-                "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root {} --connected-brain {} --approved-by <operator> --origin codex --output json",
+                "foundry milestone collect-evidence --version 0.6 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root {} --connected-brain {} --approved-by <operator> --origin codex --output json",
                 project_root.display(),
                 provider_id
             ),
@@ -6324,11 +6370,11 @@ fn push_replacement_grade_cli_demo_collection_commands(
     evidence_collection_commands: &mut Vec<String>,
 ) {
     evidence_collection_commands.push(format!(
-        "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind broader_project_coding_research_workflow --project-root {} --approved-by <operator> --origin codex --output json",
+        "foundry milestone collect-evidence --version 0.6 --capability replacement_grade_cli --kind broader_project_coding_research_workflow --project-root {} --approved-by <operator> --origin codex --output json",
         project_root.display()
     ));
     evidence_collection_commands.push(format!(
-        "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind terminal_file_editing_ux --project-root {} --approved-by <operator> --origin codex --output json",
+        "foundry milestone collect-evidence --version 0.6 --capability replacement_grade_cli --kind terminal_file_editing_ux --project-root {} --approved-by <operator> --origin codex --output json",
         project_root.display()
     ));
 }
@@ -6341,7 +6387,7 @@ fn plan_experimental_multimodal_evidence(
     configured_evidence_sources: &mut Vec<String>,
     evidence_collection_commands: &mut Vec<String>,
 ) -> Result<()> {
-    let feature_path = project_root.join(MULTIMODAL_FEATURE_RELATIVE_PATH);
+    let feature_path = crate::brand::project_config_path_for_read(project_root, "multimodal.json");
     let feature_enabled = if !feature_path.is_file() {
         manifest_templates.push(multimodal_feature_flag_template(project_root));
         config_checks.push(MilestoneEvidencePlanConfigCheck {
@@ -6391,7 +6437,8 @@ fn plan_experimental_multimodal_evidence(
     };
 
     let runtime_id = selected_multimodal_runtime_id(connected_runtime);
-    let manifest_path = project_root.join(MULTIMODAL_RUNTIMES_RELATIVE_PATH);
+    let manifest_path =
+        crate::brand::project_config_path_for_read(project_root, "multimodal-runtimes.json");
     if !manifest_path.is_file() {
         manifest_templates.push(multimodal_runtime_manifest_template(
             project_root,
@@ -6407,12 +6454,12 @@ fn plan_experimental_multimodal_evidence(
             ),
         });
         evidence_collection_commands.push(format!(
-            "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root {} --connected-runtime {} --approved-by <operator> --output json",
+            "foundry milestone collect-evidence --version 0.6 --capability experimental_multimodal_runtime --project-root {} --connected-runtime {} --approved-by <operator> --output json",
             project_root.display(),
             runtime_id
         ));
         evidence_collection_commands.push(format!(
-            "forge multimodal runtime-benchmark --capability image_understanding --fixture static_image_labels --project-root {} --connected-runtime {} --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
+            "foundry multimodal runtime-benchmark --capability image_understanding --fixture static_image_labels --project-root {} --connected-runtime {} --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
             project_root.display(),
             runtime_id
         ));
@@ -6575,12 +6622,12 @@ fn plan_experimental_multimodal_evidence(
     }
     configured_evidence_sources.push(format!("connected_multimodal_runtime:{runtime_id}"));
     evidence_collection_commands.push(format!(
-        "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root {} --connected-runtime {} --approved-by <operator> --output json",
+        "foundry milestone collect-evidence --version 0.6 --capability experimental_multimodal_runtime --project-root {} --connected-runtime {} --approved-by <operator> --output json",
         project_root.display(),
         runtime_id
     ));
     evidence_collection_commands.push(format!(
-        "forge multimodal runtime-benchmark --capability {} --fixture static_image_labels --project-root {} --connected-runtime {} --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
+        "foundry multimodal runtime-benchmark --capability {} --fixture static_image_labels --project-root {} --connected-runtime {} --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
         capability,
         project_root.display(),
         runtime_id
@@ -6604,21 +6651,21 @@ fn multimodal_feature_flag_template(project_root: &Path) -> MilestoneEvidencePla
         "scope": "project"
     });
     MilestoneEvidencePlanManifestTemplate {
-        schema_version: "forge.milestone.manifest_template.v1".to_string(),
+        schema_version: "foundry.milestone.manifest_template.v1".to_string(),
         id: "multimodal_feature_flag".to_string(),
         status: "template_ready".to_string(),
         target_path: target_path.display().to_string(),
         secret_free: true,
         template_json,
         preparation_commands: vec![
-            format!("mkdir -p {}", project_root.join(".forge").display()),
+            format!("mkdir -p {}", project_root.join(".foundry").display()),
             format!(
                 "write {} with the provided template_json after operator approval; do not store secrets in this file",
                 target_path.display()
             ),
         ],
         validation_commands: vec![format!(
-            "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root {} --output json",
+            "foundry milestone evidence-plan --version 0.6 --capability experimental_multimodal_runtime --project-root {} --output json",
             project_root.display()
         )],
         summary: "Secret-free multimodal experimental feature flag template for operator-approved runtime evidence planning.".to_string(),
@@ -6652,14 +6699,14 @@ fn multimodal_runtime_manifest_template(
         }]
     });
     MilestoneEvidencePlanManifestTemplate {
-        schema_version: "forge.milestone.manifest_template.v1".to_string(),
+        schema_version: "foundry.milestone.manifest_template.v1".to_string(),
         id: "multimodal_runtime_manifest".to_string(),
         status: "template_ready".to_string(),
         target_path: target_path.display().to_string(),
         secret_free: true,
         template_json,
         preparation_commands: vec![
-            format!("mkdir -p {}", project_root.join(".forge").display()),
+            format!("mkdir -p {}", project_root.join(".foundry").display()),
             format!(
                 "write {} with the provided template_json after replacing placeholders; do not store secrets in this file",
                 target_path.display()
@@ -6667,17 +6714,17 @@ fn multimodal_runtime_manifest_template(
         ],
         validation_commands: vec![
             format!(
-                "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root {} --connected-runtime {} --output json",
+                "foundry milestone evidence-plan --version 0.6 --capability experimental_multimodal_runtime --project-root {} --connected-runtime {} --output json",
                 project_root.display(),
                 runtime_id
             ),
             format!(
-                "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root {} --connected-runtime {} --approved-by <operator> --output json",
+                "foundry milestone collect-evidence --version 0.6 --capability experimental_multimodal_runtime --project-root {} --connected-runtime {} --approved-by <operator> --output json",
                 project_root.display(),
                 runtime_id
             ),
             format!(
-                "forge multimodal runtime-benchmark --capability image_understanding --fixture static_image_labels --project-root {} --connected-runtime {} --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
+                "foundry multimodal runtime-benchmark --capability image_understanding --fixture static_image_labels --project-root {} --connected-runtime {} --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
                 project_root.display(),
                 runtime_id
             ),
@@ -6688,7 +6735,7 @@ fn multimodal_runtime_manifest_template(
 
 fn milestone_attach_command(version: &str, capability_id: &str, kind: &str) -> String {
     format!(
-        "forge milestone attach-evidence --version {version} --capability {capability_id} --kind {kind} --summary \"Operator-approved {kind} receipt.\" --artifact <path> --approved-by <operator> --output json"
+        "foundry milestone attach-evidence --version {version} --capability {capability_id} --kind {kind} --summary \"Operator-approved {kind} receipt.\" --artifact <path> --approved-by <operator> --output json"
     )
 }
 
@@ -6720,7 +6767,7 @@ fn sanitize_milestone_component(value: &str) -> String {
     }
 }
 
-const EXPORT_DEMO_SCHEMA_VERSION: &str = "forge.milestone.export_demo.v1";
+const EXPORT_DEMO_SCHEMA_VERSION: &str = "foundry.milestone.export_demo.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MilestoneExportDemoReport {
@@ -6744,21 +6791,21 @@ pub struct MilestoneDemoArtifact {
     pub status: String,
 }
 
-const CLI_DEMO_SCHEMA_VERSION: &str = "forge.milestone.cli_demo.v1";
-const PATCH_LIFECYCLE_DEMO_SCHEMA_VERSION: &str = "forge.milestone.patch_lifecycle_demo.v1";
-const EXECUTOR_PROJECT_DEMO_SCHEMA_VERSION: &str = "forge.milestone.executor_project_demo.v1";
-const BRAIN_HANDOFF_DEMO_SCHEMA_VERSION: &str = "forge.milestone.brain_handoff_demo.v1";
+const CLI_DEMO_SCHEMA_VERSION: &str = "foundry.milestone.cli_demo.v1";
+const PATCH_LIFECYCLE_DEMO_SCHEMA_VERSION: &str = "foundry.milestone.patch_lifecycle_demo.v1";
+const EXECUTOR_PROJECT_DEMO_SCHEMA_VERSION: &str = "foundry.milestone.executor_project_demo.v1";
+const BRAIN_HANDOFF_DEMO_SCHEMA_VERSION: &str = "foundry.milestone.brain_handoff_demo.v1";
 const REAL_PROJECT_WORKFLOW_DEMO_SCHEMA_VERSION: &str =
-    "forge.milestone.real_project_workflow_demo.v1";
+    "foundry.milestone.real_project_workflow_demo.v1";
 const CONNECTED_EXTERNAL_BRAIN_DEMO_SCHEMA_VERSION: &str =
-    "forge.milestone.connected_external_brain_demo.v1";
+    "foundry.milestone.connected_external_brain_demo.v1";
 const CONNECTED_EXTERNAL_BRAIN_PROVIDER_SCHEMA_VERSION: &str =
-    "forge.milestone.connected_external_brain_provider.v1";
+    "foundry.milestone.connected_external_brain_provider.v1";
 const HEADROOM_RUNTIME_WRAPPER_DEMO_SCHEMA_VERSION: &str =
-    "forge.milestone.headroom_runtime_wrapper_demo.v1";
-const CONNECTED_BRAIN_RUNTIMES_RELATIVE_PATH: &str = ".forge/connected-brain-runtimes.json";
-const MULTIMODAL_FEATURE_RELATIVE_PATH: &str = ".forge/multimodal.json";
-const MULTIMODAL_RUNTIMES_RELATIVE_PATH: &str = ".forge/multimodal-runtimes.json";
+    "foundry.milestone.headroom_runtime_wrapper_demo.v1";
+const CONNECTED_BRAIN_RUNTIMES_RELATIVE_PATH: &str = ".foundry/connected-brain-runtimes.json";
+const MULTIMODAL_FEATURE_RELATIVE_PATH: &str = ".foundry/multimodal.json";
+const MULTIMODAL_RUNTIMES_RELATIVE_PATH: &str = ".foundry/multimodal-runtimes.json";
 
 #[derive(Debug, Clone, Default)]
 pub struct MilestoneCliDemoOptions<'a> {
@@ -6803,7 +6850,7 @@ pub struct ReplacementCliDemoFlow {
     pub workflow_id: String,
     pub run_id: Option<String>,
     pub run_status: String,
-    pub completed_through_forge: bool,
+    pub completed_through_foundry: bool,
     pub commands: Vec<String>,
     pub artifact_refs: Vec<String>,
     pub validation_evidence: Vec<String>,
@@ -7013,7 +7060,7 @@ struct ConnectedBrainProviderSelection {
 }
 
 pub fn build_milestone_export_demo(
-    store: &ForgeStore,
+    store: &FoundryStore,
     origin: &str,
 ) -> Result<MilestoneExportDemoReport> {
     let goal = "hackathon".to_string();
@@ -7135,24 +7182,24 @@ pub fn build_milestone_export_demo(
             format!("screen_artifact_id:{screen_artifact_id}"),
             format!("document_artifact_id:{document_artifact_id}"),
         ],
-        export_evidence: "forge.milestone.export_demo.v1 creates a scheduled daily research workflow with creative screen and document artifacts, design token collection, and full lineage chain preservation. The workflow can be inspected via `forge inspect` or `forge schedule list`, creative artifacts via `forge workflow list-creative`, and tokens via `forge workflow get-tokens`. Markdown and PDF artifacts are generated through `forge schedule run-due` per goal.".to_string(),
+        export_evidence: "foundry.milestone.export_demo.v1 creates a scheduled daily research workflow with creative screen and document artifacts, design token collection, and full lineage chain preservation. The workflow can be inspected via `foundry inspect` or `foundry schedule list`, creative artifacts via `foundry workflow list-creative`, and tokens via `foundry workflow get-tokens`. Markdown and PDF artifacts are generated through `foundry schedule run-due` per goal.".to_string(),
     })
 }
 
 pub fn build_replacement_cli_demo(
-    store: &ForgeStore,
+    store: &FoundryStore,
     origin: &str,
 ) -> Result<MilestoneCliDemoReport> {
     build_replacement_cli_demo_with_options(store, origin, MilestoneCliDemoOptions::default())
 }
 
 pub fn build_replacement_cli_demo_with_options(
-    store: &ForgeStore,
+    store: &FoundryStore,
     origin: &str,
     options: MilestoneCliDemoOptions<'_>,
 ) -> Result<MilestoneCliDemoReport> {
     let mut coding_workflow = create_workflow(parse_intent(
-        "Demonstrate Forge-first coding task with bounded context, file patch, diff review and validation",
+        "Demonstrate Foundry-first coding task with bounded context, file patch, diff review and validation",
     ));
     store.save_workflow(&coding_workflow)?;
 
@@ -7166,7 +7213,7 @@ pub fn build_replacement_cli_demo_with_options(
     fs::write(
         &patch_review_path,
         format!(
-            "# Replacement-grade CLI coding demo\n\nworkflow_id: `{}`\norigin: `{}`\n\nThis deterministic artifact records the Forge-owned coding flow: context, handoff, patch intent, diff review, validation, artifact attachment and inspectability. It is demo evidence only; it does not edit arbitrary user files.\n",
+            "# Replacement-grade CLI coding demo\n\nworkflow_id: `{}`\norigin: `{}`\n\nThis deterministic artifact records the Foundry-owned coding flow: context, handoff, patch intent, diff review, validation, artifact attachment and inspectability. It is demo evidence only; it does not edit arbitrary user files.\n",
             coding_workflow.id, origin
         ),
     )?;
@@ -7230,14 +7277,14 @@ pub fn build_replacement_cli_demo_with_options(
 
     let async_request = start_async_request(
         store,
-        "Demonstrate long-running Forge-first async workflow with heartbeat and resume/status visibility",
+        "Demonstrate long-running Foundry-first async workflow with heartbeat and resume/status visibility",
         origin,
     )?;
     let heartbeat = heartbeat_request(
         store,
         &async_request.run_id,
-        "forge_cli_demo",
-        "replacement-grade CLI demo run is observable through Forge heartbeat",
+        "foundry_cli_demo",
+        "replacement-grade CLI demo run is observable through Foundry heartbeat",
         600,
         None,
         origin,
@@ -7264,18 +7311,18 @@ pub fn build_replacement_cli_demo_with_options(
         flows: vec![
             ReplacementCliDemoFlow {
                 kind: "coding_task".to_string(),
-                title: "Forge-first coding task with bounded patch review".to_string(),
+                title: "Foundry-first coding task with bounded patch review".to_string(),
                 workflow_id: coding_workflow.id.clone(),
                 run_id: None,
                 run_status: coding_workflow.status.clone(),
-                completed_through_forge: true,
+                completed_through_foundry: true,
                 commands: vec![
-                    "forge plan --goal \"Demonstrate coding task\" --output json".to_string(),
-                    "forge context --workflow <workflow-id> --task <task-id> --budget 1200 --strict --view compact --output json".to_string(),
-                    "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --view compact --output json".to_string(),
-                    "forge workflow attach-artifact --workflow <workflow-id> --path <diff-review.md> --kind cli_demo --origin forge_cli --output json".to_string(),
-                    "forge validate --workflow <workflow-id> --output json".to_string(),
-                    "forge inspect <workflow-id> --verbose --output json".to_string(),
+                    "foundry plan --goal \"Demonstrate coding task\" --output json".to_string(),
+                    "foundry context --workflow <workflow-id> --task <task-id> --budget 1200 --strict --view compact --output json".to_string(),
+                    "foundry task handoff --workflow <workflow-id> --task <task-id> --executor codex --view compact --output json".to_string(),
+                    "foundry workflow attach-artifact --workflow <workflow-id> --path <diff-review.md> --kind cli_demo --origin foundry_cli --output json".to_string(),
+                    "foundry validate --workflow <workflow-id> --output json".to_string(),
+                    "foundry inspect <workflow-id> --verbose --output json".to_string(),
                 ],
                 artifact_refs: vec![attached.artifact.path],
                 validation_evidence: vec![
@@ -7294,20 +7341,20 @@ pub fn build_replacement_cli_demo_with_options(
                 real_project: None,
                 external_brain: None,
                 activity: None,
-                summary: "The coding demo proves the Forge CLI has a native flow shape for context routing, executor handoff, edit intake, patch plan/review/diff/apply/revert/restore artifact lineage, validation and inspection. It remains groundwork because richer interactive terminal editing still needs broader UX evidence.".to_string(),
+                summary: "The coding demo proves the Foundry CLI has a native flow shape for context routing, executor handoff, edit intake, patch plan/review/diff/apply/revert/restore artifact lineage, validation and inspection. It remains groundwork because richer interactive terminal editing still needs broader UX evidence.".to_string(),
             },
             ReplacementCliDemoFlow {
                 kind: "harness_control".to_string(),
-                title: "Forge-first harness, headroom and session lifecycle control".to_string(),
+                title: "Foundry-first harness, headroom and session lifecycle control".to_string(),
                 workflow_id: coding_workflow.id.clone(),
                 run_id: None,
                 run_status: harness_panel.status.clone(),
-                completed_through_forge: true,
+                completed_through_foundry: true,
                 commands: vec![
-                    "forge interactive harness --workflow <workflow-id> --task <task-id> --token-headroom --output json".to_string(),
-                    "forge harness headroom-plan --executor codex --project-root <project-root> --context-budget 1200 --token-headroom --output json".to_string(),
-                    "forge sessions --provider codex --output json".to_string(),
-                    "forge interactive readiness --output json".to_string(),
+                    "foundry interactive harness --workflow <workflow-id> --task <task-id> --token-headroom --output json".to_string(),
+                    "foundry harness headroom-plan --executor codex --project-root <project-root> --context-budget 1200 --token-headroom --output json".to_string(),
+                    "foundry sessions --provider codex --output json".to_string(),
+                    "foundry interactive readiness --output json".to_string(),
                 ],
                 artifact_refs: Vec::new(),
                 validation_evidence: vec![
@@ -7337,16 +7384,16 @@ pub fn build_replacement_cli_demo_with_options(
             connected_external_brain_flow,
             ReplacementCliDemoFlow {
                 kind: "research_artifact".to_string(),
-                title: "Forge-first research/artifact delivery".to_string(),
+                title: "Foundry-first research/artifact delivery".to_string(),
                 workflow_id: research.workflow_id.clone(),
                 run_id: None,
                 run_status: smoke.status.clone(),
-                completed_through_forge: true,
+                completed_through_foundry: true,
                 commands: vec![
-                    "forge schedule create-daily-goal-research --goal hackathon --timezone America/Sao_Paulo --cron \"0 8 * * *\" --origin forge_cli --output json".to_string(),
-                    "forge run --workflow <workflow-id> --simulate --output json".to_string(),
-                    "forge artifacts --workflow <workflow-id> --output json".to_string(),
-                    "forge inspect <workflow-id> --verbose --output json".to_string(),
+                    "foundry schedule create-daily-goal-research --goal hackathon --timezone America/Sao_Paulo --cron \"0 8 * * *\" --origin foundry_cli --output json".to_string(),
+                    "foundry run --workflow <workflow-id> --simulate --output json".to_string(),
+                    "foundry artifacts --workflow <workflow-id> --output json".to_string(),
+                    "foundry inspect <workflow-id> --verbose --output json".to_string(),
                 ],
                 artifact_refs: research_refs,
                 validation_evidence: vec![
@@ -7361,21 +7408,21 @@ pub fn build_replacement_cli_demo_with_options(
                 real_project: None,
                 external_brain: None,
                 activity: None,
-                summary: "The research demo uses the canonical daily Goal workflow to produce Markdown, PDF and Telegram delivery records through Forge-owned workflow semantics without live external delivery or secrets.".to_string(),
+                summary: "The research demo uses the canonical daily Goal workflow to produce Markdown, PDF and Telegram delivery records through Foundry-owned workflow semantics without live external delivery or secrets.".to_string(),
             },
             ReplacementCliDemoFlow {
                 kind: "long_running_async".to_string(),
-                title: "Forge-first async run handoff with heartbeat".to_string(),
+                title: "Foundry-first async run handoff with heartbeat".to_string(),
                 workflow_id: async_request.workflow_id.clone(),
                 run_id: Some(async_request.run_id.clone()),
                 run_status: heartbeat.status.clone(),
-                completed_through_forge: true,
+                completed_through_foundry: true,
                 commands: vec![
-                    "forge request start --goal \"Long-running task\" --origin forge_cli --output json".to_string(),
-                    "forge request heartbeat --run <run-id> --executor forge_cli_demo --summary \"executor alive\" --ttl-seconds 600 --origin forge_cli --output json".to_string(),
-                    "forge request status --run <run-id> --output json".to_string(),
-                    "forge request list --status running --output json".to_string(),
-                    "forge inspect <workflow-id> --output json".to_string(),
+                    "foundry request start --goal \"Long-running task\" --origin foundry_cli --output json".to_string(),
+                    "foundry request heartbeat --run <run-id> --executor foundry_cli_demo --summary \"executor alive\" --ttl-seconds 600 --origin foundry_cli --output json".to_string(),
+                    "foundry request status --run <run-id> --output json".to_string(),
+                    "foundry request list --status running --output json".to_string(),
+                    "foundry inspect <workflow-id> --output json".to_string(),
                 ],
                 artifact_refs: Vec::new(),
                 validation_evidence: vec![
@@ -7390,13 +7437,13 @@ pub fn build_replacement_cli_demo_with_options(
                 real_project: None,
                 external_brain: None,
                 activity: Some(heartbeat.activity),
-                summary: "The async demo proves Forge can start a durable run, mark it active through heartbeat, expose status/list/inspect visibility and keep orchestration authority during long-running executor work.".to_string(),
+                summary: "The async demo proves Foundry can start a durable run, mark it active through heartbeat, expose status/list/inspect visibility and keep orchestration authority during long-running executor work.".to_string(),
             },
         ],
         remaining_gaps: vec![
             "Real external model/provider execution on broader project coding/research workflows and TUI apply/approval ergonomics remain required before replacement-grade promotion.".to_string(),
             "Deeper provider/session lifecycle controls and richer terminal UX remain required.".to_string(),
-            "This demo is deterministic evidence and does not claim Forge 0.5 promotion readiness.".to_string(),
+            "This demo is deterministic evidence and does not claim Foundry 0.6 promotion readiness.".to_string(),
         ],
         lean_governance: vec![
             "The demo reuses existing request, schedule, artifact and validation primitives instead of adding a separate agent shell architecture.".to_string(),
@@ -7413,8 +7460,8 @@ fn build_milestone_headroom_runtime_wrapper_demo(
     let wrapper_plan = build_cli_wrapper_plan(CliWrapperPlanOptions {
         executor: "codex",
         command: &command,
-        forge_first: true,
-        forge_first_source: "milestone_cli_demo_headroom_runtime_wrapper",
+        foundry_first: true,
+        foundry_first_source: "milestone_cli_demo_headroom_runtime_wrapper",
         project_root: None,
         workflow_id: Some(workflow_id),
         task_id: Some(task_id),
@@ -7423,7 +7470,7 @@ fn build_milestone_headroom_runtime_wrapper_demo(
         context_budget_source: "milestone_cli_demo_headroom_runtime_wrapper",
         token_headroom: true,
         token_headroom_source: "milestone_cli_demo_headroom_runtime_wrapper",
-        require_token_headroom_for_forge_first: true,
+        require_token_headroom_for_foundry_first: true,
     });
     let runtime = &wrapper_plan.headroom_runtime_plan;
     let has_tool_output_interception = runtime.interception_points.iter().any(|point| {
@@ -7434,13 +7481,13 @@ fn build_milestone_headroom_runtime_wrapper_demo(
     let has_log_route = runtime.content_routes.iter().any(|route| {
         route.content_kind == "log" && route.strategy == "signal_log_compressor" && route.reversible
     });
-    let has_reversible_store = runtime.reversible_store.uri_scheme == "forge://harness/headroom/";
+    let has_reversible_store = runtime.reversible_store.uri_scheme == "foundry://harness/headroom/";
     let has_retrieval_tool = runtime
         .mcp_tools
         .iter()
-        .any(|tool| tool == "forge.harness.retrieve_headroom");
+        .any(|tool| tool == "foundry.harness.retrieve_headroom");
     let has_runtime_env = wrapper_plan.env.iter().any(|env| {
-        env.name == "FORGE_HEADROOM_RUNTIME_PLAN"
+        env.name == "FOUNDRY_HEADROOM_RUNTIME_PLAN"
             && env.value == CLI_HARNESS_HEADROOM_RUNTIME_PLAN_SCHEMA_VERSION
     });
     let ready = wrapper_plan.schema_version == CLI_WRAPPER_PLAN_SCHEMA_VERSION
@@ -7480,29 +7527,29 @@ fn build_milestone_headroom_runtime_wrapper_demo(
         wrapper_plan,
         validation_evidence,
         commands: vec![
-            "forge harness wrap-plan --executor codex --cmd codex --forge-first --workflow <workflow-id> --task <task-id> --context-budget 1200 --token-headroom --output json".to_string(),
-            "forge harness token-headroom --content <payload> --kind log --persist --output json".to_string(),
-            "forge harness retrieve-headroom --ref <retrieval-ref> --include-content --output json".to_string(),
-            "forge mcp call forge.harness.retrieve_headroom --input '{\"ref\":\"<retrieval-ref>\",\"include_content\":true}' --output json".to_string(),
+            "foundry harness wrap-plan --executor codex --cmd codex --foundry-first --workflow <workflow-id> --task <task-id> --context-budget 1200 --token-headroom --output json".to_string(),
+            "foundry harness token-headroom --content <payload> --kind log --persist --output json".to_string(),
+            "foundry harness retrieve-headroom --ref <retrieval-ref> --include-content --output json".to_string(),
+            "foundry mcp call foundry.harness.retrieve_headroom --input '{\"ref\":\"<retrieval-ref>\",\"include_content\":true}' --output json".to_string(),
         ],
-        summary: "The milestone demo now exposes the Headroom-inspired Forge wrapper runtime as a structured, non-executing contract: prompt/tool/stdout interception, reversible local storage, retrieval tools and env overlay are all produced by the same harness wrapper plan used by real CLI execution.".to_string(),
+        summary: "The milestone demo now exposes the Headroom-inspired Foundry wrapper runtime as a structured, non-executing contract: prompt/tool/stdout interception, reversible local storage, retrieval tools and env overlay are all produced by the same harness wrapper plan used by real CLI execution.".to_string(),
     }
 }
 
 fn build_replacement_cli_brain_handoff_demo(
-    store: &ForgeStore,
+    store: &FoundryStore,
     origin: &str,
 ) -> Result<ReplacementCliDemoFlow> {
     let request = start_async_request(
         store,
-        "Demonstrate Forge-owned external brain handoff rehearsal with context, routing, shell plan and lifecycle audit",
+        "Demonstrate Foundry-owned external brain handoff rehearsal with context, routing, shell plan and lifecycle audit",
         origin,
     )?;
     let task_id = "task-brain-handoff".to_string();
     let mut workflow = store.load_workflow(&request.workflow_id)?;
     workflow.tasks = vec![task(
         &task_id,
-        "Prepare a Forge-owned Codex handoff rehearsal",
+        "Prepare a Foundry-owned Codex handoff rehearsal",
         &[],
         &[
             "workflow goal",
@@ -7535,14 +7582,14 @@ fn build_replacement_cli_brain_handoff_demo(
                     brain_id: Some("codex".to_string()),
                     role: "primary_node_agent".to_string(),
                     parallel_group: "handoff-rehearsal".to_string(),
-                    state_owner: "forge".to_string(),
+                    state_owner: "foundry".to_string(),
                 },
                 NodeBrainAgentSlotSpec {
                     slot_id: "agent-codex-review".to_string(),
                     brain_id: Some("codex".to_string()),
                     role: "review_agent".to_string(),
                     parallel_group: "handoff-rehearsal".to_string(),
-                    state_owner: "forge".to_string(),
+                    state_owner: "foundry".to_string(),
                 },
             ],
             max_parallel_agents: Some(2),
@@ -7554,7 +7601,7 @@ fn build_replacement_cli_brain_handoff_demo(
         .base_dir()
         .join("tmp")
         .join(format!("{}-brain-handoff", workflow.id));
-    fs::create_dir_all(project_root.join(".forge"))?;
+    fs::create_dir_all(project_root.join(".foundry"))?;
 
     let handoff = build_task_handoff_with_project(
         store,
@@ -7604,12 +7651,12 @@ fn build_replacement_cli_brain_handoff_demo(
     }
     .to_string();
     let commands = vec![
-        "forge workflow update-node-brain --workflow <workflow-id> --task <task-id> --default-brain codex --agent-slot agent-codex-primary=codex:primary_node_agent:handoff-rehearsal --agent-slot agent-codex-review=codex:review_agent:handoff-rehearsal --max-parallel-agents 2 --origin forge_cli --output json".to_string(),
-        "forge context --workflow <workflow-id> --task <task-id> --project-root <project-root> --budget 1200 --strict --view compact --output json".to_string(),
-        "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --view compact --output json".to_string(),
-        "forge shells --executor codex --workflow <workflow-id> --task <task-id> --run <run-id> --record-session --origin forge_cli --output json".to_string(),
-        "forge sessions lifecycle --session codex-shell --state opened --workflow <workflow-id> --task <task-id> --run <run-id> --origin forge_cli --output json".to_string(),
-        "forge sessions history --session codex-shell --output json".to_string(),
+        "foundry workflow update-node-brain --workflow <workflow-id> --task <task-id> --default-brain codex --agent-slot agent-codex-primary=codex:primary_node_agent:handoff-rehearsal --agent-slot agent-codex-review=codex:review_agent:handoff-rehearsal --max-parallel-agents 2 --origin foundry_cli --output json".to_string(),
+        "foundry context --workflow <workflow-id> --task <task-id> --project-root <project-root> --budget 1200 --strict --view compact --output json".to_string(),
+        "foundry task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --view compact --output json".to_string(),
+        "foundry shells --executor codex --workflow <workflow-id> --task <task-id> --run <run-id> --record-session --origin foundry_cli --output json".to_string(),
+        "foundry sessions lifecycle --session codex-shell --state opened --workflow <workflow-id> --task <task-id> --run <run-id> --origin foundry_cli --output json".to_string(),
+        "foundry sessions history --session codex-shell --output json".to_string(),
     ];
     let brain_handoff = MilestoneBrainHandoffDemo {
         schema_version: BRAIN_HANDOFF_DEMO_SCHEMA_VERSION.to_string(),
@@ -7634,16 +7681,16 @@ fn build_replacement_cli_brain_handoff_demo(
         external_resources_mutated: false,
         node_brain_routing: routing_update.new_routing,
         commands: commands.clone(),
-        summary: "Forge assembled the context packet, node-brain routing, task handoff lease, plan-only shell launch receipt and ordered session lifecycle receipt for Codex without launching a child CLI or executing a model.".to_string(),
+        summary: "Foundry assembled the context packet, node-brain routing, task handoff lease, plan-only shell launch receipt and ordered session lifecycle receipt for Codex without launching a child CLI or executing a model.".to_string(),
     };
 
     Ok(ReplacementCliDemoFlow {
         kind: "brain_handoff_rehearsal".to_string(),
-        title: "Forge-owned external brain handoff rehearsal".to_string(),
+        title: "Foundry-owned external brain handoff rehearsal".to_string(),
         workflow_id: workflow.id,
         run_id: Some(request.run_id),
         run_status: status,
-        completed_through_forge: true,
+        completed_through_foundry: true,
         commands,
         artifact_refs: vec![
             format!("shell_plan_global_event_id:{}", shell_receipt.global_event_id),
@@ -7667,17 +7714,17 @@ fn build_replacement_cli_brain_handoff_demo(
         real_project: None,
         external_brain: None,
         activity: None,
-        summary: "This flow proves Forge can prepare a Codex node handoff with Forge-owned context, memory policy, node-brain routing, shell launch plan and session lifecycle audit, while honestly leaving actual model execution outside this deterministic milestone demo.".to_string(),
+        summary: "This flow proves Foundry can prepare a Codex node handoff with Foundry-owned context, memory policy, node-brain routing, shell launch plan and session lifecycle audit, while honestly leaving actual model execution outside this deterministic milestone demo.".to_string(),
     })
 }
 
 fn build_replacement_cli_real_project_workflow_demo(
-    store: &ForgeStore,
+    store: &FoundryStore,
     origin: &str,
 ) -> Result<ReplacementCliDemoFlow> {
     let request = start_async_request(
         store,
-        "Demonstrate Forge-owned real project coding and research workflow with brain routing, handoff, harness execution and multi-file artifacts",
+        "Demonstrate Foundry-owned real project coding and research workflow with brain routing, handoff, harness execution and multi-file artifacts",
         origin,
     )?;
     let task_id = "task-real-project-coding-research".to_string();
@@ -7693,7 +7740,7 @@ fn build_replacement_cli_real_project_workflow_demo(
             "validation command",
         ],
         vec![],
-        "validated code and research artifacts generated under Forge lineage",
+        "validated code and research artifacts generated under Foundry lineage",
         (ExecutorKind::Ai, 0.18),
     )];
     workflow.status = "running".to_string();
@@ -7717,14 +7764,14 @@ fn build_replacement_cli_real_project_workflow_demo(
                     brain_id: Some("codex".to_string()),
                     role: "project_coder".to_string(),
                     parallel_group: "real-project-demo".to_string(),
-                    state_owner: "forge".to_string(),
+                    state_owner: "foundry".to_string(),
                 },
                 NodeBrainAgentSlotSpec {
                     slot_id: "agent-codex-researcher".to_string(),
                     brain_id: Some("codex".to_string()),
                     role: "project_researcher".to_string(),
                     parallel_group: "real-project-demo".to_string(),
-                    state_owner: "forge".to_string(),
+                    state_owner: "foundry".to_string(),
                 },
             ],
             max_parallel_agents: Some(2),
@@ -7739,13 +7786,13 @@ fn build_replacement_cli_real_project_workflow_demo(
     if project_root.exists() {
         fs::remove_dir_all(&project_root)?;
     }
-    fs::create_dir_all(project_root.join(".forge"))?;
+    fs::create_dir_all(project_root.join(".foundry"))?;
     fs::create_dir_all(project_root.join("src"))?;
     fs::create_dir_all(project_root.join("tests"))?;
     fs::create_dir_all(project_root.join("docs/research"))?;
     fs::write(
         project_root.join("README.md"),
-        "# Forge real project demo\n\nThis isolated project receives code and research artifacts through Forge-controlled execution.\n",
+        "# Foundry real project demo\n\nThis isolated project receives code and research artifacts through Foundry-controlled execution.\n",
     )?;
 
     let handoff = build_task_handoff_with_project(
@@ -7757,7 +7804,7 @@ fn build_replacement_cli_real_project_workflow_demo(
         900,
         Some(&project_root),
     )?;
-    let shim_dir = project_root.join(".forge/shims");
+    let shim_dir = project_root.join(".foundry/shims");
     let _bootstrap = build_harness_bootstrap_report(HarnessBootstrapOptions {
         shim_dir: &shim_dir,
         executor: "sh",
@@ -7768,7 +7815,7 @@ fn build_replacement_cli_real_project_workflow_demo(
         token_headroom: true,
         token_headroom_source: "milestone_real_project_demo",
         apply: true,
-        approved_by: Some("forge_cli_demo"),
+        approved_by: Some("foundry_cli_demo"),
         force: true,
     })?;
 
@@ -7784,38 +7831,38 @@ pub fn classify_request(input: &str) -> &'static str {
 }
 RS
 cat > tests/workflow_contract.txt <<EOF
-workflow=$FORGE_WORKFLOW_ID
-task=$FORGE_TASK_ID
-run=$FORGE_RUN_ID
+workflow=$FOUNDRY_WORKFLOW_ID
+task=$FOUNDRY_TASK_ID
+run=$FOUNDRY_RUN_ID
 brain=codex
-harness=$FORGE_HARNESS
-mode=$FORGE_HARNESS_MODE
+harness=$FOUNDRY_HARNESS
+mode=$FOUNDRY_HARNESS_MODE
 EOF
 cat > docs/research/findings.md <<EOF
 # Real project research fixture
 
-- Workflow: $FORGE_WORKFLOW_ID
-- Task: $FORGE_TASK_ID
-- Result: code and research artifacts generated under Forge harness lineage.
+- Workflow: $FOUNDRY_WORKFLOW_ID
+- Task: $FOUNDRY_TASK_ID
+- Result: code and research artifacts generated under Foundry harness lineage.
 EOF
 grep -q 'classify_request' src/lib.rs
-grep -q "$FORGE_WORKFLOW_ID" tests/workflow_contract.txt
+grep -q "$FOUNDRY_WORKFLOW_ID" tests/workflow_contract.txt
 grep -q 'research artifacts' docs/research/findings.md
 {
-  printf 'forge_real_project_demo\n'
-  printf 'workflow=%s\n' "$FORGE_WORKFLOW_ID"
-  printf 'task=%s\n' "$FORGE_TASK_ID"
-  printf 'run=%s\n' "$FORGE_RUN_ID"
+  printf 'foundry_real_project_demo\n'
+  printf 'workflow=%s\n' "$FOUNDRY_WORKFLOW_ID"
+  printf 'task=%s\n' "$FOUNDRY_TASK_ID"
+  printf 'run=%s\n' "$FOUNDRY_RUN_ID"
   printf 'brain=codex\n'
-  printf 'harness=%s\n' "$FORGE_HARNESS"
-  printf 'mode=%s\n' "$FORGE_HARNESS_MODE"
-  printf 'token_headroom=%s\n' "$FORGE_TOKEN_HEADROOM"
+  printf 'harness=%s\n' "$FOUNDRY_HARNESS"
+  printf 'mode=%s\n' "$FOUNDRY_HARNESS_MODE"
+  printf 'token_headroom=%s\n' "$FOUNDRY_TOKEN_HEADROOM"
   printf 'artifacts=src/lib.rs,tests/workflow_contract.txt,docs/research/findings.md\n'
   printf 'validation=code_and_research_markers_verified\n'
-  printf 'research_summary=Forge routed coding and research through one lineage-preserving workflow.\n'
+  printf 'research_summary=Foundry routed coding and research through one lineage-preserving workflow.\n'
   i=0
   while [ "$i" -lt 48 ]; do
-    printf 'trace[%02d]=workflow=%s task=%s run=%s phase=project_coding_research status=observed artifact_set=code,research,contract\n' "$i" "$FORGE_WORKFLOW_ID" "$FORGE_TASK_ID" "$FORGE_RUN_ID"
+    printf 'trace[%02d]=workflow=%s task=%s run=%s phase=project_coding_research status=observed artifact_set=code,research,contract\n' "$i" "$FOUNDRY_WORKFLOW_ID" "$FOUNDRY_TASK_ID" "$FOUNDRY_RUN_ID"
     i=$((i + 1))
   done
 }
@@ -7829,8 +7876,8 @@ grep -q 'research artifacts' docs/research/findings.md
         store: Some(store),
         executor: "sh",
         command: &command,
-        forge_first: true,
-        forge_first_source: "milestone_real_project_demo",
+        foundry_first: true,
+        foundry_first_source: "milestone_real_project_demo",
         workflow_id: Some(&workflow.id),
         task_id: Some(&task_id),
         run_id: Some(&request.run_id),
@@ -7838,7 +7885,7 @@ grep -q 'research artifacts' docs/research/findings.md
         context_budget_source: "milestone_real_project_demo",
         token_headroom: true,
         token_headroom_source: "milestone_real_project_demo",
-        require_token_headroom_for_forge_first: true,
+        require_token_headroom_for_foundry_first: true,
         dry_run: false,
         allow_exec: true,
         secret_env: &[],
@@ -7917,22 +7964,22 @@ grep -q 'research artifacts' docs/research/findings.md
             format!("handoff_status:{}", handoff.status),
             format!("global_event_id:{}", receipt.global_event_id.unwrap_or_default()),
         ],
-        summary: "Forge routed a real-project style task to Codex, built a handoff packet for an isolated project, executed a governed harness command with workflow/task/run lineage, generated code plus research artifacts and validated them without touching external resources.".to_string(),
+        summary: "Foundry routed a real-project style task to Codex, built a handoff packet for an isolated project, executed a governed harness command with workflow/task/run lineage, generated code plus research artifacts and validated them without touching external resources.".to_string(),
     };
 
     Ok(ReplacementCliDemoFlow {
         kind: "real_project_coding_research".to_string(),
-        title: "Forge-owned real project coding and research workflow".to_string(),
+        title: "Foundry-owned real project coding and research workflow".to_string(),
         workflow_id: workflow.id,
         run_id: Some(request.run_id),
         run_status: status,
-        completed_through_forge: true,
+        completed_through_foundry: true,
         commands: vec![
-            "forge workflow update-node-brain --workflow <workflow-id> --task <task-id> --default-brain codex --agent-slot agent-codex-coder=codex:project_coder:real-project-demo --agent-slot agent-codex-researcher=codex:project_researcher:real-project-demo --max-parallel-agents 2 --origin forge_cli --output json".to_string(),
-        "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --view compact --output json".to_string(),
-            "forge harness bootstrap --executor sh --shim-dir <project-root>/.forge/shims --project-root <project-root> --apply --approved-by forge_cli_demo --output json".to_string(),
-            "forge harness exec --executor sh --project-root <project-root> --workflow <workflow-id> --task <task-id> --run <run-id> --forge-first --execute --allow-exec -- /bin/sh -c <real-project-code-and-research-script>".to_string(),
-            "forge harness retrieve-headroom --ref <stdout-retrieval-ref> --output json".to_string(),
+            "foundry workflow update-node-brain --workflow <workflow-id> --task <task-id> --default-brain codex --agent-slot agent-codex-coder=codex:project_coder:real-project-demo --agent-slot agent-codex-researcher=codex:project_researcher:real-project-demo --max-parallel-agents 2 --origin foundry_cli --output json".to_string(),
+        "foundry task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --view compact --output json".to_string(),
+            "foundry harness bootstrap --executor sh --shim-dir <project-root>/.foundry/shims --project-root <project-root> --apply --approved-by foundry_cli_demo --output json".to_string(),
+            "foundry harness exec --executor sh --project-root <project-root> --workflow <workflow-id> --task <task-id> --run <run-id> --foundry-first --execute --allow-exec -- /bin/sh -c <real-project-code-and-research-script>".to_string(),
+            "foundry harness retrieve-headroom --ref <stdout-retrieval-ref> --output json".to_string(),
         ],
         artifact_refs: target_paths
             .iter()
@@ -7952,7 +7999,7 @@ grep -q 'research artifacts' docs/research/findings.md
         real_project: Some(real_project),
         external_brain: None,
         activity: None,
-        summary: "This flow moves the replacement-grade CLI evidence beyond single-file fixtures by proving a multi-file project coding and research task can run through Forge-owned brain routing, handoff, harness lineage and validation.".to_string(),
+        summary: "This flow moves the replacement-grade CLI evidence beyond single-file fixtures by proving a multi-file project coding and research task can run through Foundry-owned brain routing, handoff, harness lineage and validation.".to_string(),
     })
 }
 
@@ -7962,7 +8009,8 @@ fn load_connected_brain_provider_selection(
     let Some(project_root) = options.project_root else {
         return Ok(None);
     };
-    let manifest_path = project_root.join(CONNECTED_BRAIN_RUNTIMES_RELATIVE_PATH);
+    let manifest_path =
+        crate::brand::project_config_path_for_read(project_root, "connected-brain-runtimes.json");
     if !manifest_path.is_file() {
         if let Some(connected_brain) = options.connected_brain {
             bail!(
@@ -8067,7 +8115,7 @@ fn connected_brain_provider_command(
 }
 
 fn build_replacement_cli_connected_external_brain_demo(
-    store: &ForgeStore,
+    store: &FoundryStore,
     origin: &str,
     options: &MilestoneCliDemoOptions<'_>,
 ) -> Result<ReplacementCliDemoFlow> {
@@ -8081,7 +8129,7 @@ fn build_replacement_cli_connected_external_brain_demo(
         .unwrap_or("codex-compatible-stub");
     let request = start_async_request(
         store,
-        "Demonstrate Forge-owned connected external brain adapter execution with handoff, harness lineage and validation",
+        "Demonstrate Foundry-owned connected external brain adapter execution with handoff, harness lineage and validation",
         origin,
     )?;
     let task_id = "task-connected-external-brain".to_string();
@@ -8097,7 +8145,7 @@ fn build_replacement_cli_connected_external_brain_demo(
             "validation command",
         ],
         vec![],
-        "validated adapter outputs generated under Forge lineage",
+        "validated adapter outputs generated under Foundry lineage",
         (ExecutorKind::Ai, 0.2),
     )];
     workflow.status = "running".to_string();
@@ -8122,14 +8170,14 @@ fn build_replacement_cli_connected_external_brain_demo(
                     brain_id: Some(brain_id.to_string()),
                     role: "connected_adapter_coder".to_string(),
                     parallel_group: "connected-external-brain-demo".to_string(),
-                    state_owner: "forge".to_string(),
+                    state_owner: "foundry".to_string(),
                 },
                 NodeBrainAgentSlotSpec {
                     slot_id: "agent-external-brain-researcher".to_string(),
                     brain_id: Some(brain_id.to_string()),
                     role: "connected_adapter_researcher".to_string(),
                     parallel_group: "connected-external-brain-demo".to_string(),
-                    state_owner: "forge".to_string(),
+                    state_owner: "foundry".to_string(),
                 },
             ],
             max_parallel_agents: Some(2),
@@ -8147,7 +8195,7 @@ fn build_replacement_cli_connected_external_brain_demo(
     fs::create_dir_all(project_root.join("brain-output"))?;
     fs::write(
         project_root.join("README.md"),
-        "# Forge connected external brain demo\n\nThis isolated project receives adapter output through Forge-controlled harness execution.\n",
+        "# Foundry connected external brain demo\n\nThis isolated project receives adapter output through Foundry-controlled harness execution.\n",
     )?;
 
     let handoff = build_task_handoff_with_project(
@@ -8159,7 +8207,7 @@ fn build_replacement_cli_connected_external_brain_demo(
         900,
         Some(&project_root),
     )?;
-    let shim_dir = project_root.join(".forge/shims");
+    let shim_dir = project_root.join(".foundry/shims");
     let _bootstrap = build_harness_bootstrap_report(HarnessBootstrapOptions {
         shim_dir: &shim_dir,
         executor: "sh",
@@ -8170,7 +8218,7 @@ fn build_replacement_cli_connected_external_brain_demo(
         token_headroom: true,
         token_headroom_source: "milestone_connected_external_brain_demo",
         apply: true,
-        approved_by: Some("forge_cli_demo"),
+        approved_by: Some("foundry_cli_demo"),
         force: true,
     })?;
 
@@ -8180,18 +8228,18 @@ fn build_replacement_cli_connected_external_brain_demo(
         let adapter_script = r#"set -eu
 mkdir -p brain-output
 cat > brain-output/plan.json <<EOF
-{"schema_version":"forge.connected_external_brain_stub.v1","workflow_id":"$FORGE_WORKFLOW_ID","task_id":"$FORGE_TASK_ID","run_id":"$FORGE_RUN_ID","brain_id":"codex-compatible-stub","model_execution_performed":false}
+{"schema_version":"foundry.connected_external_brain_stub.v1","workflow_id":"$FOUNDRY_WORKFLOW_ID","task_id":"$FOUNDRY_TASK_ID","run_id":"$FOUNDRY_RUN_ID","brain_id":"codex-compatible-stub","model_execution_performed":false}
 EOF
 cat > brain-output/provider-output.json <<EOF
-{"schema_version":"forge.connected_external_brain.provider_output.v1","provider_id":"codex-compatible-stub","quality_score":0.92,"latency_ms":9,"model_execution_performed":false,"real_provider_execution_performed":false}
+{"schema_version":"foundry.connected_external_brain.provider_output.v1","provider_id":"codex-compatible-stub","quality_score":0.92,"latency_ms":9,"model_execution_performed":false,"real_provider_execution_performed":false}
 EOF
 cat > brain-output/research.md <<EOF
 # Connected external brain adapter fixture
 
-- Workflow: $FORGE_WORKFLOW_ID
-- Task: $FORGE_TASK_ID
+- Workflow: $FOUNDRY_WORKFLOW_ID
+- Task: $FOUNDRY_TASK_ID
 - Brain: codex-compatible-stub
-- Result: adapter process executed under Forge harness lineage without invoking a model provider.
+- Result: adapter process executed under Foundry harness lineage without invoking a model provider.
 EOF
 cat > brain-output/code.rs <<'RS'
 pub fn connected_external_brain_marker() -> &'static str {
@@ -8199,8 +8247,8 @@ pub fn connected_external_brain_marker() -> &'static str {
 }
 RS
 grep -q 'codex-compatible-stub' brain-output/plan.json
-grep -q 'forge.connected_external_brain.provider_output.v1' brain-output/provider-output.json
-grep -q "$FORGE_WORKFLOW_ID" brain-output/research.md
+grep -q 'foundry.connected_external_brain.provider_output.v1' brain-output/provider-output.json
+grep -q "$FOUNDRY_WORKFLOW_ID" brain-output/research.md
 grep -q 'connected_external_brain_marker' brain-output/code.rs
 printf 'connected_external_brain_stub_ok\n'
 "#;
@@ -8214,8 +8262,8 @@ printf 'connected_external_brain_stub_ok\n'
         store: Some(store),
         executor: brain_id,
         command: &command,
-        forge_first: true,
-        forge_first_source: "milestone_connected_external_brain_demo",
+        foundry_first: true,
+        foundry_first_source: "milestone_connected_external_brain_demo",
         workflow_id: Some(&workflow.id),
         task_id: Some(&task_id),
         run_id: Some(&request.run_id),
@@ -8223,7 +8271,7 @@ printf 'connected_external_brain_stub_ok\n'
         context_budget_source: "milestone_connected_external_brain_demo",
         token_headroom: true,
         token_headroom_source: "milestone_connected_external_brain_demo",
-        require_token_headroom_for_forge_first: true,
+        require_token_headroom_for_foundry_first: true,
         dry_run: false,
         allow_exec: true,
         secret_env: &[],
@@ -8282,7 +8330,7 @@ printf 'connected_external_brain_stub_ok\n'
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
     let output_schema_valid = provider_output.as_ref().is_some_and(|output| {
-        output["schema_version"] == "forge.connected_external_brain.provider_output.v1"
+        output["schema_version"] == "foundry.connected_external_brain.provider_output.v1"
             && output["provider_id"] == provider_id
     });
     let output_quality_score = provider_output
@@ -8326,7 +8374,7 @@ printf 'connected_external_brain_stub_ok\n'
         && provider_declared_model_execution
         && real_provider_execution_performed;
     let mut provider_validation_evidence = vec![
-        "provider_process_ran_under_forge_harness".to_string(),
+        "provider_process_ran_under_foundry_harness".to_string(),
         "provider_command_hash_recorded".to_string(),
         "provider_stdout_hash_recorded".to_string(),
         "provider_output_schema_validated".to_string(),
@@ -8401,9 +8449,9 @@ printf 'connected_external_brain_stub_ok\n'
         .clone()
         .unwrap_or_else(|| brain_id.to_string());
     let external_brain_summary = if provider_selection.is_some() {
-        "Forge routed an AI node to a project-declared connected external brain provider, produced a project-root handoff, executed the approved command through the harness, recorded the timeline event and validated generated provider, plan, research and code artifacts. Model/provider execution is reported strictly from the provider output contract and manifest approval."
+        "Foundry routed an AI node to a project-declared connected external brain provider, produced a project-root handoff, executed the approved command through the harness, recorded the timeline event and validated generated provider, plan, research and code artifacts. Model/provider execution is reported strictly from the provider output contract and manifest approval."
     } else {
-        "Forge routed an AI node to a connected external brain adapter id, produced a project-root handoff, executed a real guarded child process through the harness, recorded the timeline event and validated generated plan, research and code artifacts. The fixture intentionally does not invoke a live model provider."
+        "Foundry routed an AI node to a connected external brain adapter id, produced a project-root handoff, executed a real guarded child process through the harness, recorded the timeline event and validated generated plan, research and code artifacts. The fixture intentionally does not invoke a live model provider."
     };
 
     let external_brain = MilestoneConnectedExternalBrainDemo {
@@ -8457,27 +8505,27 @@ printf 'connected_external_brain_stub_ok\n'
     validation_evidence.push("external_resources_untouched".to_string());
     let mut commands = vec![
         format!(
-            "forge workflow update-node-brain --workflow <workflow-id> --task <task-id> --default-brain {brain_id} --agent-slot agent-external-brain-coder={brain_id}:connected_adapter_coder:connected-external-brain-demo --agent-slot agent-external-brain-researcher={brain_id}:connected_adapter_researcher:connected-external-brain-demo --max-parallel-agents 2 --origin forge_cli --output json"
+            "foundry workflow update-node-brain --workflow <workflow-id> --task <task-id> --default-brain {brain_id} --agent-slot agent-external-brain-coder={brain_id}:connected_adapter_coder:connected-external-brain-demo --agent-slot agent-external-brain-researcher={brain_id}:connected_adapter_researcher:connected-external-brain-demo --max-parallel-agents 2 --origin foundry_cli --output json"
         ),
         format!(
-            "forge task handoff --workflow <workflow-id> --task <task-id> --executor {brain_id} --project-root <project-root> --view compact --output json"
+            "foundry task handoff --workflow <workflow-id> --task <task-id> --executor {brain_id} --project-root <project-root> --view compact --output json"
         ),
-        "forge harness bootstrap --executor sh --shim-dir <project-root>/.forge/shims --project-root <project-root> --apply --approved-by forge_cli_demo --output json".to_string(),
+        "foundry harness bootstrap --executor sh --shim-dir <project-root>/.foundry/shims --project-root <project-root> --apply --approved-by foundry_cli_demo --output json".to_string(),
         if provider_selection.is_some() {
             format!(
-                "forge harness exec --executor {brain_id} --project-root <project-root> --workflow <workflow-id> --task <task-id> --run <run-id> --forge-first --execute --allow-exec -- <project-connected-brain-command>"
+                "foundry harness exec --executor {brain_id} --project-root <project-root> --workflow <workflow-id> --task <task-id> --run <run-id> --foundry-first --execute --allow-exec -- <project-connected-brain-command>"
             )
         } else {
-            "forge harness exec --executor codex-compatible-stub --project-root <project-root> --workflow <workflow-id> --task <task-id> --run <run-id> --forge-first --execute --allow-exec -- /bin/sh -c <connected-external-brain-script>".to_string()
+            "foundry harness exec --executor codex-compatible-stub --project-root <project-root> --workflow <workflow-id> --task <task-id> --run <run-id> --foundry-first --execute --allow-exec -- /bin/sh -c <connected-external-brain-script>".to_string()
         },
-        "forge events timeline --workflow <workflow-id> --output json".to_string(),
-        "forge harness retrieve-headroom --ref <stdout-retrieval-ref> --output json".to_string(),
+        "foundry events timeline --workflow <workflow-id> --output json".to_string(),
+        "foundry harness retrieve-headroom --ref <stdout-retrieval-ref> --output json".to_string(),
     ];
     if let Some(provider) = selected_provider {
         commands.insert(
             0,
             format!(
-                "forge milestone cli-demo --project-root <project-root> --connected-brain {} --origin forge_cli --output json",
+                "foundry milestone cli-demo --project-root <project-root> --connected-brain {} --origin foundry_cli --output json",
                 provider.id
             ),
         );
@@ -8485,11 +8533,11 @@ printf 'connected_external_brain_stub_ok\n'
 
     Ok(ReplacementCliDemoFlow {
         kind: "connected_external_brain".to_string(),
-        title: "Connected external brain adapter execution under Forge harness".to_string(),
+        title: "Connected external brain adapter execution under Foundry harness".to_string(),
         workflow_id: workflow.id,
         run_id: Some(request.run_id),
         run_status: status,
-        completed_through_forge: true,
+        completed_through_foundry: true,
         commands,
         artifact_refs: target_paths
             .iter()
@@ -8502,11 +8550,11 @@ printf 'connected_external_brain_stub_ok\n'
         real_project: None,
         external_brain: Some(external_brain),
         activity: None,
-        summary: "This flow moves the replacement-grade CLI evidence from plan-only handoff toward a connected external-brain adapter path: Forge selects the brain id, owns context and lineage, runs a real guarded process, records the event and validates outputs, while keeping live model/provider execution as an explicit remaining gap.".to_string(),
+        summary: "This flow moves the replacement-grade CLI evidence from plan-only handoff toward a connected external-brain adapter path: Foundry selects the brain id, owns context and lineage, runs a real guarded process, records the event and validates outputs, while keeping live model/provider execution as an explicit remaining gap.".to_string(),
     })
 }
 
-fn load_or_build_rehearsal_brain_router(store: &ForgeStore) -> Result<BrainRouterReport> {
+fn load_or_build_rehearsal_brain_router(store: &FoundryStore) -> Result<BrainRouterReport> {
     let report = load_executors(store)?;
     if report
         .brain_router
@@ -8522,27 +8570,27 @@ fn load_or_build_rehearsal_brain_router(store: &ForgeStore) -> Result<BrainRoute
 
 fn rehearsal_brain_router() -> BrainRouterReport {
     BrainRouterReport {
-        schema_version: "forge.brain_router.v1".to_string(),
-        controller: "forge".to_string(),
+        schema_version: "foundry.brain_router.v1".to_string(),
+        controller: "foundry".to_string(),
         controller_role: "orchestration_control_plane".to_string(),
-        orchestrator_brain: "forge".to_string(),
+        orchestrator_brain: "foundry".to_string(),
         brain_role: "replaceable_execution_brain".to_string(),
         node_brain_role: "per_node_agentic_execution_brain".to_string(),
         routing_principle:
-            "Forge owns memory, skills, MCP routing, context, workflow state, shell/session lifecycle, permissions, cost policy and validation; external CLIs only execute bounded brain work."
+            "Foundry owns memory, skills, MCP routing, context, workflow state, shell/session lifecycle, permissions, cost policy and validation; external CLIs only execute bounded brain work."
                 .to_string(),
         node_brain_routing_policy:
-            "Each AI or mixed workflow node may declare its own Forge-owned node_brain_routing contract with one or more agent slots, different brains per slot, and multiple agents on the same brain."
+            "Each AI or mixed workflow node may declare its own Foundry-owned node_brain_routing contract with one or more agent slots, different brains per slot, and multiple agents on the same brain."
                 .to_string(),
         parallel_agent_policy:
-            "Forge may lease and run independent AI node agent slots in parallel when dependencies, context budgets, quota and validation gates allow it."
+            "Foundry may lease and run independent AI node agent slots in parallel when dependencies, context budgets, quota and validation gates allow it."
                 .to_string(),
         hot_swap_policy:
-            "A workflow run can switch the active execution brain through Forge-owned routing without losing workflow lineage."
+            "A workflow run can switch the active execution brain through Foundry-owned routing without losing workflow lineage."
                 .to_string(),
         selected_brain: Some("codex".to_string()),
         model_decision: None,
-        forge_controlled_surfaces: vec![
+        foundry_controlled_surfaces: vec![
             "workflow_graph".to_string(),
             "memory".to_string(),
             "skills".to_string(),
@@ -8557,7 +8605,7 @@ fn rehearsal_brain_router() -> BrainRouterReport {
         brain_owned_surfaces: vec![
             "reasoning_for_assigned_task".to_string(),
             "bounded_code_or_text_proposals".to_string(),
-            "child_process_execution_when_authorized_by_forge".to_string(),
+            "child_process_execution_when_authorized_by_foundry".to_string(),
         ],
         brains: vec![BrainCandidate {
             id: "codex".to_string(),
@@ -8566,36 +8614,36 @@ fn rehearsal_brain_router() -> BrainRouterReport {
             status: "rehearsal_not_synced".to_string(),
             execution_mode: "external_cli_brain".to_string(),
             session_role: "execution_brain_adapter".to_string(),
-            persistent_state_owner: "forge".to_string(),
-            context_source: "forge_context_packet".to_string(),
-            memory_source: "forge_memory_router".to_string(),
-            skills_source: "forge_skill_router".to_string(),
-            mcp_source: "forge_mcp_router".to_string(),
+            persistent_state_owner: "foundry".to_string(),
+            context_source: "foundry_context_packet".to_string(),
+            memory_source: "foundry_memory_router".to_string(),
+            skills_source: "foundry_skill_router".to_string(),
+            mcp_source: "foundry_mcp_router".to_string(),
             installed: false,
             configured: false,
             allowed: false,
             non_interactive_ready: false,
-            forge_first_ready: false,
-            forge_first_entrypoint: None,
+            foundry_first_ready: false,
+            foundry_first_entrypoint: None,
             harness_status: None,
             shell_entrypoints: vec![vec!["codex".to_string()]],
-            reason: "deterministic milestone rehearsal router; run forge sync all for real provider readiness".to_string(),
+            reason: "deterministic milestone rehearsal router; run foundry sync all for real provider readiness".to_string(),
         }],
         shell_sessions: vec![
             BrainShellSessionSpec {
-                id: "forge-tui".to_string(),
-                brain_id: "forge".to_string(),
-                entry_command: vec!["forge".to_string()],
+                id: "foundry-tui".to_string(),
+                brain_id: "foundry".to_string(),
+                entry_command: vec!["foundry".to_string()],
                 attachable: true,
-                launch_mode: "forge_control_tui".to_string(),
-                forge_first_ready: true,
-                forge_first_entrypoint: Some(vec!["forge".to_string()]),
+                launch_mode: "foundry_control_tui".to_string(),
+                foundry_first_ready: true,
+                foundry_first_entrypoint: Some(vec!["foundry".to_string()]),
                 role: "primary_control_tui".to_string(),
                 state_boundary:
-                    "Forge owns workflow state, memory, skills, MCP routing and shell lifecycle."
+                    "Foundry owns workflow state, memory, skills, MCP routing and shell lifecycle."
                         .to_string(),
                 safety_note:
-                    "Use this as the default human operation surface; external brains should be launched from Forge-controlled handoffs."
+                    "Use this as the default human operation surface; external brains should be launched from Foundry-controlled handoffs."
                         .to_string(),
             },
             BrainShellSessionSpec {
@@ -8604,11 +8652,11 @@ fn rehearsal_brain_router() -> BrainRouterReport {
                 entry_command: vec!["codex".to_string()],
                 attachable: false,
                 launch_mode: "native_cli".to_string(),
-                forge_first_ready: false,
-                forge_first_entrypoint: None,
+                foundry_first_ready: false,
+                foundry_first_entrypoint: None,
                 role: "execution_brain_shell".to_string(),
                 state_boundary:
-                    "External CLI session is an execution surface only; Forge remains the source of truth for memory, skills, MCPs, context and workflow lineage."
+                    "External CLI session is an execution surface only; Foundry remains the source of truth for memory, skills, MCPs, context and workflow lineage."
                         .to_string(),
                 safety_note:
                     "This milestone rehearsal records only a plan; run executor sync and authorization before real Codex execution."
@@ -8618,7 +8666,7 @@ fn rehearsal_brain_router() -> BrainRouterReport {
         safety_gates: vec![
             "sync_executors_before_handoff".to_string(),
             "human_authorization_for_external_cli_use".to_string(),
-            "forge_context_packet_required_before_ai_handoff".to_string(),
+            "foundry_context_packet_required_before_ai_handoff".to_string(),
             "organization_context_required".to_string(),
             "personality_decision_required".to_string(),
             "company_work_decision_required".to_string(),
@@ -8629,7 +8677,7 @@ fn rehearsal_brain_router() -> BrainRouterReport {
 }
 
 fn build_replacement_cli_patch_lifecycle_demo(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     origin: &str,
 ) -> Result<MilestonePatchLifecycleDemo> {
@@ -8650,14 +8698,14 @@ fn build_replacement_cli_patch_lifecycle_demo(
             workflow_id,
             &task_id,
             vec![target_path.clone()],
-            "Update the demo fixture through Forge-owned patch lifecycle evidence.",
+            "Update the demo fixture through Foundry-owned patch lifecycle evidence.",
             origin,
         )?;
         let plan_artifact_path = patch_plan_artifact_path(store, &plan.artifact, "patch plan")?;
 
         fs::write(
             repository_path.join(&target_path),
-            "pub fn demo_message() -> &'static str {\n    \"updated through forge patch lifecycle\"\n}\n",
+            "pub fn demo_message() -> &'static str {\n    \"updated through foundry patch lifecycle\"\n}\n",
         )?;
 
         let review = build_patch_review(
@@ -8706,7 +8754,7 @@ fn build_replacement_cli_patch_lifecycle_demo(
             workflow_id,
             &task_id,
             &revert_artifact_path,
-            "forge_cli_demo",
+            "foundry_cli_demo",
             true,
             origin,
         )?;
@@ -8748,26 +8796,26 @@ fn build_replacement_cli_patch_lifecycle_demo(
                 "human_restore_approval_recorded".to_string(),
             ],
             commands: vec![
-                "forge interactive patch-workbench --output json".to_string(),
-                format!("forge patch plan --workflow {workflow_id} --task {task_id} --intent <intent> --path src/demo.rs --origin forge_cli --output json"),
-                format!("forge patch review --workflow {workflow_id} --task {task_id} --path src/demo.rs --plan-artifact <patch-plan> --origin forge_cli --output json"),
-                format!("forge patch diff --workflow {workflow_id} --task {task_id} --path src/demo.rs --file-index 0 --hunk-index 0 --output json"),
-                format!("forge patch apply --workflow {workflow_id} --task {task_id} --path src/demo.rs --plan-artifact <patch-plan> --origin forge_cli --output json"),
-                format!("forge patch revert --workflow {workflow_id} --task {task_id} --apply-artifact <patch-apply> --origin forge_cli --output json"),
-                format!("forge patch restore --workflow {workflow_id} --task {task_id} --revert-artifact <patch-revert> --approved-by forge_cli_demo --confirm-restore --origin forge_cli --output json"),
+                "foundry interactive patch-workbench --output json".to_string(),
+                format!("foundry patch plan --workflow {workflow_id} --task {task_id} --intent <intent> --path src/demo.rs --origin foundry_cli --output json"),
+                format!("foundry patch review --workflow {workflow_id} --task {task_id} --path src/demo.rs --plan-artifact <patch-plan> --origin foundry_cli --output json"),
+                format!("foundry patch diff --workflow {workflow_id} --task {task_id} --path src/demo.rs --file-index 0 --hunk-index 0 --output json"),
+                format!("foundry patch apply --workflow {workflow_id} --task {task_id} --path src/demo.rs --plan-artifact <patch-plan> --origin foundry_cli --output json"),
+                format!("foundry patch revert --workflow {workflow_id} --task {task_id} --apply-artifact <patch-apply> --origin foundry_cli --output json"),
+                format!("foundry patch restore --workflow {workflow_id} --task {task_id} --revert-artifact <patch-revert> --approved-by foundry_cli_demo --confirm-restore --origin foundry_cli --output json"),
             ],
-            summary: "Deterministic fixture repo executed the full Forge patch lifecycle with plan, review, diff, apply record, revert proposal and approved restore artifacts, then returned the target file to a clean Git state.".to_string(),
+            summary: "Deterministic fixture repo executed the full Foundry patch lifecycle with plan, review, diff, apply record, revert proposal and approved restore artifacts, then returned the target file to a clean Git state.".to_string(),
         })
     })
 }
 
 fn build_replacement_cli_executor_project_demo(
-    store: &ForgeStore,
+    store: &FoundryStore,
     origin: &str,
 ) -> Result<ReplacementCliDemoFlow> {
     let request = start_async_request(
         store,
-        "Demonstrate executor-driven project editing through Forge harness lineage",
+        "Demonstrate executor-driven project editing through Foundry harness lineage",
         origin,
     )?;
     let workflow = store.load_workflow(&request.workflow_id)?;
@@ -8786,10 +8834,10 @@ fn build_replacement_cli_executor_project_demo(
     fs::create_dir_all(project_root.join("src"))?;
     fs::write(
         project_root.join("README.md"),
-        "# Forge executor project demo\n\nThis fixture is mutated only under Forge harness control.\n",
+        "# Foundry executor project demo\n\nThis fixture is mutated only under Foundry harness control.\n",
     )?;
 
-    let shim_dir = project_root.join(".forge/shims");
+    let shim_dir = project_root.join(".foundry/shims");
     let bootstrap = build_harness_bootstrap_report(HarnessBootstrapOptions {
         shim_dir: &shim_dir,
         executor: "sh",
@@ -8800,11 +8848,11 @@ fn build_replacement_cli_executor_project_demo(
         token_headroom: true,
         token_headroom_source: "milestone_cli_demo",
         apply: true,
-        approved_by: Some("forge_cli_demo"),
+        approved_by: Some("foundry_cli_demo"),
         force: true,
     })?;
 
-    let edit_script = "mkdir -p src && printf 'workflow=%s\\ntask=%s\\nrun=%s\\nharness=%s\\nmode=%s\\nheadroom=%s\\n' \"$FORGE_WORKFLOW_ID\" \"$FORGE_TASK_ID\" \"$FORGE_RUN_ID\" \"$FORGE_HARNESS\" \"$FORGE_HARNESS_MODE\" \"$FORGE_TOKEN_HEADROOM\" > src/executor-output.txt && cat src/executor-output.txt";
+    let edit_script = "mkdir -p src && printf 'workflow=%s\\ntask=%s\\nrun=%s\\nharness=%s\\nmode=%s\\nheadroom=%s\\n' \"$FOUNDRY_WORKFLOW_ID\" \"$FOUNDRY_TASK_ID\" \"$FOUNDRY_RUN_ID\" \"$FOUNDRY_HARNESS\" \"$FOUNDRY_HARNESS_MODE\" \"$FOUNDRY_TOKEN_HEADROOM\" > src/executor-output.txt && cat src/executor-output.txt";
     let command = vec![
         "/bin/sh".to_string(),
         "-c".to_string(),
@@ -8814,8 +8862,8 @@ fn build_replacement_cli_executor_project_demo(
         store: Some(store),
         executor: "sh",
         command: &command,
-        forge_first: true,
-        forge_first_source: "milestone_cli_demo",
+        foundry_first: true,
+        foundry_first_source: "milestone_cli_demo",
         workflow_id: Some(&workflow.id),
         task_id: Some(&task_id),
         run_id: Some(&request.run_id),
@@ -8823,7 +8871,7 @@ fn build_replacement_cli_executor_project_demo(
         context_budget_source: "milestone_cli_demo",
         token_headroom: true,
         token_headroom_source: "milestone_cli_demo",
-        require_token_headroom_for_forge_first: true,
+        require_token_headroom_for_foundry_first: true,
         dry_run: false,
         allow_exec: true,
         secret_env: &[],
@@ -8876,21 +8924,21 @@ fn build_replacement_cli_executor_project_demo(
             format!("run_id:{}", request.run_id),
             format!("global_event_id:{}", receipt.global_event_id.unwrap_or_default()),
         ],
-        summary: "The fixture project is edited by a guarded executor command after Forge writes project harness policy, requires lineage, applies token headroom and records the execution in the global event timeline.".to_string(),
+        summary: "The fixture project is edited by a guarded executor command after Foundry writes project harness policy, requires lineage, applies token headroom and records the execution in the global event timeline.".to_string(),
     };
 
     Ok(ReplacementCliDemoFlow {
         kind: "executor_project".to_string(),
-        title: "Executor-driven isolated project edit under Forge harness".to_string(),
+        title: "Executor-driven isolated project edit under Foundry harness".to_string(),
         workflow_id: workflow.id,
         run_id: Some(request.run_id),
         run_status: receipt.status,
-        completed_through_forge: true,
+        completed_through_foundry: true,
         commands: vec![
-            "forge harness bootstrap --executor sh --shim-dir <project-root>/.forge/shims --project-root <project-root> --apply --approved-by forge_cli_demo --output json".to_string(),
-            "forge harness exec --executor sh --project-root <project-root> --workflow <workflow-id> --task <task-id> --run <run-id> --forge-first --execute --allow-exec -- /bin/sh -c <project-edit-script>".to_string(),
-            "forge events timeline --workflow <workflow-id> --output json".to_string(),
-            "forge harness retrieve-headroom --ref <stdout-retrieval-ref> --output json".to_string(),
+            "foundry harness bootstrap --executor sh --shim-dir <project-root>/.foundry/shims --project-root <project-root> --apply --approved-by foundry_cli_demo --output json".to_string(),
+            "foundry harness exec --executor sh --project-root <project-root> --workflow <workflow-id> --task <task-id> --run <run-id> --foundry-first --execute --allow-exec -- /bin/sh -c <project-edit-script>".to_string(),
+            "foundry events timeline --workflow <workflow-id> --output json".to_string(),
+            "foundry harness retrieve-headroom --ref <stdout-retrieval-ref> --output json".to_string(),
         ],
         artifact_refs: vec![project_root.join(target_path).display().to_string()],
         validation_evidence: vec![
@@ -8907,21 +8955,21 @@ fn build_replacement_cli_executor_project_demo(
         real_project: None,
         external_brain: None,
         activity: None,
-        summary: "This flow closes part of the replacement-grade CLI gap by proving an executor can modify an isolated project through Forge-owned bootstrap, lineage policy, guarded execution, event recording and reversible stdout headroom.".to_string(),
+        summary: "This flow closes part of the replacement-grade CLI gap by proving an executor can modify an isolated project through Foundry-owned bootstrap, lineage policy, guarded execution, event recording and reversible stdout headroom.".to_string(),
     })
 }
 
-fn open_absolute_store_view(store: &ForgeStore) -> Result<ForgeStore> {
+fn open_absolute_store_view(store: &FoundryStore) -> Result<FoundryStore> {
     let path = if store.path().is_absolute() {
         store.path().to_path_buf()
     } else {
         env::current_dir()?.join(store.path())
     };
-    ForgeStore::open(path)
+    FoundryStore::open(path)
 }
 
 fn prepare_patch_lifecycle_demo_repository(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
 ) -> Result<PathBuf> {
     let repository_path = store
@@ -8939,9 +8987,12 @@ fn prepare_patch_lifecycle_demo_repository(
     run_demo_git(&repository_path, &["init", "-q"])?;
     run_demo_git(
         &repository_path,
-        &["config", "user.email", "forge@example.com"],
+        &["config", "user.email", "foundry@example.com"],
     )?;
-    run_demo_git(&repository_path, &["config", "user.name", "Forge CLI Demo"])?;
+    run_demo_git(
+        &repository_path,
+        &["config", "user.name", "Foundry CLI Demo"],
+    )?;
     run_demo_git(&repository_path, &["add", "src/demo.rs"])?;
     run_demo_git(&repository_path, &["commit", "-q", "-m", "initial fixture"])?;
     Ok(repository_path)
@@ -8987,7 +9038,7 @@ fn patch_demo_target_is_clean(repository_path: &Path, target_path: &str) -> Resu
 }
 
 fn patch_plan_artifact_path(
-    store: &ForgeStore,
+    store: &FoundryStore,
     artifact: &Option<PatchPlanArtifactRef>,
     label: &str,
 ) -> Result<String> {
@@ -9000,7 +9051,7 @@ fn patch_plan_artifact_path(
 }
 
 fn patch_apply_artifact_path(
-    store: &ForgeStore,
+    store: &FoundryStore,
     artifact: &Option<PatchApplyArtifactRef>,
     label: &str,
 ) -> Result<String> {
@@ -9012,7 +9063,7 @@ fn patch_apply_artifact_path(
         .to_string())
 }
 
-fn resolve_store_artifact_path(store: &ForgeStore, artifact_path: &str) -> PathBuf {
+fn resolve_store_artifact_path(store: &FoundryStore, artifact_path: &str) -> PathBuf {
     let path = Path::new(artifact_path);
     if path.is_absolute() {
         path.to_path_buf()
@@ -9059,11 +9110,11 @@ fn summarize_patch_artifact(
     })
 }
 
-fn forge_05_capabilities() -> Vec<MilestoneCapability> {
+fn foundry_06_capabilities() -> Vec<MilestoneCapability> {
     vec![
         capability(
             "interactive_cli_baseline",
-            "Interactive Forge CLI baseline",
+            "Interactive Foundry CLI baseline",
             "validated",
             "0.4.97 validates the no-argument TTY home, slash-command catalog, conversational routing and retention decisions. Cycle 24 confirms all 14 required slash commands, conversational routing with direct-answer vs workflow classification, retention decisions with delete/retain/archive policy, and CLI contract tests for TTY/non-TTY behavior with 175 passing tests.",
             "Full terminal TUI loop and richer inline mode still need implementation evidence; autocomplete now has read-only CLI, MCP and dashboard evidence.",
@@ -9087,55 +9138,55 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
             "Creative artifact IR baseline",
             "validated",
             "0.4.102 validates ScreenSpec, WhiteboardSpec, DocumentSpec, SlideDeckSpec, ComponentSpec as first-class creative artifact types with serde round-trip, CLI attach/list/inspect, and workflow integration. Cycle 26 maintains validated status with passing tests.",
-            "Declarative import/export, rendering adapters and full screen/whiteboard/document editing through the runtime remain for 0.5.",
+            "Declarative import/export, rendering adapters and full screen/whiteboard/document editing through the runtime remain for 0.6.",
         ),
         capability(
             "design_tokens",
             "Design systems/tokens",
             "validated",
             "0.4.102 validates DesignToken, TokenType, TokenCollection, SemanticAlias as serde-able types with CLI set-tokens/get-tokens and workflow integration. 0.4.125 adds the first token resolution engine for raw tokens, semantic aliases, mode overrides, impact preview, CLI/MCP resolve tools and targeted patch-by-intent without rewriting creative artifacts.",
-            "Inheritance across token collections, rendered propagation previews and richer human edit preservation demos remain before 0.5 promotion.",
+            "Inheritance across token collections, rendered propagation previews and richer human edit preservation demos remain before 0.6 promotion.",
         ),
         capability(
             "componentization_ai_surfaces",
             "Componentization and AI-first UI surfaces",
             "validated",
             "0.4.102 validates ComponentSpec with props, variants, states, slots, token dependencies and code template as serde-able IR with PatchByIntent schema. 0.4.125 resolves token dependencies in creative artifacts and records targeted token patch diffs as PatchByIntent evidence.",
-            "Rendered component preview, action registry generation and AI-driven component generation remain for 0.5.",
+            "Rendered component preview, action registry generation and AI-driven component generation remain for 0.6.",
         ),
         capability(
             "live_collaboration",
             "Live collaboration",
             "validated",
-            "0.4.98-0.4.104 validate human decision audit and MCP human interaction bridges. 0.4.127 adds Forge-owned creative collaboration state on artifacts with presence, cursors/selections, comments, patch streams, conflict records, rollbacks, audit history, CLI event/status commands, MCP collaboration tools and screen/document contract tests.",
-            "Full browser live editing transport, multi-user conflict resolution UX and richer rollback visualization remain before a final 0.5 promotion claim.",
+            "0.4.98-0.4.104 validate human decision audit and MCP human interaction bridges. 0.4.127 adds Foundry-owned creative collaboration state on artifacts with presence, cursors/selections, comments, patch streams, conflict records, rollbacks, audit history, CLI event/status commands, MCP collaboration tools and screen/document contract tests.",
+            "Full browser live editing transport, multi-user conflict resolution UX and richer rollback visualization remain before a final 0.6 promotion claim.",
         ),
         capability(
             "research_artifact_baseline",
             "Research artifact baseline",
             "validated",
-            "0.4.129 adds `forge milestone research` and MCP tool `forge.milestone.research` with a source-grounded comparison across Penpot, Stitch, v0, AG-UI, Impeccable, Figma MCP, Remotion, OBS and local creative/productivity skills. The research is converted into Forge-owned validation gates, creative workflow templates and lean governance decisions in `docs/research/forge-0.5-creative-runtime-source-research.md`.",
-            "Keep the research artifact current as external creative/runtime protocols drift; no 0.5 promotion claim should bypass the full milestone manifest.",
+            "0.4.129 adds `foundry milestone research` and MCP tool `foundry.milestone.research` with a source-grounded comparison across Penpot, Stitch, v0, AG-UI, Impeccable, Figma MCP, Remotion, OBS and local creative/productivity skills. The research is converted into Foundry-owned validation gates, creative workflow templates and lean governance decisions in `docs/research/foundry-0.5-creative-runtime-source-research.md`.",
+            "Keep the historical research artifact current as external creative/runtime protocols drift; no 0.6 promotion claim should bypass the full milestone manifest.",
         ),
         capability(
             "export_demo_baseline",
             "Export/demo baseline",
             "validated",
-            "0.4.130 adds `forge milestone export-demo` as a structured export/demo surface that creates a scheduled daily research workflow with a screen creative artifact, a document creative artifact and a design token collection, proving design/tokens/component export lineage. The demo workflow can be inspected, its creative artifacts listed/inspected and its design tokens resolved/promoted. Daily Goal smoke produces Markdown/PDF artifacts and Telegram delivery records through Forge-owned workflow semantics across all cycles.",
-            "Full rendered previews and richer browser-based editing demos remain for a later 0.5 milestone iteration.",
+            "0.4.130 adds `foundry milestone export-demo` as a structured export/demo surface that creates a scheduled daily research workflow with a screen creative artifact, a document creative artifact and a design token collection, proving design/tokens/component export lineage. The demo workflow can be inspected, its creative artifacts listed/inspected and its design tokens resolved/promoted. Daily Goal smoke produces Markdown/PDF artifacts and Telegram delivery records through Foundry-owned workflow semantics across all cycles.",
+            "Full rendered previews and richer browser-based editing demos remain for a later 0.6 milestone iteration.",
         ),
         optional_capability(
             "replacement_grade_cli",
-            "Replacement-grade Forge CLI",
+            "Replacement-grade Foundry CLI",
             "groundwork",
-            "0.4.x validates the no-argument interactive home, slash commands, conversational routing, human decisions, async run handoff and observability surfaces. 0.4.144 adds `forge milestone cli-demo` and MCP tool `forge.milestone.cli_demo`, which generate deterministic Forge-first demo evidence for coding, harness/headroom/session lifecycle control, research/artifact and long-running async flows, including `forge.milestone.patch_lifecycle_demo.v1` with plan/review/diff/apply/revert/restore artifact lineage in an isolated fixture repo. 0.4.145 adds executor-aware, runtime-aware and cost-sensitive routing classification to the interactive conversational router, plus creative artifact and design token dependency fields to `forge inspect` output. 0.4.146 adds registry-level run health summaries so `forge list` and `forge inspect` expose running, stale and missing-heartbeat runs even when `active_run_count` is zero. 0.4.148 adds process-liveness-aware run activity so a recorded live executor PID keeps long-running handoffs active after heartbeat TTL expiry instead of forcing stale recovery. 0.4.150 adds `forge patch plan` and MCP tool `forge.patch.plan` as a plan-only file-editing contract with repo-relative permission gates, file snapshots, diff-review commands, validation commands and workflow artifact lineage. 0.4.151 adds apply artifacts and guarded revert proposals so rollback intent is recorded without silently executing destructive file restores. 0.4.152 adds in-TUI `/patch plan`, `/patch apply` and `/patch revert` slash commands to the interactive REPL with human approval prompts before execution, plus two-token slash command routing support. 0.4.153 adds in-TUI `/context` and `/handoff` commands so operators can inspect bounded context routes and explicitly approve executor handoff lease acquisition from inside `forge`. 0.4.154 exposes `forge.interactive.home`, `forge.interactive.slash_commands` and `forge.interactive.route` through MCP so agents can inspect and use the same interactive command/chat routing model without taking over orchestration. The patch lifecycle now includes `forge patch review`, MCP `forge.patch.review` and `/patch review`, which persist `forge.patch_review.v1` evidence with Git diff/status/check summaries before apply approval while keeping source files unchanged, `forge patch diff`, MCP `forge.patch.diff` and `/patch diff`, which persist `forge.patch_diff.v1` evidence for read-only multi-file diff navigation, and `forge patch restore`, MCP `forge.patch.restore` and `/patch restore`, which persist `forge.patch_restore.v1` evidence for explicit, approved repo-local file restoration from a revert artifact. The interactive home now carries `forge.interactive.ui_composition.v1` with ordered regions, Core widgets, safe Addon widgets and refresh/inspection commands for TUI/web/agent dashboard composition, plus `forge.interactive.structured_logs.v1` with recent event sequence, workflow, category, severity, origin, correlation, observability and payload preview for timeline drill-downs; the dedicated `forge interactive readiness`/`forge.interactive.readiness` surface exposes executor, runtime, brain, shell, Forge-controlled surface and harness readiness with corrective commands before shell or handoff without loading the full home, the dedicated `forge interactive harness`/`forge.interactive.harness` surface exposes a consolidated harness center with mode, doctor, shim status, wrap-plan, `headroom_plan`, `session_lifecycle_plan` and token-headroom preview without loading the full home or executing child CLIs, the dedicated `forge interactive sessions`/`forge.interactive.sessions` surface exposes provider/session readiness, lifecycle state, per-session `operation_plan`, shell history commands and next lifecycle controls without opening or attaching shells, the dedicated `forge interactive command-palette`/`forge.interactive.command_palette` surface exposes grouped contextual navigation, workflow, patch, permission, harness, session and observability actions with mutation and approval flags without mutating state, `forge interactive action-registry`/`forge.interactive.action_registry` plus `/actions [query]` expose a strict action registry for TUI/web/agent clients, `forge interactive action-invocation`/`forge.interactive.action_invocation` plus `/action <action-id>` resolve one selected action into a non-executing invocation plan, the dedicated `forge interactive autocomplete`/`forge.interactive.autocomplete` surface exposes read-only slash-command, command-palette and `/action <partial>` action-id suggestions for partial operator input with score, source panel, mutation and approval flags, the dedicated `forge interactive patch-workbench`/`forge.interactive.patch_workbench` surface exposes Git status, file lanes, bounded inline `diff_preview`, multi-file `diff_review_queue`, `forge.interactive.patch_edit_intake.v1` required inputs and form readiness, diff stat/check, explicit `approval_flow` review/approval/rollback gates and permission-gated patch lifecycle commands for native file-editing and rich diff-review UI without mutating files, the dedicated `forge interactive permissions`/`forge.interactive.permissions` surface exposes tenant memberships, Addon permission authorizations, pending/timed-out human approvals and granular next-action commands without mutating state, the dedicated `forge interactive workflow-dag`/`forge.interactive.workflow_dag` surface exposes dependency nodes, edges, readiness, human waits and drill-down commands without loading the full home, the dedicated `forge interactive structured-logs`/`forge.interactive.structured_logs` surface exposes the same log contract without loading the full home, and the home plus dedicated `forge interactive task-board`/`forge.interactive.task_board` surface also carry `forge.interactive.task_board.v1`, giving TUI/web/agent dashboards workflow lanes, operable per-task cards, ready handoffs, checkpoint resume candidates, human waits, artifacts and direct next-action commands. The harness also emits guarded CLI execution receipts with Forge-first wrapper env, workflow/task/run lineage, non-destructive PATH shim installation, automatic native CLI discovery that excludes the shim directory, read-only shim status audits for PATH precedence/ownership/recursion, executor-sync projection of Forge-first shim readiness into brain/shell entrypoints, plan-only `forge shells` / MCP `forge.shell.launch_plan` launch reports with readiness/preflight/context/handoff/heartbeat gates, `forge.shell.record_plan` receipts that write `shell_launch_planned` global events, `forge sessions` / MCP `forge.sessions` reports with session lifecycle state, `forge.brain_session_operation_plan.v1` recommendations, `forge sessions lifecycle` / MCP `forge.session.lifecycle` audit-only lifecycle receipts, ordered transition policy with `previous_state`, `lifecycle_sequence`, invalid transition rejection, `lifecycle_policy.allowed_next_states`, next lifecycle commands and provider/state/readiness filters in `forge sessions` plus MCP `forge.sessions`, and `forge sessions history`, MCP `forge.session.history` and `/sessions history` for per-session chronological audit history, `forge.harness.exec_event.v1` global events for guarded CLI receipts with task/node correlation, output hashes/excerpts and reversible stdout/stderr token-headroom reports for authorized real child execution, project `.forge/harness.json` `require_lineage_for_exec` policy that returns `harness_exec_blocked_by_project_policy` when real child execution lacks workflow/task/run lineage, `forge harness doctor` plus MCP `forge.harness.doctor` consolidated readiness audits and the interactive home `harness_doctor_panel`, `forge harness mode --project-root` plus MCP `forge.harness.mode` `project_root` diagnostics for auditing another project before launching a brain CLI, and `forge harness wrap-plan --project-root` plus MCP `forge.harness.wrap_plan` `project_root` support so wrapper planning respects a remote project's Forge-first defaults before shell execution, and `forge harness install-shims --project-root` plus MCP `forge.harness.install_shims` `project_root` support so shim installation uses the same remote project defaults, and `forge harness exec --project-root` plus MCP `forge.harness.exec` `project_root` support so execution uses remote defaults and policy without changing child `cwd`. The `forge milestone cli-demo` output now also includes `forge.milestone.executor_project_demo.v1`, proving a deterministic executor can mutate an isolated project only after governed harness bootstrap, lineage-required execution, event recording and stdout token-headroom retrieval, `forge.milestone.brain_handoff_demo.v1`, proving Forge-owned context, node-brain routing, task handoff, plan-only shell launch and audit-only session lifecycle for Codex without child CLI/model execution, `forge.milestone.headroom_runtime_wrapper_demo.v1`, proving the non-executing Forge-first wrapper contract with Headroom interception points, content routes, reversible retrieval store, MCP retrieval tool and env overlay, plus `forge.milestone.connected_external_brain_provider.v1`, proving provider-output schema validation, command/stdout hashes, `.forge/connected-brain-runtimes.json` project-manifest selection and explicit no-real-provider-execution evidence unless the manifest/output declare and approve model execution. This is enabling groundwork, not proof that `forge` can replace Codex/OpenCode for daily permission-gated shell work and end-to-end coding/research workflows.",
-            "Continue from deterministic `forge.milestone.real_project_workflow_demo.v1`, connected `forge.milestone.connected_external_brain_demo.v1` adapter evidence and `forge.milestone.connected_external_brain_provider.v1` provider-contract validation into real external model/provider execution on broader project coding/research workflows, and continue hardening terminal file editing UX before promoting this beyond groundwork.",
+            "0.4.x validates the no-argument interactive home, slash commands, conversational routing, human decisions, async run handoff and observability surfaces. 0.4.144 adds `foundry milestone cli-demo` and MCP tool `foundry.milestone.cli_demo`, which generate deterministic Foundry-first demo evidence for coding, harness/headroom/session lifecycle control, research/artifact and long-running async flows, including `foundry.milestone.patch_lifecycle_demo.v1` with plan/review/diff/apply/revert/restore artifact lineage in an isolated fixture repo. 0.4.145 adds executor-aware, runtime-aware and cost-sensitive routing classification to the interactive conversational router, plus creative artifact and design token dependency fields to `foundry inspect` output. 0.4.146 adds registry-level run health summaries so `foundry list` and `foundry inspect` expose running, stale and missing-heartbeat runs even when `active_run_count` is zero. 0.4.148 adds process-liveness-aware run activity so a recorded live executor PID keeps long-running handoffs active after heartbeat TTL expiry instead of forcing stale recovery. 0.4.150 adds `foundry patch plan` and MCP tool `foundry.patch.plan` as a plan-only file-editing contract with repo-relative permission gates, file snapshots, diff-review commands, validation commands and workflow artifact lineage. 0.4.151 adds apply artifacts and guarded revert proposals so rollback intent is recorded without silently executing destructive file restores. 0.4.152 adds in-TUI `/patch plan`, `/patch apply` and `/patch revert` slash commands to the interactive REPL with human approval prompts before execution, plus two-token slash command routing support. 0.4.153 adds in-TUI `/context` and `/handoff` commands so operators can inspect bounded context routes and explicitly approve executor handoff lease acquisition from inside `foundry`. 0.4.154 exposes `foundry.interactive.home`, `foundry.interactive.slash_commands` and `foundry.interactive.route` through MCP so agents can inspect and use the same interactive command/chat routing model without taking over orchestration. The patch lifecycle now includes `foundry patch review`, MCP `foundry.patch.review` and `/patch review`, which persist `foundry.patch_review.v1` evidence with Git diff/status/check summaries before apply approval while keeping source files unchanged, `foundry patch diff`, MCP `foundry.patch.diff` and `/patch diff`, which persist `foundry.patch_diff.v1` evidence for read-only multi-file diff navigation, and `foundry patch restore`, MCP `foundry.patch.restore` and `/patch restore`, which persist `foundry.patch_restore.v1` evidence for explicit, approved repo-local file restoration from a revert artifact. The interactive home now carries `foundry.interactive.ui_composition.v1` with ordered regions, Core widgets, safe Addon widgets and refresh/inspection commands for TUI/web/agent dashboard composition, plus `foundry.interactive.structured_logs.v1` with recent event sequence, workflow, category, severity, origin, correlation, observability and payload preview for timeline drill-downs; the dedicated `foundry interactive readiness`/`foundry.interactive.readiness` surface exposes executor, runtime, brain, shell, Foundry-controlled surface and harness readiness with corrective commands before shell or handoff without loading the full home, the dedicated `foundry interactive harness`/`foundry.interactive.harness` surface exposes a consolidated harness center with mode, doctor, shim status, wrap-plan, `headroom_plan`, `session_lifecycle_plan` and token-headroom preview without loading the full home or executing child CLIs, the dedicated `foundry interactive sessions`/`foundry.interactive.sessions` surface exposes provider/session readiness, lifecycle state, per-session `operation_plan`, shell history commands and next lifecycle controls without opening or attaching shells, the dedicated `foundry interactive command-palette`/`foundry.interactive.command_palette` surface exposes grouped contextual navigation, workflow, patch, permission, harness, session and observability actions with mutation and approval flags without mutating state, `foundry interactive action-registry`/`foundry.interactive.action_registry` plus `/actions [query]` expose a strict action registry for TUI/web/agent clients, `foundry interactive action-invocation`/`foundry.interactive.action_invocation` plus `/action <action-id>` resolve one selected action into a non-executing invocation plan, the dedicated `foundry interactive autocomplete`/`foundry.interactive.autocomplete` surface exposes read-only slash-command, command-palette and `/action <partial>` action-id suggestions for partial operator input with score, source panel, mutation and approval flags, the dedicated `foundry interactive patch-workbench`/`foundry.interactive.patch_workbench` surface exposes Git status, file lanes, bounded inline `diff_preview`, multi-file `diff_review_queue`, `foundry.interactive.patch_edit_intake.v1` required inputs and form readiness, diff stat/check, explicit `approval_flow` review/approval/rollback gates and permission-gated patch lifecycle commands for native file-editing and rich diff-review UI without mutating files, the dedicated `foundry interactive permissions`/`foundry.interactive.permissions` surface exposes tenant memberships, Addon permission authorizations, pending/timed-out human approvals and granular next-action commands without mutating state, the dedicated `foundry interactive workflow-dag`/`foundry.interactive.workflow_dag` surface exposes dependency nodes, edges, readiness, human waits and drill-down commands without loading the full home, the dedicated `foundry interactive structured-logs`/`foundry.interactive.structured_logs` surface exposes the same log contract without loading the full home, and the home plus dedicated `foundry interactive task-board`/`foundry.interactive.task_board` surface also carry `foundry.interactive.task_board.v1`, giving TUI/web/agent dashboards workflow lanes, operable per-task cards, ready handoffs, checkpoint resume candidates, human waits, artifacts and direct next-action commands. The harness also emits guarded CLI execution receipts with Foundry-first wrapper env, workflow/task/run lineage, non-destructive PATH shim installation, automatic native CLI discovery that excludes the shim directory, read-only shim status audits for PATH precedence/ownership/recursion, executor-sync projection of Foundry-first shim readiness into brain/shell entrypoints, plan-only `foundry shells` / MCP `foundry.shell.launch_plan` launch reports with readiness/preflight/context/handoff/heartbeat gates, `foundry.shell.record_plan` receipts that write `shell_launch_planned` global events, `foundry sessions` / MCP `foundry.sessions` reports with session lifecycle state, `foundry.brain_session_operation_plan.v1` recommendations, `foundry sessions lifecycle` / MCP `foundry.session.lifecycle` audit-only lifecycle receipts, ordered transition policy with `previous_state`, `lifecycle_sequence`, invalid transition rejection, `lifecycle_policy.allowed_next_states`, next lifecycle commands and provider/state/readiness filters in `foundry sessions` plus MCP `foundry.sessions`, and `foundry sessions history`, MCP `foundry.session.history` and `/sessions history` for per-session chronological audit history, `foundry.harness.exec_event.v1` global events for guarded CLI receipts with task/node correlation, output hashes/excerpts and reversible stdout/stderr token-headroom reports for authorized real child execution, project `.foundry/harness.json` `require_lineage_for_exec` policy that returns `harness_exec_blocked_by_project_policy` when real child execution lacks workflow/task/run lineage, `foundry harness doctor` plus MCP `foundry.harness.doctor` consolidated readiness audits and the interactive home `harness_doctor_panel`, `foundry harness mode --project-root` plus MCP `foundry.harness.mode` `project_root` diagnostics for auditing another project before launching a brain CLI, and `foundry harness wrap-plan --project-root` plus MCP `foundry.harness.wrap_plan` `project_root` support so wrapper planning respects a remote project's Foundry-first defaults before shell execution, and `foundry harness install-shims --project-root` plus MCP `foundry.harness.install_shims` `project_root` support so shim installation uses the same remote project defaults, and `foundry harness exec --project-root` plus MCP `foundry.harness.exec` `project_root` support so execution uses remote defaults and policy without changing child `cwd`. The `foundry milestone cli-demo` output now also includes `foundry.milestone.executor_project_demo.v1`, proving a deterministic executor can mutate an isolated project only after governed harness bootstrap, lineage-required execution, event recording and stdout token-headroom retrieval, `foundry.milestone.brain_handoff_demo.v1`, proving Foundry-owned context, node-brain routing, task handoff, plan-only shell launch and audit-only session lifecycle for Codex without child CLI/model execution, `foundry.milestone.headroom_runtime_wrapper_demo.v1`, proving the non-executing Foundry-first wrapper contract with Headroom interception points, content routes, reversible retrieval store, MCP retrieval tool and env overlay, plus `foundry.milestone.connected_external_brain_provider.v1`, proving provider-output schema validation, command/stdout hashes, `.foundry/connected-brain-runtimes.json` project-manifest selection and explicit no-real-provider-execution evidence unless the manifest/output declare and approve model execution. This is enabling groundwork, not proof that `foundry` can replace Codex/OpenCode for daily permission-gated shell work and end-to-end coding/research workflows.",
+            "Continue from deterministic `foundry.milestone.real_project_workflow_demo.v1`, connected `foundry.milestone.connected_external_brain_demo.v1` adapter evidence and `foundry.milestone.connected_external_brain_provider.v1` provider-contract validation into real external model/provider execution on broader project coding/research workflows, and continue hardening terminal file editing UX before promoting this beyond groundwork.",
         ),
         optional_capability(
             "experimental_multimodal_runtime",
             "Experimental multimodal runtime",
             "groundwork",
-            "0.4.140 adds disabled-by-default multimodal inventory, plan-only install manifests and runtime guards for camera, microphone, screen, input, peripherals, model and filesystem access. 0.4.142 adds plan-only benchmark/report templates and guarded demo plans for local image recognition, audio transcription/synthesis and Blender/avatar preparation through CLI and MCP without installing models or accessing devices. The current line adds approved `.forge/multimodal.json` feature-flag configuration, `--project-root`/MCP project-root inspection, approval-gated `forge multimodal benchmark-result` plus MCP `forge.multimodal.benchmark_result` fixture-only artifacts with explicit no-install, no-model-execution, no-device-access and no-network-access evidence, approval-gated `forge multimodal runtime-benchmark` plus MCP `forge.multimodal.runtime_benchmark` guarded deterministic local runtime execution after opt-in with model guard approval while installs, devices, filesystem and network remain blocked, project-connected runtime benchmark probes from `.forge/multimodal-runtimes.json` selected through CLI `--connected-runtime` or MCP `connected_runtime` with command/stdout/stderr hashes and connected-runtime measurements, production connected-runtime evidence validation when the project manifest declares approval, model manifest hash, evidence artifacts and quality/latency thresholds that the probe satisfies, and approval-gated `forge multimodal demo-receipt` plus MCP `forge.multimodal.demo_receipt` guarded local fixture receipts after opt-in with model guard approval recorded while camera, microphone, screen, input and filesystem access stay blocked unless separately approved. Multimodal is now declared through `forge.addon.multimodal` with capability `multimodal_runtime`, permission `multimodal.runtime_benchmark`, view `multimodal.benchmark_center` and runtime contract `multimodal_runtime_benchmark.executor`; the Core command path remains a guarded compatibility executor, and Addon runtime dispatch can execute it through `forge.addons.run_dispatch` with policy/lineage evidence. These surfaces prove the safety boundary, Addon ownership, guarded runtime execution path, local receipt path and production connected-runtime evidence contract, but the 0.5 milestone still needs real production image/audio/video/3D model evidence attached before promotion.",
+            "0.4.140 adds disabled-by-default multimodal inventory, plan-only install manifests and runtime guards for camera, microphone, screen, input, peripherals, model and filesystem access. 0.4.142 adds plan-only benchmark/report templates and guarded demo plans for local image recognition, audio transcription/synthesis and Blender/avatar preparation through CLI and MCP without installing models or accessing devices. The current line adds approved `.foundry/multimodal.json` feature-flag configuration, `--project-root`/MCP project-root inspection, approval-gated `foundry multimodal benchmark-result` plus MCP `foundry.multimodal.benchmark_result` fixture-only artifacts with explicit no-install, no-model-execution, no-device-access and no-network-access evidence, approval-gated `foundry multimodal runtime-benchmark` plus MCP `foundry.multimodal.runtime_benchmark` guarded deterministic local runtime execution after opt-in with model guard approval while installs, devices, filesystem and network remain blocked, project-connected runtime benchmark probes from `.foundry/multimodal-runtimes.json` selected through CLI `--connected-runtime` or MCP `connected_runtime` with command/stdout/stderr hashes and connected-runtime measurements, production connected-runtime evidence validation when the project manifest declares approval, model manifest hash, evidence artifacts and quality/latency thresholds that the probe satisfies, and approval-gated `foundry multimodal demo-receipt` plus MCP `foundry.multimodal.demo_receipt` guarded local fixture receipts after opt-in with model guard approval recorded while camera, microphone, screen, input and filesystem access stay blocked unless separately approved. Multimodal is now declared through `foundry.addon.multimodal` with capability `multimodal_runtime`, permission `multimodal.runtime_benchmark`, view `multimodal.benchmark_center` and runtime contract `multimodal_runtime_benchmark.executor`; the Core command path remains a guarded compatibility executor, and Addon runtime dispatch can execute it through `foundry.addons.run_dispatch` with policy/lineage evidence. These surfaces prove the safety boundary, Addon ownership, guarded runtime execution path, local receipt path and production connected-runtime evidence contract, but the 0.6 milestone still needs real production image/audio/video/3D model evidence attached before promotion.",
             "Run and attach production model/runtime benchmark evidence with installed or connected models after opt-in; current runtime benchmark can validate project-connected production evidence and still avoids installs, devices and network by default unless explicitly declared and guarded.",
         ),
     ]
@@ -9169,7 +9220,7 @@ fn attached_evidence_kind_map(
 }
 
 fn validated_attached_evidence_kind_map(
-    store: &ForgeStore,
+    store: &FoundryStore,
     attached_evidence: &[MilestoneAttachedEvidence],
 ) -> BTreeMap<String, BTreeSet<String>> {
     let mut by_capability = BTreeMap::new();
@@ -9185,7 +9236,7 @@ fn validated_attached_evidence_kind_map(
 }
 
 fn milestone_attached_evidence_payload_is_promotion_ready(
-    store: &ForgeStore,
+    store: &FoundryStore,
     evidence: &MilestoneAttachedEvidence,
 ) -> bool {
     let templates = milestone_promotion_gate_templates(&evidence.capability_id);
@@ -9298,18 +9349,18 @@ fn required_evidence_for(capability_id: &str) -> &'static str {
             "Presence, patch streams, comments, conflict handling, audit and rollback demo evidence."
         }
         "research_artifact_baseline" => {
-            "Source-grounded research comparison and Forge-owned validation/template implications."
+            "Source-grounded research comparison and Foundry-owned validation/template implications."
         }
         "export_demo_baseline" => {
             "Rendered or exported design/token/component and document/slide/whiteboard workflow demos."
         }
         "replacement_grade_cli" => {
-            "Forge-first CLI demo evidence plus native file editing, inline patch workbench previews, multi-file review queues, diff review, permissions, sessions, session operation plans, harness session lifecycle plans, brain handoff rehearsal evidence and JSON-stable automation evidence."
+            "Foundry-first CLI demo evidence plus native file editing, inline patch workbench previews, multi-file review queues, diff review, permissions, sessions, session operation plans, harness session lifecycle plans, brain handoff rehearsal evidence and JSON-stable automation evidence."
         }
         "experimental_multimodal_runtime" => {
             "Disabled-by-default multimodal inventory, approved feature-flag config, install-plan, runtime guard, benchmark template, approval-gated fixture-only benchmark-result, guarded local demo-receipt and safe local image/audio/3D demo-plan evidence."
         }
-        _ => "Implementation, validation and demo evidence sufficient for 0.5 promotion.",
+        _ => "Implementation, validation and demo evidence sufficient for 0.6 promotion.",
     }
 }
 
@@ -9328,7 +9379,7 @@ fn next_action_for_gap(capability_id: &str) -> &'static str {
             "Keep the source-grounded creative-runtime research report fresh as protocols and local skills change."
         }
         "export_demo_baseline" => {
-            "Produce rendered design/tokens/component demo evidence and one structured document/slide/whiteboard workflow demo before 0.5 promotion."
+            "Produce rendered design/tokens/component demo evidence and one structured document/slide/whiteboard workflow demo before 0.6 promotion."
         }
         "replacement_grade_cli" => {
             "Continue from patch workbench review queues, session operation plans, isolated executor project demos and deterministic real-project workflow evidence into richer file-editing UX and end-to-end external-brain coding/research workflows."
@@ -9346,73 +9397,73 @@ fn research_sources() -> Vec<MilestoneResearchSource> {
             "Penpot data model",
             "https://help.penpot.app/technical-guide/developer/data-model/",
             "Pages and components share a Container abstraction; ShapeTree and Shape carry the editable design model.",
-            "Forge creative IR should preserve identity, hierarchy and rendering/export metadata instead of flattening designs into screenshots.",
+            "Foundry creative IR should preserve identity, hierarchy and rendering/export metadata instead of flattening designs into screenshots.",
         ),
         research_source(
             "Penpot data guide",
             "https://help.penpot.app/technical-guide/developer/data-guide/",
             "Penpot treats data evolution, optional attributes and component synchronization as compatibility-sensitive model concerns.",
-            "Forge migrations, patch diffs and token/component propagation need backward-compatible defaults plus explicit sync/touched state.",
+            "Foundry migrations, patch diffs and token/component propagation need backward-compatible defaults plus explicit sync/touched state.",
         ),
         research_source(
             "Penpot design tokens",
             "https://help.penpot.app/user-guide/design-systems/design-tokens/",
             "Penpot aligns tokens with the W3C DTCG format and integrates tokens with components and layout.",
-            "Forge tokens should remain source-of-truth artifacts with import/export adapters, semantic aliases and layout/component impact previews.",
+            "Foundry tokens should remain source-of-truth artifacts with import/export adapters, semantic aliases and layout/component impact previews.",
         ),
         research_source(
             "Google Stitch real-time design",
             "https://blog.google/innovation-and-ai/models-and-research/google-labs/stitch-updates/",
             "Stitch turns text, voice, codebase and design-file inputs into real-time canvas iterations and production exports.",
-            "Forge should model prompt-to-design as staged workflows: brief, variants, critique, patch, validation and export, not one-shot prompting.",
+            "Foundry should model prompt-to-design as staged workflows: brief, variants, critique, patch, validation and export, not one-shot prompting.",
         ),
         research_source(
             "v0 docs",
             "https://v0.app/docs",
             "v0 positions prompt input as a path to high-fidelity UIs, full-stack code, live prototypes, pull requests and deployment.",
-            "Forge should route code/product generation through workflow state, validation gates and retention policy before exposing generated products.",
+            "Foundry should route code/product generation through workflow state, validation gates and retention policy before exposing generated products.",
         ),
         research_source(
             "AG-UI protocol",
             "https://github.com/ag-ui-protocol/ag-ui",
             "AG-UI defines event-based agent-user interaction with streaming, shared state, frontend tool calls and human-in-the-loop collaboration.",
-            "Forge should own event/audit semantics and expose AGUI-style adapters as transport layers, not as orchestration authority.",
+            "Foundry should own event/audit semantics and expose AGUI-style adapters as transport layers, not as orchestration authority.",
         ),
         research_source(
             "AG-UI overview",
             "https://docs.ag-ui.com/introduction",
             "The protocol highlights typed shared state, streamed event diffs, interrupts, sub-agents, steering and cancellation.",
-            "Forge interaction nodes need pause/resume, state diffs, cancellation and durable decision records across CLI, web and MCP surfaces.",
+            "Foundry interaction nodes need pause/resume, state diffs, cancellation and durable decision records across CLI, web and MCP surfaces.",
         ),
         research_source(
             "Impeccable design guidance",
             "https://impeccable.style/docs/impeccable/",
             "Impeccable turns design taste into explicit PRODUCT.md/DESIGN.md guidance and anti-pattern checks before code changes.",
-            "Forge creative workflows need design-system discovery, anti-generic design gates and explicit persona/taste routing per node.",
+            "Foundry creative workflows need design-system discovery, anti-generic design gates and explicit persona/taste routing per node.",
         ),
         research_source(
             "Figma MCP developer docs",
             "https://developers.figma.com/docs/figma-mcp-server/",
             "Figma MCP lets agents read design context and write native frames, components, variables and auto-layout using a design system.",
-            "Forge MCP tools should exchange structured IR patches and token/component references rather than forcing agents to rewrite whole artifacts.",
+            "Foundry MCP tools should exchange structured IR patches and token/component references rather than forcing agents to rewrite whole artifacts.",
         ),
         research_source(
             "Remotion fundamentals",
             "https://www.remotion.dev/docs/the-fundamentals",
             "Remotion models video as React-rendered frames with explicit width, height, duration and fps metadata.",
-            "Forge media plans should use deterministic timeline metadata, frame-level validation and bounded renderer adapters without making Remotion a hard dependency.",
+            "Foundry media plans should use deterministic timeline metadata, frame-level validation and bounded renderer adapters without making Remotion a hard dependency.",
         ),
         research_source(
             "Remotion Sequence",
             "https://www.remotion.dev/docs/sequence",
             "Sequences express timed mounting, trimming, nesting and named timeline segments.",
-            "Forge animation/video IR should model sequence/timeline nodes, duration constraints and nested composition before choosing an export engine.",
+            "Foundry animation/video IR should model sequence/timeline nodes, duration constraints and nested composition before choosing an export engine.",
         ),
         research_source(
             "OBS Studio overview",
             "https://obsproject.com/kb/obs-studio-overview",
             "OBS centers composition on scenes, sources, ordering, filters and transitions.",
-            "Forge lightweight media composition can reuse scene/source/filter/transition concepts as portable IR while avoiding heavy editor dependencies.",
+            "Foundry lightweight media composition can reuse scene/source/filter/transition concepts as portable IR while avoiding heavy editor dependencies.",
         ),
     ]
 }
@@ -9423,31 +9474,31 @@ fn local_research_inputs() -> Vec<MilestoneResearchSource> {
             "Local Superpowers brainstorming skill",
             "/home/arthur/.codex/plugins/cache/openai-curated/superpowers/6188456f/skills/brainstorming/SKILL.md",
             "Requires explicit design exploration, alternatives and approval before implementation.",
-            "Forge should convert creative ambiguity into human decision/form nodes with durable approval evidence.",
+            "Foundry should convert creative ambiguity into human decision/form nodes with durable approval evidence.",
         ),
         research_source(
             "Local stitch-design skill",
             "/home/arthur/.codex/skills/stitch-design/SKILL.md",
             "Defines prompt enhancement, design-system synthesis and screen generation/editing workflows.",
-            "Forge should preserve design-system context and route generation vs edit operations as separate workflow nodes.",
+            "Foundry should preserve design-system context and route generation vs edit operations as separate workflow nodes.",
         ),
         research_source(
             "Local imagegen skill",
             "/home/arthur/.codex/skills/.system/imagegen/SKILL.md",
             "Separates generated bitmap assets from repo-native vector/code assets and requires project-bound assets to be persisted.",
-            "Forge creative artifacts should distinguish deterministic IR patches from generated bitmap assets with explicit artifact lineage.",
+            "Foundry creative artifacts should distinguish deterministic IR patches from generated bitmap assets with explicit artifact lineage.",
         ),
         research_source(
             "Local Figma generate-design skill",
             "/home/arthur/.codex/plugins/cache/openai-curated/figma/6188456f/skills/figma-generate-design/SKILL.md",
             "Requires component, variable and style discovery before mutating Figma screens.",
-            "Forge product workflows should inspect design systems before high-volume generation and reject hardcoded-token drift.",
+            "Foundry product workflows should inspect design systems before high-volume generation and reject hardcoded-token drift.",
         ),
         research_source(
             "Local Remotion best-practices skill",
             "/home/arthur/.codex/skills/remotion/SKILL.md",
             "Uses frame/time primitives, sequences and explicit render metadata for code-based video.",
-            "Forge can borrow the timeline discipline while keeping video rendering adapters optional.",
+            "Foundry can borrow the timeline discipline while keeping video rendering adapters optional.",
         ),
     ]
 }
@@ -9459,7 +9510,7 @@ fn research_findings() -> Vec<MilestoneResearchFinding> {
             "Editable creative artifacts need stable identity and hierarchy",
             &["Penpot data model", "Figma MCP developer docs"],
             "Design tools preserve object identity, hierarchy, component context and native editability.",
-            "Every Forge creative artifact patch must target stable IDs and preserve token/component references unless the patch explicitly replaces them.",
+            "Every Foundry creative artifact patch must target stable IDs and preserve token/component references unless the patch explicitly replaces them.",
         ),
         research_finding(
             "tokens_are_runtime_inputs",
@@ -9473,28 +9524,28 @@ fn research_findings() -> Vec<MilestoneResearchFinding> {
             "Prompt-to-UI should become workflow stages",
             &["Google Stitch real-time design", "v0 docs", "Local stitch-design skill"],
             "Modern tools turn prompts into variants, refinements, code and export paths.",
-            "Forge must represent brief intake, variant generation, critique, human approval, patching, validation and export as separate nodes.",
+            "Foundry must represent brief intake, variant generation, critique, human approval, patching, validation and export as separate nodes.",
         ),
         research_finding(
             "agent_ui_needs_event_state",
             "Agent UI needs durable events and shared state",
             &["AG-UI protocol", "AG-UI overview"],
             "Agent-facing apps need streaming events, shared state, interrupts, frontend tool calls and cancellation.",
-            "Forge should expose event streams and MCP tools while keeping authoritative workflow state, audit history and permission policy in Forge.",
+            "Foundry should expose event streams and MCP tools while keeping authoritative workflow state, audit history and permission policy in Foundry.",
         ),
         research_finding(
             "taste_is_a_gate",
             "Design taste is a validation input",
             &["Impeccable design guidance", "Local Superpowers brainstorming skill"],
             "Generic UI failures are predictable enough to become explicit checks.",
-            "Forge creative flows should include anti-generic gates, persona/soul routing and human direction choices when taste matters.",
+            "Foundry creative flows should include anti-generic gates, persona/soul routing and human direction choices when taste matters.",
         ),
         research_finding(
             "media_is_timeline_ir",
             "Media output should start from portable timeline IR",
             &["Remotion fundamentals", "Remotion Sequence", "OBS Studio overview"],
             "Video and live composition tools converge on scenes, sources, sequences, timing, filters and transitions.",
-            "Forge should model media plans as timeline/scene/source IR first and choose renderer adapters only after validation.",
+            "Foundry should model media plans as timeline/scene/source IR first and choose renderer adapters only after validation.",
         ),
     ]
 }
@@ -9535,7 +9586,7 @@ fn research_validation_gates() -> Vec<MilestoneResearchGate> {
             "media_timeline_determinism",
             "Media timeline determinism",
             "Media/storyboard artifacts declare scenes, sources, timeline, dimensions, fps and duration before rendering.",
-            "A video or animation export cannot be reproduced from stored Forge artifact state.",
+            "A video or animation export cannot be reproduced from stored Foundry artifact state.",
         ),
         research_gate(
             "export_fidelity_accessibility",
@@ -9655,8 +9706,8 @@ fn research_workflow_templates() -> Vec<MilestoneResearchTemplate> {
 fn research_lean_decisions() -> Vec<MilestoneLeanDecision> {
     vec![
         lean_decision(
-            "forge_ir_before_vendor_adapter",
-            "Forge-owned IR is the source of truth; vendor tools are import/export or executor adapters.",
+            "foundry_ir_before_vendor_adapter",
+            "Foundry-owned IR is the source of truth; vendor tools are import/export or executor adapters.",
             "Compact schemas for screens, whiteboards, documents, slides, media plans, tokens, components and collaboration events.",
             "A hard dependency on Penpot, Figma, Stitch, v0, Remotion or OBS to own workflow state.",
             "Round-trip patch fidelity and fewer whole-artifact rewrites.",
@@ -9670,9 +9721,9 @@ fn research_lean_decisions() -> Vec<MilestoneLeanDecision> {
         ),
         lean_decision(
             "event_stream_adapter_not_orchestrator",
-            "AGUI-style event streams are transport surfaces; Forge keeps orchestration and audit authority.",
+            "AGUI-style event streams are transport surfaces; Foundry keeps orchestration and audit authority.",
             "Event schema mapping and permission-aware command routing.",
-            "Letting frontend event protocols mutate workflow state without Forge revisioning.",
+            "Letting frontend event protocols mutate workflow state without Foundry revisioning.",
             "Durable replay, pause/resume and cross-surface decision consistency.",
         ),
     ]
@@ -9682,13 +9733,13 @@ fn research_source(
     label: &str,
     url_or_path: &str,
     evidence: &str,
-    forge_implication: &str,
+    foundry_implication: &str,
 ) -> MilestoneResearchSource {
     MilestoneResearchSource {
         label: label.to_string(),
         url_or_path: url_or_path.to_string(),
         evidence: evidence.to_string(),
-        forge_implication: forge_implication.to_string(),
+        foundry_implication: foundry_implication.to_string(),
     }
 }
 
@@ -9697,7 +9748,7 @@ fn research_finding(
     title: &str,
     source_labels: &[&str],
     finding: &str,
-    forge_runtime_rule: &str,
+    foundry_runtime_rule: &str,
 ) -> MilestoneResearchFinding {
     MilestoneResearchFinding {
         id: id.to_string(),
@@ -9707,7 +9758,7 @@ fn research_finding(
             .map(|label| (*label).to_string())
             .collect(),
         finding: finding.to_string(),
-        forge_runtime_rule: forge_runtime_rule.to_string(),
+        foundry_runtime_rule: foundry_runtime_rule.to_string(),
     }
 }
 

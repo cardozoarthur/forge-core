@@ -1,0 +1,558 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+umask 077
+export LC_ALL=C
+
+readonly -a CATEGORIES=(
+  foundry_ops
+  foundry_runtime
+  request_supervisor
+  store_check
+  backup_timer
+  backup_service
+  disk_space
+  offhost_marker
+)
+
+readonly SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-/usr/bin/systemctl}"
+readonly FOUNDRY_ADMIN_BIN="${FOUNDRY_ADMIN_BIN:-/usr/local/sbin/foundry-admin}"
+readonly CURL_BIN="${CURL_BIN:-/usr/bin/curl}"
+readonly STAT_BIN="${STAT_BIN:-/usr/bin/stat}"
+readonly DF_BIN="${DF_BIN:-/usr/bin/df}"
+readonly DATE_BIN="${DATE_BIN:-/usr/bin/date}"
+readonly HOSTNAME_BIN="${HOSTNAME_BIN:-/usr/bin/hostname}"
+readonly FLOCK_BIN="${FLOCK_BIN:-/usr/bin/flock}"
+
+readonly STORE_PATH="${FOUNDRY_STORE_PATH:-/var/lib/foundry/foundry.sqlite}"
+readonly BACKUP_DIR="${FOUNDRY_BACKUP_DIR:-/var/backups/foundry}"
+readonly STATE_DIR="${FOUNDRY_ALERT_STATE_DIR:-${STATE_DIRECTORY:-/var/lib/foundry-production-alert}}"
+readonly STATE_FILE="${STATE_DIR}/state"
+readonly OFFHOST_MAX_AGE_SECONDS="${FOUNDRY_OFFHOST_MAX_AGE_SECONDS:-86400}"
+
+TELEGRAM_BOT_TOKEN=""
+TELEGRAM_CHAT_ID=""
+CHECK_DETAIL=""
+STATE_TMP=""
+
+cleanup() {
+  TELEGRAM_BOT_TOKEN=""
+  TELEGRAM_CHAT_ID=""
+  if [[ -n "$STATE_TMP" && -f "$STATE_TMP" && ! -L "$STATE_TMP" ]]; then
+    rm -f -- "$STATE_TMP"
+  fi
+}
+trap cleanup EXIT
+
+log_error() {
+  printf 'foundry-production-alert: %s\n' "$1" >&2
+}
+
+die() {
+  log_error "$1"
+  exit 2
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  foundry-production-alert
+  foundry-production-alert --test-alert <category>
+
+Categories:
+  foundry_ops
+  store_check
+  backup_timer
+  backup_service
+  disk_space
+  offhost_marker
+EOF
+}
+
+is_category() {
+  local candidate="$1"
+  local category=""
+  for category in "${CATEGORIES[@]}"; do
+    [[ "$candidate" == "$category" ]] && return 0
+  done
+  return 1
+}
+
+require_executable() {
+  local path="$1"
+  local label="$2"
+  [[ "$path" == /* && -f "$path" && -x "$path" && ! -L "$path" ]] ||
+    die "$label is unavailable or unsafe"
+}
+
+load_credentials() {
+  local credential_dir="${CREDENTIALS_DIRECTORY:-}"
+  local credential_file=""
+  local -a credential_lines=()
+
+  [[ -n "$credential_dir" && "$credential_dir" == /* ]] ||
+    die 'systemd credential directory is unavailable'
+  [[ -d "$credential_dir" && ! -L "$credential_dir" ]] ||
+    die 'systemd credential directory is unsafe'
+  if [[ "${FOUNDRY_ALERT_OFFLINE_SELF_TEST:-0}" == "1" ]]; then
+    [[ "$credential_dir" == /tmp/foundry-production-alert-selftest.*/* ]] ||
+      die 'offline self-test credential directory is outside its fixture'
+  else
+    [[ "$credential_dir" == /run/credentials/* ]] ||
+      die 'credentials must be supplied by systemd LoadCredential'
+  fi
+
+  credential_file="${credential_dir}/foundry-telegram-alert"
+  [[ -f "$credential_file" && ! -L "$credential_file" ]] ||
+    die 'foundry-telegram-alert credential is unavailable or unsafe'
+
+  mapfile -t credential_lines <"$credential_file" ||
+    die 'foundry-telegram-alert credential could not be read'
+  [[ ${#credential_lines[@]} -eq 2 ]] ||
+    die 'foundry-telegram-alert credential must contain exactly two lines'
+
+  TELEGRAM_BOT_TOKEN="${credential_lines[0]}"
+  TELEGRAM_CHAT_ID="${credential_lines[1]}"
+  unset credential_lines
+
+  [[ "$TELEGRAM_BOT_TOKEN" =~ ^[0-9]{6,}:[A-Za-z0-9_-]{20,}$ ]] ||
+    die 'foundry-telegram-alert bot token has an invalid shape'
+  [[ "$TELEGRAM_CHAT_ID" =~ ^-?[0-9]{1,20}$ ]] ||
+    die 'foundry-telegram-alert chat id has an invalid shape'
+}
+
+curl_config_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+alert_host() {
+  local host="${FOUNDRY_ALERT_HOST_OVERRIDE:-}"
+  if [[ -z "$host" ]]; then
+    host="$("$HOSTNAME_BIN" --fqdn 2>/dev/null || "$HOSTNAME_BIN" 2>/dev/null || true)"
+  fi
+  if [[ ! "$host" =~ ^[A-Za-z0-9._:-]{1,255}$ ]]; then
+    host="unknown"
+  fi
+  printf '%s' "$host"
+}
+
+send_telegram() {
+  local text="$1"
+  local escaped_token=""
+  local escaped_chat_id=""
+  local escaped_text=""
+
+  escaped_token="$(curl_config_escape "$TELEGRAM_BOT_TOKEN")"
+  escaped_chat_id="$(curl_config_escape "$TELEGRAM_CHAT_ID")"
+  escaped_text="$(curl_config_escape "$text")"
+
+  {
+    printf 'silent\n'
+    printf 'show-error\n'
+    printf 'fail\n'
+    printf 'proto = "=https"\n'
+    printf 'tlsv1.2\n'
+    printf 'request = "POST"\n'
+    printf 'connect-timeout = "5"\n'
+    printf 'max-time = "20"\n'
+    printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$escaped_token"
+    printf 'data-urlencode = "chat_id=%s"\n' "$escaped_chat_id"
+    printf 'data-urlencode = "text=%s"\n' "$escaped_text"
+  } | "$CURL_BIN" --config - --output /dev/null 2>/dev/null
+}
+
+check_foundry_ops() {
+  CHECK_DETAIL='foundry-ops.service is active'
+  if "$SYSTEMCTL_BIN" is-active --quiet foundry-ops.service >/dev/null 2>&1; then
+    return 0
+  fi
+  CHECK_DETAIL='foundry-ops.service is not active'
+  return 1
+}
+
+check_foundry_runtime() {
+  CHECK_DETAIL='foundry-runtime.service is active'
+  if "$SYSTEMCTL_BIN" is-active --quiet foundry-runtime.service >/dev/null 2>&1; then
+    return 0
+  fi
+  CHECK_DETAIL='foundry-runtime.service is not active'
+  return 1
+}
+
+check_request_supervisor() {
+  CHECK_DETAIL='foundry-request-supervisor.service is active'
+  if "$SYSTEMCTL_BIN" is-active --quiet foundry-request-supervisor.service >/dev/null 2>&1; then
+    return 0
+  fi
+  CHECK_DETAIL='foundry-request-supervisor.service is not active'
+  return 1
+}
+
+check_store() {
+  CHECK_DETAIL='Foundry store check passed'
+  if [[ ! -f "$STORE_PATH" || -L "$STORE_PATH" ]]; then
+    CHECK_DETAIL='Foundry store is missing or unsafe'
+    return 1
+  fi
+  if "$FOUNDRY_ADMIN_BIN" \
+    --store "$STORE_PATH" \
+    store check \
+    --output json \
+    >/dev/null 2>&1; then
+    return 0
+  fi
+  CHECK_DETAIL='Foundry store check failed'
+  return 1
+}
+
+check_backup_timer() {
+  CHECK_DETAIL='foundry-backup.timer is active and enabled'
+  if "$SYSTEMCTL_BIN" is-active --quiet foundry-backup.timer >/dev/null 2>&1 &&
+    "$SYSTEMCTL_BIN" is-enabled --quiet foundry-backup.timer >/dev/null 2>&1; then
+    return 0
+  fi
+  CHECK_DETAIL='foundry-backup.timer is not both active and enabled'
+  return 1
+}
+
+systemd_property() {
+  local unit="$1"
+  local property="$2"
+  "$SYSTEMCTL_BIN" show "$unit" \
+    --property="$property" \
+    --value \
+    2>/dev/null
+}
+
+check_backup_service() {
+  local result=""
+  local exit_status=""
+  local exit_timestamp=""
+
+  result="$(systemd_property foundry-backup.service Result || true)"
+  exit_status="$(systemd_property foundry-backup.service ExecMainStatus || true)"
+  exit_timestamp="$(systemd_property foundry-backup.service ExecMainExitTimestampMonotonic || true)"
+
+  CHECK_DETAIL='last foundry-backup.service run passed'
+  if [[ "$result" == "success" &&
+    "$exit_status" == "0" &&
+    "$exit_timestamp" =~ ^[1-9][0-9]*$ ]]; then
+    return 0
+  fi
+  CHECK_DETAIL='last foundry-backup.service run is absent or failed'
+  return 1
+}
+
+check_disk_space() {
+  local store_bytes=""
+  local available_bytes=""
+  local required_bytes=""
+  local -a df_lines=()
+
+  if [[ ! -f "$STORE_PATH" || -L "$STORE_PATH" ]]; then
+    CHECK_DETAIL='disk check cannot inspect a safe Foundry store'
+    return 1
+  fi
+
+  store_bytes="$("$STAT_BIN" -c '%s' -- "$STORE_PATH" 2>/dev/null || true)"
+  mapfile -t df_lines < <(
+    "$DF_BIN" -B1 --output=avail -- "$STORE_PATH" 2>/dev/null || true
+  )
+  if [[ ${#df_lines[@]} -gt 0 ]]; then
+    available_bytes="${df_lines[${#df_lines[@]} - 1]}"
+    available_bytes="${available_bytes//[[:space:]]/}"
+  fi
+
+  if [[ ! "$store_bytes" =~ ^[1-9][0-9]*$ ||
+    ! "$available_bytes" =~ ^[0-9]+$ ||
+    "$store_bytes" -gt 4611686018427387903 ]]; then
+    CHECK_DETAIL='disk check returned invalid measurements'
+    return 1
+  fi
+
+  required_bytes=$((store_bytes * 2))
+  if ((available_bytes >= required_bytes)); then
+    CHECK_DETAIL="disk free bytes ${available_bytes} meet required ${required_bytes}"
+    return 0
+  fi
+
+  CHECK_DETAIL="disk free bytes ${available_bytes} are below required ${required_bytes}"
+  return 1
+}
+
+marker_is_valid() {
+  local marker="$1"
+  local marker_schema=""
+  local marker_backup_sha256=""
+  local marker_destination_sha256=""
+  local marker_generation=""
+  local marker_uploader_sha256=""
+  local marker_extra=""
+  local -a marker_lines=()
+
+  [[ -f "$marker" && ! -L "$marker" ]] || return 1
+  mapfile -t marker_lines <"$marker" || return 1
+  [[ ${#marker_lines[@]} -eq 1 ]] || return 1
+  read -r \
+    marker_schema \
+    marker_backup_sha256 \
+    marker_destination_sha256 \
+    marker_generation \
+    marker_uploader_sha256 \
+    marker_extra \
+    <<<"${marker_lines[0]}" || return 1
+  [[ "$marker_schema" == "foundry-offhost-v2" ]] || return 1
+  [[ "$marker_backup_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "$marker_destination_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "$marker_generation" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || return 1
+  [[ "$marker_uploader_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ -z "$marker_extra" ]] || return 1
+}
+
+current_epoch() {
+  local override="${FOUNDRY_NOW_EPOCH_OVERRIDE:-}"
+  if [[ -n "$override" ]]; then
+    [[ "$override" =~ ^[1-9][0-9]*$ ]] || return 1
+    printf '%s' "$override"
+    return 0
+  fi
+  "$DATE_BIN" +%s
+}
+
+check_offhost_marker() {
+  local marker=""
+  local marker_epoch=""
+  local newest_epoch=0
+  local now_epoch=""
+  local age_seconds=""
+  local -a markers=()
+
+  if [[ ! -d "$BACKUP_DIR" || -L "$BACKUP_DIR" ]]; then
+    CHECK_DETAIL='off-host backup directory is missing or unsafe'
+    return 1
+  fi
+
+  shopt -s nullglob
+  markers=("$BACKUP_DIR"/*.sqlite.offhost-verified)
+  shopt -u nullglob
+
+  for marker in "${markers[@]}"; do
+    marker_is_valid "$marker" || continue
+    marker_epoch="$("$STAT_BIN" -c '%Y' -- "$marker" 2>/dev/null || true)"
+    [[ "$marker_epoch" =~ ^[1-9][0-9]*$ ]] || continue
+    if ((marker_epoch > newest_epoch)); then
+      newest_epoch="$marker_epoch"
+    fi
+  done
+
+  now_epoch="$(current_epoch || true)"
+  if [[ ! "$now_epoch" =~ ^[1-9][0-9]*$ || "$newest_epoch" -eq 0 ]]; then
+    CHECK_DETAIL='no valid off-host verification marker exists'
+    return 1
+  fi
+  if ((newest_epoch > now_epoch)); then
+    CHECK_DETAIL='newest off-host verification marker is from the future'
+    return 1
+  fi
+
+  age_seconds=$((now_epoch - newest_epoch))
+  if ((age_seconds <= OFFHOST_MAX_AGE_SECONDS)); then
+    CHECK_DETAIL="newest off-host verification marker age ${age_seconds}s is within limit"
+    return 0
+  fi
+
+  CHECK_DETAIL="newest off-host verification marker age ${age_seconds}s exceeds limit"
+  return 1
+}
+
+run_check() {
+  local category="$1"
+  case "$category" in
+    foundry_ops) check_foundry_ops ;;
+    foundry_runtime) check_foundry_runtime ;;
+    request_supervisor) check_request_supervisor ;;
+    store_check) check_store ;;
+    backup_timer) check_backup_timer ;;
+    backup_service) check_backup_service ;;
+    disk_space) check_disk_space ;;
+    offhost_marker) check_offhost_marker ;;
+    *) return 2 ;;
+  esac
+}
+
+ensure_state_dir() {
+  if [[ -e "$STATE_DIR" && (! -d "$STATE_DIR" || -L "$STATE_DIR") ]]; then
+    die 'alert state directory is unsafe'
+  fi
+  mkdir -p -- "$STATE_DIR"
+  chmod 0700 -- "$STATE_DIR"
+}
+
+load_state() {
+  local -n destination="$1"
+  local category=""
+  local status=""
+
+  [[ ! -e "$STATE_FILE" ]] && return 0
+  [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] ||
+    die 'alert state file is unsafe'
+
+  while IFS='=' read -r category status; do
+    [[ -z "$category$status" ]] && continue
+    is_category "$category" ||
+      die 'alert state file contains an unknown category'
+    [[ "$status" == "ok" || "$status" == "failed" ]] ||
+      die 'alert state file contains an invalid status'
+    [[ -z "${destination[$category]+present}" ]] ||
+      die 'alert state file contains a duplicate category'
+    destination["$category"]="$status"
+  done <"$STATE_FILE"
+}
+
+save_state() {
+  local -n source="$1"
+  local category=""
+
+  STATE_TMP="$(mktemp "${STATE_DIR}/.state.XXXXXX")"
+  chmod 0600 -- "$STATE_TMP"
+  for category in "${CATEGORIES[@]}"; do
+    if [[ -n "${source[$category]+present}" ]]; then
+      printf '%s=%s\n' "$category" "${source[$category]}" >>"$STATE_TMP"
+    fi
+  done
+  mv -f -- "$STATE_TMP" "$STATE_FILE"
+  STATE_TMP=""
+}
+
+run_test_alert() {
+  local category="$1"
+  local host=""
+  local message=""
+
+  is_category "$category" || {
+    usage >&2
+    return 2
+  }
+  require_executable "$CURL_BIN" 'curl'
+  require_executable "$HOSTNAME_BIN" 'hostname'
+  load_credentials
+  host="$(alert_host)"
+  message="[Foundry production][TEST] host=${host} category=${category} synthetic alert; no health state changed"
+  if send_telegram "$message"; then
+    printf 'category=%s status=test notification=sent\n' "$category"
+    return 0
+  fi
+  log_error 'Telegram test alert delivery failed'
+  return 2
+}
+
+run_monitor() {
+  local category=""
+  local current_status=""
+  local previous_status=""
+  local effective_status=""
+  local changed=""
+  local notification=""
+  local host=""
+  local message=""
+  local unhealthy=0
+  local notification_failed=0
+  declare -A previous_state=()
+  # The associative array is passed by name to save_state.
+  # shellcheck disable=SC2034
+  declare -A final_state=()
+
+  require_executable "$SYSTEMCTL_BIN" 'systemctl'
+  require_executable "$FOUNDRY_ADMIN_BIN" 'foundry-admin'
+  require_executable "$CURL_BIN" 'curl'
+  require_executable "$STAT_BIN" 'stat'
+  require_executable "$DF_BIN" 'df'
+  require_executable "$DATE_BIN" 'date'
+  require_executable "$HOSTNAME_BIN" 'hostname'
+  require_executable "$FLOCK_BIN" 'flock'
+
+  [[ "$OFFHOST_MAX_AGE_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+    die 'off-host marker age limit is invalid'
+
+  ensure_state_dir
+  exec 9>"${STATE_DIR}/run.lock"
+  "$FLOCK_BIN" -n 9 || die 'another alert monitor run is active'
+
+  load_credentials
+  load_state previous_state
+  host="$(alert_host)"
+
+  for category in "${CATEGORIES[@]}"; do
+    CHECK_DETAIL=""
+    if run_check "$category"; then
+      current_status="ok"
+    else
+      current_status="failed"
+      unhealthy=1
+    fi
+
+    previous_status="${previous_state[$category]-}"
+    effective_status="$current_status"
+    changed="no"
+    notification="none"
+
+    if [[ "$previous_status" != "$current_status" ]]; then
+      changed="yes"
+      message=""
+      if [[ "$current_status" == "failed" ]]; then
+        message="[Foundry production][ALERT] host=${host} category=${category} detail=${CHECK_DETAIL}"
+      elif [[ "$previous_status" == "failed" ]]; then
+        message="[Foundry production][RECOVERY] host=${host} category=${category} detail=${CHECK_DETAIL}"
+      fi
+
+      if [[ -n "$message" ]]; then
+        if send_telegram "$message"; then
+          notification="sent"
+        else
+          notification="failed"
+          notification_failed=1
+          effective_status="$previous_status"
+        fi
+      fi
+    fi
+
+    if [[ -n "$effective_status" ]]; then
+      # Read later through the save_state nameref.
+      # shellcheck disable=SC2034
+      final_state["$category"]="$effective_status"
+    fi
+    printf 'category=%s status=%s changed=%s notification=%s detail=%s\n' \
+      "$category" \
+      "$current_status" \
+      "$changed" \
+      "$notification" \
+      "$CHECK_DETAIL"
+  done
+
+  save_state final_state
+
+  ((notification_failed == 0)) ||
+    die 'one or more Telegram notifications failed'
+  ((unhealthy == 0))
+}
+
+main() {
+  if [[ $# -eq 0 ]]; then
+    run_monitor
+    return
+  fi
+  if [[ $# -eq 2 && "$1" == "--test-alert" ]]; then
+    run_test_alert "$2"
+    return
+  fi
+  usage >&2
+  return 2
+}
+
+main "$@"

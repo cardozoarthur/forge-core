@@ -2,11 +2,11 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $rootDir = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
-$testDir = Join-Path ([IO.Path]::GetTempPath()) ("forge-installer-test-" + [guid]::NewGuid().ToString("N"))
+$testDir = Join-Path ([IO.Path]::GetTempPath()) ("foundry-installer-test-" + [guid]::NewGuid().ToString("N"))
 $releaseDir = Join-Path $testDir "release"
 $stubDir = Join-Path $testDir "stubs"
-$version = "v0.5.3"
-$repo = "cardozoarthur/forge-core"
+$version = "v0.6.0"
+$repo = "cardozoarthur/foundry-core"
 $issuer = "https://token.actions.githubusercontent.com"
 $identity = "https://github.com/$repo/.github/workflows/release.yml@refs/tags/$version"
 $server = $null
@@ -34,12 +34,22 @@ function Invoke-InstallerCase {
     param(
         [string]$Label,
         [bool]$ShouldSucceed,
-        [bool]$EnableTestMode = $true
+        [bool]$EnableTestMode = $true,
+        [bool]$UseLegacyVariables = $false
     )
 
     $caseBin = Join-Path $testDir ("bin-" + [guid]::NewGuid().ToString("N"))
-    $env:FORGE_BIN_DIR = $caseBin
-    $env:FORGE_INSTALLER_TEST_MODE = if ($EnableTestMode) { "1" } else { "0" }
+    if ($UseLegacyVariables) {
+        $env:FOUNDRY_BIN_DIR = $null
+        $env:FOUNDRY_INSTALLER_TEST_MODE = $null
+        # foundry-brand-allow: legacy-compat
+        $env:FORGE_BIN_DIR = $caseBin
+        # foundry-brand-allow: legacy-compat
+        $env:FORGE_INSTALLER_TEST_MODE = if ($EnableTestMode) { "1" } else { "0" }
+    } else {
+        $env:FOUNDRY_BIN_DIR = $caseBin
+        $env:FOUNDRY_INSTALLER_TEST_MODE = if ($EnableTestMode) { "1" } else { "0" }
+    }
     $succeeded = $true
     $failureMessage = $null
     try {
@@ -53,27 +63,46 @@ function Invoke-InstallerCase {
         $failureDetail = if ($failureMessage) { ": $failureMessage" } else { "" }
         throw "Installer self-test case '$Label' had unexpected result$failureDetail"
     }
-    $installed = Test-Path -PathType Leaf (Join-Path $caseBin "forge.exe")
-    if ($installed -ne $ShouldSucceed) {
+    $installed = Test-Path -PathType Leaf (Join-Path $caseBin "foundry.exe")
+    # foundry-brand-allow: legacy-compat
+    $forgeShimInstalled = Test-Path -PathType Leaf (Join-Path $caseBin "forge.exe")
+    # foundry-brand-allow: legacy-compat
+    if ($installed -ne $ShouldSucceed -or $forgeShimInstalled -ne $ShouldSucceed) {
         throw "Installer self-test case '$Label' violated no-install-on-failure"
     }
 }
 
 $previousPath = $env:PATH
-$previousRepo = $env:FORGE_REPO
-$previousVersion = $env:FORGE_VERSION
-$previousBaseUrl = $env:FORGE_RELEASE_BASE_URL
-$previousBinDir = $env:FORGE_BIN_DIR
-$previousTestMode = $env:FORGE_INSTALLER_TEST_MODE
+$previousRepo = $env:FOUNDRY_REPO
+$previousVersion = $env:FOUNDRY_VERSION
+$previousBaseUrl = $env:FOUNDRY_RELEASE_BASE_URL
+$previousBinDir = $env:FOUNDRY_BIN_DIR
+$previousTestMode = $env:FOUNDRY_INSTALLER_TEST_MODE
+# foundry-brand-allow: legacy-compat
+$previousLegacyRepo = $env:FORGE_REPO
+# foundry-brand-allow: legacy-compat
+$previousLegacyVersion = $env:FORGE_VERSION
+# foundry-brand-allow: legacy-compat
+$previousLegacyBaseUrl = $env:FORGE_RELEASE_BASE_URL
+# foundry-brand-allow: legacy-compat
+$previousLegacyBinDir = $env:FORGE_BIN_DIR
+# foundry-brand-allow: legacy-compat
+$previousLegacyTestMode = $env:FORGE_INSTALLER_TEST_MODE
 try {
     New-Item -ItemType Directory -Force -Path $releaseDir, $stubDir | Out-Null
 
     $archiveDir = Join-Path $testDir "archive"
     New-Item -ItemType Directory -Force -Path $archiveDir | Out-Null
-    Set-Content -Path (Join-Path $archiveDir "forge.exe") -Value "fixture" -Encoding ascii
-    $asset = "forge-windows-x86_64.zip"
+    Set-Content -Path (Join-Path $archiveDir "foundry.exe") -Value "fixture" -Encoding ascii
+    # foundry-brand-allow: legacy-compat
+    Set-Content -Path (Join-Path $archiveDir "forge.exe") -Value "legacy fixture" -Encoding ascii
+    $asset = "foundry-windows-x86_64.zip"
     $archive = Join-Path $releaseDir $asset
-    Compress-Archive -Path (Join-Path $archiveDir "forge.exe") -DestinationPath $archive
+    Compress-Archive -Path @(
+        (Join-Path $archiveDir "foundry.exe"),
+        # foundry-brand-allow: legacy-compat
+        (Join-Path $archiveDir "forge.exe")
+    ) -DestinationPath $archive
     $archiveDigest = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
     Set-Content `
         -Path (Join-Path $releaseDir "SHA256SUMS") `
@@ -118,12 +147,26 @@ try {
     }
 
     $env:PATH = "$stubDir;$previousPath"
-    $env:FORGE_REPO = $repo
-    $env:FORGE_VERSION = $version
-    $env:FORGE_RELEASE_BASE_URL = $baseUrl
+    $env:FOUNDRY_REPO = $repo
+    $env:FOUNDRY_VERSION = $version
+    $env:FOUNDRY_RELEASE_BASE_URL = $baseUrl
 
     Write-Bundle
     Invoke-InstallerCase "valid bundle" $true
+
+    $env:FOUNDRY_REPO = $null
+    $env:FOUNDRY_VERSION = $null
+    $env:FOUNDRY_RELEASE_BASE_URL = $null
+    # foundry-brand-allow: legacy-compat
+    $env:FORGE_REPO = $repo
+    # foundry-brand-allow: legacy-compat
+    $env:FORGE_VERSION = $version
+    # foundry-brand-allow: legacy-compat
+    $env:FORGE_RELEASE_BASE_URL = $baseUrl
+    Invoke-InstallerCase "legacy variable aliases" $true $true $true
+    $env:FOUNDRY_REPO = $repo
+    $env:FOUNDRY_VERSION = $version
+    $env:FOUNDRY_RELEASE_BASE_URL = $baseUrl
 
     Remove-Item (Join-Path $releaseDir "SHA256SUMS.sigstore.json")
     Invoke-InstallerCase "missing bundle" $false
@@ -137,7 +180,7 @@ try {
     Write-Bundle -BundleIdentity "https://github.com/$repo/.github/workflows/other.yml@refs/tags/$version"
     Invoke-InstallerCase "wrong workflow identity" $false
 
-    Write-Bundle -BundleIdentity "https://github.com/$repo/.github/workflows/release.yml@refs/tags/v0.5.4"
+    Write-Bundle -BundleIdentity "https://github.com/$repo/.github/workflows/release.yml@refs/tags/v0.6.1"
     Invoke-InstallerCase "wrong tag" $false
 
     Write-Bundle
@@ -146,11 +189,21 @@ try {
     Write-Host "PowerShell installer supply-chain self-test: PASS"
 } finally {
     $env:PATH = $previousPath
-    $env:FORGE_REPO = $previousRepo
-    $env:FORGE_VERSION = $previousVersion
-    $env:FORGE_RELEASE_BASE_URL = $previousBaseUrl
-    $env:FORGE_BIN_DIR = $previousBinDir
-    $env:FORGE_INSTALLER_TEST_MODE = $previousTestMode
+    $env:FOUNDRY_REPO = $previousRepo
+    $env:FOUNDRY_VERSION = $previousVersion
+    $env:FOUNDRY_RELEASE_BASE_URL = $previousBaseUrl
+    $env:FOUNDRY_BIN_DIR = $previousBinDir
+    $env:FOUNDRY_INSTALLER_TEST_MODE = $previousTestMode
+    # foundry-brand-allow: legacy-compat
+    $env:FORGE_REPO = $previousLegacyRepo
+    # foundry-brand-allow: legacy-compat
+    $env:FORGE_VERSION = $previousLegacyVersion
+    # foundry-brand-allow: legacy-compat
+    $env:FORGE_RELEASE_BASE_URL = $previousLegacyBaseUrl
+    # foundry-brand-allow: legacy-compat
+    $env:FORGE_BIN_DIR = $previousLegacyBinDir
+    # foundry-brand-allow: legacy-compat
+    $env:FORGE_INSTALLER_TEST_MODE = $previousLegacyTestMode
     if ($server) {
         Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
     }

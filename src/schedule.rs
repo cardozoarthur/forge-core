@@ -7,7 +7,7 @@ use crate::identity::ensure_workflow_policy;
 use crate::intent::parse_intent;
 use crate::lease::{acquire_task_lease, release_task_lease, TaskLease};
 use crate::registry::{attach_reuse_candidates_as_child_subflows, find_reuse_candidates};
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use crate::worker::{Job, WorkerPool, WorkerPoolReport};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
@@ -19,13 +19,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
-const SCHEDULE_SUMMARY_SCHEMA_VERSION: &str = "forge.schedule.summary.v1";
-const LOOP_SUMMARY_SCHEMA_VERSION: &str = "forge.loop.summary.v1";
-const MISSED_RUN_RECONCILIATION_SCHEMA_VERSION: &str = "forge.missed_run_reconciliation.v1";
-const SCALE_TO_ZERO_DECISION_SCHEMA_VERSION: &str = "forge.scale_to_zero_decision.v1";
-const SCHEDULE_SCAN_DUE_SCHEMA_VERSION: &str = "forge.schedule.scan_due.v1";
-const SCHEDULE_WORKER_STATUS_SCHEMA_VERSION: &str = "forge.schedule.worker_status.v1";
-const DAILY_GOAL_EXECUTION_SCHEMA_VERSION: &str = "forge.daily_goal_research.execution.v1";
+const SCHEDULE_SUMMARY_SCHEMA_VERSION: &str = "foundry.schedule.summary.v1";
+const LOOP_SUMMARY_SCHEMA_VERSION: &str = "foundry.loop.summary.v1";
+const MISSED_RUN_RECONCILIATION_SCHEMA_VERSION: &str = "foundry.missed_run_reconciliation.v1";
+const SCALE_TO_ZERO_DECISION_SCHEMA_VERSION: &str = "foundry.scale_to_zero_decision.v1";
+const SCHEDULE_SCAN_DUE_SCHEMA_VERSION: &str = "foundry.schedule.scan_due.v1";
+const SCHEDULE_WORKER_STATUS_SCHEMA_VERSION: &str = "foundry.schedule.worker_status.v1";
+const DAILY_GOAL_EXECUTION_SCHEMA_VERSION: &str = "foundry.daily_goal_research.execution.v1";
 const DAILY_GOAL_MAX_ARTIFACT_WORKERS: usize = 4;
 const MISSED_RUN_GRACE_MINUTES: i64 = 5;
 const ARTIFACT_DIRECTORY_NAME: &str = "artifacts";
@@ -405,7 +405,7 @@ pub fn summarize_loops(tasks: &[AtomicTask]) -> LoopSummary {
 }
 
 pub fn create_daily_goal_research_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     goals: Vec<String>,
     timezone: &str,
     cron: &str,
@@ -453,7 +453,7 @@ pub fn create_daily_goal_research_workflow(
 }
 
 pub fn update_workflow_schedule(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     options: ScheduleUpdateOptions<'_>,
@@ -524,14 +524,14 @@ pub fn update_workflow_schedule(
 }
 
 pub fn run_daily_goal_research_smoke(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &mut Workflow,
 ) -> Result<Option<DailyGoalResearchSmokeReport>> {
     run_daily_goal_research_smoke_with_schedule_mode(store, workflow, false, None)
 }
 
 fn run_daily_goal_research_smoke_with_schedule_mode(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &mut Workflow,
     due_only: bool,
     artifact_journal: Option<&ArtifactWriteJournal>,
@@ -799,7 +799,7 @@ pub fn aggregate_summary(tasks_by_workflow: &[&[AtomicTask]]) -> AggregateSummar
     }
 
     AggregateSummaryReport {
-        schema_version: "forge.schedule.aggregate_summary.v1".to_string(),
+        schema_version: "foundry.schedule.aggregate_summary.v1".to_string(),
         summary: total_schedule,
         loop_summary: total_loop,
         workflow_count,
@@ -809,7 +809,7 @@ pub fn aggregate_summary(tasks_by_workflow: &[&[AtomicTask]]) -> AggregateSummar
 }
 
 pub fn update_loop_state(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     new_state: &str,
@@ -870,7 +870,7 @@ pub fn update_loop_state(
 }
 
 pub fn run_due_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
 ) -> Result<Option<ScheduleRunDueReport>> {
     let artifact_journal = ArtifactWriteJournal::default();
@@ -881,7 +881,7 @@ pub fn run_due_workflow(
 }
 
 fn run_due_workflow_in_transaction(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     artifact_journal: Option<&ArtifactWriteJournal>,
 ) -> Result<Option<ScheduleRunDueReport>> {
@@ -1034,7 +1034,7 @@ fn run_due_workflow_in_transaction(
 }
 
 fn run_due_workflow_and_release_lease(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     schedule_task_id: &str,
     lease_id: Option<&str>,
@@ -1088,7 +1088,7 @@ fn run_due_workflow_and_release_lease(
 }
 
 fn validate_schedule_lease(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     schedule_task_id: &str,
     lease_id: &str,
@@ -1125,7 +1125,7 @@ fn validate_schedule_lease(
 }
 
 pub fn scan_due_workflows(
-    store: &ForgeStore,
+    store: &FoundryStore,
     executor: &str,
     ttl_seconds: u64,
 ) -> Result<ScheduleScanDueReport> {
@@ -1248,7 +1248,7 @@ pub fn scan_due_workflows(
 }
 
 pub fn scan_due_workflows_parallel(
-    store: &ForgeStore,
+    store: &FoundryStore,
     executor: &str,
     max_workers: usize,
     ttl_seconds: u64,
@@ -1290,7 +1290,7 @@ pub fn scan_due_workflows_parallel(
             let store_path = store_path.clone();
             let results = Arc::clone(&results);
             Box::new(move || {
-                match ForgeStore::open(&store_path).and_then(|worker_store| {
+                match FoundryStore::open(&store_path).and_then(|worker_store| {
                     scan_due_workflow_dispatch(&worker_store, &workflow_id, &executor, ttl_seconds)
                 }) {
                     Ok(report) => {
@@ -1369,7 +1369,7 @@ pub fn scan_due_workflows_parallel(
 }
 
 fn scan_idle_workflow_reconciliation(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
 ) -> Result<ScheduleScanWorkflowReport> {
     let workflow = store.load_workflow(workflow_id)?;
@@ -1396,7 +1396,7 @@ fn scan_idle_workflow_reconciliation(
 }
 
 fn scan_due_workflow_dispatch(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     executor: &str,
     ttl_seconds: u64,
@@ -1484,7 +1484,7 @@ fn scan_due_workflow_dispatch(
 }
 
 pub fn build_schedule_worker_status(
-    store: &ForgeStore,
+    store: &FoundryStore,
     executor: &str,
     max_workers: usize,
     ttl_seconds: u64,
@@ -1667,7 +1667,7 @@ fn build_assignment_plan(
     }
 
     ScheduleWorkerAssignmentPlan {
-        schema_version: "forge.schedule.assignment_plan.v1".to_string(),
+        schema_version: "foundry.schedule.assignment_plan.v1".to_string(),
         max_workers,
         assigned,
         queued,
@@ -1777,7 +1777,7 @@ fn build_worker_sleep_plan(
             "idle_without_wakeup".to_string()
         },
         reason: if next_wakeup_at.is_some() {
-            "no due work exists; the worker can scale to zero until the next Forge-owned schedule wakeup".to_string()
+            "no due work exists; the worker can scale to zero until the next Foundry-owned schedule wakeup".to_string()
         } else {
             "no scheduled workflows have a future wakeup".to_string()
         },
@@ -2019,7 +2019,7 @@ fn build_daily_goal_artifact_lineage(
         .unwrap_or_else(|| format!("loop:{loop_task_id}"));
 
     ArtifactLineageRecord {
-        schema_version: "forge.artifact_lineage.v1".to_string(),
+        schema_version: "foundry.artifact_lineage.v1".to_string(),
         workflow_id: workflow.id.clone(),
         run_id,
         schedule_task_id,
@@ -2739,7 +2739,7 @@ fn daily_goal_markdown_report_bytes(workflow_id: &str, goal: &str) -> Vec<u8> {
         "# Daily Goal Research: {goal}\n\n\
          - Workflow: `{workflow_id}`\n\
          - Discovery: DuckDuckGo query plan for upcoming hackathons and marathons.\n\
-         - Inspection: Playwright page/regulation review queued under Forge-owned semantics.\n\
+         - Inspection: Playwright page/regulation review queued under Foundry-owned semantics.\n\
          - Eligibility: first phase online, Pelotas/RS geography, Engineering Production + ADS fit.\n\
          - Economics: cost, travel burden and registration clarity are scored before recommendation.\n\
          - Ambition fit: opportunities are filtered for strong alignment with the user's stated ambitions.\n",
@@ -2754,7 +2754,7 @@ fn telegram_delivery_record(
     lineage: ArtifactLineageRecord,
 ) -> TelegramDeliveryRecord {
     TelegramDeliveryRecord {
-        schema_version: "forge.telegram_delivery.v1".to_string(),
+        schema_version: "foundry.telegram_delivery.v1".to_string(),
         goal: goal.to_string(),
         lineage,
         status: "recorded".to_string(),
@@ -2856,7 +2856,7 @@ mod schedule_concurrency_tests {
     use rusqlite::{params, Connection};
     use tempfile::tempdir;
 
-    fn create_due_schedule(store: &ForgeStore) -> (String, String) {
+    fn create_due_schedule(store: &FoundryStore) -> (String, String) {
         let created = create_daily_goal_research_workflow(
             store,
             vec!["lease fencing".to_string()],
@@ -2883,8 +2883,8 @@ mod schedule_concurrency_tests {
     #[test]
     fn stale_schedule_lease_is_fenced_after_reacquisition() {
         let temp = tempdir().unwrap();
-        let store_path = temp.path().join("forge.sqlite");
-        let store = ForgeStore::open(&store_path).unwrap();
+        let store_path = temp.path().join("foundry.sqlite");
+        let store = FoundryStore::open(&store_path).unwrap();
         let (workflow_id, task_id) = create_due_schedule(&store);
 
         let first = acquire_task_lease(&store, &workflow_id, &task_id, "worker-old", 60)

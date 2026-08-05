@@ -14,7 +14,7 @@ use crate::request::{
     build_run_activity, final_completion_audit_block_reason, RunActivity, RunRecord,
 };
 use crate::scheduler::{plan_parallel_execution, ParallelSchedulePlan};
-use crate::storage::{ForgeStore, StoreEvent};
+use crate::storage::{FoundryStore, StoreEvent};
 use crate::validation::validate_workflow;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
@@ -23,7 +23,8 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
-const IMPROVEMENT_CANDIDATES_SCHEMA_VERSION: &str = "forge.orchestrator_improvement_candidates.v1";
+const IMPROVEMENT_CANDIDATES_SCHEMA_VERSION: &str =
+    "foundry.orchestrator_improvement_candidates.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ImprovementProposal {
@@ -411,14 +412,14 @@ pub struct EventPolicyPromotionBenchmarkSummary {
 }
 
 pub fn rank_improvement_candidates(
-    store: &ForgeStore,
+    store: &FoundryStore,
     limit: usize,
 ) -> Result<OrchestratorImprovementCandidatesReport> {
     rank_improvement_candidates_with_filter(store, limit, ImprovementCandidateFilter::default())
 }
 
 pub fn rank_improvement_candidates_with_filter(
-    store: &ForgeStore,
+    store: &FoundryStore,
     limit: usize,
     filter: ImprovementCandidateFilter,
 ) -> Result<OrchestratorImprovementCandidatesReport> {
@@ -520,7 +521,7 @@ fn improvement_candidate_filter_matches(
 }
 
 fn build_improvement_candidate(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     runs: &[RunRecord],
 ) -> Result<Option<OrchestratorImprovementCandidate>> {
@@ -898,7 +899,7 @@ fn build_parallelization_report(
     };
 
     ParallelizationOpportunityReport {
-        schema_version: "forge.improve.parallelization_opportunity.v1".to_string(),
+        schema_version: "foundry.improve.parallelization_opportunity.v1".to_string(),
         parallel_opportunity,
         ready_parallel_task_count,
         ready_parallel_task_ids,
@@ -1013,7 +1014,7 @@ fn build_cost_efficiency_report(
     };
 
     CostEfficiencyReport {
-        schema_version: "forge.improve.cost_efficiency.v1".to_string(),
+        schema_version: "foundry.improve.cost_efficiency.v1".to_string(),
         ai_task_count,
         repetitive_or_deterministic_ai_task_count: repetitive_ai_tasks.len(),
         repetitive_or_deterministic_ai_task_ids: repetitive_ai_tasks
@@ -1353,7 +1354,7 @@ fn propagate_dependency_version_boundary(tasks: &mut [AtomicTask]) -> Vec<String
 }
 
 pub fn normalize_avoidable_ai_costs(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     origin: &str,
 ) -> Result<AvoidableAiCostNormalizationReport> {
@@ -1404,7 +1405,7 @@ pub fn normalize_avoidable_ai_costs(
         let validation = validate_workflow(&workflow);
         return Ok(AvoidableAiCostNormalizationReport {
             status: "no_changes".to_string(),
-            schema_version: "forge.improve.avoidable_ai_cost_normalization.v1".to_string(),
+            schema_version: "foundry.improve.avoidable_ai_cost_normalization.v1".to_string(),
             workflow_id: workflow.id,
             origin: origin.to_string(),
             revision: workflow
@@ -1462,7 +1463,7 @@ pub fn normalize_avoidable_ai_costs(
         &workflow.id,
         event_kind,
         &json!({
-            "schema_version": "forge.improve.avoidable_ai_cost_normalization.v1",
+            "schema_version": "foundry.improve.avoidable_ai_cost_normalization.v1",
             "revision": revision,
             "origin": origin,
             "normalized_task_count": normalized_tasks.len(),
@@ -1477,7 +1478,7 @@ pub fn normalize_avoidable_ai_costs(
 
     Ok(AvoidableAiCostNormalizationReport {
         status: status.to_string(),
-        schema_version: "forge.improve.avoidable_ai_cost_normalization.v1".to_string(),
+        schema_version: "foundry.improve.avoidable_ai_cost_normalization.v1".to_string(),
         workflow_id: workflow.id,
         origin: origin.to_string(),
         revision,
@@ -1493,7 +1494,7 @@ pub fn normalize_avoidable_ai_costs(
 }
 
 pub fn normalize_avoidable_ai_costs_for_candidates(
-    store: &ForgeStore,
+    store: &FoundryStore,
     limit: usize,
     origin: &str,
 ) -> Result<AvoidableAiCostBatchNormalizationReport> {
@@ -1555,7 +1556,7 @@ pub fn normalize_avoidable_ai_costs_for_candidates(
 
     Ok(AvoidableAiCostBatchNormalizationReport {
         status: status.to_string(),
-        schema_version: "forge.improve.avoidable_ai_cost_batch_normalization.v1".to_string(),
+        schema_version: "foundry.improve.avoidable_ai_cost_batch_normalization.v1".to_string(),
         origin: origin.to_string(),
         requested_limit: limit,
         ranked_candidate_count: candidates.candidate_count,
@@ -1571,7 +1572,7 @@ pub fn normalize_avoidable_ai_costs_for_candidates(
 }
 
 pub fn apply_event_improvement_policy(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     recommendation_id: Option<&str>,
     recommended_policy: Option<&str>,
@@ -1649,7 +1650,7 @@ pub fn apply_event_improvement_policy(
             .unwrap_or(0);
         return Ok(EventPolicyApplicationReport {
             status: "event_policy_application_plan_only".to_string(),
-            schema_version: "forge.improve.event_policy_application.v1".to_string(),
+            schema_version: "foundry.improve.event_policy_application.v1".to_string(),
             workflow_id: workflow.id,
             origin: origin.to_string(),
             dry_run: !apply,
@@ -1683,7 +1684,7 @@ pub fn apply_event_improvement_policy(
             .unwrap_or(0);
         return Ok(EventPolicyApplicationReport {
             status: "event_policy_application_blocked_missing_approval".to_string(),
-            schema_version: "forge.improve.event_policy_application.v1".to_string(),
+            schema_version: "foundry.improve.event_policy_application.v1".to_string(),
             workflow_id: workflow.id,
             origin: origin.to_string(),
             dry_run: false,
@@ -1711,7 +1712,7 @@ pub fn apply_event_improvement_policy(
             .unwrap_or(0);
         return Ok(EventPolicyApplicationReport {
             status: "event_policy_application_planned".to_string(),
-            schema_version: "forge.improve.event_policy_application.v1".to_string(),
+            schema_version: "foundry.improve.event_policy_application.v1".to_string(),
             workflow_id: workflow.id,
             origin: origin.to_string(),
             dry_run: true,
@@ -1752,7 +1753,7 @@ pub fn apply_event_improvement_policy(
         &workflow.id,
         "event_improvement_policy_applied",
         &json!({
-            "schema_version": "forge.improve.event_policy_application.v1",
+            "schema_version": "foundry.improve.event_policy_application.v1",
             "revision": revision,
             "origin": origin,
             "approved_by": approved_by,
@@ -1770,7 +1771,7 @@ pub fn apply_event_improvement_policy(
 
     Ok(EventPolicyApplicationReport {
         status: "event_policy_application_applied".to_string(),
-        schema_version: "forge.improve.event_policy_application.v1".to_string(),
+        schema_version: "foundry.improve.event_policy_application.v1".to_string(),
         workflow_id: workflow.id,
         origin: origin.to_string(),
         dry_run: false,
@@ -1791,7 +1792,7 @@ pub fn apply_event_improvement_policy(
 }
 
 pub fn benchmark_event_improvement_policy(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     recommendation_id: Option<&str>,
     recommended_policy: Option<&str>,
@@ -1891,7 +1892,7 @@ pub fn benchmark_event_improvement_policy(
     };
     let report = EventPolicyBenchmarkReport {
         status: status.to_string(),
-        schema_version: "forge.improve.event_policy_benchmark.v1".to_string(),
+        schema_version: "foundry.improve.event_policy_benchmark.v1".to_string(),
         workflow_id: workflow.id.clone(),
         origin: origin.to_string(),
         recommendation_id,
@@ -1956,7 +1957,7 @@ pub fn benchmark_event_improvement_policy(
 }
 
 pub fn promote_event_improvement_policy(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     recommendation_id: Option<&str>,
     recommended_policy: Option<&str>,
@@ -1967,7 +1968,7 @@ pub fn promote_event_improvement_policy(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
-            anyhow::anyhow!("forge improve promote-event-policy requires --approved-by")
+            anyhow::anyhow!("foundry improve promote-event-policy requires --approved-by")
         })?;
     let mut workflow = store.load_workflow(workflow_id)?;
     let events = store.load_workflow_events(workflow_id)?;
@@ -1995,7 +1996,7 @@ pub fn promote_event_improvement_policy(
             .unwrap_or(0);
         return Ok(EventPolicyPromotionReport {
             status: "event_policy_promotion_already_accepted".to_string(),
-            schema_version: "forge.improve.event_policy_promotion.v1".to_string(),
+            schema_version: "foundry.improve.event_policy_promotion.v1".to_string(),
             workflow_id: workflow.id,
             origin: origin.to_string(),
             approved_by: approved_by.to_string(),
@@ -2024,7 +2025,7 @@ pub fn promote_event_improvement_policy(
     if !promotion_allowed {
         return Ok(EventPolicyPromotionReport {
             status: "event_policy_promotion_blocked".to_string(),
-            schema_version: "forge.improve.event_policy_promotion.v1".to_string(),
+            schema_version: "foundry.improve.event_policy_promotion.v1".to_string(),
             workflow_id: workflow.id,
             origin: origin.to_string(),
             approved_by: approved_by.to_string(),
@@ -2067,7 +2068,7 @@ pub fn promote_event_improvement_policy(
         &workflow.id,
         "event_improvement_policy_promoted",
         &json!({
-            "schema_version": "forge.improve.event_policy_promotion.v1",
+            "schema_version": "foundry.improve.event_policy_promotion.v1",
             "revision": revision,
             "origin": origin,
             "approved_by": approved_by,
@@ -2086,7 +2087,7 @@ pub fn promote_event_improvement_policy(
 
     Ok(EventPolicyPromotionReport {
         status: "event_policy_promotion_accepted".to_string(),
-        schema_version: "forge.improve.event_policy_promotion.v1".to_string(),
+        schema_version: "foundry.improve.event_policy_promotion.v1".to_string(),
         workflow_id: workflow.id,
         origin: origin.to_string(),
         approved_by: approved_by.to_string(),
@@ -2132,7 +2133,7 @@ fn select_event_policy_recommendation(
 }
 
 fn event_policy_target_task_ids(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     recommendation: &EventImprovementRecommendation,
 ) -> Result<Vec<String>> {
@@ -2462,11 +2463,11 @@ fn apply_event_policy_recommendation_to_task(
                 .async_policy
                 .run_substrates
                 .iter()
-                .any(|substrate| substrate == "forge_event_runtime_daemon")
+                .any(|substrate| substrate == "foundry_event_runtime_daemon")
             {
                 task.async_policy
                     .run_substrates
-                    .push("forge_event_runtime_daemon".to_string());
+                    .push("foundry_event_runtime_daemon".to_string());
                 mark_event_policy_changed_field(&mut changed_fields, "async_policy");
             }
         }
@@ -2590,7 +2591,7 @@ fn event_policy_noop_report(
         .unwrap_or(0);
     EventPolicyApplicationReport {
         status: status.to_string(),
-        schema_version: "forge.improve.event_policy_application.v1".to_string(),
+        schema_version: "foundry.improve.event_policy_application.v1".to_string(),
         workflow_id: workflow.id,
         origin: origin.to_string(),
         dry_run: !apply,
@@ -2776,7 +2777,7 @@ fn suggested_commands(
     let mut commands = Vec::new();
     if has_reason(reasons, "support_only_output_risk") {
         commands.push(vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "workflow".to_string(),
             "update-goal".to_string(),
             "--workflow".to_string(),
@@ -2784,12 +2785,12 @@ fn suggested_commands(
             "--goal".to_string(),
             "<goal with explicit user-facing deliverables>".to_string(),
             "--origin".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ]);
         commands.push(vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "status".to_string(),
             "--workflow".to_string(),
             workflow.id.clone(),
@@ -2797,7 +2798,7 @@ fn suggested_commands(
             "json".to_string(),
         ]);
         commands.push(vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "improve".to_string(),
             "--workflow".to_string(),
             workflow.id.clone(),
@@ -2810,7 +2811,7 @@ fn suggested_commands(
         let activity = build_run_activity(run);
         if run.status == "running" && activity.heartbeat_status == "stale" {
             commands.push(vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "request".to_string(),
                 "recover-stale".to_string(),
                 "--run".to_string(),
@@ -2820,7 +2821,7 @@ fn suggested_commands(
             ]);
         } else if run.status == "needs_attention" {
             commands.push(vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "request".to_string(),
                 "status".to_string(),
                 "--run".to_string(),
@@ -2833,7 +2834,7 @@ fn suggested_commands(
     if has_reason(reasons, "rework_loop_signal") {
         if let Some(run) = latest_driveable_run(runs) {
             commands.push(vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "request".to_string(),
                 "drive".to_string(),
                 "--run".to_string(),
@@ -2845,7 +2846,7 @@ fn suggested_commands(
                 "--ttl-seconds".to_string(),
                 "300".to_string(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ]);
@@ -2865,13 +2866,13 @@ fn suggested_commands(
     if final_package_is_ready_or_verified {
         if let Some(run) = latest_run_with_status(runs, "completed").or_else(|| latest_run(runs)) {
             commands.push(vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "request".to_string(),
                 "final-package".to_string(),
                 "--run".to_string(),
                 run.run_id.clone(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ]);
@@ -2879,7 +2880,7 @@ fn suggested_commands(
     }
     if has_reason(reasons, "post_final_verification_cleanup") {
         commands.push(vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "status".to_string(),
             "--workflow".to_string(),
             workflow.id.clone(),
@@ -2891,7 +2892,7 @@ fn suggested_commands(
         && workflow_ready_for_final_audit_command(workflow)
     {
         commands.push(vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "request".to_string(),
             "ensure-final-audit".to_string(),
             "--workflow".to_string(),
@@ -2899,7 +2900,7 @@ fn suggested_commands(
             "--executor".to_string(),
             "codex".to_string(),
             "--origin".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ]);
@@ -2907,7 +2908,7 @@ fn suggested_commands(
     if parallelization.ready_parallel_task_count > 0 {
         if let Some(run) = latest_driveable_run(runs) {
             commands.push(vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "request".to_string(),
                 "drive".to_string(),
                 "--run".to_string(),
@@ -2919,7 +2920,7 @@ fn suggested_commands(
                 "--ttl-seconds".to_string(),
                 "300".to_string(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ]);
@@ -2957,19 +2958,19 @@ fn suggested_commands(
         && workflow.tasks.iter().any(normalizable_avoidable_ai_task)
     {
         commands.push(vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "improve".to_string(),
             "normalize-cost".to_string(),
             "--workflow".to_string(),
             workflow.id.clone(),
             "--origin".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ]);
     }
     commands.push(vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "improve".to_string(),
         "--workflow".to_string(),
         workflow.id.clone(),
@@ -2993,7 +2994,7 @@ fn task_handoff_command(workflow: &Workflow, task_id: &str) -> Vec<String> {
         .map(suggested_handoff_executor)
         .unwrap_or("codex");
     vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "task".to_string(),
         "handoff".to_string(),
         "--workflow".to_string(),
@@ -3012,13 +3013,13 @@ fn task_handoff_command(workflow: &Workflow, task_id: &str) -> Vec<String> {
 pub(crate) fn suggested_handoff_executor(task: &AtomicTask) -> &'static str {
     match task.executor {
         ExecutorKind::Ai | ExecutorKind::Mixed if task.execution_policy.ai_allowed => "codex",
-        _ => "forge_cli",
+        _ => "foundry_cli",
     }
 }
 
 fn task_handoff_already_suggested(commands: &[Vec<String>], task_id: &str) -> bool {
     commands.iter().any(|command| {
-        command.first().is_some_and(|part| part == "forge")
+        command.first().is_some_and(|part| part == "foundry")
             && command.get(1).is_some_and(|part| part == "task")
             && command.get(2).is_some_and(|part| part == "handoff")
             && command
@@ -3140,7 +3141,7 @@ fn looks_like_final_completion_audit_task(task: &crate::graph::AtomicTask) -> bo
 }
 
 pub fn generate_improvement(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     target_version: Option<String>,
 ) -> Result<ImprovementProposal> {
@@ -3274,11 +3275,11 @@ fn render_changelog(
 ) -> String {
     let event_policy_section = render_event_policy_changelog_section(event_improvement_policy);
     format!(
-        r#"# Forge Core {target_version} Changelog
+        r#"# Foundry Core {target_version} Changelog
 
 ## Summary
 
-This candidate version evolves Forge structurally instead of only tuning prompts or changing executor choices.
+This candidate version evolves Foundry structurally instead of only tuning prompts or changing executor choices.
 
 ## Task Structure
 

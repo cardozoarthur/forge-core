@@ -2,7 +2,7 @@ use crate::graph::{AtomicTask, ExecutorKind, Workflow};
 use crate::identity::ensure_operating_context_policy;
 use crate::intent::OperatingContextSpec;
 use crate::storage::{
-    CostLedgerIndexQuery, CostLedgerIndexWrite, CostLedgerRetentionQuery, ForgeStore,
+    CostLedgerIndexQuery, CostLedgerIndexWrite, CostLedgerRetentionQuery, FoundryStore,
     GlobalEventWrite, StoreEvent, StoredCostLedgerIndexRecord,
 };
 use anyhow::{bail, Context, Result};
@@ -13,13 +13,13 @@ use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const COST_LEDGER_SCHEMA_VERSION: &str = "forge.cost_ledger.v1";
-pub const COST_LEDGER_INDEX_SCHEMA_VERSION: &str = "forge.cost_ledger_index.v1";
-pub const COST_LEDGER_HISTORY_SCHEMA_VERSION: &str = "forge.cost_ledger_history.v1";
-pub const COST_LEDGER_MAINTENANCE_SCHEMA_VERSION: &str = "forge.cost_ledger_maintenance.v1";
-pub const COST_LEDGER_DAEMON_SCHEMA_VERSION: &str = "forge.cost_ledger_daemon.v1";
-pub const COST_LEDGER_RETENTION_SCHEMA_VERSION: &str = "forge.cost_ledger_retention.v1";
-pub const COST_LEDGER_INCREMENTAL_SCHEMA_VERSION: &str = "forge.cost_ledger_incremental.v1";
+pub const COST_LEDGER_SCHEMA_VERSION: &str = "foundry.cost_ledger.v1";
+pub const COST_LEDGER_INDEX_SCHEMA_VERSION: &str = "foundry.cost_ledger_index.v1";
+pub const COST_LEDGER_HISTORY_SCHEMA_VERSION: &str = "foundry.cost_ledger_history.v1";
+pub const COST_LEDGER_MAINTENANCE_SCHEMA_VERSION: &str = "foundry.cost_ledger_maintenance.v1";
+pub const COST_LEDGER_DAEMON_SCHEMA_VERSION: &str = "foundry.cost_ledger_daemon.v1";
+pub const COST_LEDGER_RETENTION_SCHEMA_VERSION: &str = "foundry.cost_ledger_retention.v1";
+pub const COST_LEDGER_INCREMENTAL_SCHEMA_VERSION: &str = "foundry.cost_ledger_incremental.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CostLedgerReport {
@@ -424,7 +424,7 @@ struct SummaryBucket {
 }
 
 pub fn build_cost_ledger(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -463,7 +463,7 @@ pub fn build_cost_ledger(
 }
 
 pub fn build_cost_ledger_for_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -502,7 +502,7 @@ pub fn build_cost_ledger_for_context(
 }
 
 pub fn materialize_cost_ledger_index(
-    store: &ForgeStore,
+    store: &FoundryStore,
     query: CostLedgerIndexQuery<'_>,
 ) -> Result<CostLedgerIndexReport> {
     let ledger = build_cost_ledger(
@@ -530,7 +530,7 @@ pub fn materialize_cost_ledger_index(
 
 #[allow(clippy::too_many_arguments)]
 pub fn materialize_cost_ledger_index_for_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -585,7 +585,7 @@ pub fn materialize_cost_ledger_index_for_context(
 }
 
 pub fn build_cost_ledger_history(
-    store: &ForgeStore,
+    store: &FoundryStore,
     query: CostLedgerHistoryQuery<'_>,
 ) -> Result<CostLedgerHistoryReport> {
     let bucket = normalize_cost_history_bucket(query.bucket)?;
@@ -629,7 +629,7 @@ pub fn build_cost_ledger_history(
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_cost_ledger_history_for_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -697,7 +697,7 @@ pub fn build_cost_ledger_history_for_context(
 }
 
 pub fn maintain_cost_ledger(
-    store: &ForgeStore,
+    store: &FoundryStore,
     query: CostLedgerMaintenanceQuery<'_>,
 ) -> Result<CostLedgerMaintenanceReport> {
     let bucket = normalize_cost_history_bucket(query.history.bucket)?;
@@ -758,7 +758,7 @@ pub fn maintain_cost_ledger(
 
 #[allow(clippy::too_many_arguments)]
 pub fn maintain_cost_ledger_for_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -831,7 +831,7 @@ pub fn maintain_cost_ledger_for_context(
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_cost_ledger_daemon(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -970,7 +970,7 @@ pub fn run_cost_ledger_daemon(
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_cost_ledger_daemon_for_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -1043,7 +1043,7 @@ pub fn run_cost_ledger_daemon_for_context(
 
 #[allow(clippy::too_many_arguments)]
 pub fn apply_cost_ledger_retention(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -1162,7 +1162,7 @@ pub fn apply_cost_ledger_retention(
 
 #[allow(clippy::too_many_arguments)]
 pub fn apply_cost_ledger_retention_for_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -1231,7 +1231,7 @@ pub fn apply_cost_ledger_retention_for_context(
 }
 
 pub fn materialize_cost_ledger_incremental(
-    store: &ForgeStore,
+    store: &FoundryStore,
     query: CostLedgerIncrementalQuery<'_>,
 ) -> Result<CostLedgerIncrementalReport> {
     let limit = query.limit.filter(|limit| *limit > 0);
@@ -1310,7 +1310,7 @@ pub fn materialize_cost_ledger_incremental(
 
 #[allow(clippy::too_many_arguments)]
 pub fn materialize_cost_ledger_incremental_for_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     after_sequence: Option<i64>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -1666,7 +1666,7 @@ fn cost_history_group_id(row: &CostLedgerIndexRow, group_by: &str) -> String {
 }
 
 fn build_workflow_cost_ledger(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
 ) -> Result<CostLedgerWorkflow> {
     let events = store.load_workflow_events(&workflow.id)?;
@@ -1939,7 +1939,7 @@ fn filter_eq(filter: Option<&str>, value: &str) -> bool {
 }
 
 fn cost_daemon_tenant_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -1951,11 +1951,11 @@ fn cost_daemon_tenant_context(
             .context("failed to serialize workflow operating context for cost daemon");
     }
     Ok(json!({
-        "schema_version": "forge.operating_context.v1",
+        "schema_version": "foundry.operating_context.v1",
         "organization": cost_daemon_identity(organization_id, "default-org"),
         "brand": cost_daemon_identity(brand_id, "default-brand"),
         "product": cost_daemon_identity(product_id, "default-product"),
-        "user": cost_daemon_identity(None, "forge-cost-daemon"),
+        "user": cost_daemon_identity(None, "foundry-cost-daemon"),
         "channel": cost_daemon_identity(None, "system"),
         "memory_scope": "project",
         "personality_scope": "default",

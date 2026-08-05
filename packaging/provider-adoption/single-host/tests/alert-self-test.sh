@@ -7,13 +7,13 @@ test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly test_dir
 package_root="$(cd -- "${test_dir}/.." && pwd)"
 readonly package_root
-readonly operator="${package_root}/bin/forge-production-alert"
+readonly operator="${package_root}/bin/foundry-production-alert"
 readonly stubs="${test_dir}/stubs"
-test_root="$(mktemp -d /tmp/forge-production-alert-selftest.XXXXXX)"
+test_root="$(mktemp -d /tmp/foundry-production-alert-selftest.XXXXXX)"
 readonly test_root
 readonly credentials_dir="${test_root}/credentials"
 readonly backup_dir="${test_root}/backups"
-readonly store_path="${test_root}/forge.sqlite"
+readonly store_path="${test_root}/foundry.sqlite"
 readonly curl_capture="${test_root}/curl"
 readonly output_log="${test_root}/operator.log"
 readonly fake_token='123456:FAKE_TOKEN_FOR_OFFLINE_SELF_TEST_123456'
@@ -21,7 +21,7 @@ readonly fake_chat_id='-1001234567890'
 readonly now_epoch='200000'
 
 cleanup() {
-  if [[ "$test_root" == /tmp/forge-production-alert-selftest.* && -d "$test_root" ]]; then
+  if [[ "$test_root" == /tmp/foundry-production-alert-selftest.* && -d "$test_root" ]]; then
     rm -rf -- "$test_root"
   fi
 }
@@ -47,14 +47,14 @@ run_operator() {
   shift 2
 
   CREDENTIALS_DIRECTORY="$credentials_dir" \
-    FORGE_ALERT_OFFLINE_SELF_TEST=1 \
-    FORGE_ALERT_STATE_DIR="$state_dir" \
-    FORGE_STORE_PATH="$store_path" \
-    FORGE_BACKUP_DIR="$backup_dir" \
-    FORGE_NOW_EPOCH_OVERRIDE="$now_epoch" \
-    FORGE_ALERT_HOST_OVERRIDE='forge-selftest' \
+    FOUNDRY_ALERT_OFFLINE_SELF_TEST=1 \
+    FOUNDRY_ALERT_STATE_DIR="$state_dir" \
+    FOUNDRY_STORE_PATH="$store_path" \
+    FOUNDRY_BACKUP_DIR="$backup_dir" \
+    FOUNDRY_NOW_EPOCH_OVERRIDE="$now_epoch" \
+    FOUNDRY_ALERT_HOST_OVERRIDE='foundry-selftest' \
     SYSTEMCTL_BIN="${stubs}/systemctl" \
-    FORGE_ADMIN_BIN="${stubs}/forge-admin" \
+    FOUNDRY_ADMIN_BIN="${stubs}/foundry-admin" \
     CURL_BIN="${stubs}/curl" \
     STAT_BIN="${stubs}/stat" \
     DF_BIN="${stubs}/df" \
@@ -78,16 +78,16 @@ expect_failure() {
 mkdir -p -- "$credentials_dir" "$backup_dir" "$curl_capture"
 chmod 0700 -- "$credentials_dir" "$backup_dir" "$curl_capture"
 printf '%s\n%s\n' "$fake_token" "$fake_chat_id" \
-  >"${credentials_dir}/forge-telegram-alert"
-chmod 0600 -- "${credentials_dir}/forge-telegram-alert"
+  >"${credentials_dir}/foundry-telegram-alert"
+chmod 0600 -- "${credentials_dir}/foundry-telegram-alert"
 printf 'offline-store-fixture\n' >"$store_path"
-printf '%s\n%s\n%s\n%s\n%s\n' \
-  'forge-offhost-v2' \
+printf '%s %s %s %s %s\n' \
+  'foundry-offhost-v2' \
   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
   'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
   'selftest-generation' \
   'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' \
-  >"${backup_dir}/forge-20260725T000000Z.sqlite.offhost-verified"
+  >"${backup_dir}/foundry-20260725T000000Z.sqlite.offhost-verified"
 
 for executable in "$operator" "${stubs}"/*; do
   [[ -x "$executable" ]] || fail "non-executable test component: $executable"
@@ -95,8 +95,8 @@ for executable in "$operator" "${stubs}"/*; do
 done
 
 for category in \
-  forge_ops \
-  forge_runtime \
+  foundry_ops \
+  foundry_runtime \
   request_supervisor \
   store_check \
   backup_timer \
@@ -109,8 +109,8 @@ done
   fail 'eight offline test alerts were not captured'
 
 for category in \
-  forge_ops \
-  forge_runtime \
+  foundry_ops \
+  foundry_runtime \
   request_supervisor \
   store_check \
   backup_timer \

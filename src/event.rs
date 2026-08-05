@@ -28,12 +28,17 @@ use crate::schedule::{
     ScheduleWorkerStatusReport,
 };
 use crate::storage::{
-    EventServiceWrite, ForgeStore, GlobalEventWrite, InboundEventRecord, StoreEvent,
+    EventServiceWrite, FoundryStore, GlobalEventWrite, InboundEventRecord, StoreEvent,
     StoredEventObservabilityRecord, StoredEventServiceRecord, StoredGlobalEventRecord,
 };
 use crate::workflow::{
-    attach_workflow_artifact, complete_workflow, pause_workflow, resume_workflow,
-    update_workflow_goal, ArtifactAttachReport,
+    add_workflow_task, add_workflow_task_dependency, attach_workflow_artifact,
+    clear_workflow_task_impediment, complete_workflow, pause_workflow,
+    remove_workflow_task_dependency, resume_workflow, set_workflow_task_impediment,
+    set_workflow_task_priority, update_workflow_goal_with_expected_revision,
+    update_workflow_task_with_expected_revision, ArtifactAttachReport, WorkflowTaskAddInput,
+    WorkflowTaskDependencyInput, WorkflowTaskImpedimentClearInput, WorkflowTaskImpedimentInput,
+    WorkflowTaskPriorityInput, WorkflowTaskUpdateInput,
 };
 use anyhow::{bail, Context, Result};
 use chrono::{
@@ -43,7 +48,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::env;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -53,44 +57,45 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-pub const EVENT_STREAM_SCHEMA_VERSION: &str = "forge.event_stream.v1";
-pub const EVENT_ENVELOPE_SCHEMA_VERSION: &str = "forge.event_envelope.v1";
-pub const EVENT_TIMELINE_SCHEMA_VERSION: &str = "forge.event_timeline.v1";
-pub const EVENT_OBSERVABILITY_INDEX_SCHEMA_VERSION: &str = "forge.event_observability_index.v1";
-pub const EVENT_OBSERVABILITY_HISTORY_SCHEMA_VERSION: &str = "forge.event_observability_history.v1";
-pub const EVENT_IMPROVEMENT_POLICY_SCHEMA_VERSION: &str = "forge.event_improvement_policy.v1";
-pub const EVENT_INBOX_SCHEMA_VERSION: &str = "forge.event_inbox.v1";
-pub const EVENT_INGEST_SCHEMA_VERSION: &str = "forge.event_ingest.v1";
-pub const EVENT_ROUTE_SCHEMA_VERSION: &str = "forge.event_route.v1";
-pub const EVENT_IDENTITY_CONTEXT_SCHEMA_VERSION: &str = "forge.event_identity_context.v1";
-pub const EVENT_WORKER_SCHEMA_VERSION: &str = "forge.event_worker.v1";
-pub const EVENT_WORKER_LOOP_SCHEMA_VERSION: &str = "forge.event_worker_loop.v1";
-pub const EVENT_SERVICE_PLAN_SCHEMA_VERSION: &str = "forge.event_service_plan.v1";
-pub const EVENT_SERVICE_RUN_SCHEMA_VERSION: &str = "forge.event_service_run.v1";
-pub const EVENT_SERVICE_SUPERVISOR_SCHEMA_VERSION: &str = "forge.event_service_supervisor.v1";
-pub const EVENT_RUNTIME_RECONCILE_SCHEMA_VERSION: &str = "forge.event_runtime_reconcile.v1";
-pub const EVENT_RUNTIME_DAEMON_SCHEMA_VERSION: &str = "forge.event_runtime_daemon.v1";
-pub const EVENT_SERVICES_SCHEMA_VERSION: &str = "forge.event_services.v1";
-pub const EVENT_SERVICES_RECOVERY_SCHEMA_VERSION: &str = "forge.event_services_recovery.v1";
-pub const EVENT_WEBHOOK_INGRESS_SCHEMA_VERSION: &str = "forge.event_webhook_ingress.v1";
+pub const EVENT_STREAM_SCHEMA_VERSION: &str = "foundry.event_stream.v1";
+pub const EVENT_ENVELOPE_SCHEMA_VERSION: &str = "foundry.event_envelope.v1";
+pub const EVENT_TIMELINE_SCHEMA_VERSION: &str = "foundry.event_timeline.v1";
+pub const EVENT_OBSERVABILITY_INDEX_SCHEMA_VERSION: &str = "foundry.event_observability_index.v1";
+pub const EVENT_OBSERVABILITY_HISTORY_SCHEMA_VERSION: &str =
+    "foundry.event_observability_history.v1";
+pub const EVENT_IMPROVEMENT_POLICY_SCHEMA_VERSION: &str = "foundry.event_improvement_policy.v1";
+pub const EVENT_INBOX_SCHEMA_VERSION: &str = "foundry.event_inbox.v1";
+pub const EVENT_INGEST_SCHEMA_VERSION: &str = "foundry.event_ingest.v1";
+pub const EVENT_ROUTE_SCHEMA_VERSION: &str = "foundry.event_route.v1";
+pub const EVENT_IDENTITY_CONTEXT_SCHEMA_VERSION: &str = "foundry.event_identity_context.v1";
+pub const EVENT_WORKER_SCHEMA_VERSION: &str = "foundry.event_worker.v1";
+pub const EVENT_WORKER_LOOP_SCHEMA_VERSION: &str = "foundry.event_worker_loop.v1";
+pub const EVENT_SERVICE_PLAN_SCHEMA_VERSION: &str = "foundry.event_service_plan.v1";
+pub const EVENT_SERVICE_RUN_SCHEMA_VERSION: &str = "foundry.event_service_run.v1";
+pub const EVENT_SERVICE_SUPERVISOR_SCHEMA_VERSION: &str = "foundry.event_service_supervisor.v1";
+pub const EVENT_RUNTIME_RECONCILE_SCHEMA_VERSION: &str = "foundry.event_runtime_reconcile.v1";
+pub const EVENT_RUNTIME_DAEMON_SCHEMA_VERSION: &str = "foundry.event_runtime_daemon.v1";
+pub const EVENT_SERVICES_SCHEMA_VERSION: &str = "foundry.event_services.v1";
+pub const EVENT_SERVICES_RECOVERY_SCHEMA_VERSION: &str = "foundry.event_services_recovery.v1";
+pub const EVENT_WEBHOOK_INGRESS_SCHEMA_VERSION: &str = "foundry.event_webhook_ingress.v1";
 pub const EVENT_WEBHOOK_INGRESS_RESPONSE_SCHEMA_VERSION: &str =
-    "forge.event_webhook_ingress.response.v1";
-pub const EVENT_ADAPTER_POLICY_SCHEMA_VERSION: &str = "forge.event_adapter_policy.v1";
-pub const EVENT_ADDON_ADAPTER_PLAN_SCHEMA_VERSION: &str = "forge.event_addon_adapter_plan.v1";
-pub const EVENT_EXTENSION_MATCHES_SCHEMA_VERSION: &str = "forge.event_extension_matches.v1";
+    "foundry.event_webhook_ingress.response.v1";
+pub const EVENT_ADAPTER_POLICY_SCHEMA_VERSION: &str = "foundry.event_adapter_policy.v1";
+pub const EVENT_ADDON_ADAPTER_PLAN_SCHEMA_VERSION: &str = "foundry.event_addon_adapter_plan.v1";
+pub const EVENT_EXTENSION_MATCHES_SCHEMA_VERSION: &str = "foundry.event_extension_matches.v1";
 pub const EVENT_WORKFLOW_ACTIVATION_PLAN_SCHEMA_VERSION: &str =
-    "forge.event_workflow_activation_plan.v1";
-pub const EVENT_ACTIVATION_DISPATCH_SCHEMA_VERSION: &str = "forge.event_activation_dispatch.v1";
-pub const EVENT_EGRESS_EMIT_SCHEMA_VERSION: &str = "forge.event_egress_emit.v1";
-pub const EVENT_EGRESS_REQUEST_SCHEMA_VERSION: &str = "forge.event_egress_request.v1";
+    "foundry.event_workflow_activation_plan.v1";
+pub const EVENT_ACTIVATION_DISPATCH_SCHEMA_VERSION: &str = "foundry.event_activation_dispatch.v1";
+pub const EVENT_EGRESS_EMIT_SCHEMA_VERSION: &str = "foundry.event_egress_emit.v1";
+pub const EVENT_EGRESS_REQUEST_SCHEMA_VERSION: &str = "foundry.event_egress_request.v1";
 pub const EVENT_EGRESS_DELIVERY_EVIDENCE_SCHEMA_VERSION: &str =
-    "forge.event_egress_delivery_evidence.v1";
-const WEBHOOK_TIMESTAMP_HEADER: &str = "x-forge-timestamp";
-const WEBHOOK_NONCE_HEADER: &str = "x-forge-nonce";
+    "foundry.event_egress_delivery_evidence.v1";
+const WEBHOOK_TIMESTAMP_HEADER: &str = "x-foundry-timestamp";
+const WEBHOOK_NONCE_HEADER: &str = "x-foundry-nonce";
 const WEBHOOK_SIGNATURE_MAX_SKEW_SECONDS: i64 = 300;
 const WEBHOOK_RATE_LIMIT_PER_MINUTE_DEFAULT: usize = 60;
-const WEBHOOK_ALLOW_INSECURE_LOCAL_ENV: &str = "FORGE_ALLOW_INSECURE_LOCAL_WEBHOOK";
-const WEBHOOK_RATE_LIMIT_ENV: &str = "FORGE_WEBHOOK_RATE_LIMIT_PER_MINUTE";
+const WEBHOOK_ALLOW_INSECURE_LOCAL_ENV: &str = "FOUNDRY_ALLOW_INSECURE_LOCAL_WEBHOOK";
+const WEBHOOK_RATE_LIMIT_ENV: &str = "FOUNDRY_WEBHOOK_RATE_LIMIT_PER_MINUTE";
 const MIN_WEBHOOK_HMAC_SECRET_BYTES: usize = 32;
 
 type WebhookIngressProgressCallback<'a> =
@@ -1380,7 +1385,7 @@ pub struct EventObservability {
 }
 
 pub fn build_workflow_event_stream(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     limit: Option<usize>,
 ) -> Result<WorkflowEventStreamReport> {
@@ -1408,7 +1413,7 @@ pub fn build_workflow_event_stream(
 }
 
 pub fn build_global_event_timeline(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -1490,7 +1495,7 @@ pub fn build_global_event_timeline(
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_global_event_timeline_for_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -1541,7 +1546,7 @@ pub fn build_global_event_timeline_for_context(
 }
 
 pub fn build_event_observability_index(
-    store: &ForgeStore,
+    store: &FoundryStore,
     query: EventObservabilityQuery<'_>,
 ) -> Result<EventObservabilityIndexReport> {
     let (mut records, index_source) = load_event_observability_records(store, query)?;
@@ -1579,7 +1584,7 @@ pub fn build_event_observability_index(
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_event_observability_index_for_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -1640,7 +1645,7 @@ pub fn build_event_observability_index_for_context(
 }
 
 pub fn build_event_observability_history(
-    store: &ForgeStore,
+    store: &FoundryStore,
     query: EventObservabilityHistoryQuery<'_>,
 ) -> Result<EventObservabilityHistoryReport> {
     let bucket = normalize_history_bucket(query.bucket)?;
@@ -1682,7 +1687,7 @@ pub fn build_event_observability_history(
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_event_observability_history_for_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -1757,7 +1762,7 @@ pub fn build_event_observability_history_for_context(
 }
 
 pub fn build_event_improvement_policy(
-    store: &ForgeStore,
+    store: &FoundryStore,
     query: EventImprovementPolicyQuery<'_>,
 ) -> Result<EventImprovementPolicyReport> {
     let thresholds = EventImprovementPolicyThresholds {
@@ -1816,7 +1821,7 @@ pub fn build_event_improvement_policy(
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_event_improvement_policy_for_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: Option<&str>,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
@@ -1896,7 +1901,7 @@ pub fn build_event_improvement_policy_for_context(
 }
 
 fn load_event_observability_records(
-    store: &ForgeStore,
+    store: &FoundryStore,
     query: EventObservabilityQuery<'_>,
 ) -> Result<(Vec<EventObservabilityRecord>, String)> {
     let mut records = store
@@ -2786,7 +2791,7 @@ fn event_improvement_suggested_commands(
     recommended_policy: &str,
 ) -> Vec<Vec<String>> {
     let mut commands = vec![vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "events".to_string(),
         "observability".to_string(),
         "--workflow".to_string(),
@@ -2811,7 +2816,7 @@ fn event_improvement_suggested_commands(
             return commands;
         };
         commands.push(vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "workflow".to_string(),
             "update-node-brain".to_string(),
             "--workflow".to_string(),
@@ -2846,14 +2851,14 @@ fn event_has_ai_signal(record: &EventObservabilityRecord) -> bool {
 }
 
 pub fn ingest_inbound_event(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: InboundEventIngestInput,
 ) -> Result<InboundEventIngestReport> {
     ingest_inbound_event_with_context(store, input, &OperatingContextSpec::default())
 }
 
 pub fn ingest_inbound_event_with_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     input: InboundEventIngestInput,
     operating_context: &OperatingContextSpec,
 ) -> Result<InboundEventIngestReport> {
@@ -2878,7 +2883,7 @@ pub fn ingest_inbound_event_with_context(
 }
 
 pub fn list_inbound_event_inbox(
-    store: &ForgeStore,
+    store: &FoundryStore,
     status: Option<&str>,
     limit: usize,
 ) -> Result<InboundEventInboxReport> {
@@ -2886,7 +2891,7 @@ pub fn list_inbound_event_inbox(
 }
 
 pub fn list_inbound_event_inbox_for_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     status: Option<&str>,
     limit: usize,
     operating_context: &OperatingContextSpec,
@@ -2921,7 +2926,7 @@ pub fn list_inbound_event_inbox_for_context(
 }
 
 pub fn scan_inbound_event_inbox(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     status: Option<&str>,
     limit: usize,
@@ -3024,7 +3029,7 @@ pub fn scan_inbound_event_inbox(
 }
 
 pub fn run_inbound_event_worker_loop(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     options: InboundEventWorkerLoopOptions<'_>,
 ) -> Result<InboundEventWorkerLoopReport> {
@@ -3123,7 +3128,7 @@ fn event_stop_file_requested(stop_file: Option<&Path>) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_event_service_plan(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     service_kind: &str,
     status: Option<&str>,
@@ -3169,7 +3174,7 @@ pub fn build_event_service_plan(
 
     let (command, settings) = if service_kind == "worker" {
         let mut command = vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "events".to_string(),
             "worker".to_string(),
             "--project-root".to_string(),
@@ -3217,7 +3222,7 @@ pub fn build_event_service_plan(
             );
         }
         let mut command = vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "events".to_string(),
             "webhook-ingress".to_string(),
             "--host".to_string(),
@@ -3268,7 +3273,7 @@ pub fn build_event_service_plan(
 
     let lease = json!({
         "enabled": true,
-        "owner": "forge.event_service_manager",
+        "owner": "foundry.event_service_manager",
         "ttl_seconds": lease_seconds,
         "heartbeat_interval_seconds": heartbeat_seconds,
         "stale_policy": "recover_or_restart_after_ttl",
@@ -3287,10 +3292,10 @@ pub fn build_event_service_plan(
         "signal_policy": "finish_current_request_then_stop",
     });
     let health = json!({
-        "schema_version": "forge.event_service_health_plan.v1",
+        "schema_version": "foundry.event_service_health_plan.v1",
         "checks": ["process_alive", "lease_fresh", "last_cycle_or_request_recent", "failed_count_threshold"],
         "interval_seconds": heartbeat_seconds,
-        "report_command": ["forge", "events", "timeline", "--limit", "20", "--output", "json"],
+        "report_command": ["foundry", "events", "timeline", "--limit", "20", "--output", "json"],
     });
 
     let mut report = EventServicePlanReport {
@@ -3317,7 +3322,7 @@ pub fn build_event_service_plan(
         source_id: &report.service_id,
         workflow_id: None,
         kind: "event_service_plan_created",
-        origin: "forge",
+        origin: "foundry",
         status: &report.status,
         data: &event_data,
         tenant_context: &tenant_context,
@@ -3328,7 +3333,7 @@ pub fn build_event_service_plan(
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_event_worker_service(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     status: Option<&str>,
     limit: usize,
@@ -3364,7 +3369,7 @@ pub fn run_event_worker_service(
         1,
         65_536,
         None,
-        "X-Forge-Signature",
+        "X-Foundry-Signature",
         lease_seconds,
         heartbeat_seconds,
         5,
@@ -3492,7 +3497,7 @@ pub fn run_event_worker_service(
             "heartbeat_count": heartbeat_count,
         });
         let running_health = json!({
-            "schema_version": "forge.event_service_health.v1",
+            "schema_version": "foundry.event_service_health.v1",
             "status": "running",
             "checked_at": last_heartbeat_at.to_rfc3339(),
             "request_count": scanned_count,
@@ -3610,7 +3615,7 @@ pub fn run_event_worker_service(
         "event_service_run_completed"
     };
     let health = json!({
-        "schema_version": "forge.event_service_health.v1",
+        "schema_version": "foundry.event_service_health.v1",
         "status": final_status,
         "checked_at": completed_at.to_rfc3339(),
         "request_count": worker_report.scanned_count,
@@ -3667,7 +3672,7 @@ pub fn run_event_worker_service(
         source_id: &service_id,
         workflow_id: None,
         kind: report_status,
-        origin: "forge",
+        origin: "foundry",
         status: report_status,
         data: &event_data,
         tenant_context: &tenant_context,
@@ -3678,7 +3683,7 @@ pub fn run_event_worker_service(
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_event_webhook_ingress_service(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     host: &str,
     port: u16,
@@ -3759,7 +3764,7 @@ pub fn run_event_webhook_ingress_service(
         "lease": lease.clone(),
         "heartbeat": heartbeat.clone(),
         "health": {
-            "schema_version": "forge.event_service_health.v1",
+            "schema_version": "foundry.event_service_health.v1",
             "status": "running",
             "checked_at": last_heartbeat_at.to_rfc3339(),
             "request_count": 0,
@@ -3829,7 +3834,7 @@ pub fn run_event_webhook_ingress_service(
             });
             let stop_requested = phase == "stop_file_requested";
             let health = json!({
-                "schema_version": "forge.event_service_health.v1",
+                "schema_version": "foundry.event_service_health.v1",
                 "status": "running",
                 "phase": phase,
                 "checked_at": last_heartbeat_at.to_rfc3339(),
@@ -3900,7 +3905,7 @@ pub fn run_event_webhook_ingress_service(
         Err(error) => {
             let failed_at = Utc::now();
             let health = json!({
-                "schema_version": "forge.event_service_health.v1",
+                "schema_version": "foundry.event_service_health.v1",
                 "status": "failed",
                 "checked_at": failed_at.to_rfc3339(),
                 "request_count": 0,
@@ -3974,7 +3979,7 @@ pub fn run_event_webhook_ingress_service(
         "event_service_run_completed"
     };
     let health = json!({
-        "schema_version": "forge.event_service_health.v1",
+        "schema_version": "foundry.event_service_health.v1",
         "status": final_status,
         "checked_at": completed_at.to_rfc3339(),
         "request_count": webhook_report.request_count,
@@ -4033,7 +4038,7 @@ pub fn run_event_webhook_ingress_service(
         source_id: &service_id,
         workflow_id: None,
         kind: report_status,
-        origin: "forge",
+        origin: "foundry",
         status: report_status,
         data: &event_data,
         tenant_context: &tenant_context,
@@ -4044,7 +4049,7 @@ pub fn run_event_webhook_ingress_service(
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_event_service_supervisor(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     service_kind: &str,
     status: Option<&str>,
@@ -4222,7 +4227,7 @@ pub fn run_event_service_supervisor(
         "event_service_supervisor_completed"
     };
     let health = json!({
-        "schema_version": "forge.event_service_supervisor_health.v1",
+        "schema_version": "foundry.event_service_supervisor_health.v1",
         "status": status,
         "started_at": started_at.to_rfc3339(),
         "completed_at": completed_at.to_rfc3339(),
@@ -4265,7 +4270,7 @@ pub fn run_event_service_supervisor(
         source_id: &report.supervisor_id,
         workflow_id: None,
         kind: status,
-        origin: "forge",
+        origin: "foundry",
         status,
         data: &event_data,
         tenant_context: &tenant_context,
@@ -4283,7 +4288,7 @@ fn next_event_service_supervisor_backoff(current: u64, max: u64) -> u64 {
 }
 
 pub fn list_event_services(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     service_kind: Option<&str>,
     status: Option<&str>,
@@ -4328,7 +4333,7 @@ pub fn list_event_services(
 }
 
 pub fn recover_stale_event_services(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     service_kind: Option<&str>,
     limit: usize,
@@ -4340,7 +4345,7 @@ pub fn recover_stale_event_services(
     let service_kind = service_kind
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let origin = normalize_text(Some(origin)).unwrap_or_else(|| "forge".to_string());
+    let origin = normalize_text(Some(origin)).unwrap_or_else(|| "foundry".to_string());
     let limit = limit.max(1);
     let operating_context = load_project_operating_context(&project_root)?;
     let (organization_id, brand_id, product_id) = event_service_tenant_filters_for_context(
@@ -4375,7 +4380,7 @@ pub fn recover_stale_event_services(
             object.insert(
                 "recovery".to_string(),
                 json!({
-                    "schema_version": "forge.event_service_recovery_marker.v1",
+                    "schema_version": "foundry.event_service_recovery_marker.v1",
                     "status": "stale",
                     "origin": origin,
                     "recovered_at": observed_at,
@@ -4391,7 +4396,7 @@ pub fn recover_stale_event_services(
             data = json!({
                 "previous_data": data,
                 "recovery": {
-                    "schema_version": "forge.event_service_recovery_marker.v1",
+                    "schema_version": "foundry.event_service_recovery_marker.v1",
                     "status": "stale",
                     "origin": origin,
                     "recovered_at": observed_at,
@@ -4471,7 +4476,7 @@ pub fn recover_stale_event_services(
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_event_runtime_reconcile(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     status: Option<&str>,
     limit: usize,
@@ -4559,7 +4564,7 @@ pub fn run_event_runtime_reconcile(
         )
         .collect::<Vec<_>>();
     let registry = EventRuntimeRegistrySnapshot {
-        schema_version: "forge.event_runtime_registry_snapshot.v1".to_string(),
+        schema_version: "foundry.event_runtime_registry_snapshot.v1".to_string(),
         workflow_count: registry_workflows.len(),
         persistent_workflows: registry_workflows
             .iter()
@@ -4585,7 +4590,7 @@ pub fn run_event_runtime_reconcile(
         product_id.as_deref(),
     )?;
     let inbox = EventRuntimeInboxSnapshot {
-        schema_version: "forge.event_runtime_inbox_snapshot.v1".to_string(),
+        schema_version: "foundry.event_runtime_inbox_snapshot.v1".to_string(),
         status_filter: requested_status.clone(),
         pending_event_count: pending_events.len(),
         sampled_limit: limit,
@@ -4644,7 +4649,7 @@ pub fn run_event_runtime_reconcile(
         .map(EventServiceView::from)
         .collect::<Vec<_>>();
     let service_snapshot = EventRuntimeServiceSnapshot {
-        schema_version: "forge.event_runtime_service_snapshot.v1".to_string(),
+        schema_version: "foundry.event_runtime_service_snapshot.v1".to_string(),
         service_kind: "worker".to_string(),
         service_count: services.len(),
         running_count,
@@ -4728,7 +4733,7 @@ pub fn run_event_runtime_reconcile(
                     1,
                     65_536,
                     None,
-                    "X-Forge-Signature",
+                    "X-Foundry-Signature",
                     stop_file,
                     &lease_owner,
                     lease_seconds,
@@ -4764,7 +4769,7 @@ pub fn run_event_runtime_reconcile(
             None
         };
         Some(EventRuntimeScheduleSnapshot {
-            schema_version: "forge.event_runtime_schedule_snapshot.v1".to_string(),
+            schema_version: "foundry.event_runtime_schedule_snapshot.v1".to_string(),
             scan_schedules,
             executor: schedule_executor.clone(),
             max_workers: schedule_max_workers,
@@ -4827,7 +4832,7 @@ pub fn run_event_runtime_reconcile(
         source_id: &report.reconcile_id,
         workflow_id: None,
         kind: status,
-        origin: "forge",
+        origin: "foundry",
         status,
         data: &event_data,
         tenant_context: &tenant_context,
@@ -4860,7 +4865,7 @@ fn event_worker_supervisor_command(
     backoff_max_seconds: u64,
 ) -> Vec<String> {
     let mut command = vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "events".to_string(),
         "service-supervise".to_string(),
         "--kind".to_string(),
@@ -4903,7 +4908,7 @@ fn event_worker_supervisor_command(
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_event_runtime_daemon(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: &Path,
     status: Option<&str>,
     limit: usize,
@@ -4954,7 +4959,7 @@ pub fn run_event_runtime_daemon(
     let lease_expires_at =
         (started_at + ChronoDuration::seconds(lease_seconds as i64)).to_rfc3339();
     let running_data = json!({
-        "schema_version": "forge.event_runtime_daemon_state.v1",
+        "schema_version": "foundry.event_runtime_daemon_state.v1",
         "service_id": service_id,
         "status": "running",
         "project_root": project_root.display().to_string(),
@@ -4976,7 +4981,7 @@ pub fn run_event_runtime_daemon(
         "stop_file": stop_file_display,
         "started_at": started_at.to_rfc3339(),
         "health": {
-            "schema_version": "forge.event_runtime_daemon_health.v1",
+            "schema_version": "foundry.event_runtime_daemon_health.v1",
             "status": "running",
             "cycle_count": 0,
             "retained_cycle_count": 0,
@@ -5083,7 +5088,7 @@ pub fn run_event_runtime_daemon(
         let heartbeat_expires_at =
             (heartbeat_at + ChronoDuration::seconds(lease_seconds as i64)).to_rfc3339();
         let running_health = json!({
-            "schema_version": "forge.event_runtime_daemon_health.v1",
+            "schema_version": "foundry.event_runtime_daemon_health.v1",
             "status": "running",
             "cycle_count": cycle,
             "retained_cycle_count": cycles.len(),
@@ -5096,7 +5101,7 @@ pub fn run_event_runtime_daemon(
             "last_cycle": cycle,
         });
         let running_data = json!({
-            "schema_version": "forge.event_runtime_daemon_state.v1",
+            "schema_version": "foundry.event_runtime_daemon_state.v1",
             "service_id": service_id,
             "status": "running",
             "project_root": project_root.display().to_string(),
@@ -5162,7 +5167,7 @@ pub fn run_event_runtime_daemon(
         "event_runtime_daemon_completed"
     };
     let health = json!({
-        "schema_version": "forge.event_runtime_daemon_health.v1",
+        "schema_version": "foundry.event_runtime_daemon_health.v1",
         "status": report_status,
         "started_at": started_at.to_rfc3339(),
         "completed_at": completed_at.to_rfc3339(),
@@ -5179,7 +5184,7 @@ pub fn run_event_runtime_daemon(
         "stop_file": stop_file_display,
     });
     let final_data = json!({
-        "schema_version": "forge.event_runtime_daemon_state.v1",
+        "schema_version": "foundry.event_runtime_daemon_state.v1",
         "service_id": service_id,
         "status": report_status,
         "project_root": project_root.display().to_string(),
@@ -5263,7 +5268,7 @@ pub fn run_event_runtime_daemon(
         source_id: &service_id,
         workflow_id: None,
         kind: report_status,
-        origin: "forge",
+        origin: "foundry",
         status: report_status,
         data: &event_data,
         tenant_context: &tenant_context,
@@ -5281,7 +5286,7 @@ fn runtime_daemon_cycle_is_idle(cycle: &EventRuntimeDaemonCycle) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_event_webhook_ingress_server(
-    store: &ForgeStore,
+    store: &FoundryStore,
     host: &str,
     port: u16,
     path: &str,
@@ -5320,7 +5325,7 @@ pub fn run_event_webhook_ingress_server(
 
 #[allow(clippy::too_many_arguments)]
 fn run_event_webhook_ingress_server_with_progress(
-    store: &ForgeStore,
+    store: &FoundryStore,
     host: &str,
     port: u16,
     path: &str,
@@ -5351,7 +5356,7 @@ fn run_event_webhook_ingress_server_with_progress(
         .all(|address| address.ip().is_loopback());
     let allow_unsigned_mutations = local_only
         && event_env_flag(WEBHOOK_ALLOW_INSECURE_LOCAL_ENV)
-        && !event_env_flag("FORGE_PRODUCTION_MODE");
+        && !event_env_flag("FOUNDRY_PRODUCTION_MODE");
     validate_webhook_ingress_security(
         local_only,
         hmac_verifier.is_some(),
@@ -5529,7 +5534,7 @@ fn emit_webhook_ingress_progress(
 
 #[allow(clippy::too_many_arguments)]
 fn build_webhook_ingress_entry_from_stream(
-    store: &ForgeStore,
+    store: &FoundryStore,
     stream: &mut TcpStream,
     peer_address: SocketAddr,
     path: &str,
@@ -5598,7 +5603,7 @@ fn webhook_ingress_error_status(message: &str) -> u16 {
 }
 
 pub fn route_inbound_event(
-    store: &ForgeStore,
+    store: &FoundryStore,
     event_id: &str,
     project_root: &Path,
 ) -> Result<InboundEventRouteReport> {
@@ -5606,7 +5611,7 @@ pub fn route_inbound_event(
     let project_root = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
-    let addon_dirs = vec![project_root.join(".forge/addons")];
+    let addon_dirs = vec![project_root.join(".foundry/addons")];
     let addon_catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
     let adapter_policy = evaluate_inbound_event_adapter_policy(&addon_catalog, &event);
     let addon_event_adapter_plan =
@@ -5684,7 +5689,7 @@ pub fn route_inbound_event(
 }
 
 pub fn dispatch_inbound_event_activations(
-    store: &ForgeStore,
+    store: &FoundryStore,
     event_id: &str,
     project_root: &Path,
     dry_run: bool,
@@ -5694,7 +5699,7 @@ pub fn dispatch_inbound_event_activations(
 }
 
 fn dispatch_inbound_event_activations_for_route(
-    store: &ForgeStore,
+    store: &FoundryStore,
     route: &InboundEventRouteReport,
     project_root: &Path,
     dry_run: bool,
@@ -5702,7 +5707,7 @@ fn dispatch_inbound_event_activations_for_route(
     let project_root = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
-    let addon_dirs = vec![project_root.join(".forge/addons")];
+    let addon_dirs = vec![project_root.join(".foundry/addons")];
     let addon_catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
     let activation_plan = &route
         .addon_event_adapter_plan
@@ -5789,7 +5794,7 @@ fn event_activation_dispatch_input(
     contract: &AddonRuntimeContractPolicyEntry,
 ) -> Value {
     json!({
-        "schema_version": "forge.event_workflow_activation.v1",
+        "schema_version": "foundry.event_workflow_activation.v1",
         "event_id": route.event_id,
         "origin": route.origin,
         "action": route.action,
@@ -5873,7 +5878,7 @@ fn event_activation_dispatch_notes(
 }
 
 pub fn emit_event_egress(
-    store: &ForgeStore,
+    store: &FoundryStore,
     catalog: &AddonCatalog,
     input: EventEgressEmitInput,
     operating_context: &OperatingContextSpec,
@@ -5953,7 +5958,7 @@ pub fn emit_event_egress(
 }
 
 fn ensure_event_egress_tenant_policy(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: &EventEgressRequestEnvelope,
     operating_context: &OperatingContextSpec,
 ) -> Result<()> {
@@ -5967,7 +5972,7 @@ fn normalize_event_egress_input(mut input: EventEgressEmitInput) -> Result<Event
     input.adapter_id = required_text("adapter_id", &input.adapter_id)?;
     input.event_type = required_text("event_type", &input.event_type)?;
     input.action = required_text("action", &input.action)?;
-    input.origin = normalize_text(Some(&input.origin)).unwrap_or_else(|| "forge".to_string());
+    input.origin = normalize_text(Some(&input.origin)).unwrap_or_else(|| "foundry".to_string());
     input.addon_id = input
         .addon_id
         .map(|value| value.trim().to_string())
@@ -6218,7 +6223,8 @@ fn deliver_event_egress(
     let body = serde_json::to_vec(request)?;
     let signature = build_event_egress_auth_headers(&adapter.adapter, &body)?;
     let response = if parsed.scheme.eq_ignore_ascii_case("https") {
-        let resolved_address = if event_env_value_is("FORGE_EVENT_EGRESS_HTTPS_MODE", "simulate") {
+        let resolved_address = if event_env_value_is("FOUNDRY_EVENT_EGRESS_HTTPS_MODE", "simulate")
+        {
             None
         } else {
             Some(resolve_event_egress_address(&parsed)?)
@@ -6291,7 +6297,7 @@ fn deliver_telegram_event_egress(
         .clamp(256, 1_048_576);
     let method = telegram_delivery_method(request);
     let endpoint = format!("telegram://bot_api/{method}");
-    let simulated = env::var("FORGE_TELEGRAM_EGRESS_MODE")
+    let simulated = crate::brand::env_var("FOUNDRY_TELEGRAM_EGRESS_MODE")
         .map(|value| value.eq_ignore_ascii_case("simulate"))
         .unwrap_or(false);
     let response = if simulated {
@@ -6327,8 +6333,8 @@ fn telegram_chat_id(payload: &Value) -> Option<String> {
     extract_string(payload, &["chat_id"])
         .or_else(|| extract_string(payload, &["authorized_chat"]))
         .or_else(|| extract_string(payload, &["authorized_chat_id"]))
-        .or_else(|| env::var("TELEGRAM_REPORT_CHAT_ID").ok())
-        .or_else(|| env::var("TELEGRAM_CHAT_ID").ok())
+        .or_else(|| crate::brand::env_var("TELEGRAM_REPORT_CHAT_ID").ok())
+        .or_else(|| crate::brand::env_var("TELEGRAM_CHAT_ID").ok())
         .and_then(|value| normalize_text(Some(&value)))
 }
 
@@ -6352,7 +6358,7 @@ fn telegram_message_text(payload: &Value) -> Option<String> {
 }
 
 fn telegram_caption(payload: &Value) -> String {
-    telegram_message_text(payload).unwrap_or_else(|| "Forge report".to_string())
+    telegram_message_text(payload).unwrap_or_else(|| "Foundry report".to_string())
 }
 
 fn telegram_document_path(payload: &Value) -> Option<String> {
@@ -6443,7 +6449,7 @@ fn run_telegram_curl(
 }
 
 fn attach_event_egress_delivery_artifact(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: &EventEgressRequestEnvelope,
     adapter_policy: &EventEgressAdapterPolicyReport,
     delivery: &EventEgressDeliveryReport,
@@ -6458,7 +6464,7 @@ fn attach_event_egress_delivery_artifact(
     }
     let evidence_dir = store
         .base_dir()
-        .join(".forge")
+        .join(".foundry")
         .join("event-egress-delivery");
     fs::create_dir_all(&evidence_dir)?;
     let source_path = evidence_dir.join(format!("{}.json", request.request_id));
@@ -6488,7 +6494,7 @@ fn attach_event_egress_delivery_artifact(
 }
 
 fn record_event_egress_global_event(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: &EventEgressRequestEnvelope,
     adapter_policy: &EventEgressAdapterPolicyReport,
     delivery: Option<&EventEgressDeliveryReport>,
@@ -6561,7 +6567,7 @@ fn build_event_egress_auth_headers(
         .signature_header
         .as_deref()
         .and_then(|value| normalize_text(Some(value)))
-        .unwrap_or_else(|| "X-Forge-Signature".to_string());
+        .unwrap_or_else(|| "X-Foundry-Signature".to_string());
     let signature_header = normalize_http_header_name("signature_header", &signature_header)?;
     let timestamp = Utc::now().timestamp().to_string();
     let nonce = Uuid::new_v4().simple().to_string();
@@ -6579,8 +6585,8 @@ fn build_event_egress_auth_headers(
         credential_vault: resolved_secret.credential_vault,
         headers: vec![
             (signature_header, signature),
-            ("X-Forge-Timestamp".to_string(), timestamp),
-            ("X-Forge-Nonce".to_string(), nonce),
+            ("X-Foundry-Timestamp".to_string(), timestamp),
+            ("X-Foundry-Nonce".to_string(), nonce),
         ],
     })
 }
@@ -6626,7 +6632,7 @@ fn resolve_event_egress_secret(
     let secret_env = env_name.with_context(|| {
         format!("{purpose} requires secret_env, hmac_secret_env or credential_vault")
     })?;
-    let value = env::var(&secret_env)
+    let value = crate::brand::env_var(&secret_env)
         .with_context(|| format!("{purpose} secret env `{secret_env}` is not set"))?;
     Ok(EventEgressResolvedSecret {
         value,
@@ -6863,7 +6869,7 @@ fn post_event_egress_json(
         .collect::<Result<Vec<_>>>()?
         .join("");
     let request_headers = format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: forge-core/event-egress\r\nContent-Type: application/json\r\nAccept: application/json\r\n{extra_headers}Connection: close\r\nContent-Length: {}\r\n\r\n",
+        "POST {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: foundry-core/event-egress\r\nContent-Type: application/json\r\nAccept: application/json\r\n{extra_headers}Connection: close\r\nContent-Length: {}\r\n\r\n",
         endpoint.path,
         host_header,
         body.len()
@@ -6900,7 +6906,7 @@ fn post_event_egress_https_curl(
     max_response_bytes: usize,
     extra_headers: &[(String, String)],
 ) -> Result<EventEgressHttpResponse> {
-    let simulated = event_env_value_is("FORGE_EVENT_EGRESS_HTTPS_MODE", "simulate");
+    let simulated = event_env_value_is("FOUNDRY_EVENT_EGRESS_HTTPS_MODE", "simulate");
     if simulated {
         let body = json!({
             "ok": true,
@@ -6941,7 +6947,7 @@ fn post_event_egress_https_curl(
         "POST",
         endpoint,
         "-H",
-        "User-Agent: forge-core/event-egress",
+        "User-Agent: foundry-core/event-egress",
         "-H",
         "Content-Type: application/json",
         "-H",
@@ -7026,7 +7032,7 @@ fn http_event_response_body(response: &[u8]) -> &[u8] {
 
 #[allow(clippy::too_many_arguments)]
 fn handle_webhook_ingress_stream(
-    store: &ForgeStore,
+    store: &FoundryStore,
     stream: &mut TcpStream,
     peer_address: SocketAddr,
     expected_path: &str,
@@ -7274,7 +7280,7 @@ fn build_webhook_hmac_verifier(
         return Ok(None);
     };
     let signature_header = normalize_http_header_name("signature_header", signature_header)?;
-    let secret = env::var(&secret_env)
+    let secret = crate::brand::env_var(&secret_env)
         .with_context(|| format!("webhook HMAC secret env `{secret_env}` is not set"))?;
     if secret.len() < MIN_WEBHOOK_HMAC_SECRET_BYTES {
         bail!(
@@ -7374,7 +7380,7 @@ impl WebhookIngressSecurityState {
 }
 
 fn configured_webhook_rate_limit() -> usize {
-    env::var(WEBHOOK_RATE_LIMIT_ENV)
+    crate::brand::env_var(WEBHOOK_RATE_LIMIT_ENV)
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(WEBHOOK_RATE_LIMIT_PER_MINUTE_DEFAULT)
@@ -7449,7 +7455,7 @@ fn validate_webhook_ingress_security(
 }
 
 fn event_env_flag(name: &str) -> bool {
-    env::var(name)
+    crate::brand::env_var(name)
         .map(|value| {
             matches!(
                 value.trim().to_ascii_lowercase().as_str(),
@@ -7460,7 +7466,7 @@ fn event_env_flag(name: &str) -> bool {
 }
 
 fn event_env_value_is(name: &str, expected: &str) -> bool {
-    env::var(name)
+    crate::brand::env_var(name)
         .map(|value| value.trim().eq_ignore_ascii_case(expected))
         .unwrap_or(false)
 }
@@ -7636,7 +7642,7 @@ fn select_timeline_page(
     (
         selected,
         EventTimelinePage {
-            schema_version: "forge.event_timeline.page.v1".to_string(),
+            schema_version: "foundry.event_timeline.page.v1".to_string(),
             after_sequence,
             limit: normalized_limit,
             next_cursor,
@@ -7677,7 +7683,7 @@ fn select_observability_page(
     (
         selected,
         EventTimelinePage {
-            schema_version: "forge.event_timeline.page.v1".to_string(),
+            schema_version: "foundry.event_timeline.page.v1".to_string(),
             after_sequence,
             limit: normalized_limit,
             next_cursor,
@@ -7733,7 +7739,7 @@ fn global_event_matches_filters(
 }
 
 fn event_inbox_tenant_filters_for_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     operating_context: &OperatingContextSpec,
     action: &str,
 ) -> Result<(Option<String>, Option<String>, Option<String>)> {
@@ -7749,7 +7755,7 @@ fn event_inbox_tenant_filters_for_context(
 }
 
 fn event_service_tenant_filters_for_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     operating_context: &OperatingContextSpec,
     action: &str,
 ) -> Result<(Option<String>, Option<String>, Option<String>)> {
@@ -7765,7 +7771,7 @@ fn event_service_tenant_filters_for_context(
 }
 
 fn event_runtime_allowed_workflow_ids(
-    store: &ForgeStore,
+    store: &FoundryStore,
     organization_id: Option<&str>,
     brand_id: Option<&str>,
     product_id: Option<&str>,
@@ -8341,7 +8347,7 @@ fn event_workflow_activation_dispatch_command(
     contract: &AddonRuntimeContractPolicyEntry,
 ) -> Vec<String> {
     let input = json!({
-        "schema_version": "forge.event_workflow_activation.v1",
+        "schema_version": "foundry.event_workflow_activation.v1",
         "event_id": event.id,
         "origin": event.origin,
         "action": event.action,
@@ -8358,7 +8364,7 @@ fn event_workflow_activation_dispatch_command(
         "contract_type": contract.contract_type,
     });
     vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "addons".to_string(),
         "dispatch-contract".to_string(),
         "--addon".to_string(),
@@ -8383,7 +8389,7 @@ fn event_workflow_activation_plan_notes(
             "No matched Addon Event Extension declared a workflow activation.".to_string(),
         ],
         "workflow_activation_ready" => vec![
-            "Matched Addon Event Extensions are ready to dispatch runtime contracts; Forge did not execute handlers inline.".to_string(),
+            "Matched Addon Event Extensions are ready to dispatch runtime contracts; Foundry did not execute handlers inline.".to_string(),
         ],
         "workflow_activation_partially_ready" => vec![format!(
             "{} event workflow activation(s) need permission or contract repair before dispatch.",
@@ -8639,7 +8645,7 @@ fn inbound_event_addon_adapter_next_commands(
 ) -> Vec<Vec<String>> {
     let mut commands = vec![
         vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "events".to_string(),
             "route".to_string(),
             "--event".to_string(),
@@ -8650,7 +8656,7 @@ fn inbound_event_addon_adapter_next_commands(
             "json".to_string(),
         ],
         vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "events".to_string(),
             "adapters".to_string(),
             "--direction".to_string(),
@@ -8663,7 +8669,7 @@ fn inbound_event_addon_adapter_next_commands(
     for adapter in adapters {
         for permission in &adapter.permission_gate.human_approval_required {
             commands.push(vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "addons".to_string(),
                 "authorize-permission".to_string(),
                 "--addon".to_string(),
@@ -8691,10 +8697,10 @@ fn inbound_event_addon_adapter_plan_notes(
 ) -> Vec<String> {
     let mut notes = Vec::new();
     if !adapter_policy.enforced {
-        notes.push("No Addon ingress adapter claimed this origin; Forge kept legacy inbox routing available.".to_string());
+        notes.push("No Addon ingress adapter claimed this origin; Foundry kept legacy inbox routing available.".to_string());
     } else if matched_count > 0 {
         notes.push(
-            "Addon ingress adapter candidates are ready for Forge event routing.".to_string(),
+            "Addon ingress adapter candidates are ready for Foundry event routing.".to_string(),
         );
     } else if adapters.is_empty() {
         notes.push("No Addon ingress adapter matched the event origin and transport.".to_string());
@@ -8790,7 +8796,7 @@ fn adapter_schema_matches(adapter: &AddonEventAdapterView, schema: Option<&str>)
 fn auth_requires_verification(auth: &str) -> bool {
     let auth = auth.trim();
     !auth.is_empty()
-        && !["none", "forge_policy"]
+        && !["none", "foundry_policy"]
             .iter()
             .any(|allowed| auth.eq_ignore_ascii_case(allowed))
 }
@@ -8825,7 +8831,7 @@ fn text_matches(left: &str, right: &str) -> bool {
 }
 
 fn route_start_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     event: InboundEventRecord,
     project_root: &Path,
     addon_catalog: &AddonCatalog,
@@ -8872,19 +8878,28 @@ fn route_start_workflow(
 }
 
 fn route_modify_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     event: InboundEventRecord,
     adapter_policy: InboundEventAdapterPolicyReport,
     addon_event_adapter_plan: InboundEventAddonAdapterPlan,
 ) -> Result<InboundEventRouteReport> {
     let workflow_id = extract_workflow_id(&event.data)
         .with_context(|| format!("inbound event {} does not include a workflow_id", event.id))?;
-    let new_goal = extract_goal(&event.data)
-        .with_context(|| format!("inbound event {} does not include a new goal", event.id))?;
     let origin = format!("event_inbox:{}", event.origin);
-    let update = update_workflow_goal(store, &workflow_id, &new_goal, &origin)?;
+    let expected_revision = extract_u64(&event.data, &["expected_revision"])?;
+    let mutation = extract_string(&event.data, &["mutation"])
+        .map(|value| normalize_workflow_mutation(&value))
+        .unwrap_or_else(|| "update_goal".to_string());
+    let revision = execute_workflow_mutation(
+        store,
+        &event,
+        &workflow_id,
+        &origin,
+        &mutation,
+        expected_revision,
+    )?;
     let workflow = store.load_workflow(&workflow_id)?;
-    let route_decision = format!("modify_workflow revision {}", update.revision);
+    let route_decision = format!("modify_workflow revision {revision} mutation {mutation}");
     record_inbound_event_routed(store, &workflow, &event, &adapter_policy, &route_decision)?;
     let routed_data = enrich_event_data(
         event.data.clone(),
@@ -8907,13 +8922,237 @@ fn route_modify_workflow(
         workflow_id: Some(workflow.id.clone()),
         workflow_goal: Some(workflow.goal.clone()),
         created_workflow: Some(workflow),
-        route_result: Some(serde_json::to_value(&update)?),
+        route_result: Some(json!({
+            "mutation": mutation,
+            "revision": revision,
+        })),
         event: inbound_event_view(store, routed_event),
     })
 }
 
+fn execute_workflow_mutation(
+    store: &FoundryStore,
+    event: &InboundEventRecord,
+    workflow_id: &str,
+    origin: &str,
+    mutation: &str,
+    expected_revision: Option<u64>,
+) -> Result<u64> {
+    match mutation {
+        "update_goal" => {
+            let new_goal = extract_goal(&event.data).with_context(|| {
+                format!("inbound event {} does not include a new goal", event.id)
+            })?;
+            Ok(update_workflow_goal_with_expected_revision(
+                store,
+                workflow_id,
+                &new_goal,
+                origin,
+                expected_revision,
+            )?
+            .revision)
+        }
+        "add_task" => {
+            let description = extract_string(&event.data, &["description", "task_description"])
+                .with_context(|| {
+                    format!(
+                        "inbound event {} add_task does not include description",
+                        event.id
+                    )
+                })?;
+            Ok(add_workflow_task(
+                store,
+                workflow_id,
+                WorkflowTaskAddInput {
+                    task_id: extract_string(&event.data, &["task_id"]),
+                    description,
+                    priority: extract_string(&event.data, &["priority"])
+                        .unwrap_or_else(|| "medium".to_string()),
+                    origin: origin.to_string(),
+                    expected_revision,
+                },
+            )?
+            .revision)
+        }
+        "update_task" => {
+            let task_id = required_modify_workflow_task_id(event)?;
+            let title = extract_string(&event.data, &["title"]);
+            let goal = extract_string(&event.data, &["task_goal", "goal"]);
+            let expected_output = extract_string(&event.data, &["expected_output"]);
+            Ok(update_workflow_task_with_expected_revision(
+                store,
+                workflow_id,
+                WorkflowTaskUpdateInput {
+                    task_id: &task_id,
+                    title: title.as_deref(),
+                    goal: goal.as_deref(),
+                    expected_output: expected_output.as_deref(),
+                    origin,
+                },
+                expected_revision,
+            )?
+            .revision)
+        }
+        "set_priority" => {
+            let task_id = required_modify_workflow_task_id(event)?;
+            let priority = extract_string(&event.data, &["priority"]).with_context(|| {
+                format!(
+                    "inbound event {} set_priority does not include priority",
+                    event.id
+                )
+            })?;
+            Ok(set_workflow_task_priority(
+                store,
+                workflow_id,
+                WorkflowTaskPriorityInput {
+                    task_id,
+                    priority,
+                    origin: origin.to_string(),
+                    expected_revision,
+                },
+            )?
+            .revision)
+        }
+        "add_dependency" | "remove_dependency" => {
+            let task_id = required_modify_workflow_task_id(event)?;
+            let dependency_task_id =
+                extract_string(&event.data, &["depends_on", "dependency_task_id"]).with_context(
+                    || {
+                        format!(
+                            "inbound event {} {mutation} does not include depends_on",
+                            event.id
+                        )
+                    },
+                )?;
+            let input = WorkflowTaskDependencyInput {
+                task_id,
+                dependency_task_id,
+                origin: origin.to_string(),
+                expected_revision,
+            };
+            if mutation == "add_dependency" {
+                Ok(add_workflow_task_dependency(store, workflow_id, input)?.revision)
+            } else {
+                Ok(remove_workflow_task_dependency(store, workflow_id, input)?.revision)
+            }
+        }
+        "set_impediment" => {
+            let task_id = required_modify_workflow_task_id(event)?;
+            let reason = extract_string(&event.data, &["reason"]).with_context(|| {
+                format!(
+                    "inbound event {} set_impediment does not include reason",
+                    event.id
+                )
+            })?;
+            Ok(set_workflow_task_impediment(
+                store,
+                workflow_id,
+                WorkflowTaskImpedimentInput {
+                    task_id,
+                    reason,
+                    kind: extract_string(&event.data, &["kind"])
+                        .unwrap_or_else(|| "manual".to_string()),
+                    origin: origin.to_string(),
+                    expected_revision,
+                },
+            )?
+            .revision)
+        }
+        "clear_impediment" => {
+            let task_id = required_modify_workflow_task_id(event)?;
+            Ok(clear_workflow_task_impediment(
+                store,
+                workflow_id,
+                WorkflowTaskImpedimentClearInput {
+                    task_id,
+                    impediment_id: extract_string(&event.data, &["impediment_id", "impediment"]),
+                    origin: origin.to_string(),
+                    expected_revision,
+                },
+            )?
+            .revision)
+        }
+        _ => bail!(
+            "inbound event {} uses unsupported workflow mutation `{mutation}`",
+            event.id
+        ),
+    }
+}
+
+fn required_modify_workflow_task_id(event: &InboundEventRecord) -> Result<String> {
+    extract_string(&event.data, &["task_id"]).with_context(|| {
+        format!(
+            "inbound event {} workflow mutation does not include task_id",
+            event.id
+        )
+    })
+}
+
+fn normalize_workflow_mutation(value: &str) -> String {
+    match value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_")
+        .as_str()
+    {
+        "goal" | "change_goal" | "workflow_goal" => "update_goal".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn extract_u64(data: &Value, keys: &[&str]) -> Result<Option<u64>> {
+    for candidate in value_candidates(data) {
+        for key in keys {
+            let Some(value) = candidate.get(*key) else {
+                continue;
+            };
+            if value.is_null() {
+                continue;
+            }
+            if let Some(number) = value.as_u64() {
+                return Ok(Some(number));
+            }
+            if let Some(number) = value
+                .as_str()
+                .map(str::trim)
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                return Ok(Some(number));
+            }
+            bail!("field `{key}` must be a non-negative integer");
+        }
+    }
+    Ok(None)
+}
+
+fn extract_i32(data: &Value, keys: &[&str]) -> Result<Option<i32>> {
+    for candidate in value_candidates(data) {
+        for key in keys {
+            let Some(value) = candidate.get(*key) else {
+                continue;
+            };
+            if value.is_null() {
+                continue;
+            }
+            let number = value
+                .as_i64()
+                .or_else(|| {
+                    value
+                        .as_str()
+                        .map(str::trim)
+                        .and_then(|value| value.parse::<i64>().ok())
+                })
+                .with_context(|| format!("field `{key}` must be an integer"))?;
+            return i32::try_from(number)
+                .map(Some)
+                .with_context(|| format!("field `{key}` is outside the i32 range"));
+        }
+    }
+    Ok(None)
+}
+
 fn route_continue_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     event: InboundEventRecord,
     adapter_policy: InboundEventAdapterPolicyReport,
     addon_event_adapter_plan: InboundEventAddonAdapterPlan,
@@ -8969,7 +9208,7 @@ fn route_continue_workflow(
 }
 
 fn route_status_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     event: InboundEventRecord,
     route_decision: &str,
     adapter_policy: InboundEventAdapterPolicyReport,
@@ -9013,7 +9252,7 @@ fn route_status_workflow(
     })
 }
 
-fn continue_attach_artifact(store: &ForgeStore, data: &Value, origin: &str) -> Result<Value> {
+fn continue_attach_artifact(store: &FoundryStore, data: &Value, origin: &str) -> Result<Value> {
     let workflow_id = workflow_id_for_event_data(store, data)?;
     let path = extract_string(data, &["artifact_path", "path"])
         .with_context(|| "continue_workflow attach_artifact requires artifact_path or path")?;
@@ -9029,7 +9268,7 @@ fn continue_attach_artifact(store: &ForgeStore, data: &Value, origin: &str) -> R
     .map_err(Into::into)
 }
 
-fn continue_checkpoint(store: &ForgeStore, data: &Value, origin: &str) -> Result<Value> {
+fn continue_checkpoint(store: &FoundryStore, data: &Value, origin: &str) -> Result<Value> {
     let workflow_id = workflow_id_for_event_data(store, data)?;
     let task_id =
         extract_string(data, &["task_id"]).with_context(|| "checkpoint requires task_id")?;
@@ -9068,7 +9307,7 @@ fn continue_checkpoint(store: &ForgeStore, data: &Value, origin: &str) -> Result
     .map_err(Into::into)
 }
 
-fn continue_answer_interaction(store: &ForgeStore, data: &Value, origin: &str) -> Result<Value> {
+fn continue_answer_interaction(store: &FoundryStore, data: &Value, origin: &str) -> Result<Value> {
     let workflow_id = workflow_id_for_event_data(store, data)?;
     let task_id = extract_string(data, &["task_id"])
         .with_context(|| "answer_interaction requires task_id")?;
@@ -9087,7 +9326,7 @@ fn continue_answer_interaction(store: &ForgeStore, data: &Value, origin: &str) -
     .map_err(Into::into)
 }
 
-fn continue_complete_task(store: &ForgeStore, data: &Value, origin: &str) -> Result<Value> {
+fn continue_complete_task(store: &FoundryStore, data: &Value, origin: &str) -> Result<Value> {
     let run_id =
         extract_string(data, &["run_id"]).with_context(|| "complete_task requires run_id")?;
     let task_id =
@@ -9100,6 +9339,7 @@ fn continue_complete_task(store: &ForgeStore, data: &Value, origin: &str) -> Res
         .map(PathBuf::from)
         .collect::<Vec<_>>();
     let evidence_command = extract_string(data, &["evidence_command"]);
+    let evidence_exit_code = extract_i32(data, &["evidence_exit_code"])?;
     let evidence_summary = extract_string(data, &["evidence_summary"]);
     serde_json::to_value(complete_ready_task(
         store,
@@ -9110,6 +9350,7 @@ fn continue_complete_task(store: &ForgeStore, data: &Value, origin: &str) -> Res
             summary: &summary,
             artifact_paths: &artifacts,
             evidence_command: evidence_command.as_deref(),
+            evidence_exit_code,
             evidence_summary: evidence_summary.as_deref(),
             estimated_usd: data
                 .get("estimated_usd")
@@ -9131,7 +9372,7 @@ fn continue_complete_task(store: &ForgeStore, data: &Value, origin: &str) -> Res
     .map_err(Into::into)
 }
 
-fn continue_drive_run(store: &ForgeStore, data: &Value, origin: &str) -> Result<Value> {
+fn continue_drive_run(store: &FoundryStore, data: &Value, origin: &str) -> Result<Value> {
     let run_id = extract_string(data, &["run_id"]).with_context(|| "drive_run requires run_id")?;
     let executor = extract_string(data, &["executor"]).unwrap_or_else(|| origin.to_string());
     let ttl_seconds = data
@@ -9182,7 +9423,7 @@ fn enrich_event_data(
 }
 
 fn record_inbound_event_routed(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     event: &InboundEventRecord,
     adapter_policy: &InboundEventAdapterPolicyReport,
@@ -9195,7 +9436,7 @@ fn record_inbound_event_routed(
 }
 
 fn inbound_event_routed_runtime_data(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &Workflow,
     event: &InboundEventRecord,
     adapter_policy: &InboundEventAdapterPolicyReport,
@@ -9259,7 +9500,7 @@ fn extract_workflow_id(data: &Value) -> Option<String> {
         })
 }
 
-fn workflow_id_for_event_data(store: &ForgeStore, data: &Value) -> Result<String> {
+fn workflow_id_for_event_data(store: &FoundryStore, data: &Value) -> Result<String> {
     if let Some(workflow_id) = extract_workflow_id(data) {
         return Ok(workflow_id);
     }
@@ -9319,12 +9560,8 @@ fn has_any_key(data: &Value, keys: &[&str]) -> bool {
 }
 
 fn normalized_action(action: &str) -> String {
-    match action
-        .trim()
-        .to_ascii_lowercase()
-        .replace('-', "_")
-        .as_str()
-    {
+    let canonical = crate::brand::canonical_identifier(action.trim());
+    match canonical.to_ascii_lowercase().replace('-', "_").as_str() {
         "start" | "create_workflow" | "new_workflow" => "start_workflow".to_string(),
         "continue" => "continue_workflow".to_string(),
         "modify" | "update_goal" | "change_goal" => "modify_workflow".to_string(),
@@ -9343,7 +9580,7 @@ fn required_text(name: &str, value: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
-fn inbound_event_view(store: &ForgeStore, event: InboundEventRecord) -> InboundEventView {
+fn inbound_event_view(store: &FoundryStore, event: InboundEventRecord) -> InboundEventView {
     let operating_context =
         serde_json::from_value::<OperatingContextSpec>(event.tenant_context.clone())
             .unwrap_or_default();
@@ -9362,7 +9599,7 @@ fn inbound_event_view(store: &ForgeStore, event: InboundEventRecord) -> InboundE
 }
 
 fn inbound_event_identity_context(
-    store: &ForgeStore,
+    store: &FoundryStore,
     event: &InboundEventRecord,
 ) -> Option<EventIdentityContext> {
     let source_identity = extract_inbound_event_source_identity(&event.data)?;
@@ -9426,7 +9663,7 @@ impl From<InboundEventRecord> for InboundEventView {
 
 fn envelope_event(event: StoreEvent, tenant_context: &EventTenantContext) -> WorkflowEventEnvelope {
     let origin = extract_string(&event.data, &["origin", "actor", "executor"])
-        .unwrap_or_else(|| "forge".to_string());
+        .unwrap_or_else(|| "foundry".to_string());
     let observability = build_event_observability(&event.kind, &event.data);
     WorkflowEventEnvelope {
         schema_version: EVENT_ENVELOPE_SCHEMA_VERSION.to_string(),
@@ -9438,7 +9675,7 @@ fn envelope_event(event: StoreEvent, tenant_context: &EventTenantContext) -> Wor
         severity: infer_severity(&event.kind, &event.data),
         origin,
         source: extract_string(&event.data, &["source"])
-            .unwrap_or_else(|| "forge_store".to_string()),
+            .unwrap_or_else(|| "foundry_store".to_string()),
         occurred_at: event.created_at,
         correlation: EventCorrelation {
             run_id: extract_string(&event.data, &["run_id"]),
@@ -9548,7 +9785,7 @@ pub(crate) fn build_event_observability(kind: &str, data: &Value) -> EventObserv
     )
     .or_else(|| derive_context_pressure_state(context_pressure_bps));
     EventObservability {
-        schema_version: "forge.event_observability.v1".to_string(),
+        schema_version: "foundry.event_observability.v1".to_string(),
         node_ref: extract_observability_string(data, &["node_id", "node", "task_id", "task"]),
         addon_id: extract_observability_string(data, &["addon_id", "addon"]),
         duration_ms: extract_observability_i64(
@@ -9879,7 +10116,7 @@ mod security_tests {
             method: "POST".to_string(),
             path: "/webhook".to_string(),
             headers: vec![
-                ("x-forge-signature".to_string(), signature),
+                ("x-foundry-signature".to_string(), signature),
                 (WEBHOOK_TIMESTAMP_HEADER.to_string(), timestamp),
                 (WEBHOOK_NONCE_HEADER.to_string(), nonce.to_string()),
             ],
@@ -9887,7 +10124,7 @@ mod security_tests {
         };
         let verifier = WebhookHmacVerifier {
             secret_env: "UNIT_TEST_SECRET".to_string(),
-            signature_header: "X-Forge-Signature".to_string(),
+            signature_header: "X-Foundry-Signature".to_string(),
             secret: secret.to_vec(),
         };
         let mut state = WebhookIngressSecurityState {

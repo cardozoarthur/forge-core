@@ -8,17 +8,16 @@ use std::{
     process::Command,
 };
 
-const STATUS_SCHEMA_VERSION: &str = "forge.multimodal.status.v1";
-const INSTALL_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.install_plan.v1";
-const READINESS_SCHEMA_VERSION: &str = "forge.multimodal.readiness.v1";
-const BENCHMARK_TEMPLATE_SCHEMA_VERSION: &str = "forge.multimodal.benchmark_template.v1";
-const BENCHMARK_RESULT_SCHEMA_VERSION: &str = "forge.multimodal.benchmark_result.v1";
-const RUNTIME_BENCHMARK_SCHEMA_VERSION: &str = "forge.multimodal.runtime_benchmark.v1";
-const DEMO_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.demo_plan.v1";
-const DEMO_RECEIPT_SCHEMA_VERSION: &str = "forge.multimodal.demo_receipt.v1";
-const GUARD_SCHEMA_VERSION: &str = "forge.multimodal.guard.v1";
-const MULTIMODAL_CONFIG_RELATIVE_PATH: &str = ".forge/multimodal.json";
-const MULTIMODAL_RUNTIMES_RELATIVE_PATH: &str = ".forge/multimodal-runtimes.json";
+const STATUS_SCHEMA_VERSION: &str = "foundry.multimodal.status.v1";
+const INSTALL_PLAN_SCHEMA_VERSION: &str = "foundry.multimodal.install_plan.v1";
+const READINESS_SCHEMA_VERSION: &str = "foundry.multimodal.readiness.v1";
+const BENCHMARK_TEMPLATE_SCHEMA_VERSION: &str = "foundry.multimodal.benchmark_template.v1";
+const BENCHMARK_RESULT_SCHEMA_VERSION: &str = "foundry.multimodal.benchmark_result.v1";
+const RUNTIME_BENCHMARK_SCHEMA_VERSION: &str = "foundry.multimodal.runtime_benchmark.v1";
+const DEMO_PLAN_SCHEMA_VERSION: &str = "foundry.multimodal.demo_plan.v1";
+const DEMO_RECEIPT_SCHEMA_VERSION: &str = "foundry.multimodal.demo_receipt.v1";
+const GUARD_SCHEMA_VERSION: &str = "foundry.multimodal.guard.v1";
+const MULTIMODAL_CONFIG_RELATIVE_PATH: &str = ".foundry/multimodal.json";
 
 macro_rules! capability {
     (
@@ -502,10 +501,10 @@ pub fn build_multimodal_status_with_feature_flag(
         capabilities,
         runtime_guards: runtime_guards(),
         model_storage_policy:
-            "Model downloads, caches and generated media require Forge-owned manifests, hashes, size budgets and explicit human approval before install."
+            "Model downloads, caches and generated media require Foundry-owned manifests, hashes, size budgets and explicit human approval before install."
                 .to_string(),
         provider_abstraction:
-            "Cloud providers and local/open-source models remain interchangeable execution resources behind Forge capability nodes."
+            "Cloud providers and local/open-source models remain interchangeable execution resources behind Foundry capability nodes."
                 .to_string(),
         next_action:
             "Generate install plans and benchmarks for missing capabilities; do not install models or access devices until the experimental flag and runtime guard allow it."
@@ -540,7 +539,7 @@ pub fn resolve_multimodal_feature_flag(
     };
 
     MultimodalFeatureFlag {
-        name: "forge.experimental.multimodal".to_string(),
+        name: "foundry.experimental.multimodal".to_string(),
         enabled,
         default_state: "disabled".to_string(),
         activation: multimodal_feature_flag_activation(source, project_config_status).to_string(),
@@ -596,12 +595,12 @@ pub fn build_multimodal_install_plan(
             "offline_behavior".to_string(),
         ],
         storage_policy:
-            "Store install manifests, hashes, licenses, benchmark results and cache locations in Forge-owned state before enabling a model node."
+            "Store install manifests, hashes, licenses, benchmark results and cache locations in Foundry-owned state before enabling a model node."
                 .to_string(),
         rollback_steps: vec![
-            "Disable the Forge multimodal capability flag for the selected scope.".to_string(),
-            "Remove model cache paths recorded in the Forge install manifest.".to_string(),
-            "Revoke device or peripheral permissions from Forge runtime policy.".to_string(),
+            "Disable the Foundry multimodal capability flag for the selected scope.".to_string(),
+            "Remove model cache paths recorded in the Foundry install manifest.".to_string(),
+            "Revoke device or peripheral permissions from Foundry runtime policy.".to_string(),
             "Record uninstall evidence and rerun multimodal status.".to_string(),
         ],
         next_action:
@@ -654,7 +653,7 @@ pub fn build_multimodal_readiness(
         runtime_candidates,
         model_candidates,
         readiness_summary: format!(
-            "{installed_runtime_count} runtime candidate(s) detected and {known_model_manifest_count} Forge model manifest(s) present; no model, device, network or installer execution was performed."
+            "{installed_runtime_count} runtime candidate(s) detected and {known_model_manifest_count} Foundry model manifest(s) present; no model, device, network or installer execution was performed."
         ),
         promotion_ready: false,
         promotion_gate: "real_guarded_model_benchmark_required".to_string(),
@@ -785,19 +784,19 @@ pub fn build_multimodal_benchmark_result(
                 "model_execution_performed",
                 "false",
                 "boolean",
-                "forge_fixture_only_contract",
+                "foundry_fixture_only_contract",
             ),
             benchmark_measurement(
                 "device_access_performed",
                 "false",
                 "boolean",
-                "forge_fixture_only_contract",
+                "foundry_fixture_only_contract",
             ),
             benchmark_measurement(
                 "network_access_performed",
                 "false",
                 "boolean",
-                "forge_fixture_only_contract",
+                "foundry_fixture_only_contract",
             ),
         ],
         guard_checks: vec![
@@ -870,11 +869,11 @@ pub fn build_multimodal_runtime_benchmark(
     let runtime_id = connected_probe
         .as_ref()
         .map(|probe| probe.evidence.runtime_id.clone())
-        .unwrap_or_else(|| "forge_deterministic_fixture_runtime".to_string());
+        .unwrap_or_else(|| "foundry_deterministic_fixture_runtime".to_string());
     let model_id = connected_probe
         .as_ref()
         .map(|probe| probe.evidence.model_id.clone())
-        .unwrap_or_else(|| "forge_fixture_model_v1".to_string());
+        .unwrap_or_else(|| "foundry_fixture_model_v1".to_string());
     let model_output = connected_probe
         .as_ref()
         .map(|probe| probe.model_output.clone())
@@ -885,13 +884,13 @@ pub fn build_multimodal_runtime_benchmark(
             "runtime_execution_performed",
             "true",
             "boolean",
-            "forge_runtime_benchmark",
+            "foundry_runtime_benchmark",
         ),
         benchmark_measurement(
             "model_execution_performed",
             "true",
             "boolean",
-            "forge_runtime_benchmark",
+            "foundry_runtime_benchmark",
         ),
         benchmark_measurement("quality_score", "1.0", "score", "deterministic_fixture"),
         benchmark_measurement("latency_ms", "1", "ms", "deterministic_fixture"),
@@ -1273,31 +1272,31 @@ pub fn build_multimodal_demo_receipt(
                 "local_fixture_execution",
                 "true",
                 "boolean",
-                "forge_guarded_demo_receipt",
+                "foundry_guarded_demo_receipt",
             ),
             benchmark_measurement(
                 "model_guard_allowed",
                 if model_guard_allowed { "true" } else { "false" },
                 "boolean",
-                "forge_multimodal_guard_matrix",
+                "foundry_multimodal_guard_matrix",
             ),
             benchmark_measurement(
                 "device_access_performed",
                 "false",
                 "boolean",
-                "forge_multimodal_guard_matrix",
+                "foundry_multimodal_guard_matrix",
             ),
             benchmark_measurement(
                 "filesystem_access_performed",
                 "false",
                 "boolean",
-                "forge_multimodal_guard_matrix",
+                "foundry_multimodal_guard_matrix",
             ),
             benchmark_measurement(
                 "network_access_performed",
                 "false",
                 "boolean",
-                "forge_multimodal_guard_matrix",
+                "foundry_multimodal_guard_matrix",
             ),
         ],
         artifact_manifest: vec![
@@ -1352,7 +1351,7 @@ pub fn evaluate_multimodal_guard(
         audit_required: true,
         dry_run_required: true,
         reason: if allowed {
-            "Experimental multimodal access is enabled and this action received explicit allow; Forge still requires audit logs and dry-run/simulation before risky control."
+            "Experimental multimodal access is enabled and this action received explicit allow; Foundry still requires audit logs and dry-run/simulation before risky control."
                 .to_string()
         } else if !enable_experimental {
             "Experimental multimodal access is disabled by default; enable it only after explicit human opt-in."
@@ -1391,7 +1390,7 @@ fn demo_guard_decision(
         reason: if guard_allowed {
             "Guard approval is recorded for this scope, but the local fixture receipt does not perform real model or device access."
         } else {
-            "No guard approval was supplied for this scope, so Forge records zero access performed."
+            "No guard approval was supplied for this scope, so Foundry records zero access performed."
         }
         .to_string(),
     }
@@ -1600,7 +1599,7 @@ fn find_capability(capability_id: &str, enable_experimental: bool) -> Result<Mul
         .find(|capability| capability.id == capability_id)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "unknown multimodal capability: {capability_id}; run forge multimodal status"
+                "unknown multimodal capability: {capability_id}; run foundry multimodal status"
             )
         })
 }
@@ -1611,7 +1610,7 @@ fn find_benchmark_fixture(fixture_id: &str) -> Result<MultimodalBenchmarkFixture
         .find(|fixture| fixture.id == fixture_id)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "unknown multimodal benchmark fixture: {fixture_id}; run forge multimodal benchmark-template"
+                "unknown multimodal benchmark fixture: {fixture_id}; run foundry multimodal benchmark-template"
             )
         })
 }
@@ -1626,7 +1625,7 @@ fn runtime_readiness(candidate: &str) -> MultimodalRuntimeReadiness {
             status: "manifest_probe_required".to_string(),
             evidence: vec![
                 format!("candidate={candidate}"),
-                "No subprocess was executed; this runtime requires a Forge adapter/library manifest probe before use.".to_string(),
+                "No subprocess was executed; this runtime requires a Foundry adapter/library manifest probe before use.".to_string(),
             ],
             executes_probe: false,
         };
@@ -1670,7 +1669,7 @@ fn model_readiness(candidate: &str, project_root: Option<&Path>) -> MultimodalMo
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     let manifest_path = root
-        .join(".forge")
+        .join(".foundry")
         .join("multimodal-models")
         .join(format!("{id}.json"));
     let manifest_present = manifest_path.is_file();
@@ -1707,7 +1706,7 @@ fn runtime_binary_names(candidate: &str) -> Vec<String> {
 }
 
 fn find_binary_in_path(binary: &str) -> Option<PathBuf> {
-    let path_var = env::var_os("PATH")?;
+    let path_var = crate::brand::env_var_os("PATH")?;
     env::split_paths(&path_var)
         .map(|entry| entry.join(binary))
         .find(|candidate| candidate.is_file())
@@ -1733,7 +1732,7 @@ fn default_multimodal_feature_flag(enable_experimental: bool) -> MultimodalFeatu
         "default_disabled"
     };
     MultimodalFeatureFlag {
-        name: "forge.experimental.multimodal".to_string(),
+        name: "foundry.experimental.multimodal".to_string(),
         enabled: enable_experimental,
         default_state: "disabled".to_string(),
         activation: multimodal_feature_flag_activation(source, "not_checked").to_string(),
@@ -1767,7 +1766,7 @@ fn read_multimodal_project_config(project_root: Option<&Path>) -> MultimodalProj
         .map(Path::to_path_buf)
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    let path = project_root.join(MULTIMODAL_CONFIG_RELATIVE_PATH);
+    let path = crate::brand::project_config_path_for_read(&project_root, "multimodal.json");
     let Ok(content) = fs::read_to_string(&path) else {
         return MultimodalProjectConfig {
             path,
@@ -1821,16 +1820,16 @@ fn multimodal_feature_flag_activation(source: &str, project_config_status: &str)
             "Enabled by explicit --enable-experimental or MCP enable_experimental input; runtime guard still requires explicit allow."
         }
         ("project_config", _) => {
-            "Enabled by approved .forge/multimodal.json project config; runtime guard still requires explicit allow."
+            "Enabled by approved .foundry/multimodal.json project config; runtime guard still requires explicit allow."
         }
         (_, "missing_approval") => {
             "Project config requested enablement but is missing approved_by; keep disabled until human approval is recorded."
         }
         (_, "invalid_json") => {
-            "Project config is invalid JSON; keep disabled until the Forge-owned config is repaired and approved."
+            "Project config is invalid JSON; keep disabled until the Foundry-owned config is repaired and approved."
         }
         _ => {
-            "Pass --enable-experimental or create approved .forge/multimodal.json with experimental_enabled and approved_by after human approval."
+            "Pass --enable-experimental or create approved .foundry/multimodal.json with experimental_enabled and approved_by after human approval."
         }
     }
 }
@@ -1954,8 +1953,8 @@ fn deterministic_fixture_model_output(
         _ => vec!["document", "text", "workflow"],
     };
     serde_json::json!({
-        "runtime_id": "forge_deterministic_fixture_runtime",
-        "model_id": "forge_fixture_model_v1",
+        "runtime_id": "foundry_deterministic_fixture_runtime",
+        "model_id": "foundry_fixture_model_v1",
         "fixture_id": fixture.id,
         "fixture_kind": fixture.artifact_kind,
         "labels": labels,
@@ -1975,7 +1974,8 @@ fn run_connected_runtime_probe(
         Some(path) => path.to_path_buf(),
         None => env::current_dir()?,
     };
-    let manifest_path = project_root.join(MULTIMODAL_RUNTIMES_RELATIVE_PATH);
+    let manifest_path =
+        crate::brand::project_config_path_for_read(&project_root, "multimodal-runtimes.json");
     let manifest_bytes = fs::read(&manifest_path).with_context(|| {
         format!(
             "connected multimodal runtime manifest not found at {}",
@@ -2070,7 +2070,7 @@ fn run_connected_runtime_probe(
 
     Ok(ConnectedRuntimeProbe {
         evidence: MultimodalConnectedRuntimeEvidence {
-            schema_version: "forge.multimodal.connected_runtime_probe.v1".to_string(),
+            schema_version: "foundry.multimodal.connected_runtime_probe.v1".to_string(),
             status: "connected_runtime_probe_completed".to_string(),
             manifest_path: manifest_path.display().to_string(),
             manifest_status: "loaded".to_string(),
@@ -2159,7 +2159,7 @@ fn production_runtime_evidence(
     };
 
     MultimodalProductionRuntimeEvidence {
-        schema_version: "forge.multimodal.production_runtime_evidence.v1".to_string(),
+        schema_version: "foundry.multimodal.production_runtime_evidence.v1".to_string(),
         status: status.to_string(),
         approved_by: production.approved_by.clone(),
         approval_ref: production.approval_ref.clone(),

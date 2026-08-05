@@ -1,19 +1,19 @@
-# Forge Core Agent Guide
+# Foundry Core Agent Guide
 
-Forge Core is a Rust workflow runtime. Treat it as operational infrastructure, not as a chatbot wrapper or a human-flow builder.
+Foundry Core is a Rust workflow runtime. Treat it as operational infrastructure, not as a chatbot wrapper or a human-flow builder.
 
 ## Product Rules
 
-- Preserve Forge as the orchestration authority. CLIs and model providers are execution engines, even when they integrate tightly with Forge for usability.
+- Preserve Foundry as the orchestration authority. CLIs and model providers are execution engines, even when they integrate tightly with Foundry for usability.
 - Treat skill/plugin/native CLI coupling as an adoption layer, not as the source of truth for workflow state.
-- Keep Forge skills small. The top-level Forge skill must stay a router; split broad behavior into domain skills or single-function skills before it becomes a multi-domain manual.
-- Support both integration directions: CLIs call Forge for planning/context/validation, and Forge calls CLIs through bounded executor adapters for long-running tasks.
-- On install and sync, detect installed/configured CLIs, ask for human authorization, and persist which executors Forge may use.
+- Keep Foundry skills small. The top-level Foundry skill must stay a router; split broad behavior into domain skills or single-function skills before it becomes a multi-domain manual.
+- Support both integration directions: CLIs call Foundry for planning/context/validation, and Foundry calls CLIs through bounded executor adapters for long-running tasks.
+- On install and sync, detect installed/configured CLIs, ask for human authorization, and persist which executors Foundry may use.
 - Do not use an installed CLI as an execution engine unless local executor policy marks it allowed.
 - Detect Docker, Kubernetes and Knative as async run substrates, not cognitive executors.
 - Do not install Knative or mutate Kubernetes/Docker/Knative resources without explicit user authorization.
-- Forge may update/delete resources it created. Pre-existing external resources require explicit authorization before mutation.
-- Workflows are mutable at runtime: goals and artifacts can be changed by `forge_cli`, Codex/OpenCode or skills, but every mutation must be revisioned and traced.
+- Foundry may update/delete resources it created. Pre-existing external resources require explicit authorization before mutation.
+- Workflows are mutable at runtime: goals and artifacts can be changed by `foundry_cli`, Codex/OpenCode or skills, but every mutation must be revisioned and traced.
 - Treat every task and subtask as goal-oriented. Completion means the goal is definitively ready, not merely that an executor produced output.
 - If a goal is not definitively ready, return the task to work and expose the rework reason.
 - Preserve validation-before-promotion semantics.
@@ -27,7 +27,8 @@ Forge Core is a Rust workflow runtime. Treat it as operational infrastructure, n
 ## Code Rules
 
 - Core language: Rust.
-- CLI binary name: `forge`.
+<!-- foundry-brand-allow: legacy-compat -->
+- Primary CLI binary name: `foundry`. The deprecated `forge` compatibility shim is temporary and must not become a second authority.
 - Persistence: SQLite through `rusqlite`.
 - Config and artifacts should remain human-readable where practical.
 - Keep modules small and purpose-specific:
@@ -54,6 +55,6 @@ cargo build --release
 For CLI smoke:
 
 ```bash
-forge plan --goal "Create a delivery platform" --output json
-forge skill install --target codex --target opencode --output json --home /tmp/forge-skill-smoke
+foundry plan --goal "Create a delivery platform" --output json
+foundry skill install --target codex --target opencode --output json --home /tmp/foundry-skill-smoke
 ```

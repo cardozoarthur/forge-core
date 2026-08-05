@@ -1,13 +1,13 @@
 use crate::artifact::hex_sha256;
 use crate::graph::{task, ExecutorKind, TaskStatus, ValidationRule, Workflow, WorkflowRevision};
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const EXECUTOR_RESPONSE_SCHEMA_VERSION: &str = "forge.executor_response.v1";
-const EXECUTOR_RESPONSE_VALIDATION_SCHEMA_VERSION: &str = "forge.executor_response_validation.v1";
+const EXECUTOR_RESPONSE_SCHEMA_VERSION: &str = "foundry.executor_response.v1";
+const EXECUTOR_RESPONSE_VALIDATION_SCHEMA_VERSION: &str = "foundry.executor_response_validation.v1";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExecutorResponse {
@@ -92,7 +92,7 @@ pub struct ExecutorResponseViolation {
 }
 
 pub fn validate_executor_response_file(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     response_path: &Path,
@@ -418,7 +418,8 @@ pub fn validate_executor_response(
 ) -> ExecutorResponseValidationReport {
     let mut violations = Vec::new();
 
-    if response.schema_version != EXECUTOR_RESPONSE_SCHEMA_VERSION {
+    if !crate::brand::identifier_matches(&response.schema_version, EXECUTOR_RESPONSE_SCHEMA_VERSION)
+    {
         violations.push(violation(
             "schema_version_unsupported",
             "schema_version",

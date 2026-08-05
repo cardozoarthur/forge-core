@@ -1,54 +1,54 @@
 # Worktree Sandbox Example
 
-This example creates a Forge-owned Git worktree, binds a workflow to it, and runs a guarded test. Replace every placeholder with an absolute path or returned id.
+This example creates a Foundry-owned Git worktree, binds a workflow to it, and runs a guarded test. Replace every placeholder with an absolute path or returned id.
 
 ## 1. Define Stable Paths
 
 ```bash
-FORGE_WORKTREE_STORE=/absolute/path/to/central-forge.sqlite
-FORGE_REPOSITORY_ROOT=/absolute/path/to/repository
-FORGE_WORKTREE_ROOT=/absolute/path/to/worktrees/forge-preview
-FORGE_WORKTREE_ID=wt_replace_from_create_output
-FORGE_WORKFLOW_ID=wf_replace_from_plan_output
-FORGE_TASK_ID=task-001
-FORGE_APPROVER=operator-id
+FOUNDRY_WORKTREE_STORE=/absolute/path/to/central-foundry.sqlite
+FOUNDRY_REPOSITORY_ROOT=/absolute/path/to/repository
+FOUNDRY_WORKTREE_ROOT=/absolute/path/to/worktrees/foundry-preview
+FOUNDRY_WORKTREE_ID=wt_replace_from_create_output
+FOUNDRY_WORKFLOW_ID=wf_replace_from_plan_output
+FOUNDRY_TASK_ID=task-001
+FOUNDRY_APPROVER=operator-id
 ```
 
-Keep `FORGE_WORKTREE_STORE` absolute and outside `FORGE_WORKTREE_ROOT`. Use the same value for every command.
+Keep `FOUNDRY_WORKTREE_STORE` absolute and outside `FOUNDRY_WORKTREE_ROOT`. Use the same value for every command.
 
 ## 2. Discover And Create
 
 ```bash
-forge --store "$FORGE_WORKTREE_STORE" worktree discover \
-  --repository "$FORGE_REPOSITORY_ROOT" \
+foundry --store "$FOUNDRY_WORKTREE_STORE" worktree discover \
+  --repository "$FOUNDRY_REPOSITORY_ROOT" \
   --output json
 
-forge --store "$FORGE_WORKTREE_STORE" worktree create \
-  --repository "$FORGE_REPOSITORY_ROOT" \
-  --path "$FORGE_WORKTREE_ROOT" \
-  --branch feature/forge-preview \
+foundry --store "$FOUNDRY_WORKTREE_STORE" worktree create \
+  --repository "$FOUNDRY_REPOSITORY_ROOT" \
+  --path "$FOUNDRY_WORKTREE_ROOT" \
+  --branch feature/foundry-preview \
   --start-point main \
   --allow-repository-mutation \
   --output json
 ```
 
-Copy `worktree.id` from the create response into `FORGE_WORKTREE_ID`.
+Copy `worktree.id` from the create response into `FOUNDRY_WORKTREE_ID`.
 
-For an existing checkout, use `forge worktree register --path "$FORGE_WORKTREE_ROOT"` instead of `create`.
+For an existing checkout, use `foundry worktree register --path "$FOUNDRY_WORKTREE_ROOT"` instead of `create`.
 
 ## 3. Initialize And Review Policy
 
 ```bash
-forge --store "$FORGE_WORKTREE_STORE" worktree init \
-  --worktree "$FORGE_WORKTREE_ID" \
+foundry --store "$FOUNDRY_WORKTREE_STORE" worktree init \
+  --worktree "$FOUNDRY_WORKTREE_ID" \
   --allow-worktree-write \
   --output json
 ```
 
-Review `$FORGE_WORKTREE_ROOT/.forge/worktree.toml`. For a local process test, keep the bounded but non-isolating runtime explicit:
+Review `$FOUNDRY_WORKTREE_ROOT/.foundry/worktree.toml`. For a local process test, keep the bounded but non-isolating runtime explicit:
 
 ```toml
-schema_version = "forge.worktree.config.v1"
+schema_version = "foundry.worktree.config.v1"
 
 [guardrails]
 require_clean = false
@@ -56,7 +56,7 @@ allow_detached_head = false
 allowed_branches = ["feature/*"]
 allowed_commands = ["cargo", "sh"]
 modifiable_paths = ["."]
-protected_paths = [".git/", ".forge/worktree.toml"]
+protected_paths = [".git/", ".foundry/worktree.toml"]
 require_workflow_binding = true
 max_command_seconds = 900
 max_output_bytes = 1048576
@@ -64,7 +64,7 @@ max_output_bytes = 1048576
 [sandbox]
 enabled = true
 name = "internal"
-root = ".forge/sandboxes/internal"
+root = ".foundry/sandboxes/internal"
 runtime = "process"
 working_directory = "."
 purposes = ["preview", "test"]
@@ -81,11 +81,11 @@ Both sandbox paths and all modification scopes must remain relative and inside t
 `init` approved the generated file, but the review above changed its content. Approve that exact new hash before a guard or sandbox plan:
 
 ```bash
-forge --store "$FORGE_WORKTREE_STORE" worktree approve-config \
-  --worktree "$FORGE_WORKTREE_ID" \
+foundry --store "$FOUNDRY_WORKTREE_STORE" worktree approve-config \
+  --worktree "$FOUNDRY_WORKTREE_ID" \
   --allow-guardrail-update \
-  --approved-by "$FORGE_APPROVER" \
-  --origin forge_cli \
+  --approved-by "$FOUNDRY_APPROVER" \
+  --origin foundry_cli \
   --output json
 ```
 
@@ -94,20 +94,20 @@ Editing the manifest again invalidates this approval. Review and repeat `approve
 ## 4. Plan And Bind In One Command
 
 ```bash
-forge --store "$FORGE_WORKTREE_STORE" plan \
+foundry --store "$FOUNDRY_WORKTREE_STORE" plan \
   --goal "Implement the change and pass the worktree test gate" \
-  --worktree "$FORGE_WORKTREE_ID" \
+  --worktree "$FOUNDRY_WORKTREE_ID" \
   --output json
 ```
 
-Copy `workflow_id` into `FORGE_WORKFLOW_ID`. To override one task with another registered worktree, bind that task explicitly:
+Copy `workflow_id` into `FOUNDRY_WORKFLOW_ID`. To override one task with another registered worktree, bind that task explicitly:
 
 ```bash
-forge --store "$FORGE_WORKTREE_STORE" worktree bind \
+foundry --store "$FOUNDRY_WORKTREE_STORE" worktree bind \
   --worktree <task-worktree-id> \
-  --workflow "$FORGE_WORKFLOW_ID" \
-  --task "$FORGE_TASK_ID" \
-  --origin forge_cli \
+  --workflow "$FOUNDRY_WORKFLOW_ID" \
+  --task "$FOUNDRY_TASK_ID" \
+  --origin foundry_cli \
   --output json
 ```
 
@@ -118,14 +118,14 @@ The task-specific binding wins over the workflow default.
 Check the narrow files or directories that the task intends to write:
 
 ```bash
-forge --store "$FORGE_WORKTREE_STORE" worktree guard check \
-  --worktree "$FORGE_WORKTREE_ID" \
+foundry --store "$FOUNDRY_WORKTREE_STORE" worktree guard check \
+  --worktree "$FOUNDRY_WORKTREE_ID" \
   --operation modify \
   --path src/lib.rs \
   --path tests/worktree_contract.rs \
   --reason "Implement and verify the worktree behavior" \
-  --workflow "$FORGE_WORKFLOW_ID" \
-  --task "$FORGE_TASK_ID" \
+  --workflow "$FOUNDRY_WORKFLOW_ID" \
+  --task "$FOUNDRY_TASK_ID" \
   --output json
 ```
 
@@ -134,15 +134,15 @@ Continue only with `status=modification_allowed` and `allowed=true`. A blocked c
 When a protected or non-modifiable scope is genuinely required, create the returned objective predecessor explicitly:
 
 ```bash
-forge --store "$FORGE_WORKTREE_STORE" worktree guard create-predecessor \
-  --worktree "$FORGE_WORKTREE_ID" \
-  --workflow "$FORGE_WORKFLOW_ID" \
-  --task "$FORGE_TASK_ID" \
-  --path .forge/worktree.toml \
-  --goal "Update .forge/worktree.toml for the reviewed policy and validate the resulting hash" \
+foundry --store "$FOUNDRY_WORKTREE_STORE" worktree guard create-predecessor \
+  --worktree "$FOUNDRY_WORKTREE_ID" \
+  --workflow "$FOUNDRY_WORKFLOW_ID" \
+  --task "$FOUNDRY_TASK_ID" \
+  --path .foundry/worktree.toml \
+  --goal "Update .foundry/worktree.toml for the reviewed policy and validate the resulting hash" \
   --allow-workflow-mutation \
-  --approved-by "$FORGE_APPROVER" \
-  --origin forge_cli \
+  --approved-by "$FOUNDRY_APPROVER" \
+  --origin foundry_cli \
   --output json
 ```
 
@@ -155,11 +155,11 @@ Run that exception branch only when the protected change is actually required. I
 Plan first:
 
 ```bash
-forge --store "$FORGE_WORKTREE_STORE" worktree sandbox plan \
-  --worktree "$FORGE_WORKTREE_ID" \
+foundry --store "$FOUNDRY_WORKTREE_STORE" worktree sandbox plan \
+  --worktree "$FOUNDRY_WORKTREE_ID" \
   --purpose test \
-  --workflow "$FORGE_WORKFLOW_ID" \
-  --task "$FORGE_TASK_ID" \
+  --workflow "$FOUNDRY_WORKFLOW_ID" \
+  --task "$FOUNDRY_TASK_ID" \
   --output json
 ```
 
@@ -168,18 +168,18 @@ With no command after `--`, the manifest supplies `cargo test`. Require `status=
 Then authorize one real execution:
 
 ```bash
-forge --store "$FORGE_WORKTREE_STORE" worktree sandbox run \
-  --worktree "$FORGE_WORKTREE_ID" \
+foundry --store "$FOUNDRY_WORKTREE_STORE" worktree sandbox run \
+  --worktree "$FOUNDRY_WORKTREE_ID" \
   --purpose test \
-  --workflow "$FORGE_WORKFLOW_ID" \
-  --task "$FORGE_TASK_ID" \
+  --workflow "$FOUNDRY_WORKFLOW_ID" \
+  --task "$FOUNDRY_TASK_ID" \
   --allow-exec \
   --output json
 ```
 
 Keep the validation task pending or in rework when the plan has blockers, execution was not approved, the command timed out, or the receipt has a non-zero exit. Only hand off or promote the dependent implementation task after `status=sandbox_completed` and `exit_code=0`, with the receipt referenced as validation evidence.
 
-Forge blocks the sandbox run when guardrails fail. The workflow still needs an explicit task dependency/validation rule if this receipt must block another arbitrary task.
+Foundry blocks the sandbox run when guardrails fail. The workflow still needs an explicit task dependency/validation rule if this receipt must block another arbitrary task.
 
 ## 7. Opt Into Stronger Local Isolation
 
@@ -189,7 +189,7 @@ On a Linux host with `bwrap` available, change the manifest to:
 [sandbox]
 enabled = true
 name = "internal"
-root = ".forge/sandboxes/internal"
+root = ".foundry/sandboxes/internal"
 runtime = "bubblewrap"
 working_directory = "."
 purposes = ["preview", "test"]
@@ -200,27 +200,27 @@ inherit_environment = ["LANG"]
 Approve the changed manifest hash, then verify the actual boundary with a system-mounted shell:
 
 ```bash
-forge --store "$FORGE_WORKTREE_STORE" worktree sandbox run \
-  --worktree "$FORGE_WORKTREE_ID" \
+foundry --store "$FOUNDRY_WORKTREE_STORE" worktree sandbox run \
+  --worktree "$FOUNDRY_WORKTREE_ID" \
   --purpose test \
-  --workflow "$FORGE_WORKFLOW_ID" \
-  --task "$FORGE_TASK_ID" \
+  --workflow "$FOUNDRY_WORKFLOW_ID" \
+  --task "$FOUNDRY_TASK_ID" \
   --allow-exec \
   --output json \
-  -- sh -c 'test -r Cargo.toml && test ! -w Cargo.toml && test -w .forge/sandboxes/internal'
+  -- sh -c 'test -r Cargo.toml && test ! -w Cargo.toml && test -w .foundry/sandboxes/internal'
 ```
 
-The plan embedded in a successful receipt reports both isolation fields as true, `runtime_worktree_root=/workspace`, `runtime_sandbox_root=/workspace/.forge/sandboxes/internal`, and `forge_store_path_mounted=false`. Bubblewrap mounts the host worktree read-only at that guest root, binds only the internal sandbox root writable, maps its `home` to `/home/forge` and `tmp` to `/tmp`, and intentionally omits host-home toolchains. `FORGE_STORE_PATH` remains a host locator for lineage; the external SQLite file is not mounted, so nested Forge mutations belong to the parent workflow outside the guest. To run an actual build, its executable/runtime must exist in the read-only system mounts and all outputs/caches must target the runtime sandbox root. The `process` runtime reports both enforcement fields as false and cannot enforce `network="deny"`.
+The plan embedded in a successful receipt reports both isolation fields as true, `runtime_worktree_root=/workspace`, `runtime_sandbox_root=/workspace/.foundry/sandboxes/internal`, and `foundry_store_path_mounted=false`. Bubblewrap mounts the host worktree read-only at that guest root, binds only the internal sandbox root writable, maps its `home` to `/home/foundry` and `tmp` to `/tmp`, and intentionally omits host-home toolchains. `FOUNDRY_STORE_PATH` remains a host locator for lineage; the external SQLite file is not mounted, so nested Foundry mutations belong to the parent workflow outside the guest. To run an actual build, its executable/runtime must exist in the read-only system mounts and all outputs/caches must target the runtime sandbox root. The `process` runtime reports both enforcement fields as false and cannot enforce `network="deny"`.
 
 ## 8. Inspect The Recorded State
 
 ```bash
-forge --store "$FORGE_WORKTREE_STORE" worktree inspect \
-  --worktree "$FORGE_WORKTREE_ID" \
+foundry --store "$FOUNDRY_WORKTREE_STORE" worktree inspect \
+  --worktree "$FOUNDRY_WORKTREE_ID" \
   --output json
 
-forge --store "$FORGE_WORKTREE_STORE" worktree list \
-  --workflow "$FORGE_WORKFLOW_ID" \
+foundry --store "$FOUNDRY_WORKTREE_STORE" worktree list \
+  --workflow "$FOUNDRY_WORKFLOW_ID" \
   --output json
 ```
 

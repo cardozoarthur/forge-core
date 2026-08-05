@@ -1,14 +1,16 @@
 use crate::artifact::hex_sha256;
 use crate::identity::inspect_project_operating_context;
 use crate::intent::OperatingContextSpec;
+use crate::lease::{validate_task_lease_for_execution, TaskLease};
 use crate::security::{
     evaluate_runtime_security_guardrails, RuntimeSecurityGuardrailReport,
     RuntimeSecurityGuardrailRequest,
 };
 use crate::storage::{
-    ForgeStore, GlobalEventWrite, HeadroomBlobWrite, RuntimeSecretVaultAccess,
+    FoundryStore, GlobalEventWrite, HeadroomBlobWrite, RuntimeSecretVaultAccess,
     StoredHeadroomBlobRecord,
 };
+use crate::worktree::bound_worktree_mutation_claim;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -20,41 +22,41 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const TOKEN_HEADROOM_SCHEMA_VERSION: &str = "forge.harness.token_headroom.v1";
-pub const CLI_WRAPPER_PLAN_SCHEMA_VERSION: &str = "forge.harness.cli_wrapper_plan.v1";
-pub const HEADROOM_RETRIEVAL_SCHEMA_VERSION: &str = "forge.harness.headroom_retrieval.v1";
-pub const HEADROOM_STATS_SCHEMA_VERSION: &str = "forge.harness.headroom_stats.v1";
-pub const CLI_HARNESS_EXEC_SCHEMA_VERSION: &str = "forge.harness.exec_receipt.v1";
-pub const CLI_HARNESS_EXEC_EVENT_SCHEMA_VERSION: &str = "forge.harness.exec_event.v1";
-pub const CLI_HARNESS_MODE_SCHEMA_VERSION: &str = "forge.harness.mode.v1";
-pub const CLI_HARNESS_DOCTOR_SCHEMA_VERSION: &str = "forge.harness.doctor.v1";
-pub const CLI_HARNESS_HEADROOM_PLAN_SCHEMA_VERSION: &str = "forge.harness.headroom_plan.v1";
+pub const TOKEN_HEADROOM_SCHEMA_VERSION: &str = "foundry.harness.token_headroom.v1";
+pub const CLI_WRAPPER_PLAN_SCHEMA_VERSION: &str = "foundry.harness.cli_wrapper_plan.v1";
+pub const HEADROOM_RETRIEVAL_SCHEMA_VERSION: &str = "foundry.harness.headroom_retrieval.v1";
+pub const HEADROOM_STATS_SCHEMA_VERSION: &str = "foundry.harness.headroom_stats.v1";
+pub const CLI_HARNESS_EXEC_SCHEMA_VERSION: &str = "foundry.harness.exec_receipt.v1";
+pub const CLI_HARNESS_EXEC_EVENT_SCHEMA_VERSION: &str = "foundry.harness.exec_event.v1";
+pub const CLI_HARNESS_MODE_SCHEMA_VERSION: &str = "foundry.harness.mode.v1";
+pub const CLI_HARNESS_DOCTOR_SCHEMA_VERSION: &str = "foundry.harness.doctor.v1";
+pub const CLI_HARNESS_HEADROOM_PLAN_SCHEMA_VERSION: &str = "foundry.harness.headroom_plan.v1";
 pub const CLI_HARNESS_HEADROOM_RUNTIME_PLAN_SCHEMA_VERSION: &str =
-    "forge.harness.headroom_runtime_plan.v1";
+    "foundry.harness.headroom_runtime_plan.v1";
 pub const CLI_HARNESS_CONNECTED_BRAIN_PROVIDER_WRAPPER_SCHEMA_VERSION: &str =
-    "forge.harness.connected_brain_provider_wrapper.v1";
-pub const CLI_HARNESS_ADOPTION_PLAN_SCHEMA_VERSION: &str = "forge.harness.adoption_plan.v1";
+    "foundry.harness.connected_brain_provider_wrapper.v1";
+pub const CLI_HARNESS_ADOPTION_PLAN_SCHEMA_VERSION: &str = "foundry.harness.adoption_plan.v1";
 pub const CLI_HARNESS_ACTIVATION_PROFILE_SCHEMA_VERSION: &str =
-    "forge.harness.activation_profile.v1";
+    "foundry.harness.activation_profile.v1";
 pub const CLI_HARNESS_EXECUTOR_COMPATIBILITY_SCHEMA_VERSION: &str =
-    "forge.harness.executor_compatibility.v1";
-pub const CLI_HARNESS_BOOTSTRAP_SCHEMA_VERSION: &str = "forge.harness.bootstrap.v1";
+    "foundry.harness.executor_compatibility.v1";
+pub const CLI_HARNESS_BOOTSTRAP_SCHEMA_VERSION: &str = "foundry.harness.bootstrap.v1";
 pub const CLI_HARNESS_ORCHESTRATION_CONTRACT_SCHEMA_VERSION: &str =
-    "forge.harness.orchestration_contract.v1";
+    "foundry.harness.orchestration_contract.v1";
 pub const CLI_HARNESS_BOOTSTRAP_CONFIG_WRITE_SCHEMA_VERSION: &str =
-    "forge.harness.bootstrap_config_write.v1";
+    "foundry.harness.bootstrap_config_write.v1";
 pub const CLI_HARNESS_SESSION_LIFECYCLE_PLAN_SCHEMA_VERSION: &str =
-    "forge.harness.session_lifecycle_plan.v1";
-pub const CLI_SHIM_INSTALL_SCHEMA_VERSION: &str = "forge.harness.shim_install.v1";
-pub const CLI_SHIM_STATUS_SCHEMA_VERSION: &str = "forge.harness.shim_status.v1";
+    "foundry.harness.session_lifecycle_plan.v1";
+pub const CLI_SHIM_INSTALL_SCHEMA_VERSION: &str = "foundry.harness.shim_install.v1";
+pub const CLI_SHIM_STATUS_SCHEMA_VERSION: &str = "foundry.harness.shim_status.v1";
 pub const PROVIDER_ADAPTER_INSTALL_SCHEMA_VERSION: &str =
-    "forge.harness.provider_adapter_install.v1";
+    "foundry.harness.provider_adapter_install.v1";
 pub const CLI_SHIM_ACTIVATION_DIAGNOSTIC_SCHEMA_VERSION: &str =
-    "forge.harness.shim_activation_diagnostic.v1";
-const CLI_SHIM_MARKER: &str = "# forge-harness-shim:v1";
-const PROVIDER_ADAPTER_MARKER: &str = "# forge-provider-adapter:v1";
-const CLI_HARNESS_ACTIVATION_BEGIN: &str = "# >>> forge harness activation profile";
-const CLI_HARNESS_ACTIVATION_END: &str = "# <<< forge harness activation profile";
+    "foundry.harness.shim_activation_diagnostic.v1";
+const CLI_SHIM_MARKER: &str = "# foundry-harness-shim:v1";
+const PROVIDER_ADAPTER_MARKER: &str = "# foundry-provider-adapter:v1";
+const CLI_HARNESS_ACTIVATION_BEGIN: &str = "# >>> foundry harness activation profile";
+const CLI_HARNESS_ACTIVATION_END: &str = "# <<< foundry harness activation profile";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenHeadroomReport {
@@ -88,8 +90,8 @@ pub struct CliWrapperPlanReport {
     pub status: String,
     pub executor: String,
     pub command: Vec<String>,
-    pub forge_first: bool,
-    pub forge_first_source: String,
+    pub foundry_first: bool,
+    pub foundry_first_source: String,
     pub workflow_id: Option<String>,
     pub task_id: Option<String>,
     pub run_id: Option<String>,
@@ -98,7 +100,7 @@ pub struct CliWrapperPlanReport {
     pub context_budget_source: String,
     pub token_headroom_enabled: bool,
     pub token_headroom_source: String,
-    pub require_token_headroom_for_forge_first: bool,
+    pub require_token_headroom_for_foundry_first: bool,
     pub env: Vec<CliWrapperEnvVar>,
     pub launch_command: Vec<String>,
     pub orchestration_contract: HarnessOrchestrationContract,
@@ -117,7 +119,7 @@ pub struct HarnessHeadroomRuntimePlan {
     pub executor: String,
     pub mode: String,
     pub context_budget: usize,
-    pub require_for_forge_first: bool,
+    pub require_for_foundry_first: bool,
     pub interception_points: Vec<HarnessHeadroomInterceptionPoint>,
     pub content_routes: Vec<HarnessHeadroomContentRoute>,
     pub reversible_store: HarnessHeadroomReversibleStore,
@@ -187,7 +189,7 @@ pub struct HarnessOrchestrationContract {
     pub status: String,
     pub control_plane: String,
     pub executor: String,
-    pub forge_first: bool,
+    pub foundry_first: bool,
     pub workflow_id: Option<String>,
     pub task_id: Option<String>,
     pub run_id: Option<String>,
@@ -237,8 +239,8 @@ pub struct HarnessSessionLifecycleGate {
 pub struct CliWrapperPlanOptions<'a> {
     pub executor: &'a str,
     pub command: &'a [String],
-    pub forge_first: bool,
-    pub forge_first_source: &'a str,
+    pub foundry_first: bool,
+    pub foundry_first_source: &'a str,
     pub project_root: Option<&'a Path>,
     pub workflow_id: Option<&'a str>,
     pub task_id: Option<&'a str>,
@@ -247,16 +249,16 @@ pub struct CliWrapperPlanOptions<'a> {
     pub context_budget_source: &'a str,
     pub token_headroom: bool,
     pub token_headroom_source: &'a str,
-    pub require_token_headroom_for_forge_first: bool,
+    pub require_token_headroom_for_foundry_first: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HarnessModeReport {
     pub schema_version: String,
     pub status: String,
-    pub forge_first: bool,
+    pub foundry_first: bool,
     pub effective_mode: String,
-    pub forge_first_source: String,
+    pub foundry_first_source: String,
     pub env_default_present: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env_default_value: Option<String>,
@@ -271,7 +273,7 @@ pub struct HarnessModeReport {
     pub context_budget_source: String,
     pub default_token_headroom: bool,
     pub token_headroom_source: String,
-    pub require_token_headroom_for_forge_first: bool,
+    pub require_token_headroom_for_foundry_first: bool,
     pub precedence: Vec<String>,
     pub safety_checks: Vec<String>,
     pub notes: Vec<String>,
@@ -284,7 +286,7 @@ pub struct HarnessDoctorReport {
     pub executor: String,
     pub project_root: String,
     pub shim_dir: String,
-    pub forge_first_ready: bool,
+    pub foundry_first_ready: bool,
     pub token_headroom_ready: bool,
     pub shim_ready: bool,
     pub lineage_policy_ready: bool,
@@ -303,8 +305,8 @@ pub struct HarnessHeadroomPlanReport {
     pub status: String,
     pub executor: String,
     pub project_root: String,
-    pub forge_first: bool,
-    pub forge_first_source: String,
+    pub foundry_first: bool,
+    pub foundry_first_source: String,
     pub workflow_id: Option<String>,
     pub task_id: Option<String>,
     pub run_id: Option<String>,
@@ -312,7 +314,7 @@ pub struct HarnessHeadroomPlanReport {
     pub context_budget_source: String,
     pub token_headroom_enabled: bool,
     pub token_headroom_source: String,
-    pub require_token_headroom_for_forge_first: bool,
+    pub require_token_headroom_for_foundry_first: bool,
     pub wrapper_env: Vec<CliWrapperEnvVar>,
     pub orchestration_contract: HarnessOrchestrationContract,
     pub wrapper_plan: CliWrapperPlanReport,
@@ -350,7 +352,7 @@ pub struct HarnessRecommendedProjectConfig {
     pub default_mode: String,
     pub default_context_budget: usize,
     pub default_token_headroom: bool,
-    pub require_token_headroom_for_forge_first: bool,
+    pub require_token_headroom_for_foundry_first: bool,
     pub require_lineage_for_exec: bool,
 }
 
@@ -403,7 +405,7 @@ pub struct HarnessActivationProfileReport {
     pub approved_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup_path: Option<String>,
-    pub forge_first: bool,
+    pub foundry_first: bool,
     pub context_budget: usize,
     pub context_budget_source: String,
     pub token_headroom: bool,
@@ -455,7 +457,7 @@ pub struct HarnessExecutorCompatibility {
     pub selected: bool,
     pub compatibility_status: String,
     pub adoption_posture: String,
-    pub ready_as_forge_first_default: bool,
+    pub ready_as_foundry_first_default: bool,
     pub readiness_score_percent: usize,
     pub ready_surfaces: Vec<String>,
     pub blocked_surfaces: Vec<String>,
@@ -511,7 +513,7 @@ pub struct HarnessBootstrapConfigWrite {
 
 #[derive(Debug, Clone, Copy)]
 pub struct HarnessModeOptions<'a> {
-    pub forge_first: bool,
+    pub foundry_first: bool,
     pub observe_only: bool,
     pub project_root: Option<&'a Path>,
 }
@@ -520,7 +522,7 @@ pub struct HarnessModeOptions<'a> {
 pub struct HarnessDoctorOptions<'a> {
     pub shim_dir: &'a Path,
     pub executor: &'a str,
-    pub forge_first: bool,
+    pub foundry_first: bool,
     pub observe_only: bool,
     pub project_root: Option<&'a Path>,
     pub workflow_id: Option<&'a str>,
@@ -530,15 +532,15 @@ pub struct HarnessDoctorOptions<'a> {
     pub context_budget_source: &'a str,
     pub token_headroom: bool,
     pub token_headroom_source: &'a str,
-    pub require_token_headroom_for_forge_first: bool,
+    pub require_token_headroom_for_foundry_first: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct HarnessHeadroomPlanOptions<'a> {
     pub executor: &'a str,
     pub command: &'a [String],
-    pub forge_first: bool,
-    pub forge_first_source: &'a str,
+    pub foundry_first: bool,
+    pub foundry_first_source: &'a str,
     pub project_root: Option<&'a Path>,
     pub workflow_id: Option<&'a str>,
     pub task_id: Option<&'a str>,
@@ -547,14 +549,14 @@ pub struct HarnessHeadroomPlanOptions<'a> {
     pub context_budget_source: &'a str,
     pub token_headroom: bool,
     pub token_headroom_source: &'a str,
-    pub require_token_headroom_for_forge_first: bool,
+    pub require_token_headroom_for_foundry_first: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct HarnessAdoptionPlanOptions<'a> {
     pub shim_dir: &'a Path,
     pub executor: &'a str,
-    pub forge_first: bool,
+    pub foundry_first: bool,
     pub observe_only: bool,
     pub project_root: Option<&'a Path>,
     pub workflow_id: Option<&'a str>,
@@ -564,7 +566,7 @@ pub struct HarnessAdoptionPlanOptions<'a> {
     pub context_budget_source: &'a str,
     pub token_headroom: bool,
     pub token_headroom_source: &'a str,
-    pub require_token_headroom_for_forge_first: bool,
+    pub require_token_headroom_for_foundry_first: bool,
 }
 
 pub struct HarnessActivationProfileOptions<'a> {
@@ -595,15 +597,15 @@ pub struct HarnessBootstrapOptions<'a> {
     pub force: bool,
 }
 
-struct HarnessForgeFirstMode {
-    forge_first: bool,
+struct HarnessFoundryFirstMode {
+    foundry_first: bool,
     source: &'static str,
 }
 
 struct HarnessProjectDefaultMode {
     path: PathBuf,
     status: &'static str,
-    forge_first: Option<bool>,
+    foundry_first: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -612,7 +614,7 @@ pub struct HarnessRuntimePolicy {
     pub context_budget_source: String,
     pub token_headroom: bool,
     pub token_headroom_source: String,
-    pub require_token_headroom_for_forge_first: bool,
+    pub require_token_headroom_for_foundry_first: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -622,7 +624,7 @@ pub struct HarnessRuntimePolicyOptions<'a> {
     pub context_budget_source: &'a str,
     pub token_headroom: Option<bool>,
     pub token_headroom_source: &'a str,
-    pub forge_first: bool,
+    pub foundry_first: bool,
     pub default_context_budget: usize,
 }
 
@@ -644,12 +646,14 @@ pub struct CliHarnessExecReceipt {
     pub workflow_id: Option<String>,
     pub task_id: Option<String>,
     pub run_id: Option<String>,
-    pub forge_first: bool,
-    pub forge_first_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_lease: Option<TaskLease>,
+    pub foundry_first: bool,
+    pub foundry_first_source: String,
     pub context_budget: usize,
     pub context_budget_source: String,
     pub token_headroom_source: String,
-    pub require_token_headroom_for_forge_first: bool,
+    pub require_token_headroom_for_foundry_first: bool,
     pub dry_run: bool,
     pub allow_exec: bool,
     pub execution_mode: String,
@@ -697,9 +701,9 @@ pub struct CliShimInstallReport {
     pub status: String,
     pub shim_dir: String,
     pub store_path: Option<String>,
-    pub forge_binary: String,
-    pub forge_first: bool,
-    pub forge_first_source: String,
+    pub foundry_binary: String,
+    pub foundry_first: bool,
+    pub foundry_first_source: String,
     pub context_budget: usize,
     pub token_headroom: bool,
     pub force: bool,
@@ -718,9 +722,9 @@ pub struct CliShimReport {
     pub real_command_source: String,
     pub real_command_resolution_status: String,
     pub store_path: Option<String>,
-    pub forge_binary: String,
-    pub forge_first: bool,
-    pub forge_first_source: String,
+    pub foundry_binary: String,
+    pub foundry_first: bool,
+    pub foundry_first_source: String,
     pub context_budget: usize,
     pub token_headroom: bool,
     pub status: String,
@@ -773,7 +777,7 @@ pub struct CliShimStatusReport {
     pub executor: String,
     pub shim_path: String,
     pub shim_exists: bool,
-    pub forge_owned: bool,
+    pub foundry_owned: bool,
     pub executable: bool,
     pub path_precedence: String,
     pub path_entry_index: Option<usize>,
@@ -782,7 +786,7 @@ pub struct CliShimStatusReport {
     pub real_command_source: String,
     pub real_command_resolution_status: String,
     pub store_path: Option<String>,
-    pub forge_binary: Option<String>,
+    pub foundry_binary: Option<String>,
     pub would_recurse: bool,
     pub activation_diagnostic: CliShimActivationDiagnostic,
     pub checks: Vec<String>,
@@ -812,8 +816,8 @@ pub struct CliShimInstallOptions<'a> {
     pub executor: &'a str,
     pub real_cmd: Option<&'a str>,
     pub store_path: Option<&'a Path>,
-    pub forge_first: bool,
-    pub forge_first_source: &'a str,
+    pub foundry_first: bool,
+    pub foundry_first_source: &'a str,
     pub workflow_id: Option<&'a str>,
     pub task_id: Option<&'a str>,
     pub run_id: Option<&'a str>,
@@ -840,11 +844,11 @@ pub struct CliShimStatusOptions<'a> {
 
 #[derive(Clone, Copy)]
 pub struct CliHarnessExecOptions<'a> {
-    pub store: Option<&'a ForgeStore>,
+    pub store: Option<&'a FoundryStore>,
     pub executor: &'a str,
     pub command: &'a [String],
-    pub forge_first: bool,
-    pub forge_first_source: &'a str,
+    pub foundry_first: bool,
+    pub foundry_first_source: &'a str,
     pub workflow_id: Option<&'a str>,
     pub task_id: Option<&'a str>,
     pub run_id: Option<&'a str>,
@@ -852,7 +856,7 @@ pub struct CliHarnessExecOptions<'a> {
     pub context_budget_source: &'a str,
     pub token_headroom: bool,
     pub token_headroom_source: &'a str,
-    pub require_token_headroom_for_forge_first: bool,
+    pub require_token_headroom_for_foundry_first: bool,
     pub dry_run: bool,
     pub allow_exec: bool,
     pub secret_env: &'a [String],
@@ -1026,7 +1030,7 @@ pub fn analyze_token_headroom(
         savings_percent,
         budget_tokens,
         budget_status: budget_status.to_string(),
-        retrieval_ref: format!("forge://harness/headroom/{original_sha256}"),
+        retrieval_ref: format!("foundry://harness/headroom/{original_sha256}"),
         persisted: false,
         retrieval_available: false,
         store_status: "not_persisted".to_string(),
@@ -1036,7 +1040,7 @@ pub fn analyze_token_headroom(
 }
 
 pub fn persist_token_headroom_report(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mut report: TokenHeadroomReport,
     original_content: &str,
 ) -> Result<TokenHeadroomReport> {
@@ -1066,12 +1070,12 @@ pub fn persist_token_headroom_report(
 }
 
 pub fn retrieve_headroom_blob(
-    store: &ForgeStore,
+    store: &FoundryStore,
     retrieval_ref: &str,
     include_content: bool,
 ) -> Result<HeadroomRetrievalReport> {
     let original_sha256 = parse_headroom_ref(retrieval_ref)?;
-    let retrieval_ref = format!("forge://harness/headroom/{original_sha256}");
+    let retrieval_ref = format!("foundry://harness/headroom/{original_sha256}");
     let Some(record) = store.load_headroom_blob_by_sha(&original_sha256)? else {
         return Ok(HeadroomRetrievalReport {
             schema_version: HEADROOM_RETRIEVAL_SCHEMA_VERSION.to_string(),
@@ -1107,7 +1111,7 @@ pub fn retrieve_headroom_blob(
 }
 
 pub fn build_headroom_stats_report(
-    store: &ForgeStore,
+    store: &FoundryStore,
     options: HeadroomStatsOptions<'_>,
 ) -> Result<HeadroomStatsReport> {
     let source_filter = normalize_optional_text(options.source);
@@ -1163,12 +1167,12 @@ pub fn build_headroom_stats_report(
         .map(|blob| blob.content_kind.clone());
 
     let mut next_commands = vec![
-        "forge harness token-headroom --content <payload> --kind log --budget-tokens <n> --persist --output json".to_string(),
-        "forge harness headroom-stats --output json".to_string(),
+        "foundry harness token-headroom --content <payload> --kind log --budget-tokens <n> --persist --output json".to_string(),
+        "foundry harness headroom-stats --output json".to_string(),
     ];
     if let Some(top) = top_saved_blobs.first() {
         next_commands.push(format!(
-            "forge harness retrieve-headroom --ref {} --include-content --output json",
+            "foundry harness retrieve-headroom --ref {} --include-content --output json",
             shell_quote(&top.retrieval_ref)
         ));
     }
@@ -1225,7 +1229,7 @@ pub fn build_headroom_stats_report(
         top_saved_blobs,
         next_commands,
         notes: vec![
-            "Headroom stats are read-only and aggregate only blobs already persisted in the local Forge store.".to_string(),
+            "Headroom stats are read-only and aggregate only blobs already persisted in the local Foundry store.".to_string(),
             "Use filters to inspect noisy sources before routing large tool outputs or CLI stdout back to a brain.".to_string(),
         ],
     })
@@ -1259,12 +1263,12 @@ fn headroom_stats_operator_decision(
 
 pub fn build_harness_mode_report(options: HarnessModeOptions<'_>) -> HarnessModeReport {
     let HarnessModeOptions {
-        forge_first,
+        foundry_first,
         observe_only,
         project_root,
     } = options;
-    let mode = resolve_harness_forge_first(forge_first, observe_only, project_root);
-    let env_default_value = env::var("FORGE_HARNESS_DEFAULT_MODE").ok();
+    let mode = resolve_harness_foundry_first(foundry_first, observe_only, project_root);
+    let env_default_value = crate::brand::env_var("FOUNDRY_HARNESS_DEFAULT_MODE").ok();
     let project_root = project_root
         .map(Path::to_path_buf)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -1278,7 +1282,7 @@ pub fn build_harness_mode_report(options: HarnessModeOptions<'_>) -> HarnessMode
         context_budget_source: "default",
         token_headroom: None,
         token_headroom_source: "default",
-        forge_first: mode.forge_first,
+        foundry_first: mode.foundry_first,
         default_context_budget: 1200,
     });
     let mut safety_checks = vec![
@@ -1288,21 +1292,21 @@ pub fn build_harness_mode_report(options: HarnessModeOptions<'_>) -> HarnessMode
     if project_exec_policy.require_lineage_for_exec {
         safety_checks.push("project_require_lineage_for_exec".to_string());
     }
-    if runtime_policy.require_token_headroom_for_forge_first {
-        safety_checks.push("project_require_token_headroom_for_forge_first".to_string());
+    if runtime_policy.require_token_headroom_for_foundry_first {
+        safety_checks.push("project_require_token_headroom_for_foundry_first".to_string());
     }
     HarnessModeReport {
         schema_version: CLI_HARNESS_MODE_SCHEMA_VERSION.to_string(),
         status: "harness_mode_resolved".to_string(),
-        forge_first: mode.forge_first,
-        effective_mode: harness_effective_mode(mode.forge_first).to_string(),
-        forge_first_source: mode.source.to_string(),
+        foundry_first: mode.foundry_first,
+        effective_mode: harness_effective_mode(mode.foundry_first).to_string(),
+        foundry_first_source: mode.source.to_string(),
         env_default_present: env_default_value.is_some(),
         env_default_value,
         project_config_path: project.path.display().to_string(),
         project_config_status: project.status.to_string(),
         project_default_mode: project
-            .forge_first
+            .foundry_first
             .map(harness_effective_mode)
             .map(ToString::to_string),
         project_exec_policy_path: project_exec_policy.path.display().to_string(),
@@ -1312,8 +1316,8 @@ pub fn build_harness_mode_report(options: HarnessModeOptions<'_>) -> HarnessMode
         context_budget_source: runtime_policy.context_budget_source,
         default_token_headroom: runtime_policy.token_headroom,
         token_headroom_source: runtime_policy.token_headroom_source,
-        require_token_headroom_for_forge_first: runtime_policy
-            .require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first: runtime_policy
+            .require_token_headroom_for_foundry_first,
         precedence: vec![
             "observe_only_flag".to_string(),
             "explicit_flag".to_string(),
@@ -1325,7 +1329,7 @@ pub fn build_harness_mode_report(options: HarnessModeOptions<'_>) -> HarnessMode
         notes: vec![
             "This report is read-only and does not install shims or execute brain CLIs."
                 .to_string(),
-            "Use it before wrap-plan, install-shims or exec when the active Forge-first policy is unclear.".to_string(),
+            "Use it before wrap-plan, install-shims or exec when the active Foundry-first policy is unclear.".to_string(),
         ],
     }
 }
@@ -1336,7 +1340,7 @@ pub fn build_harness_doctor_report(
     let HarnessDoctorOptions {
         shim_dir,
         executor,
-        forge_first,
+        foundry_first,
         observe_only,
         project_root,
         workflow_id,
@@ -1346,14 +1350,14 @@ pub fn build_harness_doctor_report(
         context_budget_source,
         token_headroom,
         token_headroom_source,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
     } = options;
     let executor = normalize_executor(executor);
     let project_root_path = project_root
         .map(Path::to_path_buf)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let mode = build_harness_mode_report(HarnessModeOptions {
-        forge_first,
+        foundry_first,
         observe_only,
         project_root: Some(&project_root_path),
     });
@@ -1364,8 +1368,8 @@ pub fn build_harness_doctor_report(
     let wrapper_plan = build_cli_wrapper_plan(CliWrapperPlanOptions {
         executor: &executor,
         command: &[],
-        forge_first: mode.forge_first,
-        forge_first_source: &mode.forge_first_source,
+        foundry_first: mode.foundry_first,
+        foundry_first_source: &mode.foundry_first_source,
         project_root: Some(&project_root_path),
         workflow_id,
         task_id,
@@ -1374,19 +1378,19 @@ pub fn build_harness_doctor_report(
         context_budget_source,
         token_headroom,
         token_headroom_source,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
     });
-    let forge_first_ready = mode.forge_first;
+    let foundry_first_ready = mode.foundry_first;
     let token_headroom_ready = token_headroom && wrapper_plan.token_headroom_enabled;
     let shim_ready = shim_status.status == "shim_status_ready";
     let lineage_context_ready = !mode.require_lineage_for_exec
         || harness_exec_has_required_lineage(workflow_id, task_id, run_id);
     let lineage_policy_ready = true;
     let mut readiness_checks = vec!["read_only_no_child_process".to_string()];
-    readiness_checks.push(if forge_first_ready {
-        "forge_first_enabled".to_string()
+    readiness_checks.push(if foundry_first_ready {
+        "foundry_first_enabled".to_string()
     } else {
-        "forge_first_not_enabled".to_string()
+        "foundry_first_not_enabled".to_string()
     });
     readiness_checks.push(if token_headroom_ready {
         "token_headroom_enabled".to_string()
@@ -1409,12 +1413,12 @@ pub fn build_harness_doctor_report(
     }
 
     let mut next_actions = vec![format!(
-        "forge harness mode --project-root {} --output json",
+        "foundry harness mode --project-root {} --output json",
         shell_quote(&project_root_path.display().to_string())
     )];
     if !shim_ready {
         next_actions.push(format!(
-            "forge harness install-shims --shim-dir {} --executor {} --project-root {} --output json",
+            "foundry harness install-shims --shim-dir {} --executor {} --project-root {} --output json",
             shell_quote(&shim_dir.display().to_string()),
             shell_quote(&executor),
             shell_quote(&project_root_path.display().to_string())
@@ -1427,11 +1431,11 @@ pub fn build_harness_doctor_report(
         );
     }
     next_actions.push(format!(
-        "forge sync executors --shim-dir {} --output json",
+        "foundry sync executors --shim-dir {} --output json",
         shell_quote(&shim_dir.display().to_string())
     ));
 
-    let status = if forge_first_ready && token_headroom_ready && shim_ready {
+    let status = if foundry_first_ready && token_headroom_ready && shim_ready {
         "harness_doctor_ready"
     } else {
         "harness_doctor_degraded"
@@ -1442,7 +1446,7 @@ pub fn build_harness_doctor_report(
         executor,
         project_root: project_root_path.display().to_string(),
         shim_dir: shim_dir.display().to_string(),
-        forge_first_ready,
+        foundry_first_ready,
         token_headroom_ready,
         shim_ready,
         lineage_policy_ready,
@@ -1455,7 +1459,7 @@ pub fn build_harness_doctor_report(
         notes: vec![
             "Harness doctor is read-only: it never installs shims or launches child processes."
                 .to_string(),
-            "Use it before handing Codex, Claude, Gemini or OpenCode to Forge-first execution."
+            "Use it before handing Codex, Claude, Gemini or OpenCode to Foundry-first execution."
                 .to_string(),
         ],
     })
@@ -1467,8 +1471,8 @@ pub fn build_harness_headroom_plan(
     let HarnessHeadroomPlanOptions {
         executor,
         command,
-        forge_first,
-        forge_first_source,
+        foundry_first,
+        foundry_first_source,
         project_root,
         workflow_id,
         task_id,
@@ -1477,7 +1481,7 @@ pub fn build_harness_headroom_plan(
         context_budget_source,
         token_headroom,
         token_headroom_source,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
     } = options;
     let executor = normalize_executor(executor);
     let project_root_path = project_root
@@ -1486,8 +1490,8 @@ pub fn build_harness_headroom_plan(
     let wrapper_plan = build_cli_wrapper_plan(CliWrapperPlanOptions {
         executor: &executor,
         command,
-        forge_first,
-        forge_first_source,
+        foundry_first,
+        foundry_first_source,
         project_root,
         workflow_id,
         task_id,
@@ -1496,18 +1500,18 @@ pub fn build_harness_headroom_plan(
         context_budget_source,
         token_headroom,
         token_headroom_source,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
     });
     let mut wrapper_env = wrapper_plan.env.clone();
     wrapper_env.push(env_var(
-        "FORGE_TOKEN_HEADROOM_SOURCE",
+        "FOUNDRY_TOKEN_HEADROOM_SOURCE",
         token_headroom_source,
         "records which flag, project policy or API input selected token-headroom",
     ));
     wrapper_env.push(env_var(
-        "FORGE_HEADROOM_PLAN_SCHEMA",
+        "FOUNDRY_HEADROOM_PLAN_SCHEMA",
         CLI_HARNESS_HEADROOM_PLAN_SCHEMA_VERSION,
-        "lets downstream wrappers identify the Forge headroom planning contract",
+        "lets downstream wrappers identify the Foundry headroom planning contract",
     ));
 
     let project_root_display = project_root_path.display().to_string();
@@ -1518,21 +1522,21 @@ pub fn build_harness_headroom_plan(
     };
     let mut next_commands = vec![
         format!(
-            "forge harness wrap-plan --executor {} --project-root {} --context-budget {} {} --output json",
+            "foundry harness wrap-plan --executor {} --project-root {} --context-budget {} {} --output json",
             shell_quote(&executor),
             shell_quote(&project_root_display),
             context_budget,
             token_headroom_flag,
         ),
         format!(
-            "forge harness token-headroom --content <payload> --kind log --budget-tokens {} --output json",
+            "foundry harness token-headroom --content <payload> --kind log --budget-tokens {} --output json",
             context_budget,
         ),
-        "forge interactive harness --output json".to_string(),
+        "foundry interactive harness --output json".to_string(),
     ];
-    if require_token_headroom_for_forge_first {
+    if require_token_headroom_for_foundry_first {
         next_commands.push(
-            "keep require_token_headroom_for_forge_first enabled for Forge-first child CLIs"
+            "keep require_token_headroom_for_foundry_first enabled for Foundry-first child CLIs"
                 .to_string(),
         );
     }
@@ -1542,8 +1546,8 @@ pub fn build_harness_headroom_plan(
         status: "harness_headroom_plan_ready".to_string(),
         executor,
         project_root: project_root_display,
-        forge_first,
-        forge_first_source: normalize_harness_mode_source(forge_first_source, forge_first),
+        foundry_first,
+        foundry_first_source: normalize_harness_mode_source(foundry_first_source, foundry_first),
         workflow_id: normalize_optional_text(workflow_id),
         task_id: normalize_optional_text(task_id),
         run_id: normalize_optional_text(run_id),
@@ -1551,7 +1555,7 @@ pub fn build_harness_headroom_plan(
         context_budget_source: context_budget_source.to_string(),
         token_headroom_enabled: token_headroom,
         token_headroom_source: token_headroom_source.to_string(),
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
         wrapper_env,
         orchestration_contract: wrapper_plan.orchestration_contract.clone(),
         session_lifecycle_plan: wrapper_plan.session_lifecycle_plan.clone(),
@@ -1571,14 +1575,14 @@ pub fn build_harness_headroom_plan(
         ],
         retrieval_policy: vec![
             "original_and_compressed_hashes_are_reported".to_string(),
-            "persisted_refs_use_forge_harness_headroom_uri".to_string(),
-            "retrieval_requires_forge_harness_retrieve_headroom".to_string(),
+            "persisted_refs_use_foundry_harness_headroom_uri".to_string(),
+            "retrieval_requires_foundry_harness_retrieve_headroom".to_string(),
         ],
         mcp_tools: vec![
-            "forge.harness.headroom_plan".to_string(),
-            "forge.harness.token_headroom".to_string(),
-            "forge.harness.retrieve_headroom".to_string(),
-            "forge.harness.wrap_plan".to_string(),
+            "foundry.harness.headroom_plan".to_string(),
+            "foundry.harness.token_headroom".to_string(),
+            "foundry.harness.retrieve_headroom".to_string(),
+            "foundry.harness.wrap_plan".to_string(),
         ],
         next_commands,
         notes: vec![
@@ -1619,7 +1623,7 @@ pub fn build_harness_activation_profile(
     let current_shell_activation_status = if shim_status.path_precedence == "shim_first" {
         "activation_active"
     } else if shim_status.shim_exists
-        && shim_status.forge_owned
+        && shim_status.foundry_owned
         && shim_status.executable
         && !shim_status.would_recurse
     {
@@ -1630,7 +1634,7 @@ pub fn build_harness_activation_profile(
     .to_string();
     let path_activation_prefix = format!("PATH={}:$PATH", shell_quote(&shim_dir_display));
     let one_shot_activation_test_command = format!(
-        "{} forge harness shim-status --shim-dir {} --executor {} --output json",
+        "{} foundry harness shim-status --shim-dir {} --executor {} --output json",
         path_activation_prefix,
         shell_quote(&shim_dir_display),
         shell_quote(&executor)
@@ -1638,7 +1642,7 @@ pub fn build_harness_activation_profile(
     let verification_commands = vec![
         one_shot_activation_test_command.clone(),
         format!(
-            "{} forge harness doctor --shim-dir {} --executor {} --project-root {} --output json",
+            "{} foundry harness doctor --shim-dir {} --executor {} --project-root {} --output json",
             path_activation_prefix,
             shell_quote(&shim_dir_display),
             shell_quote(&executor),
@@ -1652,62 +1656,62 @@ pub fn build_harness_activation_profile(
     };
     let mut env = vec![
         env_var(
-            "FORGE_HARNESS",
+            "FOUNDRY_HARNESS",
             "enabled",
-            "marks the shell as intentionally routed through Forge harness controls",
+            "marks the shell as intentionally routed through Foundry harness controls",
         ),
         env_var(
-            "FORGE_HARNESS_DEFAULT_MODE",
-            "forge_first",
-            "makes compatible CLI wrappers prefer Forge infrastructure by default",
+            "FOUNDRY_HARNESS_DEFAULT_MODE",
+            "foundry_first",
+            "makes compatible CLI wrappers prefer Foundry infrastructure by default",
         ),
         env_var(
-            "FORGE_HARNESS_PROJECT_ROOT",
+            "FOUNDRY_HARNESS_PROJECT_ROOT",
             &project_root_display,
             "binds wrapper and mode resolution to this project policy root",
         ),
         env_var(
-            "FORGE_HARNESS_CONTEXT_BUDGET",
+            "FOUNDRY_HARNESS_CONTEXT_BUDGET",
             &options.context_budget.to_string(),
             "sets the default bounded context budget for wrapper planning",
         ),
         env_var(
-            "FORGE_HARNESS_TOKEN_HEADROOM",
+            "FOUNDRY_HARNESS_TOKEN_HEADROOM",
             token_headroom_value,
             "documents whether token-headroom should be active in this shell",
         ),
         env_var(
-            "FORGE_HARNESS_EXECUTOR",
+            "FOUNDRY_HARNESS_EXECUTOR",
             &executor,
             "records which brain CLI this activation profile is meant to inspect first",
         ),
     ];
     env.extend(harness_operating_context_env(Some(&project_root)));
     let activation_commands = vec![
-        r#"export FORGE_HARNESS_PREV_PATH="${PATH}""#.to_string(),
+        r#"export FOUNDRY_HARNESS_PREV_PATH="${PATH}""#.to_string(),
         format!("export PATH={}:$PATH", shell_quote(&shim_dir_display)),
-        "export FORGE_HARNESS=enabled".to_string(),
-        "export FORGE_HARNESS_DEFAULT_MODE=forge_first".to_string(),
+        "export FOUNDRY_HARNESS=enabled".to_string(),
+        "export FOUNDRY_HARNESS_DEFAULT_MODE=foundry_first".to_string(),
         format!(
-            "export FORGE_HARNESS_PROJECT_ROOT={}",
+            "export FOUNDRY_HARNESS_PROJECT_ROOT={}",
             shell_quote(&project_root_display)
         ),
         format!(
-            "export FORGE_HARNESS_CONTEXT_BUDGET={}",
+            "export FOUNDRY_HARNESS_CONTEXT_BUDGET={}",
             options.context_budget
         ),
-        format!("export FORGE_HARNESS_TOKEN_HEADROOM={token_headroom_value}"),
-        format!("export FORGE_HARNESS_EXECUTOR={}", shell_quote(&executor)),
+        format!("export FOUNDRY_HARNESS_TOKEN_HEADROOM={token_headroom_value}"),
+        format!("export FOUNDRY_HARNESS_EXECUTOR={}", shell_quote(&executor)),
     ];
     let deactivation_commands = vec![
-        r#"if [ -n "${FORGE_HARNESS_PREV_PATH:-}" ]; then export PATH="${FORGE_HARNESS_PREV_PATH}"; fi"#.to_string(),
-        "unset FORGE_HARNESS_PREV_PATH".to_string(),
-        "unset FORGE_HARNESS".to_string(),
-        "unset FORGE_HARNESS_DEFAULT_MODE".to_string(),
-        "unset FORGE_HARNESS_PROJECT_ROOT".to_string(),
-        "unset FORGE_HARNESS_CONTEXT_BUDGET".to_string(),
-        "unset FORGE_HARNESS_TOKEN_HEADROOM".to_string(),
-        "unset FORGE_HARNESS_EXECUTOR".to_string(),
+        r#"if [ -n "${FOUNDRY_HARNESS_PREV_PATH:-}" ]; then export PATH="${FOUNDRY_HARNESS_PREV_PATH}"; fi"#.to_string(),
+        "unset FOUNDRY_HARNESS_PREV_PATH".to_string(),
+        "unset FOUNDRY_HARNESS".to_string(),
+        "unset FOUNDRY_HARNESS_DEFAULT_MODE".to_string(),
+        "unset FOUNDRY_HARNESS_PROJECT_ROOT".to_string(),
+        "unset FOUNDRY_HARNESS_CONTEXT_BUDGET".to_string(),
+        "unset FOUNDRY_HARNESS_TOKEN_HEADROOM".to_string(),
+        "unset FOUNDRY_HARNESS_EXECUTOR".to_string(),
     ];
     let activation_script = format!("{}\n", activation_commands.join("\n"));
     let deactivation_script = format!("{}\n", deactivation_commands.join("\n"));
@@ -1738,7 +1742,7 @@ pub fn build_harness_activation_profile(
     let mut backup_path = None;
     let mut notes = vec![
         "Activation profile is read-only unless --apply, --shell-rc and --approved-by are all supplied.".to_string(),
-        "Source the activation script only in shells where selected CLIs should prefer Forge infrastructure.".to_string(),
+        "Source the activation script only in shells where selected CLIs should prefer Foundry infrastructure.".to_string(),
         "Deactivate by running the deactivation commands or starting a fresh shell.".to_string(),
     ];
 
@@ -1753,7 +1757,7 @@ pub fn build_harness_activation_profile(
             status = "harness_activation_profile_blocked_missing_shell_rc".to_string();
             shell_rc_status = "blocked_missing_shell_rc".to_string();
             notes.push(
-                "Supply --shell-rc <path> to choose the exact startup file Forge may update."
+                "Supply --shell-rc <path> to choose the exact startup file Foundry may update."
                     .to_string(),
             );
         } else if let Some(shell_rc) = shell_rc_path.as_ref() {
@@ -1792,7 +1796,7 @@ pub fn build_harness_activation_profile(
                 "created_shell_rc".to_string()
             };
             notes.push(
-                "A Forge-managed shell block was written; user shell activation still requires opening a new shell or sourcing the file.".to_string(),
+                "A Foundry-managed shell block was written; user shell activation still requires opening a new shell or sourcing the file.".to_string(),
             );
         }
     }
@@ -1817,18 +1821,18 @@ pub fn build_harness_activation_profile(
     let mut next_commands = vec![
         one_shot_activation_test_command.clone(),
         format!(
-            "forge harness shim-status --shim-dir {} --executor {} --output json",
+            "foundry harness shim-status --shim-dir {} --executor {} --output json",
             shell_quote(&shim_dir_display),
             shell_quote(&executor)
         ),
         format!(
-            "forge harness doctor --shim-dir {} --executor {} --project-root {} --output json",
+            "foundry harness doctor --shim-dir {} --executor {} --project-root {} --output json",
             shell_quote(&shim_dir_display),
             shell_quote(&executor),
             shell_quote(&project_root_display)
         ),
         format!(
-            "forge sync executors --shim-dir {} --allow {} --output json",
+            "foundry sync executors --shim-dir {} --allow {} --output json",
             shell_quote(&shim_dir_display),
             shell_quote(&executor)
         ),
@@ -1837,7 +1841,7 @@ pub fn build_harness_activation_profile(
         next_commands.insert(
             0,
             format!(
-                "forge harness activation-profile --shim-dir {} --executor {} --project-root {} --shell-rc {} --apply --approved-by <operator> --output json",
+                "foundry harness activation-profile --shim-dir {} --executor {} --project-root {} --shell-rc {} --apply --approved-by <operator> --output json",
                 shell_quote(&shim_dir_display),
                 shell_quote(&executor),
                 shell_quote(&project_root_display),
@@ -1862,7 +1866,7 @@ pub fn build_harness_activation_profile(
         shell_rc_status,
         approved_by,
         backup_path,
-        forge_first: true,
+        foundry_first: true,
         context_budget: options.context_budget,
         context_budget_source: options.context_budget_source.to_string(),
         token_headroom: options.token_headroom,
@@ -1892,7 +1896,7 @@ fn harness_activation_managed_block(
     activation_script: &str,
 ) -> String {
     format!(
-        "{begin}\n# forge-harness-activation:v1\n# executor={executor}\n# shim_dir={shim_dir}\n# project_root={project_root}\n{activation_script}{end}\n",
+        "{begin}\n# foundry-harness-activation:v1\n# executor={executor}\n# shim_dir={shim_dir}\n# project_root={project_root}\n{activation_script}{end}\n",
         begin = CLI_HARNESS_ACTIVATION_BEGIN,
         end = CLI_HARNESS_ACTIVATION_END,
     )
@@ -1903,7 +1907,7 @@ fn shell_rc_backup_path(shell_rc: &Path) -> PathBuf {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("shellrc");
-    shell_rc.with_file_name(format!("{file_name}.forge-backup"))
+    shell_rc.with_file_name(format!("{file_name}.foundry-backup"))
 }
 
 fn replace_harness_activation_block(existing: &str, managed_block: &str) -> String {
@@ -1942,7 +1946,7 @@ pub fn build_harness_adoption_plan(
     let HarnessAdoptionPlanOptions {
         shim_dir,
         executor,
-        forge_first,
+        foundry_first,
         observe_only,
         project_root,
         workflow_id,
@@ -1952,22 +1956,22 @@ pub fn build_harness_adoption_plan(
         context_budget_source,
         token_headroom,
         token_headroom_source,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
     } = options;
     let executor = normalize_executor(executor);
     let project_root_path = project_root
         .map(Path::to_path_buf)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let mode = build_harness_mode_report(HarnessModeOptions {
-        forge_first,
+        foundry_first,
         observe_only,
         project_root: Some(&project_root_path),
     });
     let headroom_plan = build_harness_headroom_plan(HarnessHeadroomPlanOptions {
         executor: &executor,
         command: &[],
-        forge_first: mode.forge_first,
-        forge_first_source: &mode.forge_first_source,
+        foundry_first: mode.foundry_first,
+        foundry_first_source: &mode.foundry_first_source,
         project_root: Some(&project_root_path),
         workflow_id,
         task_id,
@@ -1976,12 +1980,12 @@ pub fn build_harness_adoption_plan(
         context_budget_source,
         token_headroom,
         token_headroom_source,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
     });
     let doctor = build_harness_doctor_report(HarnessDoctorOptions {
         shim_dir,
         executor: &executor,
-        forge_first,
+        foundry_first,
         observe_only,
         project_root: Some(&project_root_path),
         workflow_id,
@@ -1991,20 +1995,20 @@ pub fn build_harness_adoption_plan(
         context_budget_source,
         token_headroom,
         token_headroom_source,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
     })?;
 
     let project_root_display = project_root_path.display().to_string();
     let shim_dir_display = shim_dir.display().to_string();
     let recommended_project_config = HarnessRecommendedProjectConfig {
-        default_mode: "forge_first".to_string(),
+        default_mode: "foundry_first".to_string(),
         default_context_budget: context_budget,
         default_token_headroom: true,
-        require_token_headroom_for_forge_first: true,
+        require_token_headroom_for_foundry_first: true,
         require_lineage_for_exec: true,
     };
     let bootstrap_project_harness = vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "harness".to_string(),
         "bootstrap".to_string(),
         "--executor".to_string(),
@@ -2028,12 +2032,12 @@ pub fn build_harness_adoption_plan(
     let lineage_task_id = task_id.unwrap_or("<task-id>").to_string();
     let lineage_run_id = run_id.unwrap_or("<run-id>").to_string();
     let exec_with_lineage_dry_run = vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "harness".to_string(),
         "exec".to_string(),
         "--executor".to_string(),
         executor.clone(),
-        "--forge-first".to_string(),
+        "--foundry-first".to_string(),
         "--project-root".to_string(),
         project_root_display.clone(),
         "--workflow".to_string(),
@@ -2064,7 +2068,7 @@ pub fn build_harness_adoption_plan(
         write_project_harness_config: bootstrap_project_harness.clone(),
         bootstrap_project_harness,
         mode: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "harness".to_string(),
             "mode".to_string(),
             "--project-root".to_string(),
@@ -2073,7 +2077,7 @@ pub fn build_harness_adoption_plan(
             "json".to_string(),
         ],
         headroom_plan: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "harness".to_string(),
             "headroom-plan".to_string(),
             "--executor".to_string(),
@@ -2084,7 +2088,7 @@ pub fn build_harness_adoption_plan(
             "json".to_string(),
         ],
         doctor: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "harness".to_string(),
             "doctor".to_string(),
             "--executor".to_string(),
@@ -2097,7 +2101,7 @@ pub fn build_harness_adoption_plan(
             "json".to_string(),
         ],
         activation_profile: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "harness".to_string(),
             "activation-profile".to_string(),
             "--shim-dir".to_string(),
@@ -2110,7 +2114,7 @@ pub fn build_harness_adoption_plan(
             "json".to_string(),
         ],
         install_shims: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "harness".to_string(),
             "install-shims".to_string(),
             "--shim-dir".to_string(),
@@ -2123,7 +2127,7 @@ pub fn build_harness_adoption_plan(
             "json".to_string(),
         ],
         sync_executors: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "sync".to_string(),
             "executors".to_string(),
             "--shim-dir".to_string(),
@@ -2132,7 +2136,7 @@ pub fn build_harness_adoption_plan(
             "json".to_string(),
         ],
         wrap_plan: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "harness".to_string(),
             "wrap-plan".to_string(),
             "--executor".to_string(),
@@ -2146,27 +2150,27 @@ pub fn build_harness_adoption_plan(
         exec_with_lineage,
     };
     let shim_file_ready = doctor.shim_status.shim_exists
-        && doctor.shim_status.forge_owned
+        && doctor.shim_status.foundry_owned
         && doctor.shim_status.executable;
     let shim_installed_but_not_active =
         shim_file_ready && doctor.shim_status.path_precedence != "shim_first";
     let next_action = if mode.project_config_status != "loaded" {
         format!(
-            "forge harness bootstrap --executor {} --shim-dir {} --project-root {} --apply --approved-by <operator> --output json",
+            "foundry harness bootstrap --executor {} --shim-dir {} --project-root {} --apply --approved-by <operator> --output json",
             shell_quote(&executor),
             shell_quote(&shim_dir_display),
             shell_quote(&project_root_display)
         )
     } else if shim_installed_but_not_active {
         format!(
-            "forge harness activation-profile --shim-dir {} --executor {} --project-root {} --output json",
+            "foundry harness activation-profile --shim-dir {} --executor {} --project-root {} --output json",
             shell_quote(&shim_dir_display),
             shell_quote(&executor),
             shell_quote(&project_root_display)
         )
     } else if !doctor.shim_ready {
         format!(
-            "forge harness install-shims --shim-dir {} --executor {} --project-root {} --output json",
+            "foundry harness install-shims --shim-dir {} --executor {} --project-root {} --output json",
             shell_quote(&shim_dir_display),
             shell_quote(&executor),
             shell_quote(&project_root_display)
@@ -2175,7 +2179,7 @@ pub fn build_harness_adoption_plan(
         shell_join(&commands.exec_with_lineage_dry_run)
     } else {
         format!(
-            "forge sync executors --shim-dir {} --output json",
+            "foundry sync executors --shim-dir {} --output json",
             shell_quote(&shim_dir_display)
         )
     };
@@ -2203,8 +2207,8 @@ pub fn build_harness_adoption_plan(
                 mutates_state: true,
                 executes_child: false,
                 requires_approval: true,
-                approval_reason: "Project harness config changes Forge-first, token-headroom and lineage policy for future CLI execution.",
-                rationale: "Project policy makes Forge-first, headroom and lineage requirements explicit instead of relying on operator memory.",
+                approval_reason: "Project harness config changes Foundry-first, token-headroom and lineage policy for future CLI execution.",
+                rationale: "Project policy makes Foundry-first, headroom and lineage requirements explicit instead of relying on operator memory.",
             }),
             harness_adoption_step(HarnessAdoptionStepInput {
                 id: "bootstrap_project_harness",
@@ -2219,8 +2223,8 @@ pub fn build_harness_adoption_plan(
                 mutates_state: true,
                 executes_child: false,
                 requires_approval: true,
-                approval_reason: "Project harness bootstrap writes Forge-first policy and CLI shims for future CLI execution.",
-                rationale: "Bootstrap gives UI and agent surfaces one explicit setup action before using Forge-first child CLI execution.",
+                approval_reason: "Project harness bootstrap writes Foundry-first policy and CLI shims for future CLI execution.",
+                rationale: "Bootstrap gives UI and agent surfaces one explicit setup action before using Foundry-first child CLI execution.",
             }),
             harness_adoption_step(HarnessAdoptionStepInput {
                 id: "inspect_headroom_plan",
@@ -2235,8 +2239,8 @@ pub fn build_harness_adoption_plan(
                 rationale: "Headroom planning keeps large logs and child output bounded while preserving reversible retrieval refs.",
             }),
             harness_adoption_step(HarnessAdoptionStepInput {
-                id: "install_forge_first_shims",
-                title: "Install Forge-first shims",
+                id: "install_foundry_first_shims",
+                title: "Install Foundry-first shims",
                 status: if doctor.shim_ready {
                     "already_ready"
                 } else if shim_file_ready {
@@ -2249,12 +2253,12 @@ pub fn build_harness_adoption_plan(
                 mutates_state: true,
                 executes_child: false,
                 requires_approval: true,
-                approval_reason: "PATH shims alter how selected CLIs enter Forge infrastructure and must be approved before writing files.",
-                rationale: "Shims make the selected CLI enter through Forge harness controls without replacing the native executable.",
+                approval_reason: "PATH shims alter how selected CLIs enter Foundry infrastructure and must be approved before writing files.",
+                rationale: "Shims make the selected CLI enter through Foundry harness controls without replacing the native executable.",
             }),
             harness_adoption_step(HarnessAdoptionStepInput {
                 id: "activate_shell_profile",
-                title: "Activate Forge-first shell profile",
+                title: "Activate Foundry-first shell profile",
                 status: if doctor.shim_ready {
                     "already_active"
                 } else if shim_file_ready {
@@ -2268,7 +2272,7 @@ pub fn build_harness_adoption_plan(
                 executes_child: false,
                 requires_approval: false,
                 approval_reason: "",
-                rationale: "Activation profile prints reversible shell exports so the operator can make selected CLIs prefer Forge infrastructure without editing shell startup files automatically.",
+                rationale: "Activation profile prints reversible shell exports so the operator can make selected CLIs prefer Foundry infrastructure without editing shell startup files automatically.",
             }),
             harness_adoption_step(HarnessAdoptionStepInput {
                 id: "sync_executor_inventory",
@@ -2296,7 +2300,7 @@ pub fn build_harness_adoption_plan(
                 executes_child: false,
                 requires_approval: false,
                 approval_reason: "",
-                rationale: "Doctor confirms Forge-first, shim, token-headroom and lineage readiness before real handoff.",
+                rationale: "Doctor confirms Foundry-first, shim, token-headroom and lineage readiness before real handoff.",
             }),
             harness_adoption_step(HarnessAdoptionStepInput {
                 id: "validate_harness_exec_dry_run_with_lineage",
@@ -2312,7 +2316,7 @@ pub fn build_harness_adoption_plan(
                 executes_child: false,
                 requires_approval: false,
                 approval_reason: "",
-                rationale: "Dry-run receipts validate Forge-first env, context budget, token headroom and workflow/task/run lineage before any child CLI execution.",
+                rationale: "Dry-run receipts validate Foundry-first env, context budget, token headroom and workflow/task/run lineage before any child CLI execution.",
             }),
             harness_adoption_step(HarnessAdoptionStepInput {
                 id: "use_harness_exec_with_lineage",
@@ -2333,14 +2337,14 @@ pub fn build_harness_adoption_plan(
         ],
         commands,
         mcp_tools: vec![
-            "forge.harness.adoption_plan".to_string(),
-            "forge.harness.bootstrap".to_string(),
-            "forge.harness.mode".to_string(),
-            "forge.harness.headroom_plan".to_string(),
-            "forge.harness.doctor".to_string(),
-            "forge.harness.activation_profile".to_string(),
-            "forge.harness.install_shims".to_string(),
-            "forge.harness.exec".to_string(),
+            "foundry.harness.adoption_plan".to_string(),
+            "foundry.harness.bootstrap".to_string(),
+            "foundry.harness.mode".to_string(),
+            "foundry.harness.headroom_plan".to_string(),
+            "foundry.harness.doctor".to_string(),
+            "foundry.harness.activation_profile".to_string(),
+            "foundry.harness.install_shims".to_string(),
+            "foundry.harness.exec".to_string(),
         ],
         next_action,
         mode,
@@ -2348,7 +2352,7 @@ pub fn build_harness_adoption_plan(
         doctor,
         notes: vec![
             "This adoption plan is read-only: it does not write project config, install shims, sync executors or execute child CLIs.".to_string(),
-            "Use it when an operator wants Codex, Claude, Gemini or OpenCode to prefer Forge infrastructure without hiding the native CLI boundary.".to_string(),
+            "Use it when an operator wants Codex, Claude, Gemini or OpenCode to prefer Foundry infrastructure without hiding the native CLI boundary.".to_string(),
         ],
     })
 }
@@ -2405,7 +2409,7 @@ pub fn build_harness_executor_compatibility_report(
         .next_commands
         .first()
         .cloned()
-        .unwrap_or_else(|| "forge interactive harness --output json".to_string());
+        .unwrap_or_else(|| "foundry interactive harness --output json".to_string());
 
     HarnessExecutorCompatibilityReport {
         schema_version: CLI_HARNESS_EXECUTOR_COMPATIBILITY_SCHEMA_VERSION.to_string(),
@@ -2417,8 +2421,8 @@ pub fn build_harness_executor_compatibility_report(
         compatibility_matrix,
         next_action,
         notes: vec![
-            "This report is read-only and keeps Codex, Claude, Gemini and OpenCode as replaceable execution brains under Forge-owned routing.".to_string(),
-            "Forge owns workflow state, context, memory, skills, MCP, credential-vault references, session lifecycle, token headroom and receipts; the native CLI remains the executor entrypoint.".to_string(),
+            "This report is read-only and keeps Codex, Claude, Gemini and OpenCode as replaceable execution brains under Foundry-owned routing.".to_string(),
+            "Foundry owns workflow state, context, memory, skills, MCP, credential-vault references, session lifecycle, token headroom and receipts; the native CLI remains the executor entrypoint.".to_string(),
         ],
     }
 }
@@ -2454,22 +2458,22 @@ fn harness_executor_compatibility(
         &surface_summary,
         &compatibility_status,
     );
-    let ready_as_forge_first_default =
-        selected && adoption_posture == "ready_as_forge_first_default";
+    let ready_as_foundry_first_default =
+        selected && adoption_posture == "ready_as_foundry_first_default";
     let readiness_score_percent = harness_executor_readiness_score(&readiness);
     let next_commands =
         harness_executor_next_commands(&family, project_root, shim_dir, selected, &readiness);
     let notes = if selected {
         vec![
             "Selected executor readiness is derived from harness doctor, wrapper plan, shim status, lineage policy and headroom policy.".to_string(),
-            "A blocked surface does not remove the executor; it tells the TUI/operator which Forge-first capability must be enabled before real child execution.".to_string(),
-            "adoption_posture is the compact operator decision for whether this brain can become the Forge-first default without more setup.".to_string(),
+            "A blocked surface does not remove the executor; it tells the TUI/operator which Foundry-first capability must be enabled before real child execution.".to_string(),
+            "adoption_posture is the compact operator decision for whether this brain can become the Foundry-first default without more setup.".to_string(),
         ]
     } else {
         vec![
             "Canonical executor family is known to the harness but was not selected for this readiness run.".to_string(),
             format!(
-                "Run `forge interactive harness --executor {}` to inspect live readiness for this brain.",
+                "Run `foundry interactive harness --executor {}` to inspect live readiness for this brain.",
                 family.executor
             ),
         ]
@@ -2483,7 +2487,7 @@ fn harness_executor_compatibility(
         selected,
         compatibility_status,
         adoption_posture,
-        ready_as_forge_first_default,
+        ready_as_foundry_first_default,
         readiness_score_percent,
         ready_surfaces: surface_summary.ready,
         blocked_surfaces: surface_summary.blocked,
@@ -2548,7 +2552,7 @@ fn harness_executor_adoption_posture(
         }) {
             return "needs_path_activation".to_string();
         }
-        return "needs_forge_owned_path_shim".to_string();
+        return "needs_foundry_owned_path_shim".to_string();
     }
     if summary
         .blocked
@@ -2578,7 +2582,7 @@ fn harness_executor_adoption_posture(
         return "ready_but_project_policy_recommended".to_string();
     }
     if compatibility_status == "ready" {
-        "ready_as_forge_first_default".to_string()
+        "ready_as_foundry_first_default".to_string()
     } else {
         "ready_with_recommendations".to_string()
     }
@@ -2598,25 +2602,25 @@ fn selected_harness_executor_readiness(
     let env_overlay_ready = wrapper_plan
         .env
         .iter()
-        .any(|item| item.name == "FORGE_HARNESS" && item.value == "enabled");
+        .any(|item| item.name == "FOUNDRY_HARNESS" && item.value == "enabled");
     let organization_context_ready = [
-        "FORGE_ORGANIZATION_ID",
-        "FORGE_ORGANIZATION_LABEL",
-        "FORGE_BRAND_ID",
-        "FORGE_BRAND_LABEL",
-        "FORGE_PRODUCT_ID",
-        "FORGE_PRODUCT_LABEL",
-        "FORGE_USER_ID",
-        "FORGE_CHANNEL_ID",
-        "FORGE_MEMORY_SCOPE",
-        "FORGE_PERSONALITY_SCOPE",
-        "FORGE_BRAND_VOICE",
-        "FORGE_BRAND_TONE",
-        "FORGE_DESIGN_TOKEN_SOURCE",
-        "FORGE_COMPONENT_SOURCE",
-        "FORGE_OPERATIONAL_MEMORY_VISIBILITY",
-        "FORGE_OPERATIONAL_SHARING_POLICY",
-        "FORGE_OPERATIONAL_APPROVAL_POLICY",
+        "FOUNDRY_ORGANIZATION_ID",
+        "FOUNDRY_ORGANIZATION_LABEL",
+        "FOUNDRY_BRAND_ID",
+        "FOUNDRY_BRAND_LABEL",
+        "FOUNDRY_PRODUCT_ID",
+        "FOUNDRY_PRODUCT_LABEL",
+        "FOUNDRY_USER_ID",
+        "FOUNDRY_CHANNEL_ID",
+        "FOUNDRY_MEMORY_SCOPE",
+        "FOUNDRY_PERSONALITY_SCOPE",
+        "FOUNDRY_BRAND_VOICE",
+        "FOUNDRY_BRAND_TONE",
+        "FOUNDRY_DESIGN_TOKEN_SOURCE",
+        "FOUNDRY_COMPONENT_SOURCE",
+        "FOUNDRY_OPERATIONAL_MEMORY_VISIBILITY",
+        "FOUNDRY_OPERATIONAL_SHARING_POLICY",
+        "FOUNDRY_OPERATIONAL_APPROVAL_POLICY",
     ]
     .iter()
     .all(|name| wrapper_plan.env.iter().any(|item| item.name == *name));
@@ -2624,17 +2628,17 @@ fn selected_harness_executor_readiness(
         wrapper_plan
             .env
             .iter()
-            .any(|item| item.name == name && item.value == "forge_controlled")
+            .any(|item| item.name == name && item.value == "foundry_controlled")
     };
     let credential_boundary_ready = wrapper_plan.env.iter().any(|item| {
-        item.name == "FORGE_CREDENTIAL_VAULT_BOUNDARY" && item.value == "reference_only"
+        item.name == "FOUNDRY_CREDENTIAL_VAULT_BOUNDARY" && item.value == "reference_only"
     });
     let event_receipts_ready = wrapper_plan
         .env
         .iter()
-        .any(|item| item.name == "FORGE_EVENT_RECEIPTS" && item.value == "required");
+        .any(|item| item.name == "FOUNDRY_EVENT_RECEIPTS" && item.value == "required");
     let shim_file_ready_for_activation = doctor.shim_status.shim_exists
-        && doctor.shim_status.forge_owned
+        && doctor.shim_status.foundry_owned
         && doctor.shim_status.executable
         && !doctor.shim_status.would_recurse;
 
@@ -2643,9 +2647,9 @@ fn selected_harness_executor_readiness(
             "env_overlay",
             if env_overlay_ready { "ready" } else { "blocked" },
             "wrapper_plan.env",
-            "Forge harness env overlay marks child CLI execution as Forge-controlled and bound to the active operating context.",
+            "Foundry harness env overlay marks child CLI execution as Foundry-controlled and bound to the active operating context.",
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "harness".to_string(),
                 "wrap-plan".to_string(),
                 "--executor".to_string(),
@@ -2663,10 +2667,10 @@ fn selected_harness_executor_readiness(
             } else {
                 "recommended"
             },
-            "wrapper_plan.env.FORGE_ORGANIZATION_ID",
-            "Forge harness env overlay should bind organization, brand, product, user and channel context before a brain CLI runs.",
+            "wrapper_plan.env.FOUNDRY_ORGANIZATION_ID",
+            "Foundry harness env overlay should bind organization, brand, product, user and channel context before a brain CLI runs.",
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "interactive".to_string(),
                 "operating-context".to_string(),
                 "--project-root".to_string(),
@@ -2686,14 +2690,14 @@ fn selected_harness_executor_readiness(
                 "harness_doctor.shim_ready"
             },
             if doctor.shim_ready {
-                "PATH resolves to the Forge-owned wrapper before native CLI defaults."
+                "PATH resolves to the Foundry-owned wrapper before native CLI defaults."
             } else if shim_file_ready_for_activation {
-                "Forge-owned shim is installed and executable, but the shim directory is not first on PATH for this shell."
+                "Foundry-owned shim is installed and executable, but the shim directory is not first on PATH for this shell."
             } else {
-                "PATH shim must prefer the Forge-owned wrapper before native CLI defaults can be intercepted."
+                "PATH shim must prefer the Foundry-owned wrapper before native CLI defaults can be intercepted."
             },
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "harness".to_string(),
                 if shim_file_ready_for_activation {
                     "activation-profile".to_string()
@@ -2720,7 +2724,7 @@ fn selected_harness_executor_readiness(
             "harness_doctor.lineage_context_ready",
             "Real harness exec requires workflow, task and run lineage when project policy requires it.",
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "harness".to_string(),
                 "exec".to_string(),
                 "--executor".to_string(),
@@ -2743,7 +2747,7 @@ fn selected_harness_executor_readiness(
             "token_headroom",
             if doctor.token_headroom_ready {
                 "ready"
-            } else if wrapper_plan.require_token_headroom_for_forge_first && wrapper_plan.forge_first {
+            } else if wrapper_plan.require_token_headroom_for_foundry_first && wrapper_plan.foundry_first {
                 "blocked"
             } else {
                 "disabled"
@@ -2751,7 +2755,7 @@ fn selected_harness_executor_readiness(
             "harness_doctor.token_headroom_ready",
             "Token headroom keeps tool output, logs and large context reversible without flooding the child brain.",
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "harness".to_string(),
                 "headroom-plan".to_string(),
                 "--executor".to_string(),
@@ -2770,9 +2774,9 @@ fn selected_harness_executor_readiness(
                 "blocked"
             },
             "session_lifecycle_plan.lineage_complete",
-            "Opening or attaching brain shells should be recorded through Forge session lifecycle with workflow lineage.",
+            "Opening or attaching brain shells should be recorded through Foundry session lifecycle with workflow lineage.",
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "sessions".to_string(),
                 "lifecycle".to_string(),
                 "--session".to_string(),
@@ -2780,7 +2784,7 @@ fn selected_harness_executor_readiness(
                 "--state".to_string(),
                 "opened".to_string(),
                 "--origin".to_string(),
-                "forge_cli".to_string(),
+                "foundry_cli".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -2793,9 +2797,9 @@ fn selected_harness_executor_readiness(
                 "recommended"
             },
             "harness_mode.project_config_status",
-            "Project .forge/harness.json makes Forge-first mode, token headroom and lineage requirements explicit.",
+            "Project .foundry/harness.json makes Foundry-first mode, token headroom and lineage requirements explicit.",
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "harness".to_string(),
                 "bootstrap".to_string(),
                 "--executor".to_string(),
@@ -2813,15 +2817,15 @@ fn selected_harness_executor_readiness(
         ),
         executor_surface_readiness(
             "context_routing",
-            if routing_env_ready("FORGE_CONTEXT_ROUTING") {
+            if routing_env_ready("FOUNDRY_CONTEXT_ROUTING") {
                 "ready"
             } else {
                 "blocked"
             },
-            "wrapper_plan.env.FORGE_CONTEXT_ROUTING",
-            "Task context should be built by Forge context policy instead of an implicit CLI project scan.",
+            "wrapper_plan.env.FOUNDRY_CONTEXT_ROUTING",
+            "Task context should be built by Foundry context policy instead of an implicit CLI project scan.",
                 vec![
-                    "forge".to_string(),
+                    "foundry".to_string(),
                     "context".to_string(),
                     "--view".to_string(),
                     "compact".to_string(),
@@ -2831,15 +2835,15 @@ fn selected_harness_executor_readiness(
         ),
         executor_surface_readiness(
             "memory_routing",
-            if routing_env_ready("FORGE_MEMORY_ROUTING") {
+            if routing_env_ready("FOUNDRY_MEMORY_ROUTING") {
                 "ready"
             } else {
                 "blocked"
             },
-            "wrapper_plan.env.FORGE_MEMORY_ROUTING",
-            "Memory reads remain scoped by Forge visibility, tenant and project policy.",
+            "wrapper_plan.env.FOUNDRY_MEMORY_ROUTING",
+            "Memory reads remain scoped by Foundry visibility, tenant and project policy.",
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "memory".to_string(),
                 "policy".to_string(),
                 "--project-root".to_string(),
@@ -2850,25 +2854,25 @@ fn selected_harness_executor_readiness(
         ),
         executor_surface_readiness(
             "skill_routing",
-            if routing_env_ready("FORGE_SKILL_ROUTING") {
+            if routing_env_ready("FOUNDRY_SKILL_ROUTING") {
                 "ready"
             } else {
                 "blocked"
             },
-            "wrapper_plan.env.FORGE_SKILL_ROUTING",
-            "Skills are selected through Forge workflow/node capability context rather than hidden CLI defaults.",
-            vec!["forge".to_string(), "interactive".to_string(), "readiness".to_string(), "--output".to_string(), "json".to_string()],
+            "wrapper_plan.env.FOUNDRY_SKILL_ROUTING",
+            "Skills are selected through Foundry workflow/node capability context rather than hidden CLI defaults.",
+            vec!["foundry".to_string(), "interactive".to_string(), "readiness".to_string(), "--output".to_string(), "json".to_string()],
         ),
         executor_surface_readiness(
             "mcp_routing",
-            if routing_env_ready("FORGE_MCP_ROUTING") {
+            if routing_env_ready("FOUNDRY_MCP_ROUTING") {
                 "ready"
             } else {
                 "blocked"
             },
-            "wrapper_plan.env.FORGE_MCP_ROUTING",
-            "MCP tools remain routed by Forge capabilities, permissions and workflow state.",
-            vec!["forge".to_string(), "mcp".to_string(), "tools".to_string(), "--output".to_string(), "json".to_string()],
+            "wrapper_plan.env.FOUNDRY_MCP_ROUTING",
+            "MCP tools remain routed by Foundry capabilities, permissions and workflow state.",
+            vec!["foundry".to_string(), "mcp".to_string(), "tools".to_string(), "--output".to_string(), "json".to_string()],
         ),
         executor_surface_readiness(
             "credential_vault_boundary",
@@ -2877,24 +2881,24 @@ fn selected_harness_executor_readiness(
             } else {
                 "blocked"
             },
-            "wrapper_plan.env.FORGE_CREDENTIAL_VAULT_BOUNDARY",
+            "wrapper_plan.env.FOUNDRY_CREDENTIAL_VAULT_BOUNDARY",
             "Credential vault values stay out of prompts; child CLIs receive only governed references or injected env at execution time.",
-            vec!["forge".to_string(), "harness".to_string(), "doctor".to_string(), "--executor".to_string(), executor.clone(), "--output".to_string(), "json".to_string()],
+            vec!["foundry".to_string(), "harness".to_string(), "doctor".to_string(), "--executor".to_string(), executor.clone(), "--output".to_string(), "json".to_string()],
         ),
         executor_surface_readiness(
             "event_receipts",
             if event_receipts_ready { "ready" } else { "blocked" },
-            "wrapper_plan.env.FORGE_EVENT_RECEIPTS",
-            "Guarded child work should emit Forge receipts for workflow, task and run lineage.",
-            vec!["forge".to_string(), "events".to_string(), "tail".to_string(), "--output".to_string(), "json".to_string()],
+            "wrapper_plan.env.FOUNDRY_EVENT_RECEIPTS",
+            "Guarded child work should emit Foundry receipts for workflow, task and run lineage.",
+            vec!["foundry".to_string(), "events".to_string(), "tail".to_string(), "--output".to_string(), "json".to_string()],
         ),
         executor_surface_readiness(
             "cost_and_headroom_accounting",
             "ready",
             "headroom_stats",
-            "Forge can account token-headroom savings and execution cost signals separately from the brain CLI.",
+            "Foundry can account token-headroom savings and execution cost signals separately from the brain CLI.",
             vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "harness".to_string(),
                 "headroom-stats".to_string(),
                 "--output".to_string(),
@@ -2916,7 +2920,7 @@ fn non_selected_harness_executor_readiness(
         .map(|surface| {
             let command = match surface.as_str() {
                 "path_shim" => vec![
-                    "forge".to_string(),
+                    "foundry".to_string(),
                     "harness".to_string(),
                     "doctor".to_string(),
                     "--executor".to_string(),
@@ -2929,7 +2933,7 @@ fn non_selected_harness_executor_readiness(
                     "json".to_string(),
                 ],
                 _ => vec![
-                    "forge".to_string(),
+                    "foundry".to_string(),
                     "interactive".to_string(),
                     "harness".to_string(),
                     "--executor".to_string(),
@@ -2944,7 +2948,7 @@ fn non_selected_harness_executor_readiness(
                 &surface,
                 "inspect_required",
                 "not_selected_executor",
-                "Select this executor to compute live Forge-first readiness for its shim, policy and lineage state.",
+                "Select this executor to compute live Foundry-first readiness for its shim, policy and lineage state.",
                 command,
             )
         })
@@ -2981,7 +2985,7 @@ fn harness_executor_next_commands(
     let shim_dir_display = shim_dir.display().to_string();
     if !selected {
         return vec![format!(
-            "forge interactive harness --executor {} --shim-dir {} --project-root {} --output json",
+            "foundry interactive harness --executor {} --shim-dir {} --project-root {} --output json",
             shell_quote(&family.executor),
             shell_quote(&shim_dir_display),
             shell_quote(&project_root_display)
@@ -2995,7 +2999,7 @@ fn harness_executor_next_commands(
             && item.source == "harness_doctor.shim_status.path_precedence"
     }) {
         commands.push(format!(
-            "forge harness activation-profile --shim-dir {} --executor {} --project-root {} --output json",
+            "foundry harness activation-profile --shim-dir {} --executor {} --project-root {} --output json",
             shell_quote(&shim_dir_display),
             shell_quote(&family.executor),
             shell_quote(&project_root_display)
@@ -3005,7 +3009,7 @@ fn harness_executor_next_commands(
         .any(|item| item.surface == "path_shim" && item.status == "blocked")
     {
         commands.push(format!(
-            "forge harness install-shims --shim-dir {} --executor {} --project-root {} --output json",
+            "foundry harness install-shims --shim-dir {} --executor {} --project-root {} --output json",
             shell_quote(&shim_dir_display),
             shell_quote(&family.executor),
             shell_quote(&project_root_display)
@@ -3021,17 +3025,17 @@ fn harness_executor_next_commands(
         );
     }
     commands.push(format!(
-        "forge harness wrap-plan --executor {} --project-root {} --output json",
+        "foundry harness wrap-plan --executor {} --project-root {} --output json",
         shell_quote(&family.executor),
         shell_quote(&project_root_display)
     ));
     commands.push(format!(
-        "forge harness headroom-plan --executor {} --project-root {} --output json",
+        "foundry harness headroom-plan --executor {} --project-root {} --output json",
         shell_quote(&family.executor),
         shell_quote(&project_root_display)
     ));
     commands.push(format!(
-        "forge sync executors --shim-dir {} --allow {} --output json",
+        "foundry sync executors --shim-dir {} --allow {} --output json",
         shell_quote(&shim_dir_display),
         shell_quote(&family.executor)
     ));
@@ -3182,16 +3186,16 @@ pub fn build_harness_bootstrap_report(
     let project_root_display = project_root_path.display().to_string();
     let shim_dir_display = shim_dir_path.display().to_string();
     let recommended_project_config = HarnessRecommendedProjectConfig {
-        default_mode: "forge_first".to_string(),
+        default_mode: "foundry_first".to_string(),
         default_context_budget: context_budget,
         default_token_headroom: true,
-        require_token_headroom_for_forge_first: true,
+        require_token_headroom_for_foundry_first: true,
         require_lineage_for_exec: true,
     };
     let adoption_plan = build_harness_adoption_plan(HarnessAdoptionPlanOptions {
         shim_dir: &shim_dir_path,
         executor: &executor,
-        forge_first: true,
+        foundry_first: true,
         observe_only: false,
         project_root: Some(&project_root_path),
         workflow_id: None,
@@ -3201,9 +3205,9 @@ pub fn build_harness_bootstrap_report(
         context_budget_source,
         token_headroom,
         token_headroom_source,
-        require_token_headroom_for_forge_first: true,
+        require_token_headroom_for_foundry_first: true,
     })?;
-    let config_path = project_root_path.join(".forge/harness.json");
+    let config_path = project_root_path.join(".foundry/harness.json");
     let existed_before = config_path.exists();
     let approved_by = approved_by
         .map(str::trim)
@@ -3267,7 +3271,7 @@ pub fn build_harness_bootstrap_report(
             shim_install: None,
             next_commands: vec![
                 "review adoption_plan before applying".to_string(),
-                "forge harness bootstrap --executor <executor> --shim-dir <dir> --project-root <project-root> --apply --approved-by <operator> --output json".to_string(),
+                "foundry harness bootstrap --executor <executor> --shim-dir <dir> --project-root <project-root> --apply --approved-by <operator> --output json".to_string(),
             ],
             notes: vec![
                 "Dry-run is the default; no project config, shim or executor state is changed."
@@ -3286,8 +3290,8 @@ pub fn build_harness_bootstrap_report(
         executor: &executor,
         real_cmd: None,
         store_path,
-        forge_first: true,
-        forge_first_source: "bootstrap_default",
+        foundry_first: true,
+        foundry_first_source: "bootstrap_default",
         workflow_id: None,
         task_id: None,
         run_id: None,
@@ -3317,15 +3321,15 @@ pub fn build_harness_bootstrap_report(
         next_commands: vec![
             format!("export PATH={}:$PATH", shell_quote(&shim_dir_display)),
             format!(
-                "forge sync executors --shim-dir {} --output json",
+                "foundry sync executors --shim-dir {} --output json",
                 shell_quote(&shim_dir_display)
             ),
-            "forge harness doctor --executor <executor> --shim-dir <dir> --project-root <project-root> --output json".to_string(),
+            "foundry harness doctor --executor <executor> --shim-dir <dir> --project-root <project-root> --output json".to_string(),
         ],
         notes: vec![
-            "Bootstrap wrote the project harness policy before installing Forge-owned shims."
+            "Bootstrap wrote the project harness policy before installing Foundry-owned shims."
                 .to_string(),
-            "The native CLI remains the executable behind the shim; Forge only controls entry, context, lineage and headroom policy.".to_string(),
+            "The native CLI remains the executable behind the shim; Foundry only controls entry, context, lineage and headroom policy.".to_string(),
         ],
     })
 }
@@ -3335,14 +3339,14 @@ fn write_harness_bootstrap_project_config(
     config: &HarnessRecommendedProjectConfig,
     approved_by: Option<&str>,
 ) -> Result<HarnessBootstrapConfigWrite> {
-    let forge_dir = project_root.join(".forge");
-    fs::create_dir_all(&forge_dir).with_context(|| {
+    let foundry_dir = project_root.join(".foundry");
+    fs::create_dir_all(&foundry_dir).with_context(|| {
         format!(
-            "failed to create Forge project dir `{}`",
-            forge_dir.display()
+            "failed to create Foundry project dir `{}`",
+            foundry_dir.display()
         )
     })?;
-    let path = forge_dir.join("harness.json");
+    let path = foundry_dir.join("harness.json");
     let existed_before = path.exists();
     let mut existing = if existed_before {
         let content = fs::read_to_string(&path)
@@ -3365,8 +3369,8 @@ fn write_harness_bootstrap_project_config(
         json!(config.default_token_headroom),
     );
     existing.insert(
-        "require_token_headroom_for_forge_first".to_string(),
-        json!(config.require_token_headroom_for_forge_first),
+        "require_token_headroom_for_foundry_first".to_string(),
+        json!(config.require_token_headroom_for_foundry_first),
     );
     existing.insert(
         "require_lineage_for_exec".to_string(),
@@ -3405,7 +3409,7 @@ fn bootstrap_config_write_report(
         approved_by: approved_by.map(ToString::to_string),
         config,
         notes: vec![
-            "Project harness config controls Forge-first defaults, token headroom and lineage policy."
+            "Project harness config controls Foundry-first defaults, token headroom and lineage policy."
                 .to_string(),
             "Bootstrap preserves unrelated JSON keys when updating an existing harness config."
                 .to_string(),
@@ -3413,20 +3417,47 @@ fn bootstrap_config_write_report(
     }
 }
 
-pub fn resolve_harness_forge_first_source(
-    flag_forge_first: bool,
+pub fn resolve_harness_foundry_first_source(
+    flag_foundry_first: bool,
     flag_observe_only: bool,
 ) -> (bool, &'static str) {
-    resolve_harness_forge_first_source_for_project(flag_forge_first, flag_observe_only, None)
+    resolve_harness_foundry_first_source_for_project(flag_foundry_first, flag_observe_only, None)
 }
 
-pub fn resolve_harness_forge_first_source_for_project(
-    flag_forge_first: bool,
+pub fn resolve_harness_foundry_first_source_for_project(
+    flag_foundry_first: bool,
     flag_observe_only: bool,
     project_root: Option<&Path>,
 ) -> (bool, &'static str) {
-    let mode = resolve_harness_forge_first(flag_forge_first, flag_observe_only, project_root);
-    (mode.forge_first, mode.source)
+    let mode = resolve_harness_foundry_first(flag_foundry_first, flag_observe_only, project_root);
+    (mode.foundry_first, mode.source)
+}
+
+#[deprecated(since = "0.6.0", note = "use resolve_harness_foundry_first_source")]
+// foundry-brand-allow: legacy-compat
+pub fn resolve_harness_forge_first_source(
+    flag_forge_first: bool, // foundry-brand-allow: legacy-compat
+    flag_observe_only: bool,
+) -> (bool, &'static str) {
+    resolve_harness_foundry_first_source(flag_forge_first, flag_observe_only) // foundry-brand-allow: legacy-compat
+}
+
+#[deprecated(
+    since = "0.6.0",
+    note = "use resolve_harness_foundry_first_source_for_project"
+)]
+// foundry-brand-allow: legacy-compat
+pub fn resolve_harness_forge_first_source_for_project(
+    flag_forge_first: bool, // foundry-brand-allow: legacy-compat
+    flag_observe_only: bool,
+    project_root: Option<&Path>,
+) -> (bool, &'static str) {
+    resolve_harness_foundry_first_source_for_project(
+        // foundry-brand-allow: legacy-compat
+        flag_forge_first, // foundry-brand-allow: legacy-compat
+        flag_observe_only,
+        project_root,
+    )
 }
 
 pub fn resolve_harness_runtime_policy(
@@ -3456,19 +3487,19 @@ pub fn resolve_harness_runtime_policy(
                 .map(|enabled| (enabled, "project_config".to_string()))
         })
         .unwrap_or_else(|| (true, "default_enabled".to_string()));
-    let require_token_headroom_for_forge_first = project_policy
+    let require_token_headroom_for_foundry_first = project_policy
         .as_ref()
-        .is_some_and(|policy| policy.require_token_headroom_for_forge_first);
-    if options.forge_first && require_token_headroom_for_forge_first && !token_headroom {
+        .is_some_and(|policy| policy.require_token_headroom_for_foundry_first);
+    if options.foundry_first && require_token_headroom_for_foundry_first && !token_headroom {
         token_headroom = true;
-        token_headroom_source = "project_policy_required_for_forge_first".to_string();
+        token_headroom_source = "project_policy_required_for_foundry_first".to_string();
     }
     HarnessRuntimePolicy {
         context_budget,
         context_budget_source,
         token_headroom,
         token_headroom_source,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
     }
 }
 
@@ -3476,8 +3507,8 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
     let CliWrapperPlanOptions {
         executor,
         command,
-        forge_first,
-        forge_first_source,
+        foundry_first,
+        foundry_first_source,
         project_root,
         workflow_id,
         task_id,
@@ -3486,10 +3517,10 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         context_budget_source,
         token_headroom,
         token_headroom_source,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
     } = options;
     let executor = normalize_executor(executor);
-    let forge_first_source = normalize_harness_mode_source(forge_first_source, forge_first);
+    let foundry_first_source = normalize_harness_mode_source(foundry_first_source, foundry_first);
     let command = if command.is_empty() {
         vec![executor.clone()]
     } else {
@@ -3499,57 +3530,57 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         &executor,
         token_headroom,
         context_budget,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
     );
     let mut env =
         vec![
         env_var(
-            "FORGE_HARNESS",
+            "FOUNDRY_HARNESS",
             "enabled",
-            "marks the child process as running under Forge harness control",
+            "marks the child process as running under Foundry harness control",
         ),
         env_var(
-            "FORGE_HARNESS_MODE",
-            if forge_first { "forge_first" } else { "observe_only" },
-            "controls whether Forge context routing is preferred before native CLI defaults",
+            "FOUNDRY_HARNESS_MODE",
+            if foundry_first { "foundry_first" } else { "observe_only" },
+            "controls whether Foundry context routing is preferred before native CLI defaults",
         ),
         env_var(
-            "FORGE_HARNESS_MODE_SOURCE",
-            &forge_first_source,
+            "FOUNDRY_HARNESS_MODE_SOURCE",
+            &foundry_first_source,
             "records which CLI/API input selected the harness mode",
         ),
         env_var(
-            "FORGE_CONTEXT_BUDGET",
+            "FOUNDRY_CONTEXT_BUDGET",
             &context_budget.to_string(),
             "bounds task-local context before a brain CLI receives it",
         ),
         env_var(
-            "FORGE_TOKEN_HEADROOM",
+            "FOUNDRY_TOKEN_HEADROOM",
             if token_headroom { "enabled" } else { "disabled" },
-            "enables Forge's local token-headroom contract for tool output and context payloads",
+            "enables Foundry's local token-headroom contract for tool output and context payloads",
         ),
     ];
     env.extend(headroom_runtime_plan.env.clone());
     env.extend(harness_operating_context_env(project_root));
     if let Some(workflow_id) = workflow_id.filter(|value| !value.trim().is_empty()) {
         env.push(env_var(
-            "FORGE_WORKFLOW_ID",
+            "FOUNDRY_WORKFLOW_ID",
             workflow_id,
-            "binds CLI execution to a Forge workflow lineage",
+            "binds CLI execution to a Foundry workflow lineage",
         ));
     }
     if let Some(task_id) = task_id.filter(|value| !value.trim().is_empty()) {
         env.push(env_var(
-            "FORGE_TASK_ID",
+            "FOUNDRY_TASK_ID",
             task_id,
-            "binds CLI execution to a Forge task/node lineage",
+            "binds CLI execution to a Foundry task/node lineage",
         ));
     }
     if let Some(run_id) = run_id.filter(|value| !value.trim().is_empty()) {
         env.push(env_var(
-            "FORGE_RUN_ID",
+            "FOUNDRY_RUN_ID",
             run_id,
-            "binds CLI execution to a Forge async run lineage",
+            "binds CLI execution to a Foundry async run lineage",
         ));
     }
     if executor == "claude" {
@@ -3563,14 +3594,14 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
     env.extend(orchestration_env.clone());
 
     let mut launch_command = vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "harness".to_string(),
         "exec".to_string(),
         "--executor".to_string(),
         executor.clone(),
     ];
-    if forge_first {
-        launch_command.push("--forge-first".to_string());
+    if foundry_first {
+        launch_command.push("--foundry-first".to_string());
     }
     if let Some(workflow_id) = workflow_id.filter(|value| !value.trim().is_empty()) {
         launch_command.push("--workflow".to_string());
@@ -3596,22 +3627,22 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
 
     let mut harness_checks = vec![
         "resolve real CLI before PATH shim precedence".to_string(),
-        "prepend Forge shim directory only for the child process".to_string(),
+        "prepend Foundry shim directory only for the child process".to_string(),
         "record argv, cwd, workflow/task/run lineage, token-headroom metrics and timeline event evidence".to_string(),
         "plan shell session lifecycle events before a brain CLI is opened, attached or closed".to_string(),
-        "persist reversible headroom blobs in the Forge store when compression is applied".to_string(),
-        "fall back to observe_only when Forge context is unavailable".to_string(),
+        "persist reversible headroom blobs in the Foundry store when compression is applied".to_string(),
+        "fall back to observe_only when Foundry context is unavailable".to_string(),
     ];
-    if require_token_headroom_for_forge_first {
+    if require_token_headroom_for_foundry_first {
         harness_checks.push(
-            "project policy requires token headroom for Forge-first CLI execution".to_string(),
+            "project policy requires token headroom for Foundry-first CLI execution".to_string(),
         );
     }
     let session_lifecycle_plan =
         build_harness_session_lifecycle_plan(&executor, workflow_id, task_id, run_id);
     let orchestration_contract = build_harness_orchestration_contract(
         &executor,
-        forge_first,
+        foundry_first,
         workflow_id,
         task_id,
         run_id,
@@ -3625,17 +3656,17 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         status: "cli_wrapper_plan_ready".to_string(),
         executor: executor.clone(),
         command,
-        forge_first,
-        forge_first_source,
+        foundry_first,
+        foundry_first_source,
         workflow_id: normalize_optional_text(workflow_id),
         task_id: normalize_optional_text(task_id),
         run_id: normalize_optional_text(run_id),
-        wrapper_strategy: "env_overlay_with_forge_context_and_token_headroom".to_string(),
+        wrapper_strategy: "env_overlay_with_foundry_context_and_token_headroom".to_string(),
         context_budget,
         context_budget_source: context_budget_source.to_string(),
         token_headroom_enabled: token_headroom,
         token_headroom_source: token_headroom_source.to_string(),
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
         env,
         launch_command,
         orchestration_contract,
@@ -3646,7 +3677,7 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         notes: vec![
             "Headroom-inspired ideas absorbed: local-first compression, reversible retrieval refs, CLI wrapper env shaping, tool-search preservation and shim-based harness tests".to_string(),
             "This plan is non-destructive; actual exec remains a separate guarded harness action".to_string(),
-            "Session lifecycle commands are plan-only and must be recorded through Forge before relying on external brain shell state.".to_string(),
+            "Session lifecycle commands are plan-only and must be recorded through Foundry before relying on external brain shell state.".to_string(),
         ],
     }
 }
@@ -3657,10 +3688,10 @@ fn build_connected_brain_provider_wrapper_plan(
     token_headroom: bool,
 ) -> HarnessConnectedBrainProviderWrapperPlan {
     let project_root_path = absolute_project_root(project_root);
-    let shim_dir = project_root_path.join(".forge/bin");
+    let shim_dir = project_root_path.join(".foundry/bin");
     let wrapper_path = shim_dir.join(shim_binary_name(executor));
     let provider_adapter_path = shim_dir.join(provider_adapter_binary_name(executor));
-    let manifest_path = project_root_path.join(".forge/connected-brain-runtimes.json");
+    let manifest_path = project_root_path.join(".foundry/connected-brain-runtimes.json");
     let wrapper_exists = wrapper_path.is_file();
     let provider_adapter_exists = provider_adapter_path.is_file();
     let wrapper_executable = wrapper_exists && is_executable(&wrapper_path);
@@ -3735,7 +3766,7 @@ fn build_connected_brain_provider_wrapper_plan(
         target_manifest_path: manifest_path.display().to_string(),
         manifest_provider_template,
         install_command: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "harness".to_string(),
             "install-provider-adapter".to_string(),
             "--shim-dir".to_string(),
@@ -3751,7 +3782,7 @@ fn build_connected_brain_provider_wrapper_plan(
             "json".to_string(),
         ],
         evidence_plan_command: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "milestone".to_string(),
             "evidence-plan".to_string(),
             "--version".to_string(),
@@ -3766,7 +3797,7 @@ fn build_connected_brain_provider_wrapper_plan(
             "json".to_string(),
         ],
         collection_command: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "milestone".to_string(),
             "collect-evidence".to_string(),
             "--version".to_string(),
@@ -3782,16 +3813,16 @@ fn build_connected_brain_provider_wrapper_plan(
             "--approved-by".to_string(),
             "<operator>".to_string(),
             "--origin".to_string(),
-            "forge_cli".to_string(),
+            "foundry_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
         readiness_checks,
         counts_as_release_evidence: false,
         notes: vec![
-            "This read-only bridge separates the daily Forge-first CLI shim from the connected-brain provider adapter that must emit Forge provider-output evidence.".to_string(),
+            "This read-only bridge separates the daily Foundry-first CLI shim from the connected-brain provider adapter that must emit Foundry provider-output evidence.".to_string(),
             "Installing the daily shim is not enough for release evidence; collection requires an operator-approved provider adapter command and a separate collect-evidence run.".to_string(),
-            "The adapter path is secret-free and must run through Forge-owned context, memory, MCP, credential-vault, event receipt and token-headroom routing before promotion evidence can pass.".to_string(),
+            "The adapter path is secret-free and must run through Foundry-owned context, memory, MCP, credential-vault, event receipt and token-headroom routing before promotion evidence can pass.".to_string(),
         ],
     }
 }
@@ -3799,47 +3830,47 @@ fn build_connected_brain_provider_wrapper_plan(
 fn harness_orchestration_env(token_headroom: bool) -> Vec<CliWrapperEnvVar> {
     vec![
         env_var(
-            "FORGE_PROMPT_PACKET_REQUIRED",
+            "FOUNDRY_PROMPT_PACKET_REQUIRED",
             "true",
-            "requires Forge-owned prompt packets with organization, personality and company-work decisions before brain execution",
+            "requires Foundry-owned prompt packets with organization, personality and company-work decisions before brain execution",
         ),
         env_var(
-            "FORGE_CONTEXT_ROUTING",
-            "forge_controlled",
-            "routes task context through Forge context policy instead of the child CLI's implicit project scan",
+            "FOUNDRY_CONTEXT_ROUTING",
+            "foundry_controlled",
+            "routes task context through Foundry context policy instead of the child CLI's implicit project scan",
         ),
         env_var(
-            "FORGE_MEMORY_ROUTING",
-            "forge_controlled",
-            "routes memory lookup through Forge memory governance and visibility policy",
+            "FOUNDRY_MEMORY_ROUTING",
+            "foundry_controlled",
+            "routes memory lookup through Foundry memory governance and visibility policy",
         ),
         env_var(
-            "FORGE_SKILL_ROUTING",
-            "forge_controlled",
-            "routes skill selection through Forge-owned workflow and node capability context",
+            "FOUNDRY_SKILL_ROUTING",
+            "foundry_controlled",
+            "routes skill selection through Foundry-owned workflow and node capability context",
         ),
         env_var(
-            "FORGE_MCP_ROUTING",
-            "forge_controlled",
-            "routes MCP/tool availability through Forge capability, permission and workflow state",
+            "FOUNDRY_MCP_ROUTING",
+            "foundry_controlled",
+            "routes MCP/tool availability through Foundry capability, permission and workflow state",
         ),
         env_var(
-            "FORGE_CREDENTIAL_VAULT_BOUNDARY",
+            "FOUNDRY_CREDENTIAL_VAULT_BOUNDARY",
             "reference_only",
             "keeps credential-vault values outside prompts and passes only governed references to child CLIs",
         ),
         env_var(
-            "FORGE_TOKEN_HEADROOM_REQUIRED",
+            "FOUNDRY_TOKEN_HEADROOM_REQUIRED",
             if token_headroom { "true" } else { "false" },
-            "declares whether large context, logs and tool output must use Forge token-headroom routing",
+            "declares whether large context, logs and tool output must use Foundry token-headroom routing",
         ),
         env_var(
-            "FORGE_SESSION_LIFECYCLE",
+            "FOUNDRY_SESSION_LIFECYCLE",
             "audited",
-            "requires shell launch/opened/attached/closed state to be recorded through Forge session lifecycle",
+            "requires shell launch/opened/attached/closed state to be recorded through Foundry session lifecycle",
         ),
         env_var(
-            "FORGE_EVENT_RECEIPTS",
+            "FOUNDRY_EVENT_RECEIPTS",
             "required",
             "requires workflow/task/run lineage and receipt events for guarded child process execution",
         ),
@@ -3850,7 +3881,7 @@ fn build_harness_headroom_runtime_plan(
     executor: &str,
     enabled: bool,
     context_budget: usize,
-    require_for_forge_first: bool,
+    require_for_foundry_first: bool,
 ) -> HarnessHeadroomRuntimePlan {
     let mode = if enabled {
         "compress_reference_and_retrieve"
@@ -3868,11 +3899,11 @@ fn build_harness_headroom_runtime_plan(
         executor: executor.to_string(),
         mode: mode.to_string(),
         context_budget,
-        require_for_forge_first,
+        require_for_foundry_first,
         interception_points: vec![
             headroom_interception_point(
                 "prompt_packet",
-                "forge_context_packet",
+                "foundry_context_packet",
                 "child_cli_prompt",
                 "ingress",
                 enabled,
@@ -3889,7 +3920,7 @@ fn build_harness_headroom_runtime_plan(
             headroom_interception_point(
                 "stdout_stderr",
                 "guarded_harness_exec",
-                "forge_event_receipt",
+                "foundry_event_receipt",
                 "egress",
                 enabled,
                 "compress_output_and_store_reversible_blob",
@@ -3897,10 +3928,10 @@ fn build_harness_headroom_runtime_plan(
             headroom_interception_point(
                 "retrieval_request",
                 "brain_or_operator",
-                "forge_headroom_store",
+                "foundry_headroom_store",
                 "on_demand",
                 enabled,
-                "retrieve_original_by_forge_headroom_ref",
+                "retrieve_original_by_foundry_headroom_ref",
             ),
         ],
         content_routes: vec![
@@ -3936,11 +3967,11 @@ fn build_harness_headroom_runtime_plan(
             ),
         ],
         reversible_store: HarnessHeadroomReversibleStore {
-            backend: "forge_store_headroom_blobs".to_string(),
-            uri_scheme: "forge://harness/headroom/".to_string(),
+            backend: "foundry_store_headroom_blobs".to_string(),
+            uri_scheme: "foundry://harness/headroom/".to_string(),
             persistence_mode: "explicit_persist_or_guarded_exec_receipt".to_string(),
             retrieval_command: vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "harness".to_string(),
                 "retrieve-headroom".to_string(),
                 "--ref".to_string(),
@@ -3952,31 +3983,31 @@ fn build_harness_headroom_runtime_plan(
             ttl_policy: "store_retention_policy_controls_lifetime".to_string(),
         },
         mcp_tools: vec![
-            "forge.harness.token_headroom".to_string(),
-            "forge.harness.retrieve_headroom".to_string(),
-            "forge.harness.headroom_stats".to_string(),
+            "foundry.harness.token_headroom".to_string(),
+            "foundry.harness.retrieve_headroom".to_string(),
+            "foundry.harness.headroom_stats".to_string(),
         ],
         env: vec![
             env_var(
-                "FORGE_HEADROOM_RUNTIME_PLAN",
+                "FOUNDRY_HEADROOM_RUNTIME_PLAN",
                 CLI_HARNESS_HEADROOM_RUNTIME_PLAN_SCHEMA_VERSION,
                 "declares the structured wrapper interception and retrieval contract",
             ),
             env_var(
-                "FORGE_HEADROOM_INTERCEPT",
+                "FOUNDRY_HEADROOM_INTERCEPT",
                 if enabled { "enabled" } else { "disabled" },
                 "controls whether wrapper integrations must compress large payloads before returning them to the brain",
             ),
             env_var(
-                "FORGE_HEADROOM_RETRIEVAL_TOOL",
-                "forge.harness.retrieve_headroom",
+                "FOUNDRY_HEADROOM_RETRIEVAL_TOOL",
+                "foundry.harness.retrieve_headroom",
                 "names the MCP/CLI retrieval surface for reversible headroom refs",
             ),
         ],
         notes: vec![
             "This plan is declarative: it does not proxy network traffic or start a child CLI by itself."
                 .to_string(),
-            "It adapts Headroom-style wrapper and reversible retrieval concepts to Forge-owned workflow lineage, memory policy and event receipts.".to_string(),
+            "It adapts Headroom-style wrapper and reversible retrieval concepts to Foundry-owned workflow lineage, memory policy and event receipts.".to_string(),
         ],
     }
 }
@@ -4011,14 +4042,14 @@ fn headroom_content_route(
         strategy: strategy.to_string(),
         reversible: true,
         persistence: persistence.to_string(),
-        retrieval_hint: "return forge://harness/headroom/<sha256> when original content is needed"
-            .to_string(),
+        retrieval_hint:
+            "return foundry://harness/headroom/<sha256> when original content is needed".to_string(),
     }
 }
 
 fn build_harness_orchestration_contract(
     executor: &str,
-    forge_first: bool,
+    foundry_first: bool,
     workflow_id: Option<&str>,
     task_id: Option<&str>,
     run_id: Option<&str>,
@@ -4027,9 +4058,9 @@ fn build_harness_orchestration_contract(
     HarnessOrchestrationContract {
         schema_version: CLI_HARNESS_ORCHESTRATION_CONTRACT_SCHEMA_VERSION.to_string(),
         status: "orchestration_contract_ready".to_string(),
-        control_plane: "forge_core".to_string(),
+        control_plane: "foundry_core".to_string(),
         executor: executor.to_string(),
-        forge_first,
+        foundry_first,
         workflow_id: normalize_optional_text(workflow_id),
         task_id: normalize_optional_text(task_id),
         run_id: normalize_optional_text(run_id),
@@ -4039,53 +4070,53 @@ fn build_harness_orchestration_contract(
                 "prompt_packet",
                 "goal/workflow/node context",
                 "child brain prompt",
-                "Forge supplies organization, brand, product, personality and company-work decisions before the CLI sees task context.",
+                "Foundry supplies organization, brand, product, personality and company-work decisions before the CLI sees task context.",
             ),
             orchestration_stage(
                 "context_router",
-                "Forge context engine",
+                "Foundry context engine",
                 "bounded task packet",
                 "Context is selected by workflow/task policy rather than by unrestricted project scanning.",
             ),
             orchestration_stage(
                 "memory_router",
-                "Forge memory governance",
+                "Foundry memory governance",
                 "scoped memory snippets",
                 "Memory access stays tenant-bound, audience-gated and retrieval-based.",
             ),
             orchestration_stage(
                 "skill_router",
-                "Forge capability registry",
+                "Foundry capability registry",
                 "executor skill surface",
                 "Skills are selected from workflow and node capability needs, not from global CLI defaults.",
             ),
             orchestration_stage(
                 "mcp_router",
-                "Forge tool registry",
+                "Foundry tool registry",
                 "allowed tool surface",
                 "MCP/tool access remains permissioned, auditable and replaceable per node brain.",
             ),
             orchestration_stage(
                 "credential_vault_boundary",
-                "Forge credential references",
+                "Foundry credential references",
                 "child process environment",
                 "Secrets cross the boundary only through approved vault references or injected env, never through prompt text.",
             ),
             orchestration_stage(
                 "token_headroom",
-                "Forge harness headroom",
+                "Foundry harness headroom",
                 "logs, context and stdout/stderr",
                 "Large payloads are compressed locally with reversible retrieval refs before returning to a brain.",
             ),
             orchestration_stage(
                 "session_lifecycle",
-                "Forge session registry",
+                "Foundry session registry",
                 "brain shell lifecycle",
                 "Shell launch/opened/attached/closed transitions stay auditable even when a human drives the CLI.",
             ),
             orchestration_stage(
                 "event_receipt",
-                "Forge event timeline",
+                "Foundry event timeline",
                 "workflow observability",
                 "Guarded CLI work emits receipts tied to workflow, task and run lineage.",
             ),
@@ -4100,7 +4131,7 @@ fn build_harness_orchestration_contract(
             "event_receipts_recordable".to_string(),
         ],
         notes: vec![
-            "This contract makes external CLIs execution brains; Forge remains the workflow, routing, memory, permission and observability control plane.".to_string(),
+            "This contract makes external CLIs execution brains; Foundry remains the workflow, routing, memory, permission and observability control plane.".to_string(),
             "The contract is read-only planning data and does not launch or intercept a child process by itself.".to_string(),
         ],
     }
@@ -4114,7 +4145,7 @@ fn orchestration_stage(
 ) -> HarnessOrchestrationStage {
     HarnessOrchestrationStage {
         id: id.to_string(),
-        owner: "forge".to_string(),
+        owner: "foundry".to_string(),
         source: source.to_string(),
         target: target.to_string(),
         required: true,
@@ -4177,7 +4208,7 @@ fn build_harness_session_lifecycle_plan(
                 state: "planned".to_string(),
                 status: "available".to_string(),
                 command: vec![
-                    "forge".to_string(),
+                    "foundry".to_string(),
                     "shells".to_string(),
                     "--executor".to_string(),
                     executor.to_string(),
@@ -4189,7 +4220,7 @@ fn build_harness_session_lifecycle_plan(
                     run_arg.clone(),
                     "--record-session".to_string(),
                     "--origin".to_string(),
-                    "forge_harness".to_string(),
+                    "foundry_harness".to_string(),
                     "--output".to_string(),
                     "json".to_string(),
                 ],
@@ -4249,7 +4280,7 @@ fn harness_session_lifecycle_gate(
         state: state.to_string(),
         status: status.to_string(),
         command: vec![
-            "forge".to_string(),
+            "foundry".to_string(),
             "sessions".to_string(),
             "lifecycle".to_string(),
             "--session".to_string(),
@@ -4263,21 +4294,21 @@ fn harness_session_lifecycle_gate(
             "--run".to_string(),
             lifecycle_context.run_id.to_string(),
             "--origin".to_string(),
-            "forge_harness".to_string(),
+            "foundry_harness".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
         mutates_workflow: false,
         records_event: true,
         rationale: format!(
-            "Record the `{state}` lifecycle transition in Forge-owned session history without starting child processes."
+            "Record the `{state}` lifecycle transition in Foundry-owned session history without starting child processes."
         ),
     }
 }
 
 fn harness_session_id(executor: &str) -> String {
-    if executor == "forge" {
-        "forge-tui".to_string()
+    if executor == "foundry" {
+        "foundry-tui".to_string()
     } else {
         format!("{executor}-shell")
     }
@@ -4291,8 +4322,8 @@ pub fn install_cli_harness_shim(
         executor,
         real_cmd,
         store_path,
-        forge_first,
-        forge_first_source,
+        foundry_first,
+        foundry_first_source,
         workflow_id,
         task_id,
         run_id,
@@ -4301,26 +4332,26 @@ pub fn install_cli_harness_shim(
         force,
     } = options;
     let executor = normalize_executor(executor);
-    let forge_first_source = normalize_harness_mode_source(forge_first_source, forge_first);
+    let foundry_first_source = normalize_harness_mode_source(foundry_first_source, foundry_first);
     fs::create_dir_all(shim_dir)
         .with_context(|| format!("failed to create shim dir `{}`", shim_dir.display()))?;
     let shim_dir = shim_dir
         .canonicalize()
         .unwrap_or_else(|_| shim_dir.to_path_buf());
     let real_command = resolve_real_command_for_shim(&executor, real_cmd, &shim_dir)?;
-    let current_exe = env::current_exe().context("failed to resolve current forge binary")?;
-    let forge_binary = current_exe
+    let current_exe = env::current_exe().context("failed to resolve current foundry binary")?;
+    let foundry_binary = current_exe
         .canonicalize()
         .unwrap_or(current_exe)
         .display()
         .to_string();
     let shim_path = shim_dir.join(shim_binary_name(&executor));
     let script = build_cli_shim_script(CliShimScriptOptions {
-        forge_binary: &forge_binary,
+        foundry_binary: &foundry_binary,
         executor: &executor,
         real_cmd: &real_command.command,
         store_path,
-        forge_first,
+        foundry_first,
         workflow_id,
         task_id,
         run_id,
@@ -4362,9 +4393,9 @@ pub fn install_cli_harness_shim(
         real_command_source: real_command.source,
         real_command_resolution_status: real_command.status,
         store_path: store_path.map(|path| path.display().to_string()),
-        forge_binary: forge_binary.clone(),
-        forge_first,
-        forge_first_source: forge_first_source.clone(),
+        foundry_binary: foundry_binary.clone(),
+        foundry_first,
+        foundry_first_source: foundry_first_source.clone(),
         context_budget,
         token_headroom,
         status: status.to_string(),
@@ -4372,14 +4403,14 @@ pub fn install_cli_harness_shim(
         argv_policy: "preserve_user_argv_after_resolved_real_cli".to_string(),
         safety_checks: vec![
             "shim directory is explicit and must be added to PATH by the caller".to_string(),
-            "existing non-Forge shim files are not overwritten unless --force is used".to_string(),
+            "existing non-Foundry shim files are not overwritten unless --force is used".to_string(),
             "real CLI command is captured before the shim can take PATH precedence".to_string(),
-            "shim delegates to forge harness exec with --execute and --allow-exec".to_string(),
+            "shim delegates to foundry harness exec with --execute and --allow-exec".to_string(),
         ],
         notes: vec![
-            "This installs a Forge-owned CLI shim, not a replacement for the native CLI binary."
+            "This installs a Foundry-owned CLI shim, not a replacement for the native CLI binary."
                 .to_string(),
-            "Put the shim directory before the native CLI directory only in shells that should prefer Forge infrastructure.".to_string(),
+            "Put the shim directory before the native CLI directory only in shells that should prefer Foundry infrastructure.".to_string(),
         ],
     };
 
@@ -4388,9 +4419,9 @@ pub fn install_cli_harness_shim(
         status: overall_status.to_string(),
         shim_dir: shim_dir.display().to_string(),
         store_path: store_path.map(|path| path.display().to_string()),
-        forge_binary,
-        forge_first,
-        forge_first_source,
+        foundry_binary,
+        foundry_first,
+        foundry_first_source,
         context_budget,
         token_headroom,
         force,
@@ -4404,7 +4435,7 @@ pub fn install_cli_harness_shim(
                 shell_quote(&shim_dir.display().to_string())
             ),
             "verify the real CLI path before putting the shim directory first in PATH".to_string(),
-            "rerun with --force only when the existing file is disposable or Forge-owned"
+            "rerun with --force only when the existing file is disposable or Foundry-owned"
                 .to_string(),
         ],
     })
@@ -4479,7 +4510,7 @@ pub fn install_cli_provider_adapter(
         status: status.to_string(),
         executable,
         script_sha256: (status != "blocked_existing_file").then_some(script_sha256),
-        output_contract: "forge.connected_external_brain.provider_output.v1".to_string(),
+        output_contract: "foundry.connected_external_brain.provider_output.v1".to_string(),
         counts_as_release_evidence: false,
         safety_checks: vec![
             "provider adapter path is separate from the daily PATH shim".to_string(),
@@ -4487,13 +4518,13 @@ pub fn install_cli_provider_adapter(
                 .to_string(),
             "installed adapter does not approve provider execution or attach release evidence"
                 .to_string(),
-            "existing non-Forge adapter files are not overwritten unless --force is used"
+            "existing non-Foundry adapter files are not overwritten unless --force is used"
                 .to_string(),
         ],
         notes: vec![
-            "This installs a Forge-owned provider adapter command, not a daily CLI shim."
+            "This installs a Foundry-owned provider adapter command, not a daily CLI shim."
                 .to_string(),
-            "Operator approval and .forge/connected-brain-runtimes.json are still required before milestone evidence collection.".to_string(),
+            "Operator approval and .foundry/connected-brain-runtimes.json are still required before milestone evidence collection.".to_string(),
         ],
     };
 
@@ -4514,10 +4545,10 @@ pub fn install_cli_provider_adapter(
         blocked_count,
         adapters: vec![adapter],
         instructions: vec![
-            "reference this adapter from .forge/connected-brain-runtimes.json only after operator approval".to_string(),
-            "run forge milestone evidence-plan before collect-evidence to verify manifest readiness"
+            "reference this adapter from .foundry/connected-brain-runtimes.json only after operator approval".to_string(),
+            "run foundry milestone evidence-plan before collect-evidence to verify manifest readiness"
                 .to_string(),
-            "collect external_brain_provider_execution only through Forge milestone collection"
+            "collect external_brain_provider_execution only through Foundry milestone collection"
                 .to_string(),
         ],
     })
@@ -4526,7 +4557,7 @@ pub fn install_cli_provider_adapter(
 pub fn inspect_cli_harness_shim_status(
     options: CliShimStatusOptions<'_>,
 ) -> Result<CliShimStatusReport> {
-    let path_var = env::var_os("PATH");
+    let path_var = crate::brand::env_var_os("PATH");
     inspect_cli_harness_shim_status_with_path(options, path_var.as_deref())
 }
 
@@ -4549,7 +4580,7 @@ pub fn inspect_cli_harness_shim_status_with_path(
     } else {
         None
     };
-    let forge_owned = shim_content
+    let foundry_owned = shim_content
         .as_deref()
         .is_some_and(|content| content.contains(CLI_SHIM_MARKER));
     let executable = shim_exists && is_executable(&shim_path);
@@ -4562,7 +4593,7 @@ pub fn inspect_cli_harness_shim_status_with_path(
         .is_some_and(|path| same_path(Path::new(path), &shim_path));
     let path_precedence = match (&path_resolution.path, path_entry_index, resolved_is_shim) {
         (None, _, _) => "missing_from_path",
-        (Some(_), Some(_), true) if forge_owned => "shim_first",
+        (Some(_), Some(_), true) if foundry_owned => "shim_first",
         (Some(_), Some(_), true) => "manual_shim_first",
         (Some(_), Some(_), false) => "native_first",
         (Some(_), None, _) => "shim_not_on_path",
@@ -4594,7 +4625,7 @@ pub fn inspect_cli_harness_shim_status_with_path(
     {
         (
             "shim_script".to_string(),
-            "parsed_from_forge_shim".to_string(),
+            "parsed_from_foundry_shim".to_string(),
         )
     } else if let Some(resolution) = &fallback_real_command {
         (resolution.source.clone(), resolution.status.clone())
@@ -4609,12 +4640,12 @@ pub fn inspect_cli_harness_shim_status_with_path(
     let real_command_is_shim = real_command
         .as_deref()
         .is_some_and(|command| same_path(Path::new(command), &shim_path));
-    let would_recurse = real_command_is_shim || (resolved_is_shim && !forge_owned);
+    let would_recurse = real_command_is_shim || (resolved_is_shim && !foundry_owned);
     let status = if !shim_exists {
         "shim_status_missing"
     } else if would_recurse {
         "shim_status_blocked"
-    } else if forge_owned && executable && resolved_is_shim {
+    } else if foundry_owned && executable && resolved_is_shim {
         "shim_status_ready"
     } else {
         "shim_status_degraded"
@@ -4625,7 +4656,7 @@ pub fn inspect_cli_harness_shim_status_with_path(
         shim_dir: &shim_dir,
         executor: &executor,
         shim_exists,
-        forge_owned,
+        foundry_owned,
         executable,
         would_recurse,
     });
@@ -4637,7 +4668,7 @@ pub fn inspect_cli_harness_shim_status_with_path(
         executor: executor.clone(),
         shim_path: shim_path.display().to_string(),
         shim_exists,
-        forge_owned,
+        foundry_owned,
         executable,
         path_precedence,
         path_entry_index,
@@ -4648,14 +4679,14 @@ pub fn inspect_cli_harness_shim_status_with_path(
         store_path: parsed_script
             .as_ref()
             .and_then(|script| script.store_path.clone()),
-        forge_binary: parsed_script
+        foundry_binary: parsed_script
             .as_ref()
-            .and_then(|script| script.forge_binary.clone()),
+            .and_then(|script| script.foundry_binary.clone()),
         would_recurse,
         activation_diagnostic,
         checks: shim_status_checks(
             shim_exists,
-            forge_owned,
+            foundry_owned,
             executable,
             resolved_is_shim,
             would_recurse,
@@ -4665,7 +4696,7 @@ pub fn inspect_cli_harness_shim_status_with_path(
         notes: vec![
             "Shim status is an audit report; it does not create, overwrite or execute CLI binaries."
                 .to_string(),
-            "Use this before relying on PATH precedence for Forge-first brain CLI operation."
+            "Use this before relying on PATH precedence for Foundry-first brain CLI operation."
                 .to_string(),
         ],
     })
@@ -4676,8 +4707,8 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         store,
         executor,
         command,
-        forge_first,
-        forge_first_source,
+        foundry_first,
+        foundry_first_source,
         project_root,
         workflow_id,
         task_id,
@@ -4686,7 +4717,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         context_budget_source,
         token_headroom,
         token_headroom_source,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
         dry_run,
         allow_exec,
         secret_env,
@@ -4696,8 +4727,8 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
     let wrapper_plan = build_cli_wrapper_plan(CliWrapperPlanOptions {
         executor,
         command,
-        forge_first,
-        forge_first_source,
+        foundry_first,
+        foundry_first_source,
         project_root,
         workflow_id,
         task_id,
@@ -4706,7 +4737,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         context_budget_source,
         token_headroom,
         token_headroom_source,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
     });
     let command = wrapper_plan.command.clone();
     let cwd_path = cwd
@@ -4728,14 +4759,14 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             command: &command,
             dry_run,
             allow_exec,
-            forge_first,
+            foundry_first,
             project_policy_status,
             has_lineage: harness_exec_has_required_lineage(workflow_id, task_id, run_id),
         });
     let mut safety_checks = vec![
         "dry_run is the default; real execution requires --execute and --allow-exec".to_string(),
         "resolved executable is recorded before running the child process".to_string(),
-        "Forge env overlay is applied only to the child process".to_string(),
+        "Foundry env overlay is applied only to the child process".to_string(),
         "stdout and stderr are summarized by bytes, sha256 and bounded excerpts".to_string(),
         "workflow/task/run lineage, token-headroom settings and harness events stay explicit in the receipt".to_string(),
     ];
@@ -4753,7 +4784,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             command,
             command_sha256,
             cwd: cwd_display,
-            forge_first,
+            foundry_first,
             dry_run,
             allow_exec,
             execution_mode: "dry_run".to_string(),
@@ -4778,6 +4809,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             stdout_headroom: None,
             stderr_headroom: None,
             secret_injections: Vec::new(),
+            task_lease: None,
         });
         record_harness_exec_event_if_possible(store, workflow_id, task_id, run_id, &mut receipt)?;
         return Ok(receipt);
@@ -4788,7 +4820,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             command,
             command_sha256,
             cwd: cwd_display,
-            forge_first,
+            foundry_first,
             dry_run,
             allow_exec,
             execution_mode: "blocked".to_string(),
@@ -4813,6 +4845,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             stdout_headroom: None,
             stderr_headroom: None,
             secret_injections: Vec::new(),
+            task_lease: None,
         });
         record_harness_exec_event_if_possible(store, workflow_id, task_id, run_id, &mut receipt)?;
         return Ok(receipt);
@@ -4823,7 +4856,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             command,
             command_sha256,
             cwd: cwd_display,
-            forge_first,
+            foundry_first,
             dry_run,
             allow_exec,
             execution_mode: "blocked".to_string(),
@@ -4848,6 +4881,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             stdout_headroom: None,
             stderr_headroom: None,
             secret_injections: Vec::new(),
+            task_lease: None,
         });
         receipt.notes.push(
             "Project harness policy requires workflow, task and run lineage before real execution."
@@ -4862,7 +4896,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             command,
             command_sha256,
             cwd: cwd_display,
-            forge_first,
+            foundry_first,
             dry_run,
             allow_exec,
             execution_mode: "blocked".to_string(),
@@ -4887,10 +4921,83 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             stdout_headroom: None,
             stderr_headroom: None,
             secret_injections: Vec::new(),
+            task_lease: None,
         });
         record_harness_exec_event_if_possible(store, workflow_id, task_id, run_id, &mut receipt)?;
         return Ok(receipt);
     };
+
+    let bound_workspace_claim = match (store, workflow_id, task_id) {
+        (Some(store), Some(workflow_id), Some(task_id)) => {
+            bound_worktree_mutation_claim(store, workflow_id, task_id)?
+        }
+        _ => None,
+    };
+    let task_lease = match (store, workflow_id, task_id, bound_workspace_claim) {
+        (Some(store), Some(workflow_id), Some(task_id), Some(_)) => {
+            match validate_task_lease_for_execution(
+                store,
+                workflow_id,
+                task_id,
+                &wrapper_plan.executor,
+                &cwd_path,
+            ) {
+                Ok(lease) => Some(lease),
+                Err(error) => {
+                    let mut receipt = exec_receipt(CliExecReceiptInput {
+                        wrapper_plan,
+                        command,
+                        command_sha256,
+                        cwd: cwd_display,
+                        foundry_first,
+                        dry_run,
+                        allow_exec,
+                        execution_mode: "blocked".to_string(),
+                        project_policy_path: project_policy.path.display().to_string(),
+                        project_policy_status: project_policy_status.to_string(),
+                        require_lineage_for_exec: project_policy.require_lineage_for_exec,
+                        runtime_security_guardrails: runtime_security_guardrails.clone(),
+                        resolved_executable,
+                        resolution_status,
+                        status: "harness_exec_blocked_task_lease".to_string(),
+                        safety_checks,
+                        executed: false,
+                        success: None,
+                        exit_code: None,
+                        stdout_bytes: None,
+                        stderr_bytes: None,
+                        stdout_sha256: None,
+                        stderr_sha256: None,
+                        stdout_excerpt: None,
+                        stderr_excerpt: None,
+                        output_headroom_enabled: token_headroom,
+                        stdout_headroom: None,
+                        stderr_headroom: None,
+                        secret_injections: Vec::new(),
+                        task_lease: None,
+                    });
+                    receipt.notes.push(format!(
+                        "Task lease validation blocked execution: {error:#}"
+                    ));
+                    record_harness_exec_event_if_possible(
+                        Some(store),
+                        Some(workflow_id),
+                        Some(task_id),
+                        run_id,
+                        &mut receipt,
+                    )?;
+                    return Ok(receipt);
+                }
+            }
+        }
+        _ => None,
+    };
+    if let Some(lease) = task_lease.as_ref() {
+        safety_checks.push(format!(
+            "active task lease {} validated for executor and cwd",
+            lease.lease_id
+        ));
+    }
 
     let tenant_context = if let Some(store) = store {
         harness_tenant_context(store, workflow_id)?
@@ -4910,7 +5017,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
                         workflow_id,
                         requester: executor,
                         allowed: false,
-                        origin: "forge_harness",
+                        origin: "foundry_harness",
                         tenant_context: &tenant_context,
                     });
                 }
@@ -4929,7 +5036,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
                 command,
                 command_sha256,
                 cwd: cwd_display,
-                forge_first,
+                foundry_first,
                 dry_run,
                 allow_exec,
                 execution_mode: "blocked".to_string(),
@@ -4954,6 +5061,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
                 stdout_headroom: None,
                 stderr_headroom: None,
                 secret_injections,
+                task_lease: task_lease.clone(),
             });
             record_harness_exec_event_if_possible(
                 store,
@@ -4965,7 +5073,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             return Ok(receipt);
         }
         let Some(store) = store else {
-            bail!("runtime secret injection requires a Forge store");
+            bail!("runtime secret injection requires a Foundry store");
         };
         for mapping in secret_env {
             let (env_name, vault_reference) = parse_secret_env_mapping(mapping)?;
@@ -4974,7 +5082,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
                 workflow_id,
                 requester: executor,
                 allowed: true,
-                origin: "forge_harness",
+                origin: "foundry_harness",
                 tenant_context: &tenant_context,
             })?;
             resolved_secret_env.push((env_name.clone(), resolved.secret_value));
@@ -5026,7 +5134,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         command,
         command_sha256,
         cwd: cwd_display,
-        forge_first,
+        foundry_first,
         dry_run,
         allow_exec,
         execution_mode: "guarded_exec".to_string(),
@@ -5056,13 +5164,14 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         stdout_headroom,
         stderr_headroom,
         secret_injections,
+        task_lease,
     });
     record_harness_exec_event_if_possible(store, workflow_id, task_id, run_id, &mut receipt)?;
     Ok(receipt)
 }
 
 fn record_harness_exec_event_if_possible(
-    store: Option<&ForgeStore>,
+    store: Option<&FoundryStore>,
     workflow_id: Option<&str>,
     task_id: Option<&str>,
     run_id: Option<&str>,
@@ -5101,11 +5210,11 @@ fn record_harness_exec_event_if_possible(
     );
     let tenant_context = harness_tenant_context(store, workflow_id)?;
     let global_event_id = store.record_global_event(GlobalEventWrite {
-        source: "forge_harness",
+        source: "foundry_harness",
         source_id: &source_id,
         workflow_id,
         kind: &receipt.status,
-        origin: "forge_harness",
+        origin: "foundry_harness",
         status: harness_event_status(&receipt.status),
         data: &data,
         tenant_context: &tenant_context,
@@ -5115,7 +5224,7 @@ fn record_harness_exec_event_if_possible(
     Ok(())
 }
 
-fn harness_tenant_context(store: &ForgeStore, workflow_id: Option<&str>) -> Result<Value> {
+fn harness_tenant_context(store: &FoundryStore, workflow_id: Option<&str>) -> Result<Value> {
     if let Some(workflow_id) = workflow_id {
         if let Ok(workflow) = store.load_workflow(workflow_id) {
             return Ok(serde_json::to_value(&workflow.intent.operating_context)?);
@@ -5183,57 +5292,57 @@ fn absolute_project_root(project_root: Option<&Path>) -> PathBuf {
     absolute.canonicalize().unwrap_or(absolute)
 }
 
-fn normalize_harness_mode_source(value: &str, forge_first: bool) -> String {
+fn normalize_harness_mode_source(value: &str, foundry_first: bool) -> String {
     let value = value.trim();
     if !value.is_empty() {
         return value.to_string();
     }
-    if forge_first {
-        "unspecified_forge_first".to_string()
+    if foundry_first {
+        "unspecified_foundry_first".to_string()
     } else {
         "default_observe_only".to_string()
     }
 }
 
-fn resolve_harness_forge_first(
-    flag_forge_first: bool,
+fn resolve_harness_foundry_first(
+    flag_foundry_first: bool,
     flag_observe_only: bool,
     project_root: Option<&Path>,
-) -> HarnessForgeFirstMode {
+) -> HarnessFoundryFirstMode {
     if flag_observe_only {
-        return HarnessForgeFirstMode {
-            forge_first: false,
+        return HarnessFoundryFirstMode {
+            foundry_first: false,
             source: "observe_only_flag",
         };
     }
-    if flag_forge_first {
-        return HarnessForgeFirstMode {
-            forge_first: true,
+    if flag_foundry_first {
+        return HarnessFoundryFirstMode {
+            foundry_first: true,
             source: "explicit_flag",
         };
     }
-    if harness_default_mode_prefers_forge_first() {
-        return HarnessForgeFirstMode {
-            forge_first: true,
+    if harness_default_mode_prefers_foundry_first() {
+        return HarnessFoundryFirstMode {
+            foundry_first: true,
             source: "env_default",
         };
     }
-    if let Some(forge_first) = harness_project_default_mode(project_root) {
-        return HarnessForgeFirstMode {
-            forge_first,
+    if let Some(foundry_first) = harness_project_default_mode(project_root) {
+        return HarnessFoundryFirstMode {
+            foundry_first,
             source: "project_config",
         };
     }
-    HarnessForgeFirstMode {
-        forge_first: false,
+    HarnessFoundryFirstMode {
+        foundry_first: false,
         source: "default_observe_only",
     }
 }
 
-fn harness_default_mode_prefers_forge_first() -> bool {
-    env::var("FORGE_HARNESS_DEFAULT_MODE")
+fn harness_default_mode_prefers_foundry_first() -> bool {
+    crate::brand::env_var("FOUNDRY_HARNESS_DEFAULT_MODE")
         .ok()
-        .map(|value| harness_mode_prefers_forge_first(&value))
+        .map(|value| harness_mode_prefers_foundry_first(&value))
         .unwrap_or(false)
 }
 
@@ -5242,38 +5351,38 @@ fn harness_project_default_mode(project_root: Option<&Path>) -> Option<bool> {
         Some(path) => path.to_path_buf(),
         None => env::current_dir().ok()?,
     };
-    read_harness_project_mode(&project_root).forge_first
+    read_harness_project_mode(&project_root).foundry_first
 }
 
 fn read_harness_project_mode(project_root: &Path) -> HarnessProjectDefaultMode {
-    let path = project_root.join(".forge/harness.json");
+    let path = crate::brand::project_config_path_for_read(project_root, "harness.json");
     let Ok(content) = fs::read_to_string(&path) else {
         return HarnessProjectDefaultMode {
             path,
             status: "missing",
-            forge_first: None,
+            foundry_first: None,
         };
     };
     let Ok(config) = serde_json::from_str::<Value>(&content) else {
         return HarnessProjectDefaultMode {
             path,
             status: "invalid_json",
-            forge_first: None,
+            foundry_first: None,
         };
     };
-    let forge_first = match config.get("default_mode") {
-        Some(Value::String(value)) => Some(harness_mode_prefers_forge_first(value)),
+    let foundry_first = match config.get("default_mode") {
+        Some(Value::String(value)) => Some(harness_mode_prefers_foundry_first(value)),
         Some(Value::Bool(value)) => Some(*value),
         _ => None,
     };
     HarnessProjectDefaultMode {
         path,
-        status: if forge_first.is_some() {
+        status: if foundry_first.is_some() {
             "loaded"
         } else {
             "missing_default_mode"
         },
-        forge_first,
+        foundry_first,
     }
 }
 
@@ -5288,11 +5397,11 @@ struct HarnessProjectExecPolicy {
 struct HarnessProjectRuntimePolicy {
     context_budget: Option<usize>,
     token_headroom: Option<bool>,
-    require_token_headroom_for_forge_first: bool,
+    require_token_headroom_for_foundry_first: bool,
 }
 
 fn read_harness_project_exec_policy(project_root: &Path) -> HarnessProjectExecPolicy {
-    let path = project_root.join(".forge/harness.json");
+    let path = crate::brand::project_config_path_for_read(project_root, "harness.json");
     let Ok(content) = fs::read_to_string(&path) else {
         return HarnessProjectExecPolicy {
             path,
@@ -5323,19 +5432,19 @@ fn read_harness_project_exec_policy(project_root: &Path) -> HarnessProjectExecPo
 }
 
 fn read_harness_project_runtime_policy(project_root: &Path) -> HarnessProjectRuntimePolicy {
-    let path = project_root.join(".forge/harness.json");
+    let path = crate::brand::project_config_path_for_read(project_root, "harness.json");
     let Ok(content) = fs::read_to_string(&path) else {
         return HarnessProjectRuntimePolicy {
             context_budget: None,
             token_headroom: None,
-            require_token_headroom_for_forge_first: false,
+            require_token_headroom_for_foundry_first: false,
         };
     };
     let Ok(config) = serde_json::from_str::<Value>(&content) else {
         return HarnessProjectRuntimePolicy {
             context_budget: None,
             token_headroom: None,
-            require_token_headroom_for_forge_first: false,
+            require_token_headroom_for_foundry_first: false,
         };
     };
     let context_budget = config
@@ -5348,14 +5457,15 @@ fn read_harness_project_runtime_policy(project_root: &Path) -> HarnessProjectRun
         .get("default_token_headroom")
         .or_else(|| config.get("token_headroom"))
         .and_then(Value::as_bool);
-    let require_token_headroom_for_forge_first = config
-        .get("require_token_headroom_for_forge_first")
+    let require_token_headroom_for_foundry_first = config
+        .get("require_token_headroom_for_foundry_first")
+        .or_else(|| config.get("require_token_headroom_for_forge_first")) // foundry-brand-allow: legacy-compat
         .and_then(Value::as_bool)
         .unwrap_or(false);
     HarnessProjectRuntimePolicy {
         context_budget,
         token_headroom,
-        require_token_headroom_for_forge_first,
+        require_token_headroom_for_foundry_first,
     }
 }
 
@@ -5393,27 +5503,36 @@ fn harness_exec_has_required_lineage(
         .all(|value| value.is_some_and(|value| !value.trim().is_empty()))
 }
 
-fn harness_effective_mode(forge_first: bool) -> &'static str {
-    if forge_first {
-        "forge_first"
+fn harness_effective_mode(foundry_first: bool) -> &'static str {
+    if foundry_first {
+        "foundry_first"
     } else {
         "observe_only"
     }
 }
 
-fn harness_mode_prefers_forge_first(value: &str) -> bool {
+fn harness_mode_prefers_foundry_first(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
-        "forge_first" | "forge-first" | "forgefirst" | "1" | "true" | "yes" | "on"
+        "foundry_first"
+            | "foundry-first"
+            | "foundryfirst"
+            | "forge_first" // foundry-brand-allow: legacy-compat
+            | "forge-first" // foundry-brand-allow: legacy-compat
+            | "forgefirst" // foundry-brand-allow: legacy-compat
+            | "1"
+            | "true"
+            | "yes"
+            | "on"
     )
 }
 
 struct CliShimScriptOptions<'a> {
-    forge_binary: &'a str,
+    foundry_binary: &'a str,
     executor: &'a str,
     real_cmd: &'a str,
     store_path: Option<&'a Path>,
-    forge_first: bool,
+    foundry_first: bool,
     workflow_id: Option<&'a str>,
     task_id: Option<&'a str>,
     run_id: Option<&'a str>,
@@ -5429,18 +5548,18 @@ struct ProviderAdapterScriptOptions<'a> {
 
 fn build_cli_shim_script(options: CliShimScriptOptions<'_>) -> String {
     let CliShimScriptOptions {
-        forge_binary,
+        foundry_binary,
         executor,
         real_cmd,
         store_path,
-        forge_first,
+        foundry_first,
         workflow_id,
         task_id,
         run_id,
         context_budget,
         token_headroom,
     } = options;
-    let mut parts = vec!["exec".to_string(), shell_quote(forge_binary)];
+    let mut parts = vec!["exec".to_string(), shell_quote(foundry_binary)];
     if let Some(store_path) = store_path {
         parts.push("--store".to_string());
         parts.push(shell_quote(&store_path.display().to_string()));
@@ -5451,8 +5570,8 @@ fn build_cli_shim_script(options: CliShimScriptOptions<'_>) -> String {
         "--executor".to_string(),
         shell_quote(executor),
     ]);
-    if forge_first {
-        parts.push("--forge-first".to_string());
+    if foundry_first {
+        parts.push("--foundry-first".to_string());
     }
     if let Some(workflow_id) = workflow_id.filter(|value| !value.trim().is_empty()) {
         parts.push("--workflow".to_string());
@@ -5477,7 +5596,7 @@ fn build_cli_shim_script(options: CliShimScriptOptions<'_>) -> String {
     parts.push(shell_quote(real_cmd));
     parts.push("\"$@\"".to_string());
     format!(
-        "#!/bin/sh\n{CLI_SHIM_MARKER}\n# Generated by Forge. Edit through `forge harness install-shims`.\n{}\n",
+        "#!/bin/sh\n{CLI_SHIM_MARKER}\n# Generated by Foundry. Edit through `foundry harness install-shims`.\n{}\n",
         parts.join(" ")
     )
 }
@@ -5494,12 +5613,12 @@ fn build_provider_adapter_script(options: ProviderAdapterScriptOptions<'_>) -> S
     format!(
         r#"#!/bin/sh
 {PROVIDER_ADAPTER_MARKER}
-# Generated by Forge. Edit through `forge harness install-provider-adapter`.
+# Generated by Foundry. Edit through `foundry harness install-provider-adapter`.
 set -eu
 
 PROVIDER_ID={provider_id_shell}
 REAL_CMD={real_cmd_shell}
-PROMPT=${{FORGE_PROVIDER_PROMPT:-"Forge connected external brain task for workflow ${{FORGE_WORKFLOW_ID:-unknown}}, task ${{FORGE_TASK_ID:-unknown}}, run ${{FORGE_RUN_ID:-unknown}}. Produce a concise operational response and preserve Forge context."}}
+PROMPT=${{FOUNDRY_PROVIDER_PROMPT:-"Foundry connected external brain task for workflow ${{FOUNDRY_WORKFLOW_ID:-unknown}}, task ${{FOUNDRY_TASK_ID:-unknown}}, run ${{FOUNDRY_RUN_ID:-unknown}}. Produce a concise operational response and preserve Foundry context."}}
 
 mkdir -p brain-output
 
@@ -5542,24 +5661,24 @@ else
 fi
 
 cat > brain-output/plan.json <<EOF
-{{"schema_version":"forge.connected_external_brain.provider_plan.v1","workflow_id":"${{FORGE_WORKFLOW_ID:-unknown}}","task_id":"${{FORGE_TASK_ID:-unknown}}","run_id":"${{FORGE_RUN_ID:-unknown}}","brain_id":{provider_id_json},"model_execution_performed":$MODEL_EXECUTION,"token_headroom_enabled":{token_headroom_json}}}
+{{"schema_version":"foundry.connected_external_brain.provider_plan.v1","workflow_id":"${{FOUNDRY_WORKFLOW_ID:-unknown}}","task_id":"${{FOUNDRY_TASK_ID:-unknown}}","run_id":"${{FOUNDRY_RUN_ID:-unknown}}","brain_id":{provider_id_json},"model_execution_performed":$MODEL_EXECUTION,"token_headroom_enabled":{token_headroom_json}}}
 EOF
 
 cat > brain-output/provider-output.json <<EOF
-{{"schema_version":"forge.connected_external_brain.provider_output.v1","provider_id":{provider_id_json},"quality_score":$QUALITY_SCORE,"latency_ms":0,"model_execution_performed":$MODEL_EXECUTION,"real_provider_execution_performed":$REAL_PROVIDER_EXECUTION}}
+{{"schema_version":"foundry.connected_external_brain.provider_output.v1","provider_id":{provider_id_json},"quality_score":$QUALITY_SCORE,"latency_ms":0,"model_execution_performed":$MODEL_EXECUTION,"real_provider_execution_performed":$REAL_PROVIDER_EXECUTION}}
 EOF
 
 cat > brain-output/research.md <<EOF
 # Connected external brain provider adapter
 
 - Provider: $PROVIDER_ID
-- Workflow: ${{FORGE_WORKFLOW_ID:-unknown}}
-- Task: ${{FORGE_TASK_ID:-unknown}}
-- Run: ${{FORGE_RUN_ID:-unknown}}
+- Workflow: ${{FOUNDRY_WORKFLOW_ID:-unknown}}
+- Task: ${{FOUNDRY_TASK_ID:-unknown}}
+- Run: ${{FOUNDRY_RUN_ID:-unknown}}
 - Model execution: $MODEL_EXECUTION
 - Real provider execution: $REAL_PROVIDER_EXECUTION
 
-Forge captured provider stdout/stderr in brain-output/provider-stdout.txt and brain-output/provider-stderr.txt.
+Foundry captured provider stdout/stderr in brain-output/provider-stdout.txt and brain-output/provider-stderr.txt.
 EOF
 
 cat > brain-output/code.rs <<EOF
@@ -5593,7 +5712,7 @@ struct RealCommandResolution {
 
 #[derive(Default)]
 struct ParsedCliShimScript {
-    forge_binary: Option<String>,
+    foundry_binary: Option<String>,
     store_path: Option<String>,
     real_command: Option<String>,
 }
@@ -5615,7 +5734,7 @@ fn resolve_real_command_for_shim(
     }
 
     let binary_name = shim_binary_name(executor);
-    let Some(path_var) = env::var_os("PATH") else {
+    let Some(path_var) = crate::brand::env_var_os("PATH") else {
         bail!("real CLI command was not provided and PATH is not available");
     };
     for dir in env::split_paths(&path_var) {
@@ -5715,7 +5834,7 @@ fn parse_cli_shim_script(script: &str) -> Option<ParsedCliShimScript> {
         .and_then(|index| words.get(index + 1))
         .cloned();
     Some(ParsedCliShimScript {
-        forge_binary: words.get(1).cloned(),
+        foundry_binary: words.get(1).cloned(),
         store_path,
         real_command,
     })
@@ -5778,7 +5897,7 @@ fn split_shell_words(input: &str) -> Vec<String> {
 
 fn shim_status_checks(
     shim_exists: bool,
-    forge_owned: bool,
+    foundry_owned: bool,
     executable: bool,
     resolved_is_shim: bool,
     would_recurse: bool,
@@ -5790,20 +5909,20 @@ fn shim_status_checks(
     } else {
         "shim file is missing".to_string()
     });
-    checks.push(if forge_owned {
-        "shim has Forge ownership marker".to_string()
+    checks.push(if foundry_owned {
+        "shim has Foundry ownership marker".to_string()
     } else {
-        "shim does not have Forge ownership marker".to_string()
+        "shim does not have Foundry ownership marker".to_string()
     });
     checks.push(if executable {
         "shim file is executable".to_string()
     } else {
         "shim file is not executable".to_string()
     });
-    checks.push(if resolved_is_shim && forge_owned {
-        "PATH resolves to the Forge-owned shim".to_string()
+    checks.push(if resolved_is_shim && foundry_owned {
+        "PATH resolves to the Foundry-owned shim".to_string()
     } else if resolved_is_shim {
-        "PATH resolves to a non-Forge shim".to_string()
+        "PATH resolves to a non-Foundry shim".to_string()
     } else {
         format!("PATH resolution status: {path_resolution_status}")
     });
@@ -5821,7 +5940,7 @@ struct ShimActivationDiagnosticInput<'a> {
     shim_dir: &'a Path,
     executor: &'a str,
     shim_exists: bool,
-    forge_owned: bool,
+    foundry_owned: bool,
     executable: bool,
     would_recurse: bool,
 }
@@ -5830,9 +5949,9 @@ fn shim_activation_diagnostic(
     input: ShimActivationDiagnosticInput<'_>,
 ) -> CliShimActivationDiagnostic {
     let shim_ready_for_activation =
-        input.shim_exists && input.forge_owned && input.executable && !input.would_recurse;
+        input.shim_exists && input.foundry_owned && input.executable && !input.would_recurse;
     let activation_profile_command = vec![
-        "forge".to_string(),
+        "foundry".to_string(),
         "harness".to_string(),
         "activation-profile".to_string(),
         "--shim-dir".to_string(),
@@ -5845,7 +5964,7 @@ fn shim_activation_diagnostic(
         "json".to_string(),
     ];
     let shim_status_command = format!(
-        "forge harness shim-status --shim-dir {} --executor {} --output json",
+        "foundry harness shim-status --shim-dir {} --executor {} --output json",
         shell_quote(&input.shim_dir.display().to_string()),
         shell_quote(input.executor)
     );
@@ -5879,12 +5998,12 @@ fn shim_activation_diagnostic(
                 false,
                 "recursion_risk".to_string(),
             )
-        } else if !input.forge_owned {
+        } else if !input.foundry_owned {
             (
                 "shim_activation_blocked",
                 true,
                 false,
-                "shim_not_forge_owned".to_string(),
+                "shim_not_foundry_owned".to_string(),
             )
         } else if !input.executable {
             (
@@ -5925,7 +6044,7 @@ fn shim_activation_diagnostic(
                 .to_string(),
         ],
         notes: vec![
-            "Activation means PATH prefers the Forge-owned shim before the native brain CLI."
+            "Activation means PATH prefers the Foundry-owned shim before the native brain CLI."
                 .to_string(),
             "A recommended activation still requires the operator to opt into the PATH change."
                 .to_string(),
@@ -5936,26 +6055,26 @@ fn shim_activation_diagnostic(
 fn shim_status_instructions(status: &str, shim_dir: &Path, executor: &str) -> Vec<String> {
     match status {
         "shim_status_ready" => vec![
-            "no action required; PATH currently prefers the Forge-owned shim".to_string(),
-            "run `forge harness exec` directly when you need a one-off guarded receipt".to_string(),
+            "no action required; PATH currently prefers the Foundry-owned shim".to_string(),
+            "run `foundry harness exec` directly when you need a one-off guarded receipt".to_string(),
         ],
         "shim_status_missing" => vec![format!(
-            "run `forge harness install-shims --shim-dir {} --executor {executor}`",
+            "run `foundry harness install-shims --shim-dir {} --executor {executor}`",
             shell_quote(&shim_dir.display().to_string())
         )],
         "shim_status_blocked" => vec![
             format!(
-                "run `forge harness install-shims --shim-dir {} --executor {executor} --force` only if the existing file is disposable",
+                "run `foundry harness install-shims --shim-dir {} --executor {executor} --force` only if the existing file is disposable",
                 shell_quote(&shim_dir.display().to_string())
             ),
-            "move the non-Forge shim later in PATH or replace it through Forge before enabling Forge-first shells".to_string(),
+            "move the non-Foundry shim later in PATH or replace it through Foundry before enabling Foundry-first shells".to_string(),
         ],
         _ => vec![
             format!(
-                "export PATH={}:$PATH when this shell should prefer the Forge shim",
+                "export PATH={}:$PATH when this shell should prefer the Foundry shim",
                 shell_quote(&shim_dir.display().to_string())
             ),
-            "rerun `forge harness shim-status` after changing PATH or reinstalling the shim"
+            "rerun `foundry harness shim-status` after changing PATH or reinstalling the shim"
                 .to_string(),
         ],
     }
@@ -6020,7 +6139,7 @@ fn is_executable(path: &Path) -> bool {
 }
 
 fn build_output_headroom_report(
-    store: Option<&ForgeStore>,
+    store: Option<&FoundryStore>,
     executor: &str,
     stream: &str,
     content: &str,
@@ -6093,7 +6212,7 @@ impl HeadroomStatsAccumulator {
 
 fn headroom_stats_saved_blob(record: StoredHeadroomBlobRecord) -> HeadroomStatsSavedBlob {
     HeadroomStatsSavedBlob {
-        retrieval_ref: format!("forge://harness/headroom/{}", record.original_sha256),
+        retrieval_ref: format!("foundry://harness/headroom/{}", record.original_sha256),
         source: record.source,
         content_kind: record.content_kind,
         strategy: record.strategy,
@@ -6125,9 +6244,10 @@ fn parse_headroom_ref(value: &str) -> Result<String> {
     if value.is_empty() {
         bail!("headroom retrieval ref cannot be empty");
     }
+    let value = crate::brand::canonical_uri(value);
     let sha = value
-        .strip_prefix("forge://harness/headroom/")
-        .unwrap_or(value)
+        .strip_prefix("foundry://harness/headroom/")
+        .unwrap_or(value.as_ref())
         .trim();
     if sha.is_empty() {
         bail!("headroom retrieval ref does not include a hash");
@@ -6140,7 +6260,7 @@ struct CliExecReceiptInput {
     command: Vec<String>,
     command_sha256: String,
     cwd: String,
-    forge_first: bool,
+    foundry_first: bool,
     dry_run: bool,
     allow_exec: bool,
     execution_mode: String,
@@ -6165,6 +6285,7 @@ struct CliExecReceiptInput {
     stdout_headroom: Option<TokenHeadroomReport>,
     stderr_headroom: Option<TokenHeadroomReport>,
     secret_injections: Vec<CliHarnessSecretInjection>,
+    task_lease: Option<TaskLease>,
 }
 
 fn exec_receipt(input: CliExecReceiptInput) -> CliHarnessExecReceipt {
@@ -6182,14 +6303,15 @@ fn exec_receipt(input: CliExecReceiptInput) -> CliHarnessExecReceipt {
         workflow_id,
         task_id,
         run_id,
-        forge_first: input.forge_first,
-        forge_first_source: input.wrapper_plan.forge_first_source.clone(),
+        task_lease: input.task_lease,
+        foundry_first: input.foundry_first,
+        foundry_first_source: input.wrapper_plan.foundry_first_source.clone(),
         context_budget: input.wrapper_plan.context_budget,
         context_budget_source: input.wrapper_plan.context_budget_source.clone(),
         token_headroom_source: input.wrapper_plan.token_headroom_source.clone(),
-        require_token_headroom_for_forge_first: input
+        require_token_headroom_for_foundry_first: input
             .wrapper_plan
-            .require_token_headroom_for_forge_first,
+            .require_token_headroom_for_foundry_first,
         dry_run: input.dry_run,
         allow_exec: input.allow_exec,
         execution_mode: input.execution_mode,
@@ -6217,7 +6339,7 @@ fn exec_receipt(input: CliExecReceiptInput) -> CliHarnessExecReceipt {
         event_recorded: false,
         global_event_id: None,
         notes: vec![
-            "Harness exec is a Forge-owned receipt for brain CLI invocation, not process interception.".to_string(),
+            "Harness exec is a Foundry-owned receipt for brain CLI invocation, not process interception.".to_string(),
             "Use dry-run receipts to validate wrapper shape before opting into guarded execution.".to_string(),
         ],
     }
@@ -6245,7 +6367,7 @@ fn resolve_executable(command: Option<&String>, cwd: &Path) -> (Option<String>, 
         }
         return (None, "executable_missing".to_string());
     }
-    if let Some(paths) = env::var_os("PATH") {
+    if let Some(paths) = crate::brand::env_var_os("PATH") {
         for dir in env::split_paths(&paths) {
             let path = dir.join(command);
             if path.is_file() {
@@ -6266,7 +6388,7 @@ fn canonical_or_display(path: PathBuf) -> String {
 fn bounded_excerpt(value: &str, max_chars: usize) -> String {
     let mut excerpt = value.chars().take(max_chars).collect::<String>();
     if value.chars().count() > max_chars {
-        excerpt.push_str("\n[forge excerpt truncated]");
+        excerpt.push_str("\n[foundry excerpt truncated]");
     }
     excerpt
 }
@@ -6483,87 +6605,87 @@ fn harness_operating_context_env(project_root: Option<&Path>) -> Vec<CliWrapperE
         .unwrap_or_else(|_| OperatingContextSpec::default());
     vec![
         env_var(
-            "FORGE_ORGANIZATION_ID",
+            "FOUNDRY_ORGANIZATION_ID",
             &context.organization.id,
             "binds the wrapper to the active organization identity",
         ),
         env_var(
-            "FORGE_ORGANIZATION_LABEL",
+            "FOUNDRY_ORGANIZATION_LABEL",
             &context.organization.label,
             "binds the wrapper to the active organization label",
         ),
         env_var(
-            "FORGE_BRAND_ID",
+            "FOUNDRY_BRAND_ID",
             &context.brand.id,
             "binds the wrapper to the active brand identity",
         ),
         env_var(
-            "FORGE_BRAND_LABEL",
+            "FOUNDRY_BRAND_LABEL",
             &context.brand.label,
             "binds the wrapper to the active brand label",
         ),
         env_var(
-            "FORGE_PRODUCT_ID",
+            "FOUNDRY_PRODUCT_ID",
             &context.product.id,
             "binds the wrapper to the active product identity",
         ),
         env_var(
-            "FORGE_PRODUCT_LABEL",
+            "FOUNDRY_PRODUCT_LABEL",
             &context.product.label,
             "binds the wrapper to the active product label",
         ),
         env_var(
-            "FORGE_USER_ID",
+            "FOUNDRY_USER_ID",
             &context.user.id,
             "binds the wrapper to the active user identity",
         ),
         env_var(
-            "FORGE_CHANNEL_ID",
+            "FOUNDRY_CHANNEL_ID",
             &context.channel.id,
             "binds the wrapper to the active channel identity",
         ),
         env_var(
-            "FORGE_MEMORY_SCOPE",
+            "FOUNDRY_MEMORY_SCOPE",
             &context.memory_scope,
             "binds the wrapper to the active memory scope",
         ),
         env_var(
-            "FORGE_PERSONALITY_SCOPE",
+            "FOUNDRY_PERSONALITY_SCOPE",
             &context.personality_scope,
             "binds the wrapper to the active personality scope",
         ),
         env_var(
-            "FORGE_BRAND_VOICE",
+            "FOUNDRY_BRAND_VOICE",
             &context.brand_identity.voice,
             "binds the wrapper to the active brand voice",
         ),
         env_var(
-            "FORGE_BRAND_TONE",
+            "FOUNDRY_BRAND_TONE",
             &context.brand_identity.tone,
             "binds the wrapper to the active brand tone",
         ),
         env_var(
-            "FORGE_DESIGN_TOKEN_SOURCE",
+            "FOUNDRY_DESIGN_TOKEN_SOURCE",
             &context.design_system.token_source,
             "binds the wrapper to the active design token source",
         ),
         env_var(
-            "FORGE_COMPONENT_SOURCE",
+            "FOUNDRY_COMPONENT_SOURCE",
             &context.design_system.component_source,
             "binds the wrapper to the active component source",
         ),
         env_var(
-            "FORGE_OPERATIONAL_MEMORY_VISIBILITY",
+            "FOUNDRY_OPERATIONAL_MEMORY_VISIBILITY",
             &context.operating_policy.memory_visibility,
             "binds the wrapper to the active memory visibility policy",
         ),
         env_var(
-            "FORGE_OPERATIONAL_SHARING_POLICY",
+            "FOUNDRY_OPERATIONAL_SHARING_POLICY",
             &context.operating_policy.sharing_policy,
             "binds the wrapper to the active sharing policy",
         ),
         env_var(
-            "FORGE_OPERATIONAL_APPROVAL_POLICY",
+            "FOUNDRY_OPERATIONAL_APPROVAL_POLICY",
             &context.operating_policy.approval_policy,
             "binds the wrapper to the active approval policy",
         ),

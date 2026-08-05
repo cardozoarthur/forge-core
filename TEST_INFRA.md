@@ -1,10 +1,10 @@
-# Forge Teamwork Testing Infrastructure
+# Foundry Teamwork Testing Infrastructure
 
-This document outlines the design, architecture, and execution guidelines for the Forge Teamwork E2E and Integration testing suite.
+This document outlines the design, architecture, and execution guidelines for the Foundry Teamwork E2E and Integration testing suite.
 
 ## Test Philosophy
 
-Forge Core treats teamwork orchestration as deterministic, auditable infrastructure rather than ad-hoc chatbot dialogs. Our testing infrastructure enforces:
+Foundry Core treats teamwork orchestration as deterministic, auditable infrastructure rather than ad-hoc chatbot dialogs. Our testing infrastructure enforces:
 1. **Validation-Before-Promotion**: A task cannot progress to completion unless its dependencies and validation rules are satisfied.
 2. **Context Budgets & Isolation**: Tasks must not bleed context and must fit within designated token/byte limits.
 3. **Asynchronous Execution Trace**: Detached background runs must step through tasks safely, logging revisions and events into the SQLite store.
@@ -12,7 +12,7 @@ Forge Core treats teamwork orchestration as deterministic, auditable infrastruct
 ## Test Suite Layout
 
 - **Unit & Local Integration Tests**: Co-located within the respective source files in `src/` (e.g. `src/teamwork.rs`, `src/context.rs`).
-- **Teamwork E2E Tests**: Located in `tests/forge_teamwork_e2e.rs`. This handles end-to-end command-line assertion runs using a temporary SQLite database store.
+- **Teamwork E2E Tests**: Located in `tests/foundry_teamwork_e2e.rs`. This handles end-to-end command-line assertion runs using a temporary SQLite database store.
 
 ---
 
@@ -54,7 +54,7 @@ cargo test
 ### Tier 4 Scenario Execution
 Runs the E2E application scenario tests:
 ```bash
-cargo test --test forge_teamwork_e2e test_t4 -- --ignored
+cargo test --test foundry_teamwork_e2e test_t4 -- --ignored
 ```
 
 ### Static Analysis & Formatting

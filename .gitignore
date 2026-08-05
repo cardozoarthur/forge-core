@@ -3,26 +3,45 @@
 /.serena/
 /artifacts/
 /dist/
+/output/
 /chat_*.json
-*.sqlite-secret.key
-*.sqlite.secret.key
-*.sqlite-shm
-*.sqlite-wal
-.forge/*.secret.key
+
+# Foundry local runtime state. Keep only the reviewed, human-readable defaults.
+/.foundry/*
+!/.foundry/connected-brain-runtimes.json
+!/.foundry/harness.json
+!/.foundry/memory-governance.json
+!/.foundry/multimodal-runtimes.json
+!/.foundry/multimodal.json
+!/.foundry/operating-context.yaml
+/.foundry/keyring*
+
+# Keep pre-0.6 local state private while the compatibility reader remains
+# available.
+# foundry-brand-allow: legacy-compat
 /.forge/*
+# foundry-brand-allow: legacy-compat
 !/.forge/connected-brain-runtimes.json
+# foundry-brand-allow: legacy-compat
 !/.forge/harness.json
+# foundry-brand-allow: legacy-compat
 !/.forge/memory-governance.json
+# foundry-brand-allow: legacy-compat
 !/.forge/multimodal-runtimes.json
+# foundry-brand-allow: legacy-compat
 !/.forge/multimodal.json
+# foundry-brand-allow: legacy-compat
 !/.forge/operating-context.yaml
+# foundry-brand-allow: legacy-compat
+/.forge/keyring*
+
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.sqlite-secret.key
 *.sqlite.secret.key
 *.secret.key
 *.keyring
-/.forge/keyring*
 /.DS_Store
 /.idea/
 /.vscode/

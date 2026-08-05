@@ -1,0 +1,714 @@
+#!/usr/bin/env bash
+# Produce real, secret-free source evidence for the bounded_load production gate.
+set -euo pipefail
+set -o noclobber
+umask 077
+export LC_ALL=C
+
+fail() {
+  printf 'foundry bounded-load drill: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  foundry-bounded-load-drill \
+    --foundry /absolute/path/to/installed/foundry \
+    --store /absolute/path/to/foundry.sqlite \
+    --release-version X.Y.Z \
+    --canary-workflow-id wf_ID \
+    --output-dir /absolute/private/evidence-root \
+    [--operations 120] \
+    [--concurrency 4] \
+    [--max-duration-seconds 120] \
+    [--max-rss-bytes 536870912] \
+    [--ops-port 18767]
+
+The source store is opened for checks and a SQLite backup only. Load, SIGKILL,
+restart, and final checks operate on a disposable copy of that backup.
+
+The output directory must already exist, be private, and be owned by the
+invoking user. bounded-load-report.json must not already exist.
+
+Configure the production vault key out of band through
+FOUNDRY_SECRET_VAULT_KEY_FILE. Inline vault-key values are rejected.
+EOF
+}
+
+require_value() {
+  local option="$1"
+  local value="${2-}"
+  [[ -n "$value" ]] || fail "$option requires a non-empty value"
+}
+
+parse_uint() {
+  local value="$1"
+  local label="$2"
+  local destination="$3"
+  local normalized=""
+
+  [[ "$value" =~ ^[0-9]+$ ]] || fail "$label must be a non-negative integer"
+  [[ ${#value} -le 18 ]] || fail "$label is outside the supported integer range"
+  normalized="$((10#$value))"
+  printf -v "$destination" '%s' "$normalized"
+}
+
+require_single_line() {
+  local label="$1"
+  local value="$2"
+  [[ ! "$value" =~ [[:cntrl:]] ]] ||
+    fail "$label must not contain control characters"
+}
+
+audit_executable() {
+  local candidate="$1"
+  local audit_root="$2"
+  local expected_uid="$3"
+  local canonical=""
+  local component=""
+  local mode=""
+
+  canonical="$(realpath -e -- "$candidate")" ||
+    fail "cannot resolve Foundry executable: $candidate"
+  [[ "$candidate" = "$canonical" ]] ||
+    fail "Foundry executable path must be canonical and contain no symlink"
+  [[ -f "$canonical" && ! -L "$canonical" && -x "$canonical" ]] ||
+    fail "Foundry executable must be an executable non-symlink regular file"
+  if [[ "$audit_root" != "/" ]]; then
+    [[ "$canonical" = "$audit_root/"* ]] ||
+      fail "Foundry executable is outside the test trust root"
+  fi
+
+  component="$canonical"
+  while true; do
+    [[ ! -L "$component" ]] ||
+      fail "Foundry executable path component is a symlink: $component"
+    [[ "$(stat -c '%u' -- "$component")" -eq "$expected_uid" ]] ||
+      fail "Foundry executable path component has an untrusted owner: $component"
+    mode="$(stat -c '%a' -- "$component")"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] ||
+      fail "cannot validate Foundry executable permissions: $component"
+    (( (8#$mode & 0022) == 0 )) ||
+      fail "Foundry executable path component is writable by group or other: $component"
+    [[ "$component" = "$audit_root" ]] && break
+    component="${component%/*}"
+    [[ -n "$component" ]] || component="/"
+  done
+}
+
+for required_command in \
+  awk chmod cp curl date env grep kill ln mkdir mktemp openssl \
+  python3 realpath rm seq sha256sum sleep stat timeout tr wc; do
+  command -v "$required_command" >/dev/null 2>&1 ||
+    fail "required command not found: $required_command"
+done
+timeout --version >/dev/null 2>&1 || fail "GNU timeout is required"
+
+test_mode="${FOUNDRY_PRODUCTION_READINESS_TEST_MODE:-0}"
+case "$test_mode" in
+  0 | 1) ;;
+  *) fail "FOUNDRY_PRODUCTION_READINESS_TEST_MODE must be 0 or 1" ;;
+esac
+production_mode_raw=0
+if [[ -v FOUNDRY_PRODUCTION_MODE ]]; then
+  production_mode_raw="$FOUNDRY_PRODUCTION_MODE"
+fi
+production_mode_value="${production_mode_raw,,}"
+case "$production_mode_value" in
+  0 | false | no | off) production_mode=0 ;;
+  1 | true | yes | on) production_mode=1 ;;
+  *)
+    fail "FOUNDRY_PRODUCTION_MODE must be one of 0,false,no,off,1,true,yes,on"
+    ;;
+esac
+execution_mode="production"
+[[ "$test_mode" = 0 ]] || execution_mode="test"
+
+trust_root="/"
+trusted_uid=0
+if [[ "$test_mode" = 1 ]]; then
+  [[ "$production_mode" = 0 ]] ||
+    fail "test mode is forbidden when FOUNDRY_PRODUCTION_MODE is enabled"
+  test_root="${FOUNDRY_PRODUCTION_READINESS_TEST_ROOT:-}"
+  [[ "$test_root" = /* && "$test_root" != "/" && -d "$test_root" && ! -L "$test_root" ]] ||
+    fail "FOUNDRY_PRODUCTION_READINESS_TEST_ROOT must be an absolute non-symlink directory"
+  marker="$test_root/.foundry-production-readiness-test-root"
+  [[ -f "$marker" && ! -L "$marker" ]] ||
+    fail "production-readiness test sentinel is missing"
+  [[ "$(<"$marker")" = "foundry-production-readiness-test-v1" ]] ||
+    fail "production-readiness test sentinel is invalid"
+  trust_root="$(realpath -e -- "$test_root")"
+  trusted_uid="$(stat -c '%u' -- "$trust_root")"
+else
+  [[ -z "${FOUNDRY_PRODUCTION_READINESS_TEST_ROOT:-}" ]] ||
+    fail "FOUNDRY_PRODUCTION_READINESS_TEST_ROOT requires test mode"
+fi
+readonly test_mode production_mode execution_mode trust_root trusted_uid
+
+foundry_binary=""
+source_store_input=""
+release_version=""
+canary_workflow_id=""
+output_dir_input=""
+operations_input="120"
+concurrency_input="4"
+max_duration_input="120"
+max_rss_input="536870912"
+ops_port_input="18767"
+
+while (($# > 0)); do
+  case "$1" in
+    --foundry)
+      require_value "$1" "${2-}"
+      [[ -z "$foundry_binary" ]] || fail "--foundry may only be specified once"
+      foundry_binary="$2"
+      shift 2
+      ;;
+    --store)
+      require_value "$1" "${2-}"
+      [[ -z "$source_store_input" ]] || fail "--store may only be specified once"
+      source_store_input="$2"
+      shift 2
+      ;;
+    --release-version)
+      require_value "$1" "${2-}"
+      [[ -z "$release_version" ]] || fail "--release-version may only be specified once"
+      release_version="$2"
+      shift 2
+      ;;
+    --canary-workflow-id)
+      require_value "$1" "${2-}"
+      [[ -z "$canary_workflow_id" ]] ||
+        fail "--canary-workflow-id may only be specified once"
+      canary_workflow_id="$2"
+      shift 2
+      ;;
+    --output-dir)
+      require_value "$1" "${2-}"
+      [[ -z "$output_dir_input" ]] || fail "--output-dir may only be specified once"
+      output_dir_input="$2"
+      shift 2
+      ;;
+    --operations)
+      require_value "$1" "${2-}"
+      operations_input="$2"
+      shift 2
+      ;;
+    --concurrency)
+      require_value "$1" "${2-}"
+      concurrency_input="$2"
+      shift 2
+      ;;
+    --max-duration-seconds)
+      require_value "$1" "${2-}"
+      max_duration_input="$2"
+      shift 2
+      ;;
+    --max-rss-bytes)
+      require_value "$1" "${2-}"
+      max_rss_input="$2"
+      shift 2
+      ;;
+    --ops-port)
+      require_value "$1" "${2-}"
+      ops_port_input="$2"
+      shift 2
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --*)
+      fail "unknown option: $1"
+      ;;
+    *)
+      fail "unexpected positional argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$foundry_binary" ]] || fail "--foundry is required"
+[[ -n "$source_store_input" ]] || fail "--store is required"
+[[ -n "$release_version" ]] || fail "--release-version is required"
+[[ -n "$canary_workflow_id" ]] || fail "--canary-workflow-id is required"
+[[ -n "$output_dir_input" ]] || fail "--output-dir is required"
+
+for path_value in "$foundry_binary" "$source_store_input" "$output_dir_input"; do
+  require_single_line "path" "$path_value"
+done
+require_single_line "release version" "$release_version"
+require_single_line "canary workflow id" "$canary_workflow_id"
+
+[[ "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] ||
+  fail "--release-version must be a semantic version without a v prefix"
+[[ "$canary_workflow_id" =~ ^wf_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]] ||
+  fail "--canary-workflow-id must be a bounded wf_ identifier"
+
+operations=0
+concurrency=0
+max_duration_seconds=0
+max_rss_bytes=0
+ops_port=0
+parse_uint "$operations_input" "--operations" operations
+parse_uint "$concurrency_input" "--concurrency" concurrency
+parse_uint "$max_duration_input" "--max-duration-seconds" max_duration_seconds
+parse_uint "$max_rss_input" "--max-rss-bytes" max_rss_bytes
+parse_uint "$ops_port_input" "--ops-port" ops_port
+((operations >= 100 && operations <= 10000)) ||
+  fail "--operations must be between 100 and 10000"
+((concurrency >= 1 && concurrency <= 64 && concurrency <= operations)) ||
+  fail "--concurrency must be between 1 and 64 and not exceed operations"
+((max_duration_seconds >= 1 && max_duration_seconds <= 300)) ||
+  fail "--max-duration-seconds must be between 1 and 300"
+((max_rss_bytes >= 16777216 && max_rss_bytes <= 68719476736)) ||
+  fail "--max-rss-bytes must be between 16 MiB and 64 GiB"
+((ops_port >= 1024 && ops_port <= 65535)) ||
+  fail "--ops-port must be between 1024 and 65535"
+
+[[ "$foundry_binary" = /* ]] || fail "--foundry must be an absolute path"
+audit_executable "$foundry_binary" "$trust_root" "$trusted_uid"
+
+[[ "$source_store_input" = /* ]] || fail "--store must be an absolute path"
+[[ -f "$source_store_input" && ! -L "$source_store_input" ]] ||
+  fail "--store must identify a non-symlink regular file"
+source_store="$(realpath -e -- "$source_store_input")"
+[[ "$source_store" = "$source_store_input" ]] ||
+  fail "--store path must be canonical and contain no symlink"
+store_mode="$(stat -c '%a' -- "$source_store")"
+[[ "$store_mode" =~ ^[0-7]{3,4}$ ]] ||
+  fail "cannot validate source store permissions"
+(( (8#$store_mode & 0077) == 0 )) ||
+  fail "source store must not be accessible by group or other"
+
+[[ "$output_dir_input" = /* && "$output_dir_input" != "/" ]] ||
+  fail "--output-dir must be an absolute directory other than /"
+[[ -d "$output_dir_input" && ! -L "$output_dir_input" ]] ||
+  fail "--output-dir must be an existing non-symlink directory"
+output_dir="$(realpath -e -- "$output_dir_input")"
+[[ "$output_dir" = "$output_dir_input" ]] ||
+  fail "--output-dir path must be canonical and contain no symlink"
+[[ "$(stat -c '%u' -- "$output_dir")" -eq "$EUID" ]] ||
+  fail "--output-dir must be owned by the invoking user"
+output_mode="$(stat -c '%a' -- "$output_dir")"
+[[ "$output_mode" =~ ^[0-7]{3,4}$ ]] ||
+  fail "cannot validate --output-dir permissions"
+(( (8#$output_mode & 0077) == 0 )) ||
+  fail "--output-dir must be private to the invoking user"
+[[ -w "$output_dir" ]] || fail "--output-dir must be writable"
+
+report_path="$output_dir/bounded-load-report.json"
+[[ ! -e "$report_path" && ! -L "$report_path" ]] ||
+  fail "output must be new: $report_path"
+
+[[ -z "${FOUNDRY_SECRET_VAULT_KEY+x}" ]] ||
+  fail "FOUNDRY_SECRET_VAULT_KEY is forbidden; use a key file"
+[[ -z "${FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS+x}" ]] ||
+  fail "FOUNDRY_SECRET_VAULT_PREVIOUS_KEYS is forbidden; use key files"
+vault_key_file="${FOUNDRY_SECRET_VAULT_KEY_FILE:-}"
+[[ "$vault_key_file" = /* && -f "$vault_key_file" && ! -L "$vault_key_file" && -r "$vault_key_file" ]] ||
+  fail "FOUNDRY_SECRET_VAULT_KEY_FILE must identify a readable absolute non-symlink file"
+
+reported_version="$("$foundry_binary" --version 2>/dev/null)" ||
+  fail "Foundry executable did not report a version"
+[[ "$reported_version" = "foundry $release_version" ]] ||
+  fail "Foundry executable version does not match --release-version"
+binary_sha256="$(sha256sum "$foundry_binary" | awk '{print $1}')"
+[[ "$binary_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  fail "Foundry executable digest is invalid"
+
+work_dir="$(mktemp -d /tmp/foundry-bounded-load.XXXXXX)"
+chmod 0700 "$work_dir"
+printf '%s\n' "foundry-bounded-load-work-v1" >"$work_dir/.sentinel"
+stage_dir=""
+stage_report=""
+server_pid=""
+rss_monitor_pid=""
+rss_monitor_stop="$work_dir/rss-monitor-stop"
+
+cleanup() {
+  if [[ "$server_pid" =~ ^[0-9]+$ ]] && kill -0 "$server_pid" 2>/dev/null; then
+    kill -TERM "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
+  if [[ "$rss_monitor_pid" =~ ^[0-9]+$ ]] && kill -0 "$rss_monitor_pid" 2>/dev/null; then
+    kill -TERM "$rss_monitor_pid" 2>/dev/null || true
+    wait "$rss_monitor_pid" 2>/dev/null || true
+  fi
+  if [[ -n "${stage_dir:-}" && "$stage_dir" = "$output_dir"/.bounded-load-stage.* &&
+    -d "$stage_dir" && ! -L "$stage_dir" ]]; then
+    rm -rf -- "$stage_dir"
+  fi
+  if [[ "$work_dir" = /tmp/foundry-bounded-load.* &&
+    -f "$work_dir/.sentinel" &&
+    "$(<"$work_dir/.sentinel")" = "foundry-bounded-load-work-v1" ]]; then
+    rm -rf -- "$work_dir"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+stage_dir="$(mktemp -d "$output_dir/.bounded-load-stage.XXXXXX")"
+chmod 0700 "$stage_dir"
+stage_report="$stage_dir/bounded-load-report.json"
+
+vault_env=(
+  env
+  -u CREDENTIALS_DIRECTORY
+  -u FOUNDRY_BACKUP_OFFHOST_COMMAND_FILE
+  -u FOUNDRY_BACKUP_OFFHOST_DESTINATION_FILE
+  -u FOUNDRY_BACKUP_OFFHOST_GENERATION_FILE
+  -u FOUNDRY_OPS_BEARER_TOKEN
+  FOUNDRY_PRODUCTION_MODE=1
+  "FOUNDRY_SECRET_VAULT_KEY_FILE=$vault_key_file"
+)
+
+run_foundry() {
+  local label="$1"
+  shift
+  if timeout --foreground --signal=TERM --kill-after=2s "${max_duration_seconds}s" \
+    "${vault_env[@]}" "$foundry_binary" "$@"; then
+    return 0
+  fi
+  fail "$label failed or exceeded the bounded timeout"
+}
+
+backup_store="$work_dir/source-backup.sqlite"
+working_store="$work_dir/load-store.sqlite"
+[[ ! -e "$backup_store" && ! -L "$backup_store" ]] ||
+  fail "internal backup path unexpectedly exists"
+python3 - "$source_store" "$backup_store" <<'PY'
+import os
+import sqlite3
+import sys
+
+source_path, backup_path = sys.argv[1:]
+source = sqlite3.connect(f"file:{source_path}?mode=ro", uri=True)
+try:
+    result = source.execute("PRAGMA quick_check").fetchone()
+    if result != ("ok",):
+        raise SystemExit("source store quick_check failed")
+    destination = sqlite3.connect(backup_path)
+    try:
+        source.backup(destination)
+        destination.commit()
+        copied = destination.execute("PRAGMA quick_check").fetchone()
+        if copied != ("ok",):
+            raise SystemExit("backup store quick_check failed")
+    finally:
+        destination.close()
+finally:
+    source.close()
+os.chmod(backup_path, 0o600)
+PY
+[[ -s "$backup_store" && ! -L "$backup_store" ]] ||
+  fail "SQLite did not create a safe non-empty source backup"
+cp --reflink=auto --no-clobber -- "$backup_store" "$working_store"
+chmod 0600 "$working_store"
+run_foundry "disposable store check" \
+  --store "$working_store" store check --output json >"$work_dir/check-before.json"
+run_foundry "canary inspection before load" \
+  --store "$working_store" inspect "$canary_workflow_id" --output json \
+  >"$work_dir/canary-before.json"
+
+ops_token_file="$work_dir/ops-token"
+curl_config="$work_dir/curl.conf"
+openssl rand -hex 32 >"$ops_token_file"
+ops_token="$(tr -d '\r\n' <"$ops_token_file")"
+printf 'header = "Authorization: Bearer %s"\n' "$ops_token" >"$curl_config"
+unset ops_token
+chmod 0600 "$ops_token_file" "$curl_config"
+
+rss_samples="$work_dir/rss-samples"
+rss_exceeded="$work_dir/rss-exceeded"
+: >"$rss_samples"
+
+monitor_rss() {
+  local target_pid="$1"
+  local rss_kb=""
+  local rss_bytes=""
+
+  while [[ ! -e "$rss_monitor_stop" ]] && kill -0 "$target_pid" 2>/dev/null; do
+    rss_kb="$(
+      awk '/^VmRSS:/ { print $2; exit }' "/proc/$target_pid/status" 2>/dev/null ||
+        true
+    )"
+    if [[ "$rss_kb" =~ ^[0-9]+$ ]] && ((rss_kb > 0)); then
+      rss_bytes="$((rss_kb * 1024))"
+      printf '%s\n' "$rss_bytes" >>"$rss_samples"
+      if ((rss_bytes > max_rss_bytes)); then
+        printf '%s\n' "$rss_bytes" >"$rss_exceeded" 2>/dev/null || true
+        kill -KILL "$target_pid" 2>/dev/null || true
+        return 42
+      fi
+    fi
+    sleep 0.02
+  done
+}
+
+stop_rss_monitor() {
+  local monitor_status=0
+
+  if [[ "$rss_monitor_pid" =~ ^[0-9]+$ ]]; then
+    [[ ! -e "$rss_monitor_stop" && ! -L "$rss_monitor_stop" ]] ||
+      fail "RSS monitor stop marker unexpectedly exists"
+    printf '%s\n' "foundry-bounded-load-rss-monitor-stop-v1" >"$rss_monitor_stop"
+    if wait "$rss_monitor_pid" 2>/dev/null; then
+      monitor_status=0
+    else
+      monitor_status=$?
+    fi
+    rss_monitor_pid=""
+    rm -f -- "$rss_monitor_stop"
+  fi
+  [[ ! -e "$rss_exceeded" ]] ||
+    fail "Ops exceeded --max-rss-bytes"
+  ((monitor_status == 0)) ||
+    fail "RSS monitor failed with exit status $monitor_status"
+}
+
+start_ops() {
+  local startup_index="$1"
+  local http_status=""
+  local _attempt=""
+
+  [[ ! -e "$rss_monitor_stop" && ! -L "$rss_monitor_stop" ]] ||
+    fail "RSS monitor stop marker unexpectedly exists before startup"
+  "${vault_env[@]}" \
+    "FOUNDRY_OPS_BEARER_TOKEN_FILE=$ops_token_file" \
+    "$foundry_binary" \
+    --store "$working_store" \
+    ops serve \
+    --project-root "$work_dir/workspace" \
+    --host 127.0.0.1 \
+    --port "$ops_port" \
+    >"$work_dir/ops-$startup_index.log" 2>&1 &
+  server_pid="$!"
+  monitor_rss "$server_pid" &
+  rss_monitor_pid="$!"
+
+  for _attempt in $(seq 1 100); do
+    http_status="$(
+      curl --disable --config "$curl_config" \
+        --silent --output /dev/null --write-out '%{http_code}' \
+        --max-time 2 \
+        "http://127.0.0.1:$ops_port/api/snapshot" 2>/dev/null ||
+        true
+    )"
+    [[ "$http_status" = 200 ]] && return 0
+    kill -0 "$server_pid" 2>/dev/null ||
+      fail "Ops exited before becoming ready"
+    sleep 0.05
+  done
+  fail "Ops did not become ready on loopback"
+}
+
+load_driver="$work_dir/load-driver"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -u' \
+  'total="$1"; concurrency="$2"; config="$3"; url="$4"; result_dir="$5"' \
+  'worker() {' \
+  '  local count="$1"; local output="$2"; local measurement=""; local index=""' \
+  '  for index in $(seq 1 "$count"); do' \
+  '    if measurement="$(curl --disable --config "$config" --silent --output /dev/null --write-out "%{http_code} %{time_total}" --max-time 5 "$url" 2>/dev/null)"; then' \
+  '      printf "%s\n" "$measurement" >>"$output"' \
+  '    else' \
+  '      printf "000 0\n" >>"$output"' \
+  '    fi' \
+  '  done' \
+  '}' \
+  'base=$((total / concurrency)); remainder=$((total % concurrency)); pids=()' \
+  'for index in $(seq 0 $((concurrency - 1))); do' \
+  '  count="$base"; ((index < remainder)) && count=$((count + 1))' \
+  '  worker "$count" "$result_dir/worker-$index" &' \
+  '  pids+=("$!")' \
+  'done' \
+  'status=0' \
+  'for pid in "${pids[@]}"; do wait "$pid" || status=1; done' \
+  'exit "$status"' \
+  >"$load_driver"
+chmod 0700 "$load_driver"
+
+results_dir="$work_dir/results"
+mkdir -m 0700 "$results_dir"
+start_ops 1
+start_millis="$(date -u +%s%3N)"
+if timeout --foreground --signal=TERM --kill-after=2s "${max_duration_seconds}s" \
+  "$load_driver" "$operations" "$concurrency" "$curl_config" \
+  "http://127.0.0.1:$ops_port/api/snapshot" "$results_dir"; then
+  :
+else
+  status=$?
+  case "$status" in
+    124 | 137) fail "bounded load exceeded --max-duration-seconds" ;;
+    *) fail "bounded load driver failed with exit status $status" ;;
+  esac
+fi
+end_millis="$(date -u +%s%3N)"
+[[ "$start_millis" =~ ^[0-9]+$ && "$end_millis" =~ ^[0-9]+$ &&
+  "$end_millis" -ge "$start_millis" ]] ||
+  fail "could not measure bounded load duration"
+duration_millis="$((end_millis - start_millis))"
+duration_seconds="$(((duration_millis + 999) / 1000))"
+((duration_seconds > 0)) || duration_seconds=1
+((duration_seconds <= max_duration_seconds)) ||
+  fail "bounded load duration exceeded policy"
+
+results="$work_dir/load-results"
+for result_file in "$results_dir"/worker-*; do
+  [[ -f "$result_file" && ! -L "$result_file" ]] ||
+    fail "load worker did not produce a safe result file"
+  printf '%s' "$(<"$result_file")" >>"$results"
+  printf '\n' >>"$results"
+done
+
+operation_count="$(wc -l <"$results")"
+error_count="$(awk '$1 != "200" { errors += 1 } END { print errors + 0 }' "$results")"
+[[ "$operation_count" =~ ^[0-9]+$ && "$error_count" =~ ^[0-9]+$ ]] ||
+  fail "load result counters are invalid"
+((operation_count == operations && operation_count >= 100)) ||
+  fail "load did not complete the requested minimum operation count"
+((error_count == 0)) || fail "bounded load recorded HTTP or transport errors"
+
+p95_latency_millis="$(
+  python3 - "$results" <<'PY'
+import math
+import sys
+
+values = []
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    for raw in handle:
+        fields = raw.split()
+        if len(fields) != 2:
+            raise SystemExit("invalid result row")
+        value = float(fields[1])
+        if not math.isfinite(value) or value < 0:
+            raise SystemExit("invalid latency")
+        values.append(math.ceil(value * 1000))
+if not values:
+    raise SystemExit("missing latency samples")
+values.sort()
+index = max(0, math.ceil(len(values) * 0.95) - 1)
+print(values[index])
+PY
+)" || fail "could not calculate p95 latency"
+[[ "$p95_latency_millis" =~ ^[0-9]+$ ]] ||
+  fail "calculated p95 latency is invalid"
+((p95_latency_millis <= 2000)) ||
+  fail "p95 latency exceeds the 2000 ms production gate"
+
+kill -KILL "$server_pid" 2>/dev/null ||
+  fail "could not issue SIGKILL to Ops"
+wait "$server_pid" 2>/dev/null || true
+server_pid=""
+stop_rss_monitor
+
+run_foundry "post-crash store check" \
+  --store "$working_store" store check --output json >"$work_dir/check-after-crash.json"
+start_ops 2
+run_foundry "canary inspection after restart" \
+  --store "$working_store" inspect "$canary_workflow_id" --output json \
+  >"$work_dir/canary-after.json"
+kill -TERM "$server_pid" 2>/dev/null ||
+  fail "could not stop restarted Ops"
+wait "$server_pid" ||
+  fail "restarted Ops did not stop cleanly"
+server_pid=""
+stop_rss_monitor
+run_foundry "final store check" \
+  --store "$working_store" store check --output json >"$work_dir/check-final.json"
+
+max_rss_observed="$(awk 'BEGIN { max = 0 } $1 > max { max = $1 } END { print max }' "$rss_samples")"
+[[ "$max_rss_observed" =~ ^[0-9]+$ ]] ||
+  fail "RSS samples are invalid"
+((max_rss_observed > 0 && max_rss_observed <= max_rss_bytes)) ||
+  fail "RSS measurement is missing or exceeds the configured limit"
+
+observed_at_epoch="$(date -u +%s)"
+python3 - \
+  "$stage_report" \
+  "$release_version" \
+  "$observed_at_epoch" \
+  "$execution_mode" \
+  "$duration_seconds" \
+  "$concurrency" \
+  "$operation_count" \
+  "$error_count" \
+  "$p95_latency_millis" \
+  "$max_rss_observed" \
+  "$max_rss_bytes" \
+  "$binary_sha256" \
+  "$canary_workflow_id" <<'PY'
+import json
+import os
+import re
+import sys
+
+(
+    output,
+    release,
+    observed,
+    execution_mode,
+    duration,
+    concurrency,
+    operations,
+    errors,
+    p95,
+    max_rss,
+    rss_limit,
+    binary_sha256,
+    canary_workflow_id,
+) = sys.argv[1:]
+report = {
+    "schema_version": "foundry.milestone.production_source_evidence.bounded_load.v1",
+    "kind": "bounded_load",
+    "status": "passed",
+    "subject_version": release,
+    "observed_at_epoch": int(observed),
+    "execution_mode": execution_mode,
+    "producer": "foundry-bounded-load-drill",
+    "claims": {
+        "duration_seconds": int(duration),
+        "concurrency": int(concurrency),
+        "operation_count": int(operations),
+        "error_count": int(errors),
+        "p95_latency_millis": int(p95),
+        "max_rss_bytes": int(max_rss),
+        "max_rss_limit_bytes": int(rss_limit),
+        "timeout_enforced": True,
+        "resource_limit_enforced": True,
+        "store_check_passed": True,
+        "crash_restart_verified": True,
+    },
+    "evidence": {
+        "collector_schema_version": "foundry.production_readiness.bounded_load_drill.v1",
+        "binary_sha256": binary_sha256,
+        "canary_workflow_id": canary_workflow_id,
+    },
+}
+encoded = json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+secret_patterns = [
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    r"\bAKIA[0-9A-Z]{16}\b",
+    r"\b(?:ghp|github_pat|sk-proj)-[A-Za-z0-9_-]{12,}\b",
+    r"\b[0-9]{8,10}:[A-Za-z0-9_-]{30,}\b",
+]
+if any(re.search(pattern, encoded) for pattern in secret_patterns):
+    raise SystemExit("generated report contains secret-like material")
+with open(output, "x", encoding="utf-8") as handle:
+    handle.write(encoded)
+os.chmod(output, 0o600)
+PY
+
+[[ -s "$stage_report" && ! -L "$stage_report" ]] ||
+  fail "bounded-load source report was not generated safely"
+ln -- "$stage_report" "$report_path" ||
+  fail "could not publish bounded-load report without overwriting"
+rm -f -- "$stage_report"
+rm -rf -- "$stage_dir"
+stage_dir=""
+printf 'foundry bounded-load drill: passed (%s, sha256=%s)\n' \
+  "$report_path" "$(sha256sum "$report_path" | awk '{print $1}')"

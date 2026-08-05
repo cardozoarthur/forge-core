@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 fail() {
-  printf 'forge directory uploader self-test: %s\n' "$*" >&2
+  printf 'foundry directory uploader self-test: %s\n' "$*" >&2
   exit 1
 }
 
@@ -16,7 +16,7 @@ package_root="$(
   cd -- "$script_dir/.." && pwd -P
 )"
 readonly package_root
-readonly uploader="$package_root/bin/forge-directory-offhost-uploader"
+readonly uploader="$package_root/bin/foundry-directory-offhost-uploader"
 
 [[ -x "$uploader" ]] || fail "directory uploader must be executable"
 export PATH="$script_dir/directory-stubs:$PATH"
@@ -24,10 +24,10 @@ export PATH="$script_dir/directory-stubs:$PATH"
 test_parent="$(getent passwd "$(id -u)" | cut -d: -f6)"
 [[ -n "$test_parent" && -d "$test_parent" && ! -L "$test_parent" && -w "$test_parent" ]] ||
   fail "current account requires a writable non-symlink home for secure-path tests"
-test_root="$(mktemp -d "$test_parent/.forge-directory-uploader-test.XXXXXX")"
+test_root="$(mktemp -d "$test_parent/.foundry-directory-uploader-test.XXXXXX")"
 cleanup() {
   case "${test_root:-}" in
-    "$test_parent"/.forge-directory-uploader-test.*)
+    "$test_parent"/.foundry-directory-uploader-test.*)
       [[ -d "$test_root" && ! -L "$test_root" ]] && rm -rf -- "$test_root"
       ;;
   esac
@@ -39,10 +39,10 @@ mkdir -p \
   "$test_root/other-remote" \
   "$test_root/work"
 export TEST_DIRECTORY_MOUNT_TARGET="$test_root"
-export TEST_DIRECTORY_MOUNT_SOURCE="fixture-remote:/forge"
+export TEST_DIRECTORY_MOUNT_SOURCE="fixture-remote:/foundry"
 export TEST_DIRECTORY_MOUNT_FSTYPE="fuse.fixture"
 export TEST_DIRECTORY_MOUNT_STATE="up"
-printf 'forge provider-neutral directory fixture\n' \
+printf 'foundry provider-neutral directory fixture\n' \
   >"$test_root/work/source.sqlite"
 printf 'different immutable object\n' \
   >"$test_root/work/conflicting.sqlite"
@@ -55,9 +55,9 @@ printf '%s\n' "$source_sha256" >"$test_root/work/expected.sha256"
 
 export CREDENTIALS_DIRECTORY="/credentials-must-not-be-required"
 readonly destination="file://$test_root/remote"
-readonly object_name="forge-20260725T120000Z.sqlite"
+readonly object_name="foundry-20260725T120000Z.sqlite"
 readonly remote_object="$test_root/remote/$object_name"
-readonly remote_digest="$remote_object.forge-sha256"
+readonly remote_digest="$remote_object.foundry-sha256"
 readonly stdout_file="$test_root/work/stdout"
 readonly stderr_file="$test_root/work/stderr"
 readonly mount_identity_file="$test_root/work/mount-identity"
@@ -66,13 +66,13 @@ mount_fsid="$(stat -f -c '%i' -- "$test_root/remote")"
 [[ "$mount_fsid" =~ ^[0-9A-Fa-f]+$ ]] ||
   fail "fixture filesystem identity is invalid"
 printf '%s\n' \
-  "forge-directory-mount-v1" \
+  "foundry-directory-mount-v1" \
   "target=$TEST_DIRECTORY_MOUNT_TARGET" \
   "source=$TEST_DIRECTORY_MOUNT_SOURCE" \
   "fstype=$TEST_DIRECTORY_MOUNT_FSTYPE" \
   "fsid=$mount_fsid" \
   >"$mount_identity_file"
-export FORGE_DIRECTORY_MOUNT_IDENTITY_FILE="$mount_identity_file"
+export FOUNDRY_DIRECTORY_MOUNT_IDENTITY_FILE="$mount_identity_file"
 
 : >"$stdout_file"
 : >"$stderr_file"
@@ -89,7 +89,7 @@ grep -Fq "destination mode must be exactly 0700" "$stderr_file" ||
   fail "destination mode rejection was not explicit"
 chmod 0700 "$test_root/other-remote"
 
-if env -u FORGE_DIRECTORY_MOUNT_IDENTITY_FILE \
+if env -u FOUNDRY_DIRECTORY_MOUNT_IDENTITY_FILE \
   "$uploader" upload \
   --source "$test_root/work/source.sqlite" \
   --destination "$destination" \
@@ -98,7 +98,7 @@ if env -u FORGE_DIRECTORY_MOUNT_IDENTITY_FILE \
   >"$stdout_file" 2>"$stderr_file"; then
   fail "file destination without a persisted mount identity unexpectedly succeeded"
 fi
-grep -Fq "FORGE_DIRECTORY_MOUNT_IDENTITY_FILE is required" "$stderr_file" ||
+grep -Fq "FOUNDRY_DIRECTORY_MOUNT_IDENTITY_FILE is required" "$stderr_file" ||
   fail "missing mount identity rejection was not explicit"
 [[ ! -e "$test_root/remote/missing-identity.sqlite" ]] ||
   fail "missing mount identity wrote into the destination"
@@ -284,7 +284,7 @@ ln -s -- \
   "$test_root/other-remote/symlink-target" \
   "$test_root/remote/symlink.sqlite"
 printf '%s\n' "$source_sha256" \
-  >"$test_root/remote/symlink.sqlite.forge-sha256"
+  >"$test_root/remote/symlink.sqlite.foundry-sha256"
 if "$uploader" verify \
   --destination "$destination" \
   --object "symlink.sqlite" \
@@ -300,7 +300,7 @@ if "$uploader" verify \
 fi
 if "$uploader" verify \
   --destination "$destination" \
-  --object "backup.sqlite.forge-sha256" \
+  --object "backup.sqlite.foundry-sha256" \
   >"$stdout_file" 2>"$stderr_file"; then
   fail "reserved digest-sidecar suffix unexpectedly passed object validation"
 fi
@@ -360,4 +360,4 @@ grep -Fq "mount identity changed or is unavailable" "$stderr_file" ||
   ! -e "$test_root/work/mount-fallback-download.sqlite.sha256" ]] ||
   fail "mount-loss download published local outputs"
 
-printf 'forge directory off-host uploader self-test: ok\n'
+printf 'foundry directory off-host uploader self-test: ok\n'

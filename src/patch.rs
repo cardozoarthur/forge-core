@@ -1,6 +1,6 @@
 use crate::artifact::{hex_sha256, write_json_artifact};
 use crate::identity::ensure_workflow_policy;
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use crate::workflow::attach_workflow_artifact;
 use crate::workflow::ArtifactAttachReport;
 use crate::worktree::{
@@ -14,7 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-const PATCH_PLAN_SCHEMA_VERSION: &str = "forge.patch_plan.v1";
+const PATCH_PLAN_SCHEMA_VERSION: &str = "foundry.patch_plan.v1";
 const DEFAULT_CONTEXT_BUDGET_BYTES: usize = 1200;
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,7 +83,7 @@ pub struct PatchPlanArtifactRef {
 }
 
 pub fn build_patch_plan(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     paths: Vec<String>,
@@ -187,10 +187,10 @@ pub fn build_patch_plan(
             strict: true,
             budget_bytes: DEFAULT_CONTEXT_BUDGET_BYTES,
             command: format!(
-                "forge context --workflow {workflow_id} --task {task_id} --budget {DEFAULT_CONTEXT_BUDGET_BYTES} --strict --view compact --output json"
+                "foundry context --workflow {workflow_id} --task {task_id} --budget {DEFAULT_CONTEXT_BUDGET_BYTES} --strict --view compact --output json"
             ),
             handoff_rule:
-                "Executor must receive bounded context and return a diff/patch for human review; Forge does not apply changes during planning."
+                "Executor must receive bounded context and return a diff/patch for human review; Foundry does not apply changes during planning."
                     .to_string(),
         },
         diff_review: PatchDiffReview {
@@ -298,11 +298,11 @@ fn diff_review_commands(paths: &[String]) -> Vec<String> {
 // Patch apply
 // ---------------------------------------------------------------------------
 
-const PATCH_REVIEW_SCHEMA_VERSION: &str = "forge.patch_review.v1";
-const PATCH_DIFF_SCHEMA_VERSION: &str = "forge.patch_diff.v1";
-const PATCH_APPLY_SCHEMA_VERSION: &str = "forge.patch_apply.v1";
-const PATCH_REVERT_SCHEMA_VERSION: &str = "forge.patch_revert.v1";
-const PATCH_RESTORE_SCHEMA_VERSION: &str = "forge.patch_restore.v1";
+const PATCH_REVIEW_SCHEMA_VERSION: &str = "foundry.patch_review.v1";
+const PATCH_DIFF_SCHEMA_VERSION: &str = "foundry.patch_diff.v1";
+const PATCH_APPLY_SCHEMA_VERSION: &str = "foundry.patch_apply.v1";
+const PATCH_REVERT_SCHEMA_VERSION: &str = "foundry.patch_revert.v1";
+const PATCH_RESTORE_SCHEMA_VERSION: &str = "foundry.patch_restore.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PatchReviewReport {
@@ -452,7 +452,7 @@ pub struct PatchApplyReport {
 }
 
 pub fn build_patch_review(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     paths: Vec<String>,
@@ -616,7 +616,7 @@ fn build_path_review(path: &str, status_output: &str) -> Result<PatchPathReview>
 }
 
 pub fn build_patch_diff(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     paths: Vec<String>,
@@ -989,7 +989,7 @@ fn patch_diff_navigation_command(
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "forge patch diff --workflow {workflow_id} --task {task_id} {path_args} --file-index {file_index} --hunk-index {hunk_index} --context-lines {context_lines} --output json"
+        "foundry patch diff --workflow {workflow_id} --task {task_id} {path_args} --file-index {file_index} --hunk-index {hunk_index} --context-lines {context_lines} --output json"
     )
 }
 
@@ -1126,7 +1126,7 @@ const DEFAULT_APPLY_VALIDATION_COMMANDS: [&str; 2] = [
 /// heavy `cargo test` belongs in the patch-plan's diff-review phase so it
 /// does not cause recursive test hangs).
 pub fn build_patch_apply(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     paths: Vec<String>,
@@ -1209,7 +1209,7 @@ pub fn build_patch_apply(
         validation: validation.clone(),
         artifact: None,
         rollback_instructions: vec![
-            "Use `forge patch revert` with this apply artifact to create a guarded rollback proposal."
+            "Use `foundry patch revert` with this apply artifact to create a guarded rollback proposal."
                 .to_string(),
             "A human must approve any destructive file restore outside this record-only apply step."
                 .to_string(),
@@ -1237,11 +1237,11 @@ const DEFAULT_REVERT_VALIDATION_COMMANDS: [&str; 2] = [
 
 /// Record a guarded rollback proposal for a previously applied patch.
 ///
-/// This does not restore files by itself. Forge records the apply artifact,
+/// This does not restore files by itself. Foundry records the apply artifact,
 /// affected paths, approval command and safety notes so a human approval node
 /// or future TUI diff review can decide whether to run a destructive restore.
 pub fn build_patch_revert(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     apply_artifact_path: &str,
@@ -1299,7 +1299,7 @@ pub fn build_patch_revert(
         validation,
         artifact: None,
         safety_notes: vec![
-            "Forge did not execute git checkout or restore files automatically.".to_string(),
+            "Foundry did not execute git checkout or restore files automatically.".to_string(),
             "Human approval is required before destructive rollback commands are run.".to_string(),
             format!(
                 "If approved, run validation after restore: {}",
@@ -1320,7 +1320,7 @@ pub fn build_patch_revert(
 }
 
 pub fn build_patch_restore(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     task_id: &str,
     revert_artifact_path: &str,
@@ -1334,7 +1334,7 @@ pub fn build_patch_restore(
         bail!("--approved-by is required for patch restore");
     }
     if !confirm_restore {
-        bail!("--confirm-restore is required before Forge restores files");
+        bail!("--confirm-restore is required before Foundry restores files");
     }
 
     let workflow = store.load_workflow(workflow_id)?;
@@ -1430,7 +1430,7 @@ pub fn build_patch_restore(
         validation,
         artifact: None,
         safety_notes: vec![
-            "Forge executed an approved repo-local restore using git checkout with separated path arguments.".to_string(),
+            "Foundry executed an approved repo-local restore using git checkout with separated path arguments.".to_string(),
             "The restore was allowed only because --confirm-restore and --approved-by were present.".to_string(),
             "External resources, Docker, Kubernetes, Knative and device interfaces were not touched.".to_string(),
         ],

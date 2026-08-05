@@ -13,24 +13,24 @@ use crate::outcome::{
 };
 use crate::request::{build_run_activity, RunRecord};
 use crate::schedule::{summarize_loops, summarize_schedules, LoopSummary, ScheduleSummary};
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-const REGISTRY_CONTEXT_HANDOFF_SCHEMA_VERSION: &str = "forge.registry_context_handoff.v1";
-const REGISTRY_CONTEXT_ACTION_SCHEMA_VERSION: &str = "forge.registry_context_action.v1";
-const REGISTRY_CONTEXT_QUALITY_SCHEMA_VERSION: &str = "forge.registry_context_quality.v1";
-const REGISTRY_EXECUTION_POLICY_SCHEMA_VERSION: &str = "forge.registry_execution_policy.v1";
-const REGISTRY_CONTEXT_ACTION_REF_SCHEMA_VERSION: &str = "forge.registry_context_action_ref.v1";
-const REGISTRY_QUALITY_ACTION_SCHEMA_VERSION: &str = "forge.registry_quality_action.v1";
+const REGISTRY_CONTEXT_HANDOFF_SCHEMA_VERSION: &str = "foundry.registry_context_handoff.v1";
+const REGISTRY_CONTEXT_ACTION_SCHEMA_VERSION: &str = "foundry.registry_context_action.v1";
+const REGISTRY_CONTEXT_QUALITY_SCHEMA_VERSION: &str = "foundry.registry_context_quality.v1";
+const REGISTRY_EXECUTION_POLICY_SCHEMA_VERSION: &str = "foundry.registry_execution_policy.v1";
+const REGISTRY_CONTEXT_ACTION_REF_SCHEMA_VERSION: &str = "foundry.registry_context_action_ref.v1";
+const REGISTRY_QUALITY_ACTION_SCHEMA_VERSION: &str = "foundry.registry_quality_action.v1";
 const REGISTRY_CONTEXT_ACTION_CATALOG_SCHEMA_VERSION: &str =
-    "forge.registry_context_action_catalog.v1";
+    "foundry.registry_context_action_catalog.v1";
 const REGISTRY_QUALITY_ACTION_CATALOG_SCHEMA_VERSION: &str =
-    "forge.registry_quality_action_catalog.v1";
-const REGISTRY_RUN_ACTIVITY_SCHEMA_VERSION: &str = "forge.registry_run_activity.v1";
-const REGISTRY_WORKFLOW_RUNTIME_SCHEMA_VERSION: &str = "forge.registry_workflow_runtime.v1";
+    "foundry.registry_quality_action_catalog.v1";
+const REGISTRY_RUN_ACTIVITY_SCHEMA_VERSION: &str = "foundry.registry_run_activity.v1";
+const REGISTRY_WORKFLOW_RUNTIME_SCHEMA_VERSION: &str = "foundry.registry_workflow_runtime.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowRegistryReport {
@@ -334,19 +334,19 @@ struct RegistryContextActionProjection {
     refs: Vec<RegistryContextActionRef>,
 }
 
-pub fn list_workflows(store: &ForgeStore) -> Result<WorkflowRegistryReport> {
+pub fn list_workflows(store: &FoundryStore) -> Result<WorkflowRegistryReport> {
     list_workflows_filtered(store, WorkflowLifecycleFilter::All)
 }
 
 pub fn list_workflows_filtered(
-    store: &ForgeStore,
+    store: &FoundryStore,
     filter: WorkflowLifecycleFilter,
 ) -> Result<WorkflowRegistryReport> {
     list_workflows_with_filters(store, WorkflowRegistryFilters::new(filter))
 }
 
 pub fn list_workflows_with_filters(
-    store: &ForgeStore,
+    store: &FoundryStore,
     filters: WorkflowRegistryFilters,
 ) -> Result<WorkflowRegistryReport> {
     let workflows = store.load_workflows()?;
@@ -685,7 +685,7 @@ impl WorkflowLifecycleFilter {
     }
 }
 
-fn load_runs_by_workflow(store: &ForgeStore) -> Result<BTreeMap<String, Vec<RunRecord>>> {
+fn load_runs_by_workflow(store: &FoundryStore) -> Result<BTreeMap<String, Vec<RunRecord>>> {
     let mut runs_by_workflow: BTreeMap<String, Vec<RunRecord>> = BTreeMap::new();
     for value in store.load_runs()? {
         let run: RunRecord = serde_json::from_value(value)?;
@@ -698,7 +698,7 @@ fn load_runs_by_workflow(store: &ForgeStore) -> Result<BTreeMap<String, Vec<RunR
 }
 
 pub fn find_reuse_candidates(
-    store: &ForgeStore,
+    store: &FoundryStore,
     requested_workflow: &Workflow,
 ) -> Result<Vec<WorkflowReuseCandidate>> {
     let requested_subflows = reusable_subflows(requested_workflow, "candidate");
@@ -860,7 +860,7 @@ fn registry_row(
 
 fn empty_human_interaction_summary() -> HumanInteractionSummary {
     HumanInteractionSummary {
-        schema_version: "forge.human_interaction.summary.v1".to_string(),
+        schema_version: "foundry.human_interaction.summary.v1".to_string(),
         ..HumanInteractionSummary::default()
     }
 }
@@ -1547,7 +1547,7 @@ fn workflow_runtime_reason(
             )
         }
         "sleep_until_schedule" => {
-            "workflow is waiting for its next Forge-owned schedule wakeup".to_string()
+            "workflow is waiting for its next Foundry-owned schedule wakeup".to_string()
         }
         "keep_event_listener_ready" => {
             "persistent workflow is idle but expected to react to future events".to_string()
@@ -1567,7 +1567,7 @@ fn workflow_runtime_reason(
             "completed workflow is not yet represented as scaled-to-zero".to_string()
         }
         _ if runtime.scale_to_zero_policy == "keep_warm" => {
-            "runtime policy asks Forge to keep this workflow warm".to_string()
+            "runtime policy asks Foundry to keep this workflow warm".to_string()
         }
         _ => "no runtime intervention is required".to_string(),
     }

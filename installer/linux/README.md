@@ -1,4 +1,4 @@
-# Forge Linux Packaging
+# Foundry Linux Packaging
 
 Status: delivered by `.github/workflows/release.yml`.
 
@@ -7,11 +7,15 @@ Linux kernel 4.18 or newer and glibc 2.34 or newer. Both archives are built and
 executed on native Ubuntu 22.04 runners; release CI rejects ELF symbol
 requirements newer than `GLIBC_2.34`.
 
-Each archive contains `forge`, `LICENSE`, the systemd service bundle, and the
+Each archive contains `foundry`, `LICENSE`, the systemd service bundle, and the
 single-host production runbook. With `cosign` installed,
 `installer/install.sh` verifies the checksum manifest's exact Sigstore
 issuer/workflow/tag identity and then verifies the archive before atomically
 replacing the binary.
+<!-- foundry-brand-allow: legacy-compat -->
+The archive also carries the deprecated `forge` forwarding shim during the
+0.6.x migration window. Foundry remains the only primary binary and service
+identity.
 It installs to `$HOME/.local/bin` by default but does not modify `PATH`; see
 `installer/README.md` for shell-specific activation.
 

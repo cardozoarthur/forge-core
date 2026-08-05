@@ -204,8 +204,8 @@ impl Default for NodeBrainRoutingSpec {
         Self {
             schema_version: node_brain_routing_schema_version(),
             scope: "legacy_unspecified_node".to_string(),
-            orchestrator_brain: "forge".to_string(),
-            selection_owner: "forge".to_string(),
+            orchestrator_brain: "foundry".to_string(),
+            selection_owner: "foundry".to_string(),
             allowed_brains: Vec::new(),
             default_brain: None,
             agent_slots: Vec::new(),
@@ -215,10 +215,10 @@ impl Default for NodeBrainRoutingSpec {
             hot_swappable: false,
             switch_command: Vec::new(),
             workflow_mutation_command: Vec::new(),
-            state_owner: "forge_workflow_state".to_string(),
-            memory_source: "forge_memory_router".to_string(),
-            skills_source: "forge_skill_router".to_string(),
-            mcp_source: "forge_mcp_router".to_string(),
+            state_owner: "foundry_workflow_state".to_string(),
+            memory_source: "foundry_memory_router".to_string(),
+            skills_source: "foundry_skill_router".to_string(),
+            mcp_source: "foundry_mcp_router".to_string(),
         }
     }
 }
@@ -281,6 +281,15 @@ pub struct WorkItemSpec {
     pub impediments: Vec<String>,
     pub acceptance_criteria: Vec<String>,
     pub goal_validation: GoalValidationSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskImpediment {
+    pub id: String,
+    pub kind: String,
+    pub reason: String,
+    pub origin: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,11 +377,11 @@ fn default_node_version() -> u64 {
 }
 
 fn node_brain_routing_schema_version() -> String {
-    "forge.node_brain_routing.v1".to_string()
+    "foundry.node_brain_routing.v1".to_string()
 }
 
 fn workflow_runtime_schema_version() -> String {
-    "forge.workflow_runtime.v1".to_string()
+    "foundry.workflow_runtime.v1".to_string()
 }
 
 fn default_workflow_runtime_kind() -> String {
@@ -407,14 +416,14 @@ pub fn node_brain_routing_for_executor(executor: &ExecutorKind) -> NodeBrainRout
                 brain_id: None,
                 role: "primary_node_agent".to_string(),
                 parallel_group: "node-default".to_string(),
-                state_owner: "forge".to_string(),
+                state_owner: "foundry".to_string(),
             }];
             routing.max_parallel_agents = 4;
             routing.supports_parallel_agent_brains = true;
             routing.supports_multiple_agents_per_brain = true;
             routing.hot_swappable = true;
             routing.switch_command = vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "request".to_string(),
                 "switch-executor".to_string(),
                 "--run".to_string(),
@@ -425,7 +434,7 @@ pub fn node_brain_routing_for_executor(executor: &ExecutorKind) -> NodeBrainRout
                 "json".to_string(),
             ];
             routing.workflow_mutation_command = vec![
-                "forge".to_string(),
+                "foundry".to_string(),
                 "workflow".to_string(),
                 "update-node-brain".to_string(),
                 "--workflow".to_string(),
@@ -451,6 +460,8 @@ pub struct AtomicTask {
     pub title: String,
     pub goal: String,
     pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub active_impediments: Vec<TaskImpediment>,
     pub context_requirements: Vec<String>,
     pub validation_rules: Vec<ValidationRule>,
     pub expected_output: String,
@@ -514,6 +525,89 @@ pub struct WorkflowRevision {
     pub change_type: String,
     pub summary: String,
     pub created_at: DateTime<Utc>,
+}
+
+pub const CORE_PARALLEL_TEAM_SCHEMA_VERSION: &str = "foundry.core.parallel_team.v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoreParallelLaneSpec {
+    pub id: String,
+    pub executor_id: String,
+    pub agent_count: usize,
+    pub parallel_group: String,
+    pub responsibility: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoreParallelTeamSpec {
+    #[serde(default = "core_parallel_team_schema_version")]
+    pub schema_version: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub lanes: Vec<CoreParallelLaneSpec>,
+    #[serde(default)]
+    pub max_parallel_agents: usize,
+}
+
+impl CoreParallelTeamSpec {
+    pub fn explicit(
+        source: impl Into<String>,
+        lanes: Vec<CoreParallelLaneSpec>,
+        max_parallel_agents: usize,
+    ) -> Self {
+        Self {
+            schema_version: core_parallel_team_schema_version(),
+            source: source.into(),
+            lanes,
+            max_parallel_agents,
+        }
+    }
+}
+
+fn core_parallel_team_schema_version() -> String {
+    CORE_PARALLEL_TEAM_SCHEMA_VERSION.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CoreOrchestrationSpec {
+    pub authority: String,
+    pub dynamic_workflow: bool,
+    pub parallel_task_handoffs: bool,
+    pub parallel_agent_nodes: bool,
+    pub fan_out_fan_in: bool,
+    pub mutations_revisioned: bool,
+    pub receipts_required: bool,
+    pub validation_before_promotion: bool,
+    pub priority_scheduling: bool,
+    pub max_parallel_tasks: usize,
+    pub max_parallel_agents_per_node: usize,
+    pub resource_gates_required: bool,
+    pub quota_gates_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_team: Option<CoreParallelTeamSpec>,
+}
+
+impl Default for CoreOrchestrationSpec {
+    fn default() -> Self {
+        Self {
+            authority: "foundry_core".to_string(),
+            dynamic_workflow: true,
+            parallel_task_handoffs: true,
+            parallel_agent_nodes: true,
+            fan_out_fan_in: true,
+            mutations_revisioned: true,
+            receipts_required: true,
+            validation_before_promotion: true,
+            priority_scheduling: true,
+            max_parallel_tasks: 4,
+            max_parallel_agents_per_node: 4,
+            resource_gates_required: true,
+            quota_gates_required: true,
+            parallel_team: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -599,6 +693,8 @@ pub struct Workflow {
     pub created_at: DateTime<Utc>,
     pub intent: IntentSpec,
     #[serde(default)]
+    pub core_orchestration: CoreOrchestrationSpec,
+    #[serde(default)]
     pub runtime: WorkflowRuntimeSpec,
     pub tasks: Vec<AtomicTask>,
     #[serde(default)]
@@ -622,6 +718,7 @@ pub fn create_workflow(intent: IntentSpec) -> Workflow {
         initial_goal: Some(intent.goal.clone()),
         status: "pending".to_string(),
         created_at: Utc::now(),
+        core_orchestration: CoreOrchestrationSpec::default(),
         runtime: WorkflowRuntimeSpec::from_intent(&intent),
         intent,
         tasks,
@@ -642,7 +739,7 @@ fn rule(kind: &str, expected: &str, command: Option<&str>) -> ValidationRule {
 }
 
 fn schedule_schema_version() -> String {
-    "forge.schedule.v1".to_string()
+    "foundry.schedule.v1".to_string()
 }
 
 fn schedule_kind_cron() -> String {
@@ -666,27 +763,27 @@ fn default_scale_to_zero_when_idle() -> bool {
 }
 
 fn loop_schema_version() -> String {
-    "forge.loop.v1".to_string()
+    "foundry.loop.v1".to_string()
 }
 
 fn native_subflow_schema_version() -> String {
-    "forge.native_subflow.v1".to_string()
+    "foundry.native_subflow.v1".to_string()
 }
 
 fn artifact_lineage_schema_version() -> String {
-    "forge.artifact_lineage.v1".to_string()
+    "foundry.artifact_lineage.v1".to_string()
 }
 
 fn human_interaction_schema_version() -> String {
-    "forge.human_interaction.v1".to_string()
+    "foundry.human_interaction.v1".to_string()
 }
 
 fn human_form_schema_version() -> String {
-    "forge.human_form.v1".to_string()
+    "foundry.human_form.v1".to_string()
 }
 
 fn human_decision_schema_version() -> String {
-    "forge.human_decision.v1".to_string()
+    "foundry.human_decision.v1".to_string()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -791,6 +888,7 @@ pub fn task(
             .iter()
             .map(|item| (*item).to_string())
             .collect(),
+        active_impediments: Vec::new(),
         context_requirements: context_requirements
             .iter()
             .map(|item| (*item).to_string())
@@ -883,7 +981,7 @@ fn work_item(
         item_type,
         backlog_state: "ready".to_string(),
         priority: "p1".to_string(),
-        owner_role: "forge_runtime".to_string(),
+        owner_role: "foundry_runtime".to_string(),
         parent_id,
         subtasks,
         impediments,
@@ -1027,19 +1125,22 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
     if !autonomous_extensions_required {
         let loop_kind = detect_loop_kind(&intent.goal);
         if let Some(kind) = loop_kind {
-            tasks.push(loop_node_task("task-009", &["task-003"], kind));
+            let task_id = next_task_id(&tasks);
+            tasks.push(loop_node_task(&task_id, &["task-003"], kind));
         } else if let Some(policy) = windows_software_policy.clone() {
-            tasks.push(windows_software_task("task-009", &["task-003"], policy));
+            let task_id = next_task_id(&tasks);
+            tasks.push(windows_software_task(&task_id, &["task-003"], policy));
         } else if let Some(policy) = reusable_local_code_policy(local_code_policy.as_ref()) {
+            let task_id = next_task_id(&tasks);
             tasks.push(deterministic_non_ai_task(
-                "task-009",
+                &task_id,
                 &["task-003"],
                 policy.clone(),
             ));
         }
 
         if let Some(kind) = detect_loop_kind(&intent.goal) {
-            let loop_node_id = format!("task-{:03}", tasks.len());
+            let loop_node_id = next_task_id(&tasks);
             let loop_id = tasks
                 .iter()
                 .find(|t| t.title.contains("Run explicit loop"))
@@ -1087,8 +1188,9 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
     }
 
     if autonomous_extensions_required {
+        let immediate_id = next_task_id(&tasks);
         let mut immediate = task(
-            "task-009",
+            &immediate_id,
             "Execute immediate workflow action",
             &["task-003"],
             &["goal", "current runtime state"],
@@ -1106,14 +1208,15 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         let wait_until_at = detect_wait_until_at(&intent.goal);
         let wait_is_one_shot =
             wait_until_at.is_some() && !intent.goal.to_lowercase().contains("cron");
+        let wait_id = next_task_id(&tasks);
         let mut wait = task(
-            "task-010",
+            &wait_id,
             if wait_is_one_shot {
                 "Wait until scheduled continuation"
             } else {
                 "Wait for scheduled continuation"
             },
-            &["task-009"],
+            &[&immediate_id],
             &["schedule", "workflow state"],
             vec![rule(
                 "schedule",
@@ -1147,21 +1250,23 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         });
         tasks.push(wait);
 
+        let deterministic_id = next_task_id(&tasks);
         let deterministic = if let Some(policy) = windows_software_policy {
-            windows_software_task("task-011", &["task-010"], policy)
+            windows_software_task(&deterministic_id, &[&wait_id], policy)
         } else {
             let deterministic_policy = local_code_policy
                 .unwrap_or_else(|| default_execution_policy(&ExecutorKind::Command));
-            deterministic_non_ai_task("task-011", &["task-010"], deterministic_policy)
+            deterministic_non_ai_task(&deterministic_id, &[&wait_id], deterministic_policy)
         };
         tasks.push(deterministic);
 
         if let Some(email) = extract_email(&intent.goal) {
+            let notification_id = next_task_id(&tasks);
             let mut notification = with_persona(
                 task(
-                    "task-012",
+                    &notification_id,
                     "Send workflow cost email",
-                    &["task-011"],
+                    &[&deterministic_id],
                     &["workflow costs", "notification target"],
                     vec![rule(
                         "notification",
@@ -1176,7 +1281,7 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
             notification.notification = Some(NotificationSpec {
                 channel: "email".to_string(),
                 to: email,
-                subject: "Forge workflow cost report".to_string(),
+                subject: "Foundry workflow cost report".to_string(),
                 include_cost_report: true,
             });
             tasks.push(notification);
@@ -1239,7 +1344,7 @@ fn append_manifest_workflow_extension_tasks(
             vec![rule(
                 "addon_extension",
                 &format!(
-                    "extension {} from Addon {} is represented as an auditable Forge task without Core domain-specific code",
+                    "extension {} from Addon {} is represented as an auditable Foundry task without Core domain-specific code",
                     extension.id, extension.source_addon
                 ),
                 None,
@@ -1323,11 +1428,11 @@ fn append_n8n_primitive_research_tasks(tasks: &mut Vec<AtomicTask>, _intent: &In
     let catalog_dependency = [catalog_id.as_str()];
     let evaluation = task(
         &evaluation_id,
-        "Evaluate Forge primitive candidates",
+        "Evaluate Foundry primitive candidates",
         &catalog_dependency,
         &[
             "n8n research catalog",
-            "Forge DAG semantics",
+            "Foundry DAG semantics",
             "context routing requirements",
             "resumability and observability goals",
         ],
@@ -1339,11 +1444,11 @@ fn append_n8n_primitive_research_tasks(tasks: &mut Vec<AtomicTask>, _intent: &In
             ),
             rule(
                 "license_guard",
-                "external source code and licenses are not copied blindly into Forge",
+                "external source code and licenses are not copied blindly into Foundry",
                 None,
             ),
         ],
-        "Forge primitive promotion recommendation",
+        "Foundry primitive promotion recommendation",
         (ExecutorKind::Ai, 0.012),
     );
     tasks.push(evaluation);
@@ -1354,7 +1459,7 @@ fn append_n8n_primitive_research_tasks(tasks: &mut Vec<AtomicTask>, _intent: &In
         }
         graph_task
             .context_requirements
-            .push("Forge primitive promotion recommendation".to_string());
+            .push("Foundry primitive promotion recommendation".to_string());
     }
 }
 
@@ -1564,7 +1669,7 @@ fn append_hackathon_factory_tasks(tasks: &mut Vec<AtomicTask>) {
     telegram.notification = Some(NotificationSpec {
         channel: "telegram".to_string(),
         to: "configured_telegram_chat".to_string(),
-        subject: "Forge Hackathon MVP Factory - final idea PDF".to_string(),
+        subject: "Foundry Hackathon MVP Factory - final idea PDF".to_string(),
         include_cost_report: false,
     });
     tasks.push(telegram);
@@ -1920,8 +2025,8 @@ fn daily_goal_deterministic_policy(entrypoint: &str) -> ExecutionPolicySpec {
         deterministic: true,
         code_runtime: Some(CodeRuntimeSpec {
             language: "rust".to_string(),
-            entrypoint: format!("forge_daily_goal_{entrypoint}"),
-            sandbox: "forge_owned_artifacts_no_external_mutation".to_string(),
+            entrypoint: format!("foundry_daily_goal_{entrypoint}"),
+            sandbox: "foundry_owned_artifacts_no_external_mutation".to_string(),
         }),
         reuse_hint: "reuse_compatible_code_node".to_string(),
         selection_reason:
@@ -2045,7 +2150,7 @@ fn persona(mode: &str, voice: &str, tone: &str) -> PersonaRoutingSpec {
     PersonaRoutingSpec {
         mode: mode.to_string(),
         scope: "node".to_string(),
-        instruction_source: "forge_personality_soul_routing_v1".to_string(),
+        instruction_source: "foundry_personality_soul_routing_v1".to_string(),
         voice: voice.to_string(),
         tone: tone.to_string(),
         validation_gate: "persona_routing_required".to_string(),
@@ -2057,7 +2162,7 @@ fn persona(mode: &str, voice: &str, tone: &str) -> PersonaRoutingSpec {
     }
 }
 
-fn default_execution_policy(executor: &ExecutorKind) -> ExecutionPolicySpec {
+pub(crate) fn default_execution_policy(executor: &ExecutorKind) -> ExecutionPolicySpec {
     match executor {
         ExecutorKind::Ai => ExecutionPolicySpec {
             mode: "model_executor".to_string(),
@@ -2097,13 +2202,13 @@ fn local_code_execution_policy(goal: &str) -> Option<ExecutionPolicySpec> {
     let runtime = if lower.contains("python") {
         CodeRuntimeSpec {
             language: "python".to_string(),
-            entrypoint: "forge_local_python_code_node".to_string(),
+            entrypoint: "foundry_local_python_code_node".to_string(),
             sandbox: "local_process_no_network".to_string(),
         }
     } else if lower.contains("node.js") || lower.contains("node ") || lower.contains("javascript") {
         CodeRuntimeSpec {
             language: "nodejs".to_string(),
-            entrypoint: "forge_local_node_code_node".to_string(),
+            entrypoint: "foundry_local_node_code_node".to_string(),
             sandbox: "local_process_no_network".to_string(),
         }
     } else {
@@ -2355,7 +2460,7 @@ fn detect_loop_kind(goal: &str) -> Option<String> {
         || lower.contains("infinite_recurring_subflow")
         || lower.contains("infinite-recurring")
         || lower.contains("recurring subflow")
-        || lower.contains("improve forge core autonomously")
+        || lower.contains("improve foundry core autonomously")
         || lower.contains("self-evolution")
     {
         Some("infinite_recurring_subflow".to_string())

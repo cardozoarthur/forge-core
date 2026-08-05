@@ -1,12 +1,12 @@
 //! Policy-bound, at-most-once execution for persisted mission tasks.
 //!
-//! Forge owns the execution claim and receipt. The worktree module owns sandbox
+//! Foundry owns the execution claim and receipt. The worktree module owns sandbox
 //! planning and process isolation; this module binds that evidence to the exact
 //! mission revision, task, agent, executor policy, command and approval scope.
 
 use crate::executor::ExecutorState;
 use crate::mission::{load_mission, load_squad, MissionMode, SkillGateMode};
-use crate::storage::{open_configured_connection, ForgeStore};
+use crate::storage::{open_configured_connection, FoundryStore};
 use crate::worktree::{
     plan_worktree_sandbox, run_worktree_sandbox, WorktreeSandboxPlan, WorktreeSandboxReceipt,
     WorktreeSandboxRequest,
@@ -23,16 +23,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use uuid::Uuid;
 
-pub const MISSION_EXECUTION_PLAN_SCHEMA_VERSION: &str = "forge.mission.execution_plan.v1";
-pub const MISSION_EXECUTION_APPROVAL_SCHEMA_VERSION: &str = "forge.mission.execution_approval.v1";
-pub const MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION: &str = "forge.mission.execution_receipt.v3";
+pub const MISSION_EXECUTION_PLAN_SCHEMA_VERSION: &str = "foundry.mission.execution_plan.v1";
+pub const MISSION_EXECUTION_APPROVAL_SCHEMA_VERSION: &str = "foundry.mission.execution_approval.v1";
+pub const MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION: &str = "foundry.mission.execution_receipt.v3";
 pub const LEGACY_MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION: &str =
-    "forge.mission.execution_receipt.v2";
-pub const MISSION_EXECUTION_CLAIM_SCHEMA_VERSION: &str = "forge.mission.execution_claim.v1";
-pub const MISSION_EXECUTION_METRIC_SCHEMA_VERSION: &str = "forge.mission.execution_metric.v1";
-pub const MISSION_EXECUTION_LIST_SCHEMA_VERSION: &str = "forge.mission.execution_receipt_list.v1";
+    "foundry.mission.execution_receipt.v2";
+pub const MISSION_EXECUTION_CLAIM_SCHEMA_VERSION: &str = "foundry.mission.execution_claim.v1";
+pub const MISSION_EXECUTION_METRIC_SCHEMA_VERSION: &str = "foundry.mission.execution_metric.v1";
+pub const MISSION_EXECUTION_LIST_SCHEMA_VERSION: &str = "foundry.mission.execution_receipt_list.v1";
 pub const MISSION_EXECUTION_RECONCILIATION_SCHEMA_VERSION: &str =
-    "forge.mission.execution_reconciliation.v1";
+    "foundry.mission.execution_reconciliation.v1";
 
 const MIN_EXECUTION_LEASE_SECONDS: u64 = 300;
 const EXECUTION_LEASE_MARGIN_SECONDS: u64 = 30;
@@ -41,10 +41,11 @@ const METRIC_SOURCE_READ_ONLY_WORKTREE: &str = "bubblewrap_read_only_worktree";
 const METRIC_SOURCE_NETWORK_ISOLATION: &str = "sandbox_network_isolation";
 const METRIC_SOURCE_DETERMINISTIC_LOCAL_COST: &str =
     "deterministic_local_command_network_isolation";
-const GATE_EVIDENCE_OBSERVATION_SCHEMA_VERSION: &str = "forge.mission.gate_evidence_observation.v1";
-const GATE_EVIDENCE_OBSERVATION_PREFIX: &str = "FORGE_GATE_EVIDENCE:";
+const GATE_EVIDENCE_OBSERVATION_SCHEMA_VERSION: &str =
+    "foundry.mission.gate_evidence_observation.v1";
+const GATE_EVIDENCE_OBSERVATION_PREFIX: &str = "FOUNDRY_GATE_EVIDENCE:";
 const TEST_EXECUTION_OBSERVATION_SCHEMA_VERSION: &str =
-    "forge.mission.test_execution_observation.v1";
+    "foundry.mission.test_execution_observation.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionExecutionApproval {
@@ -493,7 +494,7 @@ struct ExecutionDbRecord {
 }
 
 pub fn plan_mission_execution(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: &MissionExecutionRequest,
 ) -> Result<MissionExecutionPlan> {
     validate_shape(request)?;
@@ -906,7 +907,7 @@ pub fn build_mission_execution_approval(
 }
 
 pub fn execute_mission_command(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: MissionExecutionRequest,
 ) -> Result<MissionExecutionResult> {
     let plan = plan_mission_execution(store, &request)?;
@@ -1021,7 +1022,7 @@ pub fn execute_mission_command(
 }
 
 pub fn list_mission_execution_receipts(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mission_id: Option<&str>,
     task_id: Option<&str>,
 ) -> Result<MissionExecutionListReport> {
@@ -1065,7 +1066,7 @@ pub fn list_mission_execution_receipts(
 }
 
 pub fn inspect_mission_execution_receipt(
-    store: &ForgeStore,
+    store: &FoundryStore,
     receipt_id: &str,
 ) -> Result<MissionExecutionRecord> {
     let record = load_db_record(store, receipt_id)?
@@ -1074,7 +1075,7 @@ pub fn inspect_mission_execution_receipt(
 }
 
 pub fn reconcile_mission_execution(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: MissionExecutionReconcileRequest,
 ) -> Result<MissionExecutionReconcileResult> {
     validate_reconciliation_request(&request)?;
@@ -1211,7 +1212,7 @@ pub fn reconcile_mission_execution(
 }
 
 pub fn load_mission_execution_receipt(
-    store: &ForgeStore,
+    store: &FoundryStore,
     receipt_id: &str,
 ) -> Result<MissionExecutionReceipt> {
     inspect_mission_execution_receipt(store, receipt_id)?
@@ -1222,7 +1223,7 @@ pub fn load_mission_execution_receipt(
 }
 
 pub fn claim_mission_execution_receipt_for_submission(
-    store: &ForgeStore,
+    store: &FoundryStore,
     receipt_id: &str,
     mission_id: &str,
     expected_mission_revision: u64,
@@ -1238,6 +1239,7 @@ pub fn claim_mission_execution_receipt_for_submission(
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mission_data_json: Option<String> = transaction
         .query_row(
+            // foundry-brand-allow: legacy-compat
             "SELECT data_json FROM forge_missions WHERE id=?1",
             [mission_id],
             |row| row.get(0),
@@ -1321,7 +1323,7 @@ pub fn claim_mission_execution_receipt_for_submission(
 }
 
 pub fn release_mission_execution_receipt_submission_claim(
-    store: &ForgeStore,
+    store: &FoundryStore,
     receipt_id: &str,
     submission_key: &str,
 ) -> Result<()> {
@@ -1367,9 +1369,13 @@ pub fn release_mission_execution_receipt_submission_claim(
 }
 
 pub fn verify_mission_execution_receipt(receipt: &MissionExecutionReceipt) -> Result<()> {
-    if receipt.schema_version != MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION
-        && receipt.schema_version != LEGACY_MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION
-    {
+    if !crate::brand::identifier_matches(
+        &receipt.schema_version,
+        MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION,
+    ) && !crate::brand::identifier_matches(
+        &receipt.schema_version,
+        LEGACY_MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION,
+    ) {
         bail!("unsupported mission execution receipt schema");
     }
     let mut canonical = receipt.clone();
@@ -1391,17 +1397,22 @@ pub fn resolved_mission_execution_metrics(
 ) -> Result<ResolvedMissionExecutionMetrics> {
     let sandbox = receipt.sandbox.as_ref();
     let sandbox_sha256 = sandbox.map(hash_json).transpose()?;
-    let legacy = receipt.schema_version == LEGACY_MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION;
-    if receipt.schema_version == MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION
-        && (matches!(receipt.observed_cost_usd, MissionExecutionMetric::Legacy(_))
-            || matches!(
-                receipt.observed_files_changed,
-                MissionExecutionMetric::Legacy(_)
-            )
-            || matches!(
-                receipt.observed_external_calls,
-                MissionExecutionMetric::Legacy(_)
-            ))
+    let legacy = crate::brand::identifier_matches(
+        &receipt.schema_version,
+        LEGACY_MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION,
+    );
+    if crate::brand::identifier_matches(
+        &receipt.schema_version,
+        MISSION_EXECUTION_RECEIPT_SCHEMA_VERSION,
+    ) && (matches!(receipt.observed_cost_usd, MissionExecutionMetric::Legacy(_))
+        || matches!(
+            receipt.observed_files_changed,
+            MissionExecutionMetric::Legacy(_)
+        )
+        || matches!(
+            receipt.observed_external_calls,
+            MissionExecutionMetric::Legacy(_)
+        ))
     {
         bail!("mission execution receipt v3 requires explicit metric observations");
     }
@@ -1538,7 +1549,10 @@ fn resolve_count_metric(
 }
 
 fn validate_metric_shape<T>(observation: &MissionExecutionMetricObservation<T>) -> Result<()> {
-    if observation.schema_version != MISSION_EXECUTION_METRIC_SCHEMA_VERSION {
+    if !crate::brand::identifier_matches(
+        &observation.schema_version,
+        MISSION_EXECUTION_METRIC_SCHEMA_VERSION,
+    ) {
         bail!("unsupported mission execution metric schema");
     }
     match observation.status {
@@ -1795,7 +1809,10 @@ fn verify_typed_claims(receipt: &MissionExecutionReceipt) -> Result<()> {
     let mut builtin_kinds = BTreeSet::new();
     let mut gate_evidence_kinds = BTreeSet::new();
     for claim in &receipt.claims {
-        if claim.schema_version != MISSION_EXECUTION_CLAIM_SCHEMA_VERSION {
+        if !crate::brand::identifier_matches(
+            &claim.schema_version,
+            MISSION_EXECUTION_CLAIM_SCHEMA_VERSION,
+        ) {
             bail!("unsupported mission execution claim schema");
         }
         if claim.scope != MissionExecutionClaimScope::Operational {
@@ -1933,7 +1950,7 @@ fn validate_submittable_receipt(
 }
 
 fn dry_run_receipt(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: &MissionExecutionRequest,
     plan: &MissionExecutionPlan,
 ) -> Result<MissionExecutionReceipt> {
@@ -2004,7 +2021,7 @@ fn build_metric_observations(
 
 #[allow(clippy::too_many_arguments)]
 fn build_receipt(
-    _store: &ForgeStore,
+    _store: &FoundryStore,
     request: &MissionExecutionRequest,
     plan: &MissionExecutionPlan,
     started: DateTime<Utc>,
@@ -2187,7 +2204,10 @@ fn validate_approval(
     approval: Option<&MissionExecutionApproval>,
 ) -> Result<()> {
     let approval = approval.context("mission execution requires explicit approval")?;
-    if approval.schema_version != MISSION_EXECUTION_APPROVAL_SCHEMA_VERSION {
+    if !crate::brand::identifier_matches(
+        &approval.schema_version,
+        MISSION_EXECUTION_APPROVAL_SCHEMA_VERSION,
+    ) {
         bail!("unsupported mission execution approval schema");
     }
     if approval.approved_by.trim().is_empty()
@@ -2251,7 +2271,7 @@ fn execution_lease_seconds_for_budget(sandbox_budget: u64) -> Result<i64> {
 }
 
 fn claim_execution(
-    store: &ForgeStore,
+    store: &FoundryStore,
     request: &MissionExecutionRequest,
     plan: &MissionExecutionPlan,
 ) -> Result<ExecutionClaim> {
@@ -2379,7 +2399,7 @@ fn claim_execution(
 }
 
 fn mark_execution_started(
-    store: &ForgeStore,
+    store: &FoundryStore,
     receipt_id: &str,
     owner_token: &str,
     started: DateTime<Utc>,
@@ -2400,7 +2420,7 @@ fn mark_execution_started(
 }
 
 fn finalize_claim(
-    store: &ForgeStore,
+    store: &FoundryStore,
     owner_token: &str,
     receipt: MissionExecutionReceipt,
 ) -> Result<()> {
@@ -2439,7 +2459,7 @@ fn finalize_claim(
     Ok(())
 }
 
-fn load_db_record(store: &ForgeStore, receipt_id: &str) -> Result<Option<ExecutionDbRecord>> {
+fn load_db_record(store: &FoundryStore, receipt_id: &str) -> Result<Option<ExecutionDbRecord>> {
     ensure_consumption_column(store)?;
     let connection = open_configured_connection(store.path())?;
     load_db_record_from_connection(&connection, receipt_id)
@@ -2596,7 +2616,7 @@ fn to_public_record(record: ExecutionDbRecord) -> Result<MissionExecutionRecord>
     })
 }
 
-fn ensure_consumption_column(store: &ForgeStore) -> Result<()> {
+fn ensure_consumption_column(store: &FoundryStore) -> Result<()> {
     let connection = open_configured_connection(store.path())?;
     let mut statement = connection.prepare("PRAGMA table_info(mission_execution_receipts)")?;
     let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
@@ -2666,7 +2686,7 @@ fn resolve_requested_gate_evidence(
         }
         if matches!(evidence_kind, "execution_completed" | "tests_passed") {
             bail!(
-                "requested gate evidence `{evidence_kind}` is reserved for Forge runtime verification"
+                "requested gate evidence `{evidence_kind}` is reserved for Foundry runtime verification"
             );
         }
         if !seen.insert(evidence_kind.to_string()) {
@@ -2836,7 +2856,7 @@ fn resolve_executable(command: &str) -> Option<PathBuf> {
     if path.components().count() > 1 {
         return fs::canonicalize(path).ok();
     }
-    std::env::var_os("PATH")
+    crate::brand::env_var_os("PATH")
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .map(|directory| directory.join(command))
@@ -2998,7 +3018,10 @@ fn parse_gate_evidence_observations(content: &str) -> BTreeMap<String, serde_jso
         let Ok(envelope) = serde_json::from_str::<serde_json::Value>(payload) else {
             continue;
         };
-        if envelope["schema_version"] != GATE_EVIDENCE_OBSERVATION_SCHEMA_VERSION {
+        if !crate::brand::json_identifier_matches(
+            &envelope["schema_version"],
+            GATE_EVIDENCE_OBSERVATION_SCHEMA_VERSION,
+        ) {
             continue;
         }
         let Some(evidence) = envelope["evidence"].as_object() else {
@@ -3071,8 +3094,10 @@ fn test_observation_is_valid(
     let Some(identity) = trusted_host_cargo_identity(&sandbox.command) else {
         return false;
     };
-    observation["schema_version"] == TEST_EXECUTION_OBSERVATION_SCHEMA_VERSION
-        && observation["source"] == "cargo_test_summary"
+    crate::brand::json_identifier_matches(
+        &observation["schema_version"],
+        TEST_EXECUTION_OBSERVATION_SCHEMA_VERSION,
+    ) && observation["source"] == "cargo_test_summary"
         && observation["toolchain_sha256"].as_str() == Some(identity.executable_sha256.as_str())
         && observation["stdout_sha256"] == sandbox.stdout_sha256
         && observation["stderr_sha256"] == sandbox.stderr_sha256
@@ -3093,8 +3118,10 @@ fn gate_observation_is_valid(
     if kind == "review_passed" {
         return test_observation_is_valid(observation, sandbox);
     }
-    observation["schema_version"] == GATE_EVIDENCE_OBSERVATION_SCHEMA_VERSION
-        && observation["source"] == "sandbox_stdout"
+    crate::brand::json_identifier_matches(
+        &observation["schema_version"],
+        GATE_EVIDENCE_OBSERVATION_SCHEMA_VERSION,
+    ) && observation["source"] == "sandbox_stdout"
         && observation["stream_sha256"] == sandbox.stdout_sha256
         && semantic_observation_satisfies(kind, &observation["value"])
 }

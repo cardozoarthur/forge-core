@@ -58,7 +58,7 @@ pub fn plan_parallel_execution(workflow: &Workflow) -> ParallelSchedulePlan {
 
     let parallel_opportunity = total_waves < total_tasks && total_tasks > 1;
 
-    let schema_version = "forge.scheduler.parallel_plan.v1".to_string();
+    let schema_version = "foundry.scheduler.parallel_plan.v1".to_string();
 
     ParallelSchedulePlan {
         schema_version,
@@ -227,6 +227,7 @@ mod tests {
                 title: format!("Task {task_id}"),
                 goal: format!("Goal {task_id}"),
                 dependencies: deps.iter().map(|d| d.to_string()).collect(),
+                active_impediments: vec![],
                 context_requirements: vec![],
                 validation_rules: vec![],
                 expected_output: "output".to_string(),
@@ -245,7 +246,7 @@ mod tests {
                     item_type: "execution_story".to_string(),
                     backlog_state: "ready".to_string(),
                     priority: "p1".to_string(),
-                    owner_role: "forge_runtime".to_string(),
+                    owner_role: "foundry_runtime".to_string(),
                     parent_id: None,
                     subtasks: vec![],
                     impediments: vec![],
@@ -348,7 +349,7 @@ mod tests {
         let workflow =
             make_workflow_with_deps(&[("task-001", &[] as &[&str]), ("task-002", &[] as &[&str])]);
         let plan = plan_parallel_execution(&workflow);
-        assert!(plan.schema_version.starts_with("forge.scheduler"));
+        assert!(plan.schema_version.starts_with("foundry.scheduler"));
         assert_eq!(plan.status, "parallel_opportunity_detected");
         assert!(plan.workflow_id.starts_with("wf_"));
     }

@@ -3,8 +3,8 @@ use serde::Serialize;
 
 pub const FINAL_COMPLETION_AUDIT_KIND: &str = "final_completion_audit";
 
-const OUTCOME_STATUS_SCHEMA_VERSION: &str = "forge.outcome_status.v1";
-const OUTCOME_REGISTRY_SCHEMA_VERSION: &str = "forge.outcome_registry_summary.v1";
+const OUTCOME_STATUS_SCHEMA_VERSION: &str = "foundry.outcome_status.v1";
+const OUTCOME_REGISTRY_SCHEMA_VERSION: &str = "foundry.outcome_registry_summary.v1";
 const SUPPORT_ONLY_FINAL_AUDIT_BLOCK_REASON: &str = "Final completion audit cannot verify a user-facing outcome because the workflow declares only support deliverables.";
 
 #[derive(Debug, Clone, Serialize)]
@@ -421,7 +421,7 @@ fn deliverable_kind(deliverable: &str) -> &'static str {
         "artifact manifest",
         "persistent runtime state",
         "interface contract",
-        "forge primitive promotion recommendation",
+        "foundry primitive promotion recommendation",
         "n8n primitive research catalog",
         "explicit goal loop node",
         "per-goal research subflow lineage",
@@ -488,7 +488,7 @@ fn significant_tokens(input: &str) -> Vec<String> {
         "explicit",
         "native",
         "workflow",
-        "forge",
+        "foundry",
     ];
     input
         .split(|character: char| !character.is_alphanumeric())

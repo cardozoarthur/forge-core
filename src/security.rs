@@ -1,12 +1,13 @@
 use crate::artifact::hex_sha256;
 use crate::graph::Workflow;
-use crate::storage::{ForgeStore, RuntimeSecretVaultWrite};
+use crate::storage::{FoundryStore, RuntimeSecretVaultWrite};
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-pub const RUNTIME_SECURITY_GUARDRAILS_SCHEMA_VERSION: &str = "forge.runtime.security_guardrails.v1";
-pub const RUNTIME_SECRET_GUARDRAIL_SCHEMA_VERSION: &str = "forge.runtime.secret_guardrail.v1";
+pub const RUNTIME_SECURITY_GUARDRAILS_SCHEMA_VERSION: &str =
+    "foundry.runtime.security_guardrails.v1";
+pub const RUNTIME_SECRET_GUARDRAIL_SCHEMA_VERSION: &str = "foundry.runtime.secret_guardrail.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeSecurityGuardrailReport {
@@ -109,7 +110,7 @@ pub struct SecretAuditEvent {
 }
 
 pub struct SecretVaultPersistOptions<'a> {
-    pub store: &'a ForgeStore,
+    pub store: &'a FoundryStore,
     pub workflow_id: Option<&'a str>,
     pub origin: &'a str,
     pub tenant_context: &'a serde_json::Value,
@@ -188,7 +189,7 @@ pub fn sanitize_prompt_secrets(
             value_sha256: value_sha256.clone(),
             value_len,
             stored: true,
-            storage_backend: "forge_secret_vault_reference".to_string(),
+            storage_backend: "foundry_secret_vault_reference".to_string(),
         });
         audit_events.push(SecretAuditEvent {
             event_kind: "secret_value_redacted".to_string(),
@@ -265,17 +266,17 @@ pub fn sanitize_prompt_secrets_with_vault(
     if !report.vault_writes.is_empty() {
         for write in &mut report.vault_writes {
             write.stored = true;
-            write.storage_backend = "forge_runtime_secret_vault".to_string();
+            write.storage_backend = "foundry_runtime_secret_vault".to_string();
         }
         for audit_event in &mut report.audit_events {
-            audit_event.result = "stored_in_forge_runtime_secret_vault".to_string();
+            audit_event.result = "stored_in_foundry_runtime_secret_vault".to_string();
         }
     }
     Ok(report)
 }
 
 pub fn sanitize_workflow_secrets_for_storage(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow: &mut Workflow,
     origin: &str,
 ) -> Result<usize> {
@@ -296,7 +297,7 @@ pub fn sanitize_workflow_secrets_for_storage(
 }
 
 fn sanitize_json_strings_for_workflow(
-    store: &ForgeStore,
+    store: &FoundryStore,
     workflow_id: &str,
     origin: &str,
     tenant_context: &serde_json::Value,
@@ -770,7 +771,7 @@ fn looks_like_public_identifier(value: &str) -> bool {
     let trimmed =
         value.trim_matches(|ch: char| matches!(ch, ',' | ';' | ':' | ')' | ']' | '}' | '"' | '\''));
     let lower = trimmed.to_ascii_lowercase();
-    lower.starts_with("forge.")
+    lower.starts_with("foundry.")
         && lower.contains(".v")
         && lower
             .chars()
@@ -882,7 +883,7 @@ pub struct RuntimeSecurityGuardrailRequest<'a> {
     pub command: &'a [String],
     pub dry_run: bool,
     pub allow_exec: bool,
-    pub forge_first: bool,
+    pub foundry_first: bool,
     pub project_policy_status: &'a str,
     pub has_lineage: bool,
 }
@@ -900,7 +901,7 @@ pub fn evaluate_runtime_security_guardrails(
     let allowed = !command_empty
         && (request.dry_run || request.allow_exec)
         && !lineage_missing
-        && (request.forge_first || !real_exec_requested);
+        && (request.foundry_first || !real_exec_requested);
     let requires_human_approval = real_exec_requested && (!request.allow_exec || lineage_missing);
     let decision = if command_empty {
         "blocked_empty_command"
@@ -910,15 +911,15 @@ pub fn evaluate_runtime_security_guardrails(
         "blocked_missing_lineage"
     } else if !request.allow_exec {
         "blocked_without_explicit_exec_approval"
-    } else if !request.forge_first {
-        "blocked_without_forge_first_runtime_boundary"
+    } else if !request.foundry_first {
+        "blocked_without_foundry_first_runtime_boundary"
     } else {
-        "allowed_forge_first_exec"
+        "allowed_foundry_first_exec"
     };
 
     RuntimeSecurityGuardrailReport {
         schema_version: RUNTIME_SECURITY_GUARDRAILS_SCHEMA_VERSION.to_string(),
-        enforcement_owner: "forge_runtime".to_string(),
+        enforcement_owner: "foundry_runtime".to_string(),
         coverage_scope: "workflow_agent_cli_mcp_deterministic_process".to_string(),
         subject_kind: request.subject_kind.to_string(),
         subject_id: request.subject_id.to_string(),
@@ -1026,7 +1027,7 @@ fn runtime_security_guardrails(
             "immutable_event_before_or_after_execution",
             &["command_sha256", "stdout_stderr_hashes", "global_event"],
             "checked",
-            "Execution receipts record command hashes, bounded output evidence and Forge events.",
+            "Execution receipts record command hashes, bounded output evidence and Foundry events.",
         ),
         guardrail(
             "organizational_policy_engine",
@@ -1071,12 +1072,12 @@ mod tests {
         let input = "\
 OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyzABCDEF1234567890
 GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890
-DATABASE_URL=postgres://forge:super-secret-password@db.internal:5432/app
+DATABASE_URL=postgres://foundry:super-secret-password@db.internal:5432/app
 ";
 
         let report = sanitize_prompt_secrets(input, SecretSanitizationOptions::default());
 
-        assert_eq!(report.schema_version, "forge.runtime.secret_guardrail.v1");
+        assert_eq!(report.schema_version, "foundry.runtime.secret_guardrail.v1");
         assert_eq!(report.status, "sanitized");
         assert_eq!(report.detections.len(), 3);
         assert!(report
@@ -1142,8 +1143,8 @@ DATABASE_URL=postgres://forge:super-secret-password@db.internal:5432/app
     }
 
     #[test]
-    fn secret_guardrail_does_not_classify_forge_schema_versions_as_entropy_secrets() {
-        let input = "forge.capability_discovery_plan.v1 forge.runtime.secret_guardrail.v1";
+    fn secret_guardrail_does_not_classify_foundry_schema_versions_as_entropy_secrets() {
+        let input = "foundry.capability_discovery_plan.v1 foundry.runtime.secret_guardrail.v1";
 
         let report = sanitize_prompt_secrets(input, SecretSanitizationOptions::default());
 
@@ -1232,7 +1233,7 @@ AUTHORIZATION=Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.signature123
     #[test]
     fn secret_guardrail_does_not_treat_distant_schema_versions_as_token_values() {
         let input = format!(
-            r#"{{"token_source":".forge/design/tokens.json","description":"{}","schema_version":"forge.operating_context.v1"}}"#,
+            r#"{{"token_source":".foundry/design/tokens.json","description":"{}","schema_version":"foundry.operating_context.v1"}}"#,
             "ordinary context ".repeat(20)
         );
 

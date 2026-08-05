@@ -1,5 +1,5 @@
 use crate::mcp::{call_mcp_tool, mcp_tools_manifest, McpToolSpec};
-use crate::storage::ForgeStore;
+use crate::storage::FoundryStore;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -8,14 +8,14 @@ const JSONRPC_VERSION: &str = "2.0";
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 
-pub fn serve_stdio(store: &ForgeStore) -> Result<()> {
+pub fn serve_stdio(store: &FoundryStore) -> Result<()> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     serve_stdio_with_io(store, stdin.lock(), stdout.lock())
 }
 
 pub fn serve_stdio_with_io<R: BufRead, W: Write>(
-    store: &ForgeStore,
+    store: &FoundryStore,
     mut reader: R,
     mut writer: W,
 ) -> Result<()> {
@@ -66,7 +66,7 @@ pub fn serve_stdio_with_io<R: BufRead, W: Write>(
     Ok(())
 }
 
-fn handle_request(store: &ForgeStore, request: Value) -> Option<Value> {
+fn handle_request(store: &FoundryStore, request: Value) -> Option<Value> {
     let object = match request.as_object() {
         Some(object) => object,
         None => {
@@ -102,11 +102,11 @@ fn handle_request(store: &ForgeStore, request: Value) -> Option<Value> {
                     }
                 },
                 "serverInfo": {
-                    "name": "forge-core",
-                    "title": "Forge Core",
+                    "name": "foundry-core",
+                    "title": "Foundry Core",
                     "version": env!("CARGO_PKG_VERSION")
                 },
-                "instructions": "Forge is the workflow authority. Mutating tools retain Forge approval, policy, revision and validation gates."
+                "instructions": "Foundry is the workflow authority. Mutating tools retain Foundry approval, policy, revision and validation gates."
             }),
         ),
         "ping" => jsonrpc_result(id, json!({})),
@@ -164,8 +164,8 @@ fn protocol_tool(tool: &McpToolSpec) -> Value {
         "inputSchema": tool.input_schema,
         "outputSchema": {
             "type": "object",
-            "description": format!("Forge output contract {}", tool.output_schema),
-            "x-forge-schema-version": tool.output_schema,
+            "description": format!("Foundry output contract {}", tool.output_schema),
+            "x-foundry-schema-version": tool.output_schema,
             "additionalProperties": true
         },
         "annotations": {
@@ -175,8 +175,8 @@ fn protocol_tool(tool: &McpToolSpec) -> Value {
             "openWorldHint": false
         },
         "_meta": {
-            "forge/asyncSafe": tool.async_safe,
-            "forge/command": tool.forge_command
+            "foundry/asyncSafe": tool.async_safe,
+            "foundry/command": tool.foundry_command
         }
     })
 }

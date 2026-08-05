@@ -3,7 +3,7 @@ use crate::interactive::{
     build_interactive_home_with_options, render_interactive_status_for_store,
     route_interactive_input_with_context, InteractiveHomeOptions, InteractiveHomeReport,
 };
-use crate::storage::{ForgeStore, GlobalEventWrite};
+use crate::storage::{FoundryStore, GlobalEventWrite};
 use anyhow::Result;
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
@@ -23,38 +23,39 @@ use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const FORGE_TUI_SCHEMA_VERSION: &str = "forge.tui.opencode_orchestrator.v1";
-const FORGE_TUI_ORCHESTRATOR_SCHEMA_VERSION: &str = "forge.tui.orchestrator.v1";
-const FORGE_CHAT_SESSION_SCHEMA_VERSION: &str = "forge.tui.chat_session.v1";
+const FOUNDRY_TUI_SCHEMA_VERSION: &str = "foundry.tui.opencode_orchestrator.v1";
+const FOUNDRY_TUI_ORCHESTRATOR_SCHEMA_VERSION: &str = "foundry.tui.orchestrator.v1";
+const FOUNDRY_CHAT_SESSION_SCHEMA_VERSION: &str = "foundry.tui.chat_session.v1";
 const MAX_ACTIVITY_LINES: usize = 80;
 const TUI_IDLE_SHELL_HANDOFF_TIMEOUT: Duration = Duration::from_secs(45);
-const CHAT_SESSION_DIR_NAME: &str = ".forge/chat-sessions";
+const CHAT_SESSION_DIR_NAME: &str = ".foundry/chat-sessions";
+const LEGACY_CHAT_SESSION_DIR_NAME: &str = ".forge/chat-sessions"; // foundry-brand-allow: legacy-compat
 const CHAT_SESSION_LATEST_FILENAME: &str = "latest.json";
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ForgeTuiReport {
+pub struct FoundryTuiReport {
     pub schema_version: String,
     pub status: String,
     pub layout: String,
-    pub orchestrator: ForgeTuiOrchestrator,
-    pub renderer_strategy: ForgeTuiRendererStrategy,
-    pub prompt: ForgeTuiPrompt,
-    pub shell: ForgeTuiShell,
-    pub status_bar: ForgeTuiStatusBar,
-    pub visualizations: Vec<ForgeTuiVisualization>,
-    pub capabilities: Vec<ForgeTuiCapability>,
+    pub orchestrator: FoundryTuiOrchestrator,
+    pub renderer_strategy: FoundryTuiRendererStrategy,
+    pub prompt: FoundryTuiPrompt,
+    pub shell: FoundryTuiShell,
+    pub status_bar: FoundryTuiStatusBar,
+    pub visualizations: Vec<FoundryTuiVisualization>,
+    pub capabilities: Vec<FoundryTuiCapability>,
     pub quick_commands: Vec<String>,
     pub agent_suggestions: Vec<String>,
     pub file_suggestions: Vec<String>,
     pub workflow_suggestions: Vec<String>,
     pub context_suggestions: Vec<String>,
     pub session_tabs: Vec<String>,
-    pub benchmark_snapshot: ForgeTuiBenchmarkSnapshot,
+    pub benchmark_snapshot: FoundryTuiBenchmarkSnapshot,
     pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ForgeTuiOrchestrator {
+pub struct FoundryTuiOrchestrator {
     pub schema_version: String,
     pub default_interaction: String,
     pub decision_policy: String,
@@ -66,7 +67,7 @@ pub struct ForgeTuiOrchestrator {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ForgeTuiRendererStrategy {
+pub struct FoundryTuiRendererStrategy {
     pub schema_version: String,
     pub current_backend: String,
     pub target_backend: String,
@@ -79,14 +80,14 @@ pub struct ForgeTuiRendererStrategy {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ForgeTuiPrompt {
+pub struct FoundryTuiPrompt {
     pub placeholder: String,
     pub submit_hint: String,
     pub command_hint: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ForgeTuiShell {
+pub struct FoundryTuiShell {
     pub enabled: bool,
     pub prefix: String,
     pub toggle: String,
@@ -94,7 +95,7 @@ pub struct ForgeTuiShell {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ForgeTuiStatusBar {
+pub struct FoundryTuiStatusBar {
     pub workflows: usize,
     pub active_runs: usize,
     pub events: usize,
@@ -106,7 +107,7 @@ pub struct ForgeTuiStatusBar {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ForgeTuiVisualization {
+pub struct FoundryTuiVisualization {
     pub id: String,
     pub title: String,
     pub command: String,
@@ -114,7 +115,7 @@ pub struct ForgeTuiVisualization {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ForgeTuiCapability {
+pub struct FoundryTuiCapability {
     pub id: String,
     pub title: String,
     pub command: String,
@@ -122,16 +123,35 @@ pub struct ForgeTuiCapability {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ForgeTuiBenchmarkSnapshot {
+pub struct FoundryTuiBenchmarkSnapshot {
     pub schema_version: String,
     pub summary: String,
     pub placement_lines: Vec<String>,
     pub executor_lines: Vec<String>,
-    pub forge_line: String,
+    pub foundry_line: String,
     pub live_notes: Vec<String>,
 }
 
-struct ForgeTuiRuntimeState {
+#[deprecated(since = "0.6.0", note = "use FoundryTuiReport")]
+pub type ForgeTuiReport = FoundryTuiReport; // foundry-brand-allow: legacy-compat
+#[deprecated(since = "0.6.0", note = "use FoundryTuiOrchestrator")]
+pub type ForgeTuiOrchestrator = FoundryTuiOrchestrator; // foundry-brand-allow: legacy-compat
+#[deprecated(since = "0.6.0", note = "use FoundryTuiRendererStrategy")]
+pub type ForgeTuiRendererStrategy = FoundryTuiRendererStrategy; // foundry-brand-allow: legacy-compat
+#[deprecated(since = "0.6.0", note = "use FoundryTuiPrompt")]
+pub type ForgeTuiPrompt = FoundryTuiPrompt; // foundry-brand-allow: legacy-compat
+#[deprecated(since = "0.6.0", note = "use FoundryTuiShell")]
+pub type ForgeTuiShell = FoundryTuiShell; // foundry-brand-allow: legacy-compat
+#[deprecated(since = "0.6.0", note = "use FoundryTuiStatusBar")]
+pub type ForgeTuiStatusBar = FoundryTuiStatusBar; // foundry-brand-allow: legacy-compat
+#[deprecated(since = "0.6.0", note = "use FoundryTuiVisualization")]
+pub type ForgeTuiVisualization = FoundryTuiVisualization; // foundry-brand-allow: legacy-compat
+#[deprecated(since = "0.6.0", note = "use FoundryTuiCapability")]
+pub type ForgeTuiCapability = FoundryTuiCapability; // foundry-brand-allow: legacy-compat
+#[deprecated(since = "0.6.0", note = "use FoundryTuiBenchmarkSnapshot")]
+pub type ForgeTuiBenchmarkSnapshot = FoundryTuiBenchmarkSnapshot; // foundry-brand-allow: legacy-compat
+
+struct FoundryTuiRuntimeState {
     project_root: Option<PathBuf>,
     chat_session_code: String,
     chat_session_path: PathBuf,
@@ -158,7 +178,7 @@ enum ConversationRole {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ForgeChatSessionRecord {
+struct FoundryChatSessionRecord {
     schema_version: String,
     chat_session_code: String,
     project_root: String,
@@ -175,27 +195,36 @@ struct PaneFrame {
     height: u16,
 }
 
-pub fn build_forge_tui(
-    store: &ForgeStore,
+pub fn build_foundry_tui(
+    store: &FoundryStore,
     project_root: Option<PathBuf>,
-) -> Result<ForgeTuiReport> {
+) -> Result<FoundryTuiReport> {
     let project_root_for_files = project_root.clone();
     let home = build_interactive_home_with_options(store, InteractiveHomeOptions { project_root })?;
     let executors = load_executors(store)?;
-    Ok(forge_tui_from_home(
+    Ok(foundry_tui_from_home(
         &home,
         &executors,
         project_root_for_files.as_deref(),
     ))
 }
 
-fn forge_tui_from_home(
+#[deprecated(since = "0.6.0", note = "use build_foundry_tui")]
+// foundry-brand-allow: legacy-compat
+pub fn build_forge_tui(
+    store: &FoundryStore,
+    project_root: Option<PathBuf>,
+) -> Result<FoundryTuiReport> {
+    build_foundry_tui(store, project_root)
+}
+
+fn foundry_tui_from_home(
     home: &InteractiveHomeReport,
     executors: &crate::executor::ExecutorSyncReport,
     project_root: Option<&Path>,
-) -> ForgeTuiReport {
+) -> FoundryTuiReport {
     let d = &home.dashboard;
-    let status_bar = ForgeTuiStatusBar {
+    let status_bar = FoundryTuiStatusBar {
         workflows: d.task_board_panel.workflow_count,
         active_runs: d.active_runs,
         events: d.event_panel.total_event_count,
@@ -207,7 +236,7 @@ fn forge_tui_from_home(
     };
 
     let session_tabs = if d.shell_entrypoints.is_empty() {
-        vec!["forge".to_string()]
+        vec!["foundry".to_string()]
     } else {
         d.shell_entrypoints.iter().take(4).cloned().collect()
     };
@@ -247,26 +276,26 @@ fn forge_tui_from_home(
     ];
     let benchmark_snapshot = build_benchmark_snapshot(executors, &status_bar);
 
-    let orchestrator = ForgeTuiOrchestrator {
-        schema_version: FORGE_TUI_ORCHESTRATOR_SCHEMA_VERSION.to_string(),
-        default_interaction: "conversation_with_forge_orchestrator".to_string(),
+    let orchestrator = FoundryTuiOrchestrator {
+        schema_version: FOUNDRY_TUI_ORCHESTRATOR_SCHEMA_VERSION.to_string(),
+        default_interaction: "conversation_with_foundry_orchestrator".to_string(),
         decision_policy: "direct_answer_or_create_workflow".to_string(),
-        plan_mode: "forge_workflow".to_string(),
-        build_mode: "forge_workflow".to_string(),
+        plan_mode: "foundry_workflow".to_string(),
+        build_mode: "foundry_workflow".to_string(),
         agent_model: "agents_and_subagents_are_workflows_or_nodes".to_string(),
         node_agent_routing: "per_node_agent_allowed".to_string(),
         summary:
-            "normal input talks to the Forge orchestrator; slash commands configure the surface"
+            "normal input talks to the Foundry orchestrator; slash commands configure the surface"
                 .to_string(),
     };
 
-    ForgeTuiReport {
-        schema_version: FORGE_TUI_SCHEMA_VERSION.to_string(),
-        status: "forge_tui_ready".to_string(),
+    FoundryTuiReport {
+        schema_version: FOUNDRY_TUI_SCHEMA_VERSION.to_string(),
+        status: "foundry_tui_ready".to_string(),
         layout: "opencode_style_orchestrator_first_tui".to_string(),
         orchestrator,
-        renderer_strategy: ForgeTuiRendererStrategy {
-            schema_version: "forge.tui.renderer_strategy.v1".to_string(),
+        renderer_strategy: FoundryTuiRendererStrategy {
+            schema_version: "foundry.tui.renderer_strategy.v1".to_string(),
             current_backend: "rust_crossterm_fullscreen_fallback".to_string(),
             target_backend: "opentui_native_core_bridge_or_incremental_rust_port".to_string(),
             ecosystem_sources: vec![
@@ -276,11 +305,11 @@ fn forge_tui_from_home(
                 "msmps/opentui-ui component, dialog, toast and styled-slot patterns".to_string(),
             ],
             rust_native_candidates: vec![
-                "Forge state projection and orchestrator routing".to_string(),
+                "Foundry state projection and orchestrator routing".to_string(),
                 "Terminal lifecycle fallback for environments without Bun/Zig".to_string(),
                 "Key command routing and shell command audit events".to_string(),
                 "Workflow, agent, subagent and node-agent data contracts".to_string(),
-                "Forge-owned component metadata, slots, states and variant contracts".to_string(),
+                "Foundry-owned component metadata, slots, states and variant contracts".to_string(),
             ],
             bridge_candidates: vec![
                 "OpenTUI Zig/C ABI renderer and optimized buffer".to_string(),
@@ -302,23 +331,23 @@ fn forge_tui_from_home(
                     .to_string(),
             ],
             create_tui_template_family:
-                "core template for Forge-owned runtime; React/Solid only for external Addon renderer prototypes"
+                "core template for Foundry-owned runtime; React/Solid only for external Addon renderer prototypes"
                     .to_string(),
             next_step:
-                "prototype a Forge TUI renderer adapter that can choose crossterm fallback or OpenTUI bridge"
+                "prototype a Foundry TUI renderer adapter that can choose crossterm fallback or OpenTUI bridge"
                     .to_string(),
         },
-        prompt: ForgeTuiPrompt {
-            placeholder: "Talk to Forge; use /, @, ~, & for autocomplete".to_string(),
-            submit_hint: "Enter sends the message; Forge answers directly or opens a workflow"
+        prompt: FoundryTuiPrompt {
+            placeholder: "Talk to Foundry; use /, @, ~, & for autocomplete".to_string(),
+            submit_hint: "Enter sends the message; Foundry answers directly or opens a workflow"
                 .to_string(),
             command_hint: "!<cmd> runs local shell; ! toggles shell mode".to_string(),
         },
-        shell: ForgeTuiShell {
+        shell: FoundryTuiShell {
             enabled: true,
             prefix: "!".to_string(),
             toggle: "!".to_string(),
-            audit_event_kind: "forge_tui_shell_command".to_string(),
+            audit_event_kind: "foundry_tui_shell_command".to_string(),
         },
         visualizations: vec![
             visualization(
@@ -343,7 +372,7 @@ fn forge_tui_from_home(
                 "subagents",
                 "Subagents",
                 "/subagents",
-                "subagents are Forge workflows, child workflows or DAG nodes".to_string(),
+                "subagents are Foundry workflows, child workflows or DAG nodes".to_string(),
             ),
             visualization(
                 "node_agents",
@@ -363,13 +392,13 @@ fn forge_tui_from_home(
                 "plan_workflows",
                 "Plan workflows",
                 "/plan",
-                "plan is a Forge workflow".to_string(),
+                "plan is a Foundry workflow".to_string(),
             ),
             capability(
                 "build_workflows",
                 "Build workflows",
                 "/build",
-                "build is a Forge workflow".to_string(),
+                "build is a Foundry workflow".to_string(),
             ),
             capability(
                 "workflows",
@@ -474,15 +503,15 @@ fn forge_tui_from_home(
         session_tabs,
         benchmark_snapshot,
         notes: vec![
-            "OpenCode-inspired terminal surface; Forge owns orchestration and state.".to_string(),
-            "Legacy detailed panels remain under `forge interactive ...`.".to_string(),
+            "OpenCode-inspired terminal surface; Foundry owns orchestration and state.".to_string(),
+            "Legacy detailed panels remain under `foundry interactive ...`.".to_string(),
         ],
         status_bar,
     }
 }
 
-fn capability(id: &str, title: &str, command: &str, summary: String) -> ForgeTuiCapability {
-    ForgeTuiCapability {
+fn capability(id: &str, title: &str, command: &str, summary: String) -> FoundryTuiCapability {
+    FoundryTuiCapability {
         id: id.to_string(),
         title: title.to_string(),
         command: command.to_string(),
@@ -490,8 +519,8 @@ fn capability(id: &str, title: &str, command: &str, summary: String) -> ForgeTui
     }
 }
 
-fn visualization(id: &str, title: &str, command: &str, summary: String) -> ForgeTuiVisualization {
-    ForgeTuiVisualization {
+fn visualization(id: &str, title: &str, command: &str, summary: String) -> FoundryTuiVisualization {
+    FoundryTuiVisualization {
         id: id.to_string(),
         title: title.to_string(),
         command: command.to_string(),
@@ -501,8 +530,8 @@ fn visualization(id: &str, title: &str, command: &str, summary: String) -> Forge
 
 fn build_benchmark_snapshot(
     executors: &crate::executor::ExecutorSyncReport,
-    status_bar: &ForgeTuiStatusBar,
-) -> ForgeTuiBenchmarkSnapshot {
+    status_bar: &FoundryTuiStatusBar,
+) -> FoundryTuiBenchmarkSnapshot {
     let wanted = ["codex", "gemini", "opencode", "claude"];
     let mut executor_lines = Vec::new();
     for id in wanted {
@@ -535,8 +564,8 @@ fn build_benchmark_snapshot(
         }
     }
 
-    let forge_line = format!(
-        "Forge: workflows={}, active_runs={}, handoffs={}, approvals={}, costs=${:.4}",
+    let foundry_line = format!(
+        "Foundry: workflows={}, active_runs={}, handoffs={}, approvals={}, costs=${:.4}",
         status_bar.workflows,
         status_bar.active_runs,
         status_bar.ready_handoffs,
@@ -544,21 +573,21 @@ fn build_benchmark_snapshot(
         status_bar.estimated_cost_usd
     );
 
-    ForgeTuiBenchmarkSnapshot {
-        schema_version: "forge.tui.benchmark_snapshot.v1".to_string(),
+    FoundryTuiBenchmarkSnapshot {
+        schema_version: "foundry.tui.benchmark_snapshot.v1".to_string(),
         summary:
-            "live version and feature comparison of local executors plus Forge orchestration surface"
+            "live version and feature comparison of local executors plus Foundry orchestration surface"
                 .to_string(),
         placement_lines: vec![
             "Placement: Core = Codex, Gemini, OpenCode.".to_string(),
             "Placement: Addon-first = OpenClaw, Hermes, Open Design, Penpot, n8n.".to_string(),
         ],
         executor_lines,
-        forge_line,
+        foundry_line,
         live_notes: vec![
             "OpenClaw benchmark: async, multi-channel operator surface with durable handoff state.".to_string(),
             "Hermes benchmark: file-first memory with semantic retrieval and scope-aware promotion.".to_string(),
-            "Codex is strongest when Forge wants direct execution, review and apply flows.".to_string(),
+            "Codex is strongest when Foundry wants direct execution, review and apply flows.".to_string(),
             "Gemini is the closest shell-first interactive reference.".to_string(),
             "OpenCode is the closest project-first TUI reference.".to_string(),
             "Claude is reported even when not installed, so the gap stays visible.".to_string(),
@@ -643,7 +672,7 @@ fn first_nonempty_line(text: &str) -> Option<String> {
 }
 
 fn find_command_on_path(command: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
+    let path_var = crate::brand::env_var_os("PATH")?;
     for directory in std::env::split_paths(&path_var) {
         let candidate = directory.join(command);
         if is_executable_path(&candidate) {
@@ -717,33 +746,46 @@ fn is_executable_path(path: &Path) -> bool {
     }
 }
 
-pub fn render_forge_tui(report: &ForgeTuiReport) -> String {
+pub fn render_foundry_tui(report: &FoundryTuiReport) -> String {
     format!(
-        "forge\n\
-         Forge chat TUI - OpenCode-style\n\
+        "foundry\n\
+         Foundry chat TUI - OpenCode-style\n\
          Prompt: {placeholder}\n\
          History and input stay on the live terminal surface.\n\
-         forge> ",
+         foundry> ",
         placeholder = report.prompt.placeholder,
     )
 }
 
-pub fn run_forge_tui(store_path: &Path, project_root: Option<PathBuf>) -> Result<i32> {
-    let store = ForgeStore::open(store_path)?;
-    let report = build_forge_tui(&store, project_root.clone())?;
+#[deprecated(since = "0.6.0", note = "use render_foundry_tui")]
+// foundry-brand-allow: legacy-compat
+pub fn render_forge_tui(report: &FoundryTuiReport) -> String {
+    // foundry-brand-allow: legacy-compat
+    render_foundry_tui(report)
+}
+
+pub fn run_foundry_tui(store_path: &Path, project_root: Option<PathBuf>) -> Result<i32> {
+    let store = FoundryStore::open(store_path)?;
+    let report = build_foundry_tui(&store, project_root.clone())?;
 
     if !std::io::stdin().is_terminal() {
-        println!("{}", render_forge_tui(&report));
+        println!("{}", render_foundry_tui(&report));
         return Ok(0);
     }
 
     run_fullscreen_tui(&store, project_root, report)
 }
 
+#[deprecated(since = "0.6.0", note = "use run_foundry_tui")]
+// foundry-brand-allow: legacy-compat
+pub fn run_forge_tui(store_path: &Path, project_root: Option<PathBuf>) -> Result<i32> {
+    run_foundry_tui(store_path, project_root)
+}
+
 fn run_fullscreen_tui(
-    store: &ForgeStore,
+    store: &FoundryStore,
     project_root: Option<PathBuf>,
-    mut report: ForgeTuiReport,
+    mut report: FoundryTuiReport,
 ) -> Result<i32> {
     let chat_session = create_chat_session_state(project_root.as_deref())?;
     let mut stdout = stdout();
@@ -755,10 +797,10 @@ fn run_fullscreen_tui(
         EnableMouseCapture,
         Hide
     )?;
-    let _guard = ForgeTuiTerminalGuard;
+    let _guard = FoundryTuiTerminalGuard;
     let chat_session_code = chat_session.chat_session_code.clone();
 
-    let mut state = ForgeTuiRuntimeState {
+    let mut state = FoundryTuiRuntimeState {
         project_root: project_root.clone(),
         chat_session_code,
         chat_session_path: chat_session_path(
@@ -768,7 +810,7 @@ fn run_fullscreen_tui(
         chat_session_created_at: chat_session.created_at,
         input: String::new(),
         shell_mode: false,
-        activity: vec!["Forge ready.".to_string()],
+        activity: vec!["Foundry ready.".to_string()],
         autocomplete: Vec::new(),
         autocomplete_index: 0,
         conversation_history: chat_session.conversation_history,
@@ -909,9 +951,9 @@ fn run_fullscreen_tui(
     Ok(0)
 }
 
-struct ForgeTuiTerminalGuard;
+struct FoundryTuiTerminalGuard;
 
-impl Drop for ForgeTuiTerminalGuard {
+impl Drop for FoundryTuiTerminalGuard {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
         let mut stdout = stdout();
@@ -927,10 +969,10 @@ impl Drop for ForgeTuiTerminalGuard {
 }
 
 fn handle_tui_submit(
-    store: &ForgeStore,
-    report: &mut ForgeTuiReport,
+    store: &FoundryStore,
+    report: &mut FoundryTuiReport,
     project_root: Option<PathBuf>,
-    state: &mut ForgeTuiRuntimeState,
+    state: &mut FoundryTuiRuntimeState,
     input: &str,
 ) -> Result<bool> {
     touch_interaction(state);
@@ -943,7 +985,7 @@ fn handle_tui_submit(
             push_activity(state, line);
         }
         persist_chat_session(state)?;
-        *report = build_forge_tui(store, project_root)?;
+        *report = build_foundry_tui(store, project_root)?;
         return Ok(false);
     }
     record_conversation_turn(state, ConversationRole::User, input);
@@ -971,7 +1013,7 @@ fn handle_tui_submit(
         if let Some(last) = shell_lines.last() {
             record_conversation_turn(state, ConversationRole::Assistant, last);
         }
-        *report = build_forge_tui(store, project_root)?;
+        *report = build_foundry_tui(store, project_root)?;
         return Ok(false);
     }
 
@@ -982,7 +1024,7 @@ fn handle_tui_submit(
             for line in dispatch_shell_command(store, command)? {
                 push_activity(state, line);
             }
-            *report = build_forge_tui(store, project_root)?;
+            *report = build_foundry_tui(store, project_root)?;
         }
         return Ok(false);
     }
@@ -991,11 +1033,11 @@ fn handle_tui_submit(
         for line in render_interactive_status_for_store(store)?.lines() {
             push_activity(state, line.to_string());
         }
-        *report = build_forge_tui(store, project_root)?;
+        *report = build_foundry_tui(store, project_root)?;
         return Ok(false);
     }
 
-    if let Some(lines) = dispatch_forge_tui_command(report, input) {
+    if let Some(lines) = dispatch_foundry_tui_command(report, input) {
         for line in &lines {
             push_activity(state, line.clone());
         }
@@ -1007,7 +1049,7 @@ fn handle_tui_submit(
 
     let conversation_context = conversation_context_for_brain(&state.conversation_history);
     let route =
-        route_interactive_input_with_context(store, input, "forge_tui", &conversation_context)?;
+        route_interactive_input_with_context(store, input, "foundry_tui", &conversation_context)?;
     if let Some(answer) = route.answer {
         push_activity(state, answer.clone());
         record_conversation_turn(state, ConversationRole::Assistant, &answer);
@@ -1026,11 +1068,15 @@ fn handle_tui_submit(
         );
     }
     persist_chat_session(state)?;
-    *report = build_forge_tui(store, project_root)?;
+    *report = build_foundry_tui(store, project_root)?;
     Ok(false)
 }
 
-fn record_conversation_turn(state: &mut ForgeTuiRuntimeState, role: ConversationRole, text: &str) {
+fn record_conversation_turn(
+    state: &mut FoundryTuiRuntimeState,
+    role: ConversationRole,
+    text: &str,
+) {
     state.conversation_history.push(ConversationTurn {
         role,
         text: text.to_string(),
@@ -1041,11 +1087,11 @@ fn record_conversation_turn(state: &mut ForgeTuiRuntimeState, role: Conversation
     }
 }
 
-fn create_chat_session_state(project_root: Option<&Path>) -> Result<ForgeChatSessionRecord> {
+fn create_chat_session_state(project_root: Option<&Path>) -> Result<FoundryChatSessionRecord> {
     let code = format!("chat_{}", Uuid::new_v4().to_string().replace('-', ""));
     let now = chrono::Utc::now().to_rfc3339();
-    let record = ForgeChatSessionRecord {
-        schema_version: FORGE_CHAT_SESSION_SCHEMA_VERSION.to_string(),
+    let record = FoundryChatSessionRecord {
+        schema_version: FOUNDRY_CHAT_SESSION_SCHEMA_VERSION.to_string(),
         chat_session_code: code,
         project_root: project_root
             .map(|root| root.display().to_string())
@@ -1072,17 +1118,23 @@ fn chat_session_directory(project_root: Option<&Path>) -> PathBuf {
         })
 }
 
+fn legacy_chat_session_directory(project_root: Option<&Path>) -> PathBuf {
+    project_root
+        .map(|root| root.join(LEGACY_CHAT_SESSION_DIR_NAME))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(LEGACY_CHAT_SESSION_DIR_NAME)
+        })
+}
+
 fn chat_session_path(project_root: Option<&Path>, code: &str) -> PathBuf {
     chat_session_directory(project_root).join(format!("{code}.json"))
 }
 
-fn latest_chat_session_path(project_root: Option<&Path>) -> PathBuf {
-    chat_session_directory(project_root).join(CHAT_SESSION_LATEST_FILENAME)
-}
-
-fn persist_chat_session(state: &ForgeTuiRuntimeState) -> Result<()> {
-    let record = ForgeChatSessionRecord {
-        schema_version: FORGE_CHAT_SESSION_SCHEMA_VERSION.to_string(),
+fn persist_chat_session(state: &FoundryTuiRuntimeState) -> Result<()> {
+    let record = FoundryChatSessionRecord {
+        schema_version: FOUNDRY_CHAT_SESSION_SCHEMA_VERSION.to_string(),
         chat_session_code: state.chat_session_code.clone(),
         project_root: state
             .project_root
@@ -1103,7 +1155,7 @@ fn persist_chat_session(state: &ForgeTuiRuntimeState) -> Result<()> {
 
 fn persist_chat_session_record(
     project_root_or_path: Option<&Path>,
-    record: &ForgeChatSessionRecord,
+    record: &FoundryChatSessionRecord,
 ) -> Result<()> {
     let session_dir = match project_root_or_path {
         Some(path)
@@ -1127,7 +1179,7 @@ fn persist_chat_session_record(
 fn load_chat_session_record(
     project_root: Option<&Path>,
     code: Option<&str>,
-) -> Result<Option<ForgeChatSessionRecord>> {
+) -> Result<Option<FoundryChatSessionRecord>> {
     load_chat_session_record_with_exclusion(project_root, code, None)
 }
 
@@ -1135,64 +1187,76 @@ fn load_chat_session_record_with_exclusion(
     project_root: Option<&Path>,
     code: Option<&str>,
     exclude_code: Option<&str>,
-) -> Result<Option<ForgeChatSessionRecord>> {
-    let session_dir = chat_session_directory(project_root);
+) -> Result<Option<FoundryChatSessionRecord>> {
     if let Some(code) = code.filter(|code| !code.trim().is_empty()) {
-        let path = chat_session_path(project_root, code.trim());
-        if !path.exists() {
-            return Ok(None);
-        }
-        let content = fs::read_to_string(&path)?;
-        let record: ForgeChatSessionRecord = serde_json::from_str(&content)?;
-        return Ok(Some(record));
-    }
-
-    let latest_path = latest_chat_session_path(project_root);
-    if latest_path.exists() {
-        let content = fs::read_to_string(&latest_path)?;
-        let record: ForgeChatSessionRecord = serde_json::from_str(&content)?;
-        if exclude_code.is_none_or(|exclude| exclude != record.chat_session_code) {
+        let code = code.trim();
+        for session_dir in [
+            chat_session_directory(project_root),
+            legacy_chat_session_directory(project_root),
+        ] {
+            let path = session_dir.join(format!("{code}.json"));
+            if !path.is_file() {
+                continue;
+            }
+            let content = fs::read_to_string(&path)?;
+            let record: FoundryChatSessionRecord = serde_json::from_str(&content)?;
             return Ok(Some(record));
         }
+        return Ok(None);
     }
 
-    let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-    for entry in fs::read_dir(&session_dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        let is_session_json = path.extension().and_then(|ext| ext.to_str()) == Some("json");
-        let is_latest = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name == CHAT_SESSION_LATEST_FILENAME);
-        if !is_session_json || is_latest {
-            continue;
-        }
-        if exclude_code.is_some_and(|exclude| {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .is_some_and(|stem| stem == exclude)
-        }) {
-            continue;
-        }
-        if let Ok(metadata) = fs::metadata(&path) {
-            if let Ok(modified) = metadata.modified() {
-                candidates.push((modified, path));
+    for session_dir in [
+        chat_session_directory(project_root),
+        legacy_chat_session_directory(project_root),
+    ] {
+        let latest_path = session_dir.join(CHAT_SESSION_LATEST_FILENAME);
+        if latest_path.is_file() {
+            let content = fs::read_to_string(&latest_path)?;
+            let record: FoundryChatSessionRecord = serde_json::from_str(&content)?;
+            if exclude_code.is_none_or(|exclude| exclude != record.chat_session_code) {
+                return Ok(Some(record));
             }
         }
+
+        let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+        for entry in fs::read_dir(&session_dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let is_session_json = path.extension().and_then(|ext| ext.to_str()) == Some("json");
+            let is_latest = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == CHAT_SESSION_LATEST_FILENAME);
+            if !is_session_json || is_latest {
+                continue;
+            }
+            if exclude_code.is_some_and(|exclude| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|stem| stem == exclude)
+            }) {
+                continue;
+            }
+            if let Ok(metadata) = fs::metadata(&path) {
+                if let Ok(modified) = metadata.modified() {
+                    candidates.push((modified, path));
+                }
+            }
+        }
+        candidates.sort_by(|left, right| right.0.cmp(&left.0));
+        let Some((_, path)) = candidates.first() else {
+            continue;
+        };
+        let content = fs::read_to_string(path)?;
+        let record: FoundryChatSessionRecord = serde_json::from_str(&content)?;
+        return Ok(Some(record));
     }
-    candidates.sort_by(|left, right| right.0.cmp(&left.0));
-    let Some((_, path)) = candidates.first() else {
-        return Ok(None);
-    };
-    let content = fs::read_to_string(path)?;
-    let record: ForgeChatSessionRecord = serde_json::from_str(&content)?;
-    Ok(Some(record))
+    Ok(None)
 }
 
 fn resume_chat_session(
-    _store: &ForgeStore,
+    _store: &FoundryStore,
     project_root: Option<&Path>,
-    state: &mut ForgeTuiRuntimeState,
+    state: &mut FoundryTuiRuntimeState,
     input: &str,
 ) -> Result<Vec<String>> {
     let code = input
@@ -1261,7 +1325,7 @@ fn conversation_context_for_brain(history: &[ConversationTurn]) -> Vec<String> {
         .collect()
 }
 
-fn dispatch_forge_tui_command(report: &ForgeTuiReport, input: &str) -> Option<Vec<String>> {
+fn dispatch_foundry_tui_command(report: &FoundryTuiReport, input: &str) -> Option<Vec<String>> {
     match input {
         "/help" | "/commands" => Some(vec![
             "Commands: /status /orchestrator /workflows /agents /subagents /nodes /events"
@@ -1273,14 +1337,14 @@ fn dispatch_forge_tui_command(report: &ForgeTuiReport, input: &str) -> Option<Ve
         "/orchestrator" => Some(vec![
             "Orchestrator: default conversation".to_string(),
             "The orchestrator decides direct answer or workflow.".to_string(),
-            "Plan and build are Forge workflows.".to_string(),
+            "Plan and build are Foundry workflows.".to_string(),
         ]),
         "/workflows" => Some(vec![format!(
             "Workflows: {} total; active runs {}",
             report.status_bar.workflows, report.status_bar.active_runs
         )]),
         "/agents" => Some(vec![
-            "Agents: agents are Forge workflows or DAG nodes.".to_string(),
+            "Agents: agents are Foundry workflows or DAG nodes.".to_string(),
             "Each node can bind a specific agent/brain routing contract.".to_string(),
         ]),
         "/subagents" => Some(vec![
@@ -1289,7 +1353,7 @@ fn dispatch_forge_tui_command(report: &ForgeTuiReport, input: &str) -> Option<Ve
         ]),
         "/nodes" | "/node-agents" => Some(vec![
             "Node agents: per-node agent routing allowed.".to_string(),
-            "Use forge workflow update-node-brain to mutate routing without stopping a run."
+            "Use foundry workflow update-node-brain to mutate routing without stopping a run."
                 .to_string(),
         ]),
         "/events" => Some(vec![format!(
@@ -1314,7 +1378,7 @@ fn dispatch_forge_tui_command(report: &ForgeTuiReport, input: &str) -> Option<Ve
         )]),
         "/config" => Some(vec![
             "Configuration: use slash commands for views and behavior.".to_string(),
-            "Normal text stays conversation with the Forge orchestrator.".to_string(),
+            "Normal text stays conversation with the Foundry orchestrator.".to_string(),
         ]),
         "/boundary" | "/core-boundary" => report
             .capabilities
@@ -1330,22 +1394,22 @@ fn dispatch_forge_tui_command(report: &ForgeTuiReport, input: &str) -> Option<Ve
     }
 }
 
-fn render_local_benchmark_lines(report: &ForgeTuiReport) -> Vec<String> {
+fn render_local_benchmark_lines(report: &FoundryTuiReport) -> Vec<String> {
     let mut lines = vec![format!("Benchmark: {}", report.benchmark_snapshot.summary)];
     lines.extend(report.benchmark_snapshot.placement_lines.clone());
     lines.extend(report.benchmark_snapshot.executor_lines.clone());
-    lines.push(report.benchmark_snapshot.forge_line.clone());
+    lines.push(report.benchmark_snapshot.foundry_line.clone());
     lines.extend(report.benchmark_snapshot.live_notes.iter().take(2).cloned());
     lines.push(
-        "Forge additions: selector autocomplete, contextual forms, shell handoff, workflow visibility."
+        "Foundry additions: selector autocomplete, contextual forms, shell handoff, workflow visibility."
             .to_string(),
     );
     lines
 }
 
-fn dispatch_shell_command(store: &ForgeStore, command: &str) -> Result<Vec<String>> {
+fn dispatch_shell_command(store: &FoundryStore, command: &str) -> Result<Vec<String>> {
     let mut lines = vec![format!("Shell command: {command}")];
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let shell = crate::brand::env_var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let output = Command::new(shell).arg("-lc").arg(command).output()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1365,19 +1429,19 @@ fn dispatch_shell_command(store: &ForgeStore, command: &str) -> Result<Vec<Strin
     Ok(lines)
 }
 
-fn record_shell_event(store: &ForgeStore, command: &str, exit_code: i32) -> Result<()> {
+fn record_shell_event(store: &FoundryStore, command: &str, exit_code: i32) -> Result<()> {
     let data = json!({
-        "schema_version": "forge.tui.shell_command.v1",
+        "schema_version": "foundry.tui.shell_command.v1",
         "command": command,
         "exit_code": exit_code,
     });
     let tenant = json!({});
     store.record_global_event(GlobalEventWrite {
-        source: "forge.tui",
-        source_id: "forge-tui",
+        source: "foundry.tui",
+        source_id: "foundry-tui",
         workflow_id: None,
-        kind: "forge_tui_shell_command",
-        origin: "forge_tui",
+        kind: "foundry_tui_shell_command",
+        origin: "foundry_tui",
         status: if exit_code == 0 {
             "completed"
         } else {
@@ -1391,8 +1455,8 @@ fn record_shell_event(store: &ForgeStore, command: &str, exit_code: i32) -> Resu
 
 fn render_fullscreen(
     stdout: &mut std::io::Stdout,
-    report: &ForgeTuiReport,
-    state: &ForgeTuiRuntimeState,
+    report: &FoundryTuiReport,
+    state: &FoundryTuiRuntimeState,
 ) -> Result<()> {
     let (width, height) = terminal::size().unwrap_or((100, 32));
     let width = width.max(72);
@@ -1429,8 +1493,8 @@ fn render_fullscreen(
 
 fn draw_input(
     stdout: &mut std::io::Stdout,
-    report: &ForgeTuiReport,
-    state: &ForgeTuiRuntimeState,
+    report: &FoundryTuiReport,
+    state: &FoundryTuiRuntimeState,
     width: u16,
     y: u16,
 ) -> Result<()> {
@@ -1538,12 +1602,12 @@ fn wrap_display_lines(lines: &[String], width: usize) -> Vec<String> {
     wrapped
 }
 
-fn activity_lines(state: &ForgeTuiRuntimeState, max_lines: usize) -> Vec<String> {
+fn activity_lines(state: &FoundryTuiRuntimeState, max_lines: usize) -> Vec<String> {
     let start = state.activity.len().saturating_sub(max_lines.max(1));
     state.activity[start..].to_vec()
 }
 
-fn draw_input_lines(_report: &ForgeTuiReport, state: &ForgeTuiRuntimeState) -> Vec<String> {
+fn draw_input_lines(_report: &FoundryTuiReport, state: &FoundryTuiRuntimeState) -> Vec<String> {
     let prompt = prompt_label(state);
     let mut lines = vec![format!("{prompt} {}", state.input)];
 
@@ -1563,14 +1627,14 @@ fn draw_input_lines(_report: &ForgeTuiReport, state: &ForgeTuiRuntimeState) -> V
     lines
 }
 
-fn refresh_tui_autocomplete(state: &mut ForgeTuiRuntimeState, report: &ForgeTuiReport) {
+fn refresh_tui_autocomplete(state: &mut FoundryTuiRuntimeState, report: &FoundryTuiReport) {
     state.autocomplete = tui_autocomplete_suggestions(report, &state.input);
     if state.autocomplete.is_empty() || state.autocomplete_index >= state.autocomplete.len() {
         state.autocomplete_index = 0;
     }
 }
 
-fn render_autocomplete_selector(state: &ForgeTuiRuntimeState) -> Vec<String> {
+fn render_autocomplete_selector(state: &FoundryTuiRuntimeState) -> Vec<String> {
     let selected = state
         .autocomplete_index
         .min(state.autocomplete.len().saturating_sub(1));
@@ -1600,7 +1664,7 @@ fn render_autocomplete_selector(state: &ForgeTuiRuntimeState) -> Vec<String> {
     lines
 }
 
-fn move_autocomplete_selection(state: &mut ForgeTuiRuntimeState, delta: isize) {
+fn move_autocomplete_selection(state: &mut FoundryTuiRuntimeState, delta: isize) {
     if state.autocomplete.is_empty() {
         state.autocomplete_index = 0;
         return;
@@ -1610,7 +1674,7 @@ fn move_autocomplete_selection(state: &mut ForgeTuiRuntimeState, delta: isize) {
     state.autocomplete_index = next as usize;
 }
 
-fn accept_autocomplete_selection(state: &mut ForgeTuiRuntimeState) {
+fn accept_autocomplete_selection(state: &mut FoundryTuiRuntimeState) {
     let Some(selected) = state.autocomplete.get(state.autocomplete_index).cloned() else {
         return;
     };
@@ -1784,7 +1848,7 @@ fn collect_file_suggestions_recursive(
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with('.') && name != ".forge" {
+        if name.starts_with('.') && name != ".foundry" {
             continue;
         }
         if path.is_dir() {
@@ -1799,7 +1863,7 @@ fn collect_file_suggestions_recursive(
     }
 }
 
-fn tui_autocomplete_suggestions(report: &ForgeTuiReport, input: &str) -> Vec<String> {
+fn tui_autocomplete_suggestions(report: &FoundryTuiReport, input: &str) -> Vec<String> {
     let token = input.split_whitespace().last().unwrap_or("").trim();
     if token.is_empty() {
         return Vec::new();
@@ -1842,11 +1906,11 @@ fn tui_autocomplete_suggestions(report: &ForgeTuiReport, input: &str) -> Vec<Str
     }
 }
 
-fn touch_interaction(state: &mut ForgeTuiRuntimeState) {
+fn touch_interaction(state: &mut FoundryTuiRuntimeState) {
     state.last_interaction_at = Instant::now();
 }
 
-fn set_shell_mode(state: &mut ForgeTuiRuntimeState, enabled: bool, reason: &str) {
+fn set_shell_mode(state: &mut FoundryTuiRuntimeState, enabled: bool, reason: &str) {
     if state.shell_mode != enabled {
         state.shell_mode = enabled;
         state.autocomplete.clear();
@@ -1863,7 +1927,7 @@ fn set_shell_mode(state: &mut ForgeTuiRuntimeState, enabled: bool, reason: &str)
 }
 
 fn maybe_handoff_to_shell_due_to_idle(
-    state: &mut ForgeTuiRuntimeState,
+    state: &mut FoundryTuiRuntimeState,
     now: Instant,
     timeout: Duration,
 ) -> bool {
@@ -1881,7 +1945,7 @@ fn maybe_handoff_to_shell_due_to_idle(
     true
 }
 
-fn push_activity(state: &mut ForgeTuiRuntimeState, line: String) {
+fn push_activity(state: &mut FoundryTuiRuntimeState, line: String) {
     state.activity.push(line);
     if state.activity.len() > MAX_ACTIVITY_LINES {
         let remove_count = state.activity.len() - MAX_ACTIVITY_LINES;
@@ -1889,11 +1953,11 @@ fn push_activity(state: &mut ForgeTuiRuntimeState, line: String) {
     }
 }
 
-fn prompt_label(state: &ForgeTuiRuntimeState) -> &'static str {
+fn prompt_label(state: &FoundryTuiRuntimeState) -> &'static str {
     if state.shell_mode {
-        "forge-shell>"
+        "foundry-shell>"
     } else {
-        "forge>"
+        "foundry>"
     }
 }
 
@@ -1923,23 +1987,23 @@ fn clip(text: &str, width: usize) -> String {
 mod tests {
     use super::*;
 
-    fn sample_report() -> ForgeTuiReport {
-        ForgeTuiReport {
-            schema_version: FORGE_TUI_SCHEMA_VERSION.to_string(),
-            status: "forge_tui_ready".to_string(),
+    fn sample_report() -> FoundryTuiReport {
+        FoundryTuiReport {
+            schema_version: FOUNDRY_TUI_SCHEMA_VERSION.to_string(),
+            status: "foundry_tui_ready".to_string(),
             layout: "opencode_style_orchestrator_first_tui".to_string(),
-            orchestrator: ForgeTuiOrchestrator {
-                schema_version: FORGE_TUI_ORCHESTRATOR_SCHEMA_VERSION.to_string(),
+            orchestrator: FoundryTuiOrchestrator {
+                schema_version: FOUNDRY_TUI_ORCHESTRATOR_SCHEMA_VERSION.to_string(),
                 default_interaction: "conversation".to_string(),
                 decision_policy: "direct_answer_or_create_workflow".to_string(),
-                plan_mode: "forge_workflow".to_string(),
-                build_mode: "forge_workflow".to_string(),
+                plan_mode: "foundry_workflow".to_string(),
+                build_mode: "foundry_workflow".to_string(),
                 agent_model: "agents_and_subagents_are_workflows_or_nodes".to_string(),
                 node_agent_routing: "per_node_agent_allowed".to_string(),
                 summary: "summary".to_string(),
             },
-            renderer_strategy: ForgeTuiRendererStrategy {
-                schema_version: "forge.tui.renderer_strategy.v1".to_string(),
+            renderer_strategy: FoundryTuiRendererStrategy {
+                schema_version: "foundry.tui.renderer_strategy.v1".to_string(),
                 current_backend: "rust_crossterm_fullscreen_fallback".to_string(),
                 target_backend: "opentui_native_core_bridge_or_incremental_rust_port".to_string(),
                 ecosystem_sources: vec![],
@@ -1949,18 +2013,18 @@ mod tests {
                 create_tui_template_family: "core".to_string(),
                 next_step: "next".to_string(),
             },
-            prompt: ForgeTuiPrompt {
-                placeholder: "Talk to Forge; use /, @, ~, & for autocomplete".to_string(),
+            prompt: FoundryTuiPrompt {
+                placeholder: "Talk to Foundry; use /, @, ~, & for autocomplete".to_string(),
                 submit_hint: "submit".to_string(),
                 command_hint: "shell".to_string(),
             },
-            shell: ForgeTuiShell {
+            shell: FoundryTuiShell {
                 enabled: true,
                 prefix: "!".to_string(),
                 toggle: "!".to_string(),
-                audit_event_kind: "forge_tui_shell_command".to_string(),
+                audit_event_kind: "foundry_tui_shell_command".to_string(),
             },
-            status_bar: ForgeTuiStatusBar {
+            status_bar: FoundryTuiStatusBar {
                 workflows: 3,
                 active_runs: 1,
                 events: 2,
@@ -1984,7 +2048,7 @@ mod tests {
             ],
             file_suggestions: vec![
                 "@src/opencode_tui.rs".to_string(),
-                "@tests/forge_cli_contract.rs".to_string(),
+                "@tests/foundry_cli_contract.rs".to_string(),
             ],
             workflow_suggestions: vec![
                 "~workflow-1 — First workflow".to_string(),
@@ -1994,9 +2058,9 @@ mod tests {
                 "&empresa.projeto.aplicacao".to_string(),
                 "&empresa.projeto.web".to_string(),
             ],
-        session_tabs: vec!["forge".to_string()],
-        benchmark_snapshot: ForgeTuiBenchmarkSnapshot {
-            schema_version: "forge.tui.benchmark_snapshot.v1".to_string(),
+        session_tabs: vec!["foundry".to_string()],
+        benchmark_snapshot: FoundryTuiBenchmarkSnapshot {
+            schema_version: "foundry.tui.benchmark_snapshot.v1".to_string(),
             summary: "summary".to_string(),
             placement_lines: vec![
                 "Placement: Core = Codex, Gemini, OpenCode.".to_string(),
@@ -2008,7 +2072,7 @@ mod tests {
                 "OpenCode: installed=true, configured=true, ready=true, path=/tmp/opencode, command=opencode".to_string(),
                 "Claude: installed=false, configured=false, ready=false, path=missing, command=claude".to_string(),
             ],
-            forge_line: "Forge: workflows=3, active_runs=1, handoffs=1, approvals=0, costs=$1.2500".to_string(),
+            foundry_line: "Foundry: workflows=3, active_runs=1, handoffs=1, approvals=0, costs=$1.2500".to_string(),
             live_notes: vec![],
         },
         notes: vec![],
@@ -2030,7 +2094,7 @@ mod tests {
                 "@opencode — OpenCode".to_string(),
                 "@gemini — Gemini".to_string(),
                 "@src/opencode_tui.rs".to_string(),
-                "@tests/forge_cli_contract.rs".to_string()
+                "@tests/foundry_cli_contract.rs".to_string()
             ]
         );
         assert_eq!(
@@ -2053,7 +2117,7 @@ mod tests {
     #[test]
     fn selector_and_form_hints_render_as_explicit_prompt_surfaces() {
         let report = sample_report();
-        let state = ForgeTuiRuntimeState {
+        let state = FoundryTuiRuntimeState {
             project_root: None,
             chat_session_code: "chat_test".to_string(),
             chat_session_path: PathBuf::from("/tmp/chat_test.json"),
@@ -2096,11 +2160,11 @@ mod tests {
     }
 
     #[test]
-    fn render_forge_tui_is_minimal_and_does_not_reintroduce_command_lists() {
+    fn render_foundry_tui_is_minimal_and_does_not_reintroduce_command_lists() {
         let report = sample_report();
-        let rendered = render_forge_tui(&report);
+        let rendered = render_foundry_tui(&report);
 
-        assert!(rendered.contains("Forge chat TUI - OpenCode-style"));
+        assert!(rendered.contains("Foundry chat TUI - OpenCode-style"));
         assert!(rendered.contains("History and input stay on the live terminal surface."));
         assert!(!rendered.contains("Workflows:"));
         assert!(!rendered.contains("Agents:"));
@@ -2110,7 +2174,7 @@ mod tests {
 
     #[test]
     fn idle_handoff_enables_shell_mode_after_timeout() {
-        let mut state = ForgeTuiRuntimeState {
+        let mut state = FoundryTuiRuntimeState {
             project_root: None,
             chat_session_code: "chat_test".to_string(),
             chat_session_path: PathBuf::from("/tmp/chat_test.json"),
@@ -2138,7 +2202,7 @@ mod tests {
 
     #[test]
     fn autocomplete_selection_moves_and_can_be_accepted() {
-        let mut state = ForgeTuiRuntimeState {
+        let mut state = FoundryTuiRuntimeState {
             project_root: None,
             chat_session_code: "chat_test".to_string(),
             chat_session_path: PathBuf::from("/tmp/chat_test.json"),
@@ -2200,10 +2264,10 @@ mod tests {
     fn chat_session_is_persisted_and_can_be_resumed_by_code() {
         let temp = tempfile::tempdir().unwrap();
         let project_root = temp.path();
-        let store = ForgeStore::open(project_root.join("forge.sqlite")).unwrap();
+        let store = FoundryStore::open(project_root.join("foundry.sqlite")).unwrap();
 
         let session = create_chat_session_state(Some(project_root)).unwrap();
-        let mut state = ForgeTuiRuntimeState {
+        let mut state = FoundryTuiRuntimeState {
             project_root: Some(project_root.to_path_buf()),
             chat_session_code: session.chat_session_code.clone(),
             chat_session_path: chat_session_path(Some(project_root), &session.chat_session_code),
@@ -2244,5 +2308,44 @@ mod tests {
         assert!(lines.iter().any(|line| line.contains("Resumed chat")));
         assert_eq!(state.conversation_history.len(), 2);
         assert_eq!(state.chat_session_code, session.chat_session_code);
+    }
+
+    #[test]
+    fn legacy_chat_sessions_are_read_only_fallback_with_canonical_precedence() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        let legacy_dir = legacy_chat_session_directory(Some(project_root));
+        let legacy = FoundryChatSessionRecord {
+            schema_version: FOUNDRY_CHAT_SESSION_SCHEMA_VERSION.to_string(),
+            chat_session_code: "chat_legacy".to_string(),
+            project_root: project_root.display().to_string(),
+            created_at: "2026-07-01T00:00:00Z".to_string(),
+            updated_at: "2026-07-01T00:00:00Z".to_string(),
+            conversation_history: vec![ConversationTurn {
+                role: ConversationRole::User,
+                text: "legacy".to_string(),
+            }],
+        };
+        persist_chat_session_record(Some(&legacy_dir), &legacy).unwrap();
+
+        let canonical_path = chat_session_path(Some(project_root), &legacy.chat_session_code);
+        assert!(!canonical_path.exists());
+        let loaded = load_chat_session_record(Some(project_root), Some(&legacy.chat_session_code))
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.conversation_history[0].text, "legacy");
+        assert!(
+            !canonical_path.exists(),
+            "legacy fallback must not migrate on read"
+        );
+
+        let mut canonical = legacy.clone();
+        canonical.conversation_history[0].text = "canonical".to_string();
+        let canonical_dir = chat_session_directory(Some(project_root));
+        persist_chat_session_record(Some(&canonical_dir), &canonical).unwrap();
+        let loaded = load_chat_session_record(Some(project_root), Some(&legacy.chat_session_code))
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.conversation_history[0].text, "canonical");
     }
 }
