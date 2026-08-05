@@ -1741,7 +1741,7 @@ fn ensure_executable(command_path: &Path, executor: &str) -> Result<()> {
         }
     }
     #[cfg(not(unix))]
-    let _ = executor;
+    let _ = (command_path, executor);
     Ok(())
 }
 

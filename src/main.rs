@@ -5132,11 +5132,105 @@ impl From<WorkflowLifecycleArg> for WorkflowLifecycleFilter {
     }
 }
 
+#[cfg(not(windows))]
+fn spawn_detached_drive_loop(executable: &Path, store_path: &Path, run_id: &str) -> Result<()> {
+    std::process::Command::new(executable)
+        .arg("--store")
+        .arg(store_path)
+        .arg("request")
+        .arg("drive-loop")
+        .arg("--run")
+        .arg(run_id)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn spawn_detached_drive_loop(executable: &Path, store_path: &Path, run_id: &str) -> Result<()> {
+    use std::ffi::{OsStr, OsString};
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::null;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
+        PROCESS_INFORMATION, STARTUPINFOW,
+    };
+
+    let arguments = [
+        executable.as_os_str().to_os_string(),
+        OsString::from("--store"),
+        store_path.as_os_str().to_os_string(),
+        OsString::from("request"),
+        OsString::from("drive-loop"),
+        OsString::from("--run"),
+        OsString::from(run_id),
+    ];
+    let mut command_line = Vec::<u16>::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        if index > 0 {
+            command_line.push(b' ' as u16);
+        }
+        append_windows_quoted_argument(&mut command_line, argument);
+    }
+    command_line.push(0);
+    let mut application = executable.as_os_str().encode_wide().collect::<Vec<_>>();
+    application.push(0);
+    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let created = unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command_line.as_mut_ptr(),
+            null(),
+            null(),
+            0,
+            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+            null(),
+            null(),
+            &startup,
+            &mut process,
+        )
+    };
+    if created == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to spawn detached request drive loop");
+    }
+    unsafe {
+        let _ = CloseHandle(process.hThread);
+        let _ = CloseHandle(process.hProcess);
+    }
+    fn append_windows_quoted_argument(command_line: &mut Vec<u16>, argument: &OsStr) {
+        command_line.push(b'"' as u16);
+        let mut backslashes = 0usize;
+        for unit in argument.encode_wide() {
+            if unit == b'\\' as u16 {
+                backslashes += 1;
+                continue;
+            }
+            if unit == b'"' as u16 {
+                command_line.extend(std::iter::repeat_n(b'\\' as u16, backslashes * 2 + 1));
+            } else {
+                command_line.extend(std::iter::repeat_n(b'\\' as u16, backslashes));
+            }
+            backslashes = 0;
+            command_line.push(unit);
+        }
+        command_line.extend(std::iter::repeat_n(b'\\' as u16, backslashes * 2));
+        command_line.push(b'"' as u16);
+    }
+
+    Ok(())
+}
+
 fn main() {
     if legacy_binary_invoked() {
         eprintln!("{LEGACY_BINARY_WARNING}");
     }
-    match run() {
+    match run_with_cli_stack() {
         Ok(code) => std::process::exit(code),
         Err(error) => {
             if let Some(cli_error) = error.downcast_ref::<clap::Error>() {
@@ -5162,6 +5256,20 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn run_with_cli_stack() -> Result<i32> {
+    // Clap materializes the complete command tree while parsing. The Foundry
+    // CLI is large enough to overflow the default Windows main-thread stack,
+    // including for early exits such as `--version`. Keep the public process
+    // contract unchanged while giving command construction a bounded stack.
+    std::thread::Builder::new()
+        .name("foundry-cli".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(run)
+        .context("failed to start the Foundry CLI worker")?
+        .join()
+        .map_err(|_| anyhow::anyhow!("Foundry CLI worker panicked"))?
 }
 
 fn legacy_binary_invoked() -> bool {
@@ -5709,16 +5817,7 @@ fn run() -> Result<i32> {
             if detached {
                 if let Some(ref r_id) = response.run_id {
                     let current_exe = std::env::current_exe()?;
-                    std::process::Command::new(current_exe)
-                        .arg("--store")
-                        .arg(&store_path)
-                        .arg("request")
-                        .arg("drive-loop")
-                        .arg("--run")
-                        .arg(r_id)
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn()?;
+                    spawn_detached_drive_loop(&current_exe, &store_path, r_id)?;
                 }
             }
             Ok(0)

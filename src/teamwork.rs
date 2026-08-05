@@ -20,6 +20,11 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+#[cfg(windows)]
+use std::{
+    ffi::OsString,
+    os::windows::ffi::{OsStrExt, OsStringExt},
+};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TeamworkResponse {
@@ -776,12 +781,14 @@ pub fn prepare_teamwork_worktrees(
     let branch_prefix = normalize_teamwork_branch_prefix(&options.branch_prefix)?;
     let workflow = store.load_workflow(workflow_id)?;
     let discovery = discover_worktrees(&options.repository)?;
-    let repository = fs::canonicalize(&discovery.repository_root).with_context(|| {
-        format!(
-            "failed to resolve teamwork repository {}",
-            discovery.repository_root
-        )
-    })?;
+    let repository = process_compatible_path(
+        &fs::canonicalize(&discovery.repository_root).with_context(|| {
+            format!(
+                "failed to resolve teamwork repository {}",
+                discovery.repository_root
+            )
+        })?,
+    );
     let worktree_root = normalize_teamwork_worktree_root(&options.worktree_root, &repository)?;
     let registered = list_registered_worktrees(store, Some(&repository), None)?.worktrees;
     let workflow_bound = list_registered_worktrees(store, None, Some(workflow_id))?.worktrees;
@@ -822,7 +829,7 @@ pub fn prepare_teamwork_worktrees(
         }
 
         if let Some(bound_elsewhere) = workflow_bound.iter().find(|record| {
-            Path::new(&record.worktree_root) != path
+            !process_paths_equal(Path::new(&record.worktree_root), &path)
                 && record.bindings.iter().any(|binding| {
                     binding.workflow_id == workflow_id
                         && binding.task_id.as_deref() == Some(task.id.as_str())
@@ -838,7 +845,7 @@ pub fn prepare_teamwork_worktrees(
 
         let existing = registered
             .iter()
-            .find(|record| Path::new(&record.worktree_root) == path)
+            .find(|record| process_paths_equal(Path::new(&record.worktree_root), &path))
             .cloned();
         let mut commands = Vec::new();
         let action = if let Some(record) = existing {
@@ -1001,7 +1008,7 @@ pub fn prepare_teamwork_worktrees(
         };
         if claim.binding_scope != "task"
             || claim.worktree_id != record.id
-            || Path::new(&claim.worktree_root) != plan.path
+            || !process_paths_equal(Path::new(&claim.worktree_root), &plan.path)
         {
             return Err(anyhow!(
                 "teamwork worktree claim verification failed for task {}",
@@ -1165,7 +1172,7 @@ fn normalize_teamwork_worktree_root(path: &Path, repository: &Path) -> Result<Pa
             ));
         }
     }
-    let resolved = if path.exists() {
+    let resolved = process_compatible_path(&if path.exists() {
         if !path.is_dir() {
             return Err(anyhow!(
                 "teamwork worktree root is not a directory: {}",
@@ -1193,7 +1200,7 @@ fn normalize_teamwork_worktree_root(path: &Path, repository: &Path) -> Result<Pa
             )
         })?;
         fs::canonicalize(parent)?.join(name)
-    };
+    });
     if resolved.parent().is_none()
         || resolved == repository
         || repository.starts_with(&resolved)
@@ -1205,6 +1212,40 @@ fn normalize_teamwork_worktree_root(path: &Path, repository: &Path) -> Result<Pa
         ));
     }
     Ok(resolved)
+}
+
+#[cfg(windows)]
+fn process_compatible_path(path: &Path) -> PathBuf {
+    const VERBATIM_PREFIX: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    const VERBATIM_UNC_PREFIX: &[u16] = &[
+        b'\\' as u16,
+        b'\\' as u16,
+        b'?' as u16,
+        b'\\' as u16,
+        b'U' as u16,
+        b'N' as u16,
+        b'C' as u16,
+        b'\\' as u16,
+    ];
+    let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if let Some(rest) = wide.strip_prefix(VERBATIM_UNC_PREFIX) {
+        let mut normalized = vec![b'\\' as u16, b'\\' as u16];
+        normalized.extend_from_slice(rest);
+        return PathBuf::from(OsString::from_wide(&normalized));
+    }
+    if let Some(rest) = wide.strip_prefix(VERBATIM_PREFIX) {
+        return PathBuf::from(OsString::from_wide(rest));
+    }
+    path.to_path_buf()
+}
+
+#[cfg(not(windows))]
+fn process_compatible_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+fn process_paths_equal(left: &Path, right: &Path) -> bool {
+    process_compatible_path(left) == process_compatible_path(right)
 }
 
 fn teamwork_external_task_brain(task: &AtomicTask) -> Result<Option<String>> {

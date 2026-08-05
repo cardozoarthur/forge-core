@@ -500,12 +500,16 @@ fn prepare_private_parent(path: &Path) -> Result<()> {
 }
 
 fn sync_file(path: &Path) -> Result<()> {
-    File::open(path)
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
         .with_context(|| format!("failed to open {} for fsync", path.display()))?
         .sync_all()
         .with_context(|| format!("failed to fsync {}", path.display()))
 }
 
+#[cfg(unix)]
 fn sync_parent(path: &Path) -> Result<()> {
     let parent = path
         .parent()
@@ -515,6 +519,11 @@ fn sync_parent(path: &Path) -> Result<()> {
         .with_context(|| format!("failed to open {} for fsync", parent.display()))?
         .sync_all()
         .with_context(|| format!("failed to fsync {}", parent.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn remove_temporary_file(path: &Path) {

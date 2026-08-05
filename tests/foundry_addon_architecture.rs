@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command as StdCommand, Stdio};
@@ -21,6 +22,7 @@ fn foundry() -> Command {
     Command::cargo_bin("foundry").expect("foundry binary should build")
 }
 
+#[cfg(unix)]
 fn write_fake_event_egress_credential_vault(bin_dir: &Path) -> std::path::PathBuf {
     let script_path = bin_dir.join("credential-vault");
     fs::write(
@@ -390,6 +392,7 @@ fn start_external_api_planning_strategy_worker_server(
     (endpoint, handle)
 }
 
+#[cfg(unix)]
 fn start_authenticated_external_api_worker_server(
     expected_requests: usize,
     secret: &str,
@@ -2267,10 +2270,11 @@ runtime_contracts:
         "route_strategy_workflow"
     );
 
-    let input = format!(
-        r#"{{"addon_dirs":["{}"],"workflow_extension_id":"route_strategy_workflow"}}"#,
-        addon_dir.display()
-    );
+    let input = serde_json::json!({
+        "addon_dirs": [addon_dir],
+        "workflow_extension_id": "route_strategy_workflow"
+    })
+    .to_string();
     let mcp_output = foundry()
         .args([
             "--store",
@@ -2503,6 +2507,7 @@ runtime_contracts:
 }
 
 #[test]
+#[cfg(unix)]
 fn addon_validator_executes_through_worker_with_result_audit_for_cli_and_mcp() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("foundry.sqlite");
@@ -2697,6 +2702,7 @@ print(json.dumps({
 }
 
 #[test]
+#[cfg(unix)]
 fn addon_executor_executes_through_worker_with_result_audit_for_cli_and_mcp() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("foundry.sqlite");
@@ -2986,6 +2992,7 @@ print(json.dumps({
 }
 
 #[test]
+#[cfg(unix)]
 fn addon_handoff_executes_through_worker_with_result_audit_for_cli_and_mcp() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("foundry.sqlite");
@@ -7704,7 +7711,7 @@ capabilities:
         "organization_project"
     );
 
-    let mcp_input = format!(r#"{{"project_root":"{}"}}"#, temp.path().display());
+    let mcp_input = serde_json::json!({"project_root": temp.path()}).to_string();
     let mcp_output = foundry()
         .args([
             "mcp",
@@ -8188,6 +8195,7 @@ tenant_policy_mode: enforce
 }
 
 #[test]
+#[cfg(unix)]
 fn external_addon_manifest_can_register_new_domain_capability() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("foundry.sqlite");
@@ -9726,6 +9734,7 @@ runtime_contracts:
 }
 
 #[test]
+#[cfg(unix)]
 fn external_api_runtime_worker_supports_auth_and_https_without_secret_leakage() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("foundry.sqlite");
@@ -11173,6 +11182,7 @@ event_adapters:
 }
 
 #[test]
+#[cfg(unix)]
 fn event_egress_adapter_resolves_bearer_secret_from_credential_vault_without_reporting_value() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("foundry.sqlite");
@@ -14287,11 +14297,12 @@ runtime_contracts:
         .unwrap()
         .to_string();
 
-    let mcp_run_input = format!(
-        r#"{{"addon_dirs":["{}"],"dispatch_id":"{}","worker":"mcp-test"}}"#,
-        addon_dir.display(),
-        dispatch_id
-    );
+    let mcp_run_input = serde_json::json!({
+        "addon_dirs": [addon_dir],
+        "dispatch_id": dispatch_id,
+        "worker": "mcp-test"
+    })
+    .to_string();
     let run_output = foundry()
         .args([
             "--store",
@@ -14809,7 +14820,7 @@ capabilities:
         );
     }
 
-    let mcp_input = format!(r#"{{"addon_dirs":["{}"]}}"#, addon_dir.display());
+    let mcp_input = serde_json::json!({"addon_dirs": [addon_dir]}).to_string();
     let mcp_output = foundry()
         .args([
             "mcp",

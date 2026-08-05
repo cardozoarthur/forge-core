@@ -3,6 +3,7 @@ use foundry_core::lease::acquire_task_lease;
 use foundry_core::storage::FoundryStore;
 use rusqlite::Connection;
 use serde_json::Value;
+#[cfg(unix)]
 use std::fs;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
@@ -126,6 +127,7 @@ fn create_registered_worktree(
 }
 
 #[test]
+#[cfg(unix)]
 fn worktree_binding_routes_context_and_runs_internal_test_sandbox() {
     let temp = tempdir().unwrap();
     let repository = temp.path().join("repository");
@@ -406,6 +408,7 @@ fn worktree_binding_routes_context_and_runs_internal_test_sandbox() {
 }
 
 #[test]
+#[cfg(unix)]
 fn task_binding_precedes_workflow_binding() {
     let temp = tempdir().unwrap();
     let repository = temp.path().join("repository");

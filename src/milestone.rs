@@ -2082,14 +2082,12 @@ fn sync_exact_production_output(
     fs::File::open(&target)
         .and_then(|file| file.sync_all())
         .with_context(|| format!("failed sync existing {label} {}", target.display()))?;
-    fs::File::open(&parent)
-        .and_then(|directory| directory.sync_all())
-        .with_context(|| {
-            format!(
-                "failed sync existing {label} directory {}",
-                parent.display()
-            )
-        })?;
+    sync_production_directory(&parent).with_context(|| {
+        format!(
+            "failed sync existing {label} directory {}",
+            parent.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -2203,8 +2201,7 @@ where
                 temporary.display()
             )
         })?;
-        fs::File::open(&parent)
-            .and_then(|directory| directory.sync_all())
+        sync_production_directory(&parent)
             .with_context(|| format!("failed sync {label} directory {}", parent.display()))?;
         Ok(())
     })();
@@ -2223,9 +2220,7 @@ where
             }
         }
         if published {
-            if let Err(cleanup_error) =
-                fs::File::open(&parent).and_then(|directory| directory.sync_all())
-            {
+            if let Err(cleanup_error) = sync_production_directory(&parent) {
                 cleanup_failures.push(format!("{}: {cleanup_error}", parent.display()));
             }
         }
@@ -2238,6 +2233,17 @@ where
         );
     }
     Ok(target)
+}
+
+#[cfg(unix)]
+fn sync_production_directory(path: &Path) -> Result<()> {
+    fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_production_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn production_mission_operational_claims_value(

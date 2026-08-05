@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use assert_cmd::Command;
 use foundry_core::artifact::hex_sha256;
 use foundry_core::storage::{FoundryStore, GlobalEventWrite};
@@ -3349,6 +3351,7 @@ fn harness_exec_receipt_surfaces_runtime_policy_sources_for_cli_and_mcp() {
 }
 
 #[test]
+#[cfg(unix)]
 fn harness_exec_enforces_project_lineage_policy_before_real_brain_execution() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("foundry.sqlite");
@@ -3500,6 +3503,7 @@ printf 'policy-exec-ok:%s\n' "$FOUNDRY_WORKFLOW_ID"
 }
 
 #[test]
+#[cfg(unix)]
 fn harness_exec_can_use_explicit_project_root_without_changing_child_cwd_for_cli_and_mcp() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("foundry.sqlite");
@@ -6214,6 +6218,7 @@ fn milestone_manifest_promotes_when_all_required_attached_evidence_is_validated(
 }
 
 #[test]
+#[cfg(unix)]
 fn milestone_evidence_plan_inspects_project_inputs_without_collecting_evidence() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("foundry.sqlite");
@@ -7388,6 +7393,7 @@ fn milestone_multimodal_template_placeholders_do_not_count_as_production_runtime
 }
 
 #[test]
+#[cfg(unix)]
 fn milestone_collect_evidence_runs_ready_sources_and_attaches_receipts() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("foundry.sqlite");
@@ -28611,6 +28617,7 @@ fn self_run_defaults_to_codex_agy_opencode_order() {
 }
 
 #[test]
+#[cfg(unix)]
 fn self_run_falls_back_to_agy_before_opencode_if_previous_executor_fails() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("foundry.sqlite");
@@ -28698,6 +28705,7 @@ fn self_run_falls_back_to_agy_before_opencode_if_previous_executor_fails() {
 }
 
 #[test]
+#[cfg(unix)]
 fn self_run_keeps_request_active_between_multiple_cycles() {
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("foundry.sqlite");
