@@ -1,13 +1,13 @@
 ---
-name: forge-core-documentation
-description: Forge Core documentation standard for workflows, tasks, and nodes, including schemas and contract definitions.
+name: foundry-core-documentation
+description: Foundry Core documentation standard for workflows, tasks, and nodes, including schemas and contract definitions.
 license: MIT
 compatibility: codex, opencode, agy, claude
 ---
 
 ## Documentation Contract
 
-All workflows, tasks, and nodes in Forge must be clearly and formally documented. Proper documentation ensures auditability, trace preservation, and precise agent execution interfaces.
+All workflows, tasks, and nodes in Foundry must be clearly and formally documented. Proper documentation ensures auditability, trace preservation, and precise agent execution interfaces.
 
 ## Documenting Workflows
 
@@ -17,10 +17,10 @@ A workflow represents the top-level orchestration structure. When documenting wo
 3. **Artifacts**: Expected generated deliverables and their tags.
 4. **Lineage**: The provenance and flow of information.
 
-Use the `forge` CLI to plan and view workflow metadata:
+Use the `foundry` CLI to plan and view workflow metadata:
 ```bash
-forge plan --goal "<goal>" --output json
-forge workflow status --workflow <workflow-id> --output json
+foundry plan --goal "<goal>" --output json
+foundry status --workflow <workflow-id> --output json
 ```
 
 ## Documenting Tasks and Subtasks

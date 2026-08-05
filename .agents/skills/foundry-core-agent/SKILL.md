@@ -1,20 +1,20 @@
 ---
-name: forge-core-agent
-description: Forge Core executor discovery, explicit authorization, readiness and adapter diagnostics.
+name: foundry-core-agent
+description: Foundry Core executor discovery, explicit authorization, readiness and adapter diagnostics.
 license: MIT
 compatibility: codex, opencode, agy, claude
 ---
 
 ## Agent and Executor Contract
 
-Forge owns workflow state, policy, leases, validation and promotion. Codex, Agy
+Foundry owns workflow state, policy, leases, validation and promotion. Codex, Agy
 and other CLIs are bounded execution engines. A CLI being present on disk does
-not authorize Forge to use it.
+not authorize Foundry to use it.
 
 An executor is usable only when all four gates are true:
 
-1. `installed`: Forge found the executable;
-2. `configured`: Forge found provider/CLI configuration evidence;
+1. `installed`: Foundry found the executable;
+2. `configured`: Foundry found provider/CLI configuration evidence;
 3. `allowed`: a human explicitly authorized the canonical executor;
 4. `non_interactive_ready`: the bounded readiness probe succeeded.
 
@@ -27,12 +27,12 @@ quota, brain or lease state.
 Use the operator's real home when probing configuration:
 
 ```bash
-forge sync executors --home "$HOME" --allow agy --allow codex --no-prompt --output json
-forge executors --output json
-forge brains --output json
+foundry sync executors --home "$HOME" --allow agy --allow codex --no-prompt --output json
+foundry executors --output json
+foundry brains --output json
 ```
 
-`--allow` is the explicit human authorization persisted by Forge. `--no-prompt`
+`--allow` is the explicit human authorization persisted by Foundry. `--no-prompt`
 only disables the interactive question; it does not authorize an executor by
 itself. Use `--deny <executor>` to persist an explicit denial.
 
@@ -42,13 +42,13 @@ executor report records the probed home so operators can distinguish the two.
 ## Adapter Credentials and Quotas
 
 ```bash
-forge harness doctor --executor agy --shim-dir "$HOME/.forge/bin" --project-root <project-root> --output json
-forge harness doctor --executor codex --shim-dir "$HOME/.forge/bin" --project-root <project-root> --output json
-forge executor-quota ai-limits --ai-limits-cmd ai-limits --output json
+foundry harness doctor --executor agy --shim-dir "$HOME/.foundry/bin" --project-root <project-root> --output json
+foundry harness doctor --executor codex --shim-dir "$HOME/.foundry/bin" --project-root <project-root> --output json
+foundry executor-quota ai-limits --ai-limits-cmd ai-limits --output json
 ```
 
 Provider credentials remain in the provider's supported environment or config
-store. Never place secret values in Forge skills, reports, command history or
+store. Never place secret values in Foundry skills, reports, command history or
 human-readable workflow artifacts.
 
 Before handoff, confirm the canonical executor is present in `usable`. Explicit

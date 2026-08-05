@@ -1,6 +1,6 @@
-# Forge release trust contract
+# Foundry release trust contract
 
-Forge `v0.5.3` and later releases fail closed at two independent trust
+Foundry `v0.6.0` and later releases fail closed at two independent trust
 boundaries:
 
 1. the release workflow accepts only an annotated SSH-signed tag made by the
@@ -13,14 +13,14 @@ republished by the current workflow.
 
 ## Configure the signed-tag root
 
-Configure these GitHub repository values before creating `v0.5.3`:
+Configure these GitHub repository values before creating `v0.6.0`:
 
 | Kind | Name | Exact value |
 | --- | --- | --- |
-| Variable | `FORGE_RELEASE_TAG_SIGNER_PRINCIPAL` | Exact SSH signing principal, normally the maintainer email |
-| Variable | `FORGE_RELEASE_TAG_SIGNER_SSH_PUBLIC_KEY` | One `ssh-ed25519 AAAA...` public-key line |
-| Variable | `FORGE_RELEASE_TAGGER_NAME` | Exact annotated-tag `taggername` |
-| Variable | `FORGE_RELEASE_TAGGER_EMAIL` | Exact annotated-tag email without angle brackets |
+| Variable | `FOUNDRY_RELEASE_TAG_SIGNER_PRINCIPAL` | Exact SSH signing principal, normally the maintainer email |
+| Variable | `FOUNDRY_RELEASE_TAG_SIGNER_SSH_PUBLIC_KEY` | One `ssh-ed25519 AAAA...` public-key line |
+| Variable | `FOUNDRY_RELEASE_TAGGER_NAME` | Exact annotated-tag `taggername` |
+| Variable | `FOUNDRY_RELEASE_TAGGER_EMAIL` | Exact annotated-tag email without angle brackets |
 
 Derive the public key from the configured private key:
 
@@ -35,7 +35,7 @@ compares tagger name and email separately, fetches `origin/main`, and requires
 the release commit to be an ancestor of that branch. Missing configuration is
 a hard failure.
 
-## Create `v0.5.3`
+## Create `v0.6.0`
 
 Push the release commit to `main` before pushing the tag:
 
@@ -43,9 +43,9 @@ Push the release commit to `main` before pushing the tag:
 git \
   -c gpg.format=ssh \
   -c user.signingkey="$HOME/.ssh/id_ed25519" \
-  tag -s v0.5.3 -m "Forge v0.5.3"
+  tag -s v0.6.0 -m "Foundry v0.6.0"
 git push origin main
-git push origin v0.5.3
+git push origin v0.6.0
 ```
 
 Confirm the two tagger values before the push:
@@ -53,7 +53,7 @@ Confirm the two tagger values before the push:
 ```bash
 git for-each-ref \
   --format='name=%(taggername)%0aemail=%(taggeremail)' \
-  refs/tags/v0.5.3
+  refs/tags/v0.6.0
 ```
 
 The release workflow refuses lightweight tags, unsigned annotated tags,
@@ -63,19 +63,19 @@ existing GitHub release.
 
 ## Installer verification
 
-The release job signs `SHA256SUMS` keylessly with GitHub OIDC. For `v0.5.3`,
+The release job signs `SHA256SUMS` keylessly with GitHub OIDC. For `v0.6.0`,
 the only accepted certificate claims are:
 
 ```text
 issuer=https://token.actions.githubusercontent.com
-identity=https://github.com/cardozoarthur/forge-core/.github/workflows/release.yml@refs/tags/v0.5.3
+identity=https://github.com/cardozoarthur/foundry-core/.github/workflows/release.yml@refs/tags/v0.6.0
 ```
 
 Both installers require `cosign`, download `SHA256SUMS` and
 `SHA256SUMS.sigstore.json`, verify those exact claims, and only then download
 the platform archive. Mirrors must preserve the manifest, bundle, archive, and
 explicit tag. Plain HTTP is rejected unless
-`FORGE_INSTALLER_TEST_MODE=1`; that switch exists only for isolated fixtures.
+`FOUNDRY_INSTALLER_TEST_MODE=1`; that switch exists only for isolated fixtures.
 
 Fast negative suites cover missing and adulterated bundles, wrong issuers,
 wrong workflow identities, wrong tags, and accidental HTTP use:

@@ -1,9 +1,9 @@
-# Project: Forge Teamwork Orchestration
+# Project: Foundry Teamwork Orchestration
 
 ## Architecture
-- `forge teamwork` CLI subcommand: accepts `--goal`, `--detached`, and `--output` options.
+- `foundry teamwork` CLI subcommand: accepts `--goal`, `--detached`, and `--output` options.
 - Dynamic Roster & Brain Heuristics: decomposes a goal into a task dependency graph, maps task characteristics to roles, and dynamically ranks/selects the best brain using consolidated web benchmark data (e.g. LMSYS, HumanEval, MMLU).
-- Antigravity parity: mirrors the observed `agy` `/teamwork-preview` pattern as prompt/goal review, delegated execution wave, and auditor promotion gates while keeping Forge workflow state authoritative.
+- Antigravity parity: mirrors the observed `agy` `/teamwork-preview` pattern as prompt/goal review, delegated execution wave, and auditor promotion gates while keeping Foundry workflow state authoritative.
 - Executor policy: Gemini is legacy-invalidated by default for teamwork planning; Codex and `agy` are the primary modern agent paths, with OpenCode as an additional allowed fallback.
 - Multi-Agent execution runtime: orchestrates role-based task execution, simulates or runs sub-processes/APIs, handles handoffs/audits, and records cost, token, and lineage metadata.
 - Persistence: stores cached web benchmark data and execution lineage in SQLite.
@@ -30,6 +30,6 @@
 | T3 | Tier 4 Real-World Application | Implement complex goal execution scenarios. Publish TEST_READY.md. | T2 | DONE |
 
 ## Interface Contracts
-- `forge teamwork --goal "<goal>"`: Entry point. Outputs JSON or human-readable format.
+- `foundry teamwork --goal "<goal>"`: Entry point. Outputs JSON or human-readable format.
 - Benchmark Cache DB Schema: SQLite table for cached rankings/metrics.
 - Executed Task Lineage: records roles, brain, execution time, token counts, and cost metrics.

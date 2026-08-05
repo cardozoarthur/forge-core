@@ -1,38 +1,38 @@
-# Forge Core Evolution Roadmap
+# Foundry Core Evolution Roadmap
 
-Forge Core should become the operational runtime that coordinates AI and non-AI execution. It can integrate tightly with agent CLIs for usability, but it should not depend on a single CLI's internal reasoning loop.
+Foundry Core should become the operational runtime that coordinates AI and non-AI execution. It can integrate tightly with agent CLIs for usability, but it should not depend on a single CLI's internal reasoning loop.
 
 ## Architectural Position
 
 The durable split is:
 
-- Forge controls workflow authority: decomposition, graph state, context, scheduling, retries, validation, artifacts, memory, costs and promotion.
+- Foundry controls workflow authority: decomposition, graph state, context, scheduling, retries, validation, artifacts, memory, costs and promotion.
 - Agent CLIs control local task execution: editing files, running tools, inspecting repositories, using model-specific capabilities and returning structured evidence.
 
 This means both statements are true:
 
 - Tight coupling is good when it makes the product simpler to use.
-- Runtime independence is required so Forge can outlive any one model, CLI or provider.
+- Runtime independence is required so Foundry can outlive any one model, CLI or provider.
 
 ## Integration Modes
 
-### 1. CLI Uses Forge
+### 1. CLI Uses Foundry
 
-Codex, OpenCode, Gemini CLI or similar tools call Forge commands during their normal workflow.
+Codex, OpenCode, Gemini CLI or similar tools call Foundry commands during their normal workflow.
 
 Examples:
 
-- `forge plan` to decompose a user objective.
-- `forge context` to request a bounded task context.
-- `forge run` to advance deterministic or simulated parts of the graph.
-- `forge validate` to check whether a workflow can progress.
-- `forge artifacts` to list reusable outputs.
+- `foundry plan` to decompose a user objective.
+- `foundry context` to request a bounded task context.
+- `foundry run` to advance deterministic or simulated parts of the graph.
+- `foundry validate` to check whether a workflow can progress.
+- `foundry artifacts` to list reusable outputs.
 
 This mode is useful for immediate adoption because it looks like a skill/plugin from the user side.
 
-### 2. Forge Uses CLI
+### 2. Foundry Uses CLI
 
-Forge launches an executor adapter for long-running or specialized tasks.
+Foundry launches an executor adapter for long-running or specialized tasks.
 
 Examples:
 
@@ -43,13 +43,13 @@ Examples:
 - Ollama adapter for local/private execution.
 - Command adapter for deterministic non-AI work.
 
-The CLI receives a strict task packet and returns a structured result. Forge keeps the workflow state and decides whether the result passes validation.
+The CLI receives a strict task packet and returns a structured result. Foundry keeps the workflow state and decides whether the result passes validation.
 
 ### 3. Native Integration Inside Open-Source CLIs
 
-When a CLI is open enough to support deeper integration, Forge can become an embedded orchestration backend.
+When a CLI is open enough to support deeper integration, Foundry can become an embedded orchestration backend.
 
-The goal is not to hide Forge behind the CLI. The goal is to make the CLI experience simpler while keeping Forge as the source of truth for:
+The goal is not to hide Foundry behind the CLI. The goal is to make the CLI experience simpler while keeping Foundry as the source of truth for:
 
 - task graph;
 - context packages;
@@ -131,7 +131,7 @@ Status: implemented in the current CLI.
 - Version changelog generation for improvement candidates.
 - Executor sync and persisted human authorization policy.
 - Runtime substrate sync for Docker/Kubernetes/Knative.
-- Runtime scope guard for Forge-owned versus external resources.
+- Runtime scope guard for Foundry-owned versus external resources.
 - Runtime goal/artifact mutation with origin-tracked revisions.
 - Codex/OpenCode-compatible skill installation.
 
@@ -148,13 +148,13 @@ Goal: define the stable executor interface before binding to specific CLIs.
 
 ### Phase 2: First Real CLI Adapters
 
-Goal: make Forge call external CLIs while keeping execution bounded.
+Goal: make Foundry call external CLIs while keeping execution bounded.
 
 - Implement an OpenCode adapter first because it is open and inspectable.
 - Implement a Codex adapter through the stable CLI surface available on this host.
 - Add Gemini CLI integration if the installed CLI exposes a usable non-interactive execution mode.
 - Add process timeouts, log capture, cancellation and retry classification.
-- Pass only `forge context` output plus explicit artifact references to each executor.
+- Pass only `foundry context` output plus explicit artifact references to each executor.
 
 ### Phase 2.5: Context Routing Engine
 
@@ -181,7 +181,7 @@ Goal: make human-facing artifacts adaptable without making executor behavior imp
 
 Goal: make future work real, not just represented in the graph.
 
-- Add `forge daemon`.
+- Add `foundry daemon`.
 - Add due-task queue backed by SQLite.
 - Add cron evaluation.
 - Add task wakeup records.
@@ -198,7 +198,7 @@ Goal: let one graph combine AI cognition and deterministic execution.
 - Add node-selection policy that can choose no-AI execution when work is repeated, stable or cheaper as code.
 - Add rollback and deployment node types.
 - Keep waits, cron, approvals, validation and notifications in the same graph model as AI tasks.
-- Persist per-node cost and execution evidence so Forge can compare AI versus deterministic execution choices.
+- Persist per-node cost and execution evidence so Foundry can compare AI versus deterministic execution choices.
 
 ### Phase 3.2: Long-Running Cognition
 
@@ -212,29 +212,29 @@ Goal: make cognitive workflows resumable instead of one-shot sessions.
 
 ### Phase 3.5: Workflow Registry, Inspect And Recursive Subflows
 
-Goal: make Forge observable and composable as a long-running runtime.
+Goal: make Foundry observable and composable as a long-running runtime.
 
-- Add `forge list` to show running and non-running workflows with stable ids, lifecycle state and the original initial request description.
+- Add `foundry list` to show running and non-running workflows with stable ids, lifecycle state and the original initial request description.
 - Add lifecycle state that distinguishes running, idle, completed, blocked, failed, scaled-to-zero and infinite/daemon-style workflows.
 - Implement scale-to-zero semantics for finite workflows when no runnable or scheduled work remains.
-- Initial `forge inspect <id>` renders the workflow graph in the terminal with lifecycle, dependency and persona annotations.
-- Expand `forge inspect <id> --verbose` from task goals, validation rules and subtasks to recursive subflows and descriptions of each process and subprocess/subflow.
+- Initial `foundry inspect <id>` renders the workflow graph in the terminal with lifecycle, dependency and persona annotations.
+- Expand `foundry inspect <id> --verbose` from task goals, validation rules and subtasks to recursive subflows and descriptions of each process and subprocess/subflow.
 - Add recursive subflow records so a workflow can contain many subflows and each subflow can contain child subflows. The current implementation persists proposed child-subflow links for compatible deterministic code-node reuse and renders them in inspection output; later cycles should validate, schedule and execute those links explicitly.
 - Add infinite subflow metadata so idle long-lived subflows remain schedulable instead of being incorrectly marked complete.
 - Before creating a new workflow, search available workflow definitions and prior workflows for compatible reusable flows, then integrate compatible ones as child subflows when appropriate.
 
 ### Phase 4: Native CLI Coupling
 
-Goal: make Forge feel simple inside daily coding tools.
+Goal: make Foundry feel simple inside daily coding tools.
 
 - Keep the existing skill/plugin layer for discoverability.
-- Add project-local Forge commands that agent CLIs can call predictably.
-- For open-source CLIs, explore native patches that let the CLI request Forge context and report task results.
-- Keep the native integration optional: Forge must remain usable as a standalone runtime.
+- Add project-local Foundry commands that agent CLIs can call predictably.
+- For open-source CLIs, explore native patches that let the CLI request Foundry context and report task results.
+- Keep the native integration optional: Foundry must remain usable as a standalone runtime.
 
 ### Phase 5: Controlled Self-Improvement
 
-Goal: let Forge improve workflows structurally without unrestricted self-modification.
+Goal: let Foundry improve workflows structurally without unrestricted self-modification.
 
 - Collect metrics per workflow, executor and validation gate.
 - Generate experimental workflow variants across task structure, prompt system, process runtime, validation governance and executor policy.
@@ -256,7 +256,7 @@ Goal: let Forge improve workflows structurally without unrestricted self-modific
 9. Add native integration spike for the easiest open-source CLI.
 10. Add real Knative node adapter with ownership labels and namespace guard.
 11. Add runtime mutation propagation so changed goals invalidate stale downstream context.
-12. Add `forge list` with running/non-running lifecycle and original request descriptions.
+12. Add `foundry list` with running/non-running lifecycle and original request descriptions.
 13. Add validated execution semantics for proposed child subflows.
 14. Add recursive finite/infinite subflow records and scale-to-zero lifecycle semantics.
 15. Add available-flow discovery so new workflows can reuse compatible existing flows as child subflows.
@@ -266,7 +266,7 @@ Goal: let Forge improve workflows structurally without unrestricted self-modific
 
 ## Non-Goals
 
-Forge should not:
+Foundry should not:
 
 - become only a Codex plugin;
 - hard-code one provider as the center of the architecture;

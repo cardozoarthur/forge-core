@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Forge v0.5 is supported for the single-host, trusted-operator production profile
+Foundry v0.6 is supported for the single-host, trusted-operator production profile
 documented in `docs/production-single-host.md`. Security fixes are released only
 for the latest published version.
 
@@ -15,10 +15,10 @@ for the latest published version.
 ## Reporting a vulnerability
 
 Do not open a public issue for a suspected vulnerability. Use the repository's
-[private vulnerability reporting](https://github.com/cardozoarthur/forge-core/security/advisories/new)
+[private vulnerability reporting](https://github.com/cardozoarthur/foundry-core/security/advisories/new)
 flow and include:
 
-- the affected Forge version and operating system;
+- the affected Foundry version and operating system;
 - the minimal steps needed to reproduce the problem;
 - the expected and observed security boundary;
 - whether secrets, workflow state, or release artifacts may be exposed.
@@ -29,10 +29,10 @@ coordinate disclosure after a fix is available.
 
 ## Production security boundary
 
-- Run the Ops service under the dedicated `forge` system account.
+- Run the Ops service under the dedicated `foundry` system account.
 - Keep the SQLite store and backup files at mode `0600` inside directories at
   mode `0700`.
-- Enable `FORGE_PRODUCTION_MODE=1`, load vault and Ops bearer secrets from
+- Enable `FOUNDRY_PRODUCTION_MODE=1`, load vault and Ops bearer secrets from
   root-owned `0600` files through systemd credentials, and never use inline
   secret environment values.
 - Bind the authenticated built-in Ops HTTP service to loopback. Remote access
