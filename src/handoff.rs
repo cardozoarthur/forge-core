@@ -21,6 +21,7 @@ use crate::graph::{
 };
 use crate::identity::ensure_workflow_policy;
 use crate::lease::{acquire_task_lease, TaskLease};
+use crate::project_agent::project_agent_routing_context;
 use crate::storage::FoundryStore;
 use crate::worktree::{
     bound_worktree_context, resolve_effective_project_root, WorktreeContextReport,
@@ -608,7 +609,12 @@ pub fn build_task_handoff_with_project(
     }
 
     let model_decision = if selected_executor == "auto" {
-        Some(resolve_auto_executor_model_decision(store, task, budget)?)
+        Some(resolve_auto_executor_model_decision(
+            store,
+            workflow_id,
+            task,
+            budget,
+        )?)
     } else {
         None
     };
@@ -818,13 +824,18 @@ impl ExecutorHandoffPacket {
 
 fn resolve_auto_executor_model_decision(
     store: &FoundryStore,
+    project_id: &str,
     task: &AtomicTask,
     budget: usize,
 ) -> Result<ExecutorModelDecisionReport> {
+    let agent_context = project_agent_routing_context(store, project_id)?;
     let decision = decide_executor_model_for_task(
         store,
         ExecutorModelDecisionOptions {
-            task: format!("{}: {}", task.title, task.goal),
+            task: format!(
+                "Primary task prompt and objective: {}: {}\n{}",
+                task.title, task.goal, agent_context
+            ),
             task_class: task_model_decision_class(task).to_string(),
             difficulty: task_model_decision_difficulty(task).to_string(),
             expected_input_tokens: budget as u64,

@@ -7057,6 +7057,12 @@ impl FoundryStore {
         Ok(states)
     }
 
+    pub fn delete_runtime_state(&self, id: &str) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM runtime_policy WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     pub fn save_worktree_state(
         &self,
         id: &str,

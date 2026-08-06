@@ -7,12 +7,16 @@ use crate::executor::{load_executors, ExecutorState};
 use crate::identity::ensure_workflow_policy;
 use crate::improve::{rank_improvement_candidates, OrchestratorImprovementCandidatesReport};
 use crate::memory::{project_memory_governance_report, ProjectMemoryGovernanceReport};
+use crate::project_agent::{
+    ensure_required_agents, remove_project_agent, upsert_project_agent, ProjectAgentSpec,
+    ProjectAgentUpsertInput,
+};
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
     WorkflowRegistryReport,
 };
 use crate::request::{
-    complete_ready_task, drive_request, step_request, RequestTaskCompletionInput,
+    complete_ready_task, drive_request, list_requests, step_request, RequestTaskCompletionInput,
 };
 use crate::storage::{FoundryStore, StoreEvent};
 use crate::worktree::{list_registered_worktrees_cached, WorktreeListReport};
@@ -88,6 +92,7 @@ pub struct OpsSnapshot {
     pub addon_view_renderers: OpsAddonViewRendererReport,
     pub operational_digital_twin: OpsOperationalDigitalTwin,
     pub visual_workflows: Vec<OpsWorkflowVisual>,
+    pub project_agents: Vec<ProjectAgentSpec>,
     pub executors: OpsExecutorInventory,
     pub worktrees: WorktreeListReport,
     pub actions: Vec<OpsActionSpec>,
@@ -206,6 +211,9 @@ pub struct OpsWorkflowVisual {
     pub status: String,
     pub design_surface: OpsDesignSurface,
     pub tasks: Vec<OpsTaskVisual>,
+    pub run_ids: Vec<String>,
+    pub run_statuses: Vec<String>,
+    pub active_run_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -604,6 +612,25 @@ pub fn build_ops_snapshot_with_addon_dirs_and_project(
     let memory_context_governance = build_memory_context_governance(store, project_root)?;
     let operational_digital_twin = build_operational_digital_twin(store, &modifier_lane)?;
     let visual_workflows = build_visual_workflows(store)?;
+    let worktrees = list_registered_worktrees_cached(store, None)?;
+    let agent_projects = registry
+        .workflows
+        .iter()
+        .map(|workflow| {
+            let project_root = worktrees
+                .worktrees
+                .iter()
+                .find(|worktree| {
+                    worktree.bindings.iter().any(|binding| {
+                        binding.workflow_id == workflow.workflow_id && binding.task_id.is_none()
+                    })
+                })
+                .map(|worktree| worktree.worktree_root.clone())
+                .unwrap_or_else(|| ".".to_string());
+            (workflow.workflow_id.clone(), project_root)
+        })
+        .collect::<Vec<_>>();
+    let project_agents = ensure_required_agents(store, &agent_projects)?;
     let executor_report = load_executors(store)?;
     let executors = OpsExecutorInventory {
         status: executor_report.status,
@@ -611,7 +638,6 @@ pub fn build_ops_snapshot_with_addon_dirs_and_project(
         usable: executor_report.usable,
         executors: executor_report.executors,
     };
-    let worktrees = list_registered_worktrees_cached(store, None)?;
     Ok(OpsSnapshot {
         status: "ok".to_string(),
         schema_version: OPS_SNAPSHOT_SCHEMA_VERSION.to_string(),
@@ -637,6 +663,7 @@ pub fn build_ops_snapshot_with_addon_dirs_and_project(
         addon_view_renderers,
         operational_digital_twin,
         visual_workflows,
+        project_agents,
         executors,
         worktrees,
         actions: ops_actions(),
@@ -1607,10 +1634,28 @@ impl OpsWorkflowDigitalTwinCounts {
 }
 
 fn build_visual_workflows(store: &FoundryStore) -> Result<Vec<OpsWorkflowVisual>> {
+    let mut runs_by_workflow = BTreeMap::<String, Vec<(String, String, DateTime<Utc>)>>::new();
+    for run in list_requests(store, None)?.runs {
+        runs_by_workflow.entry(run.workflow_id).or_default().push((
+            run.run_id,
+            run.status,
+            run.created_at,
+        ));
+    }
+    for runs in runs_by_workflow.values_mut() {
+        runs.sort_by(|left, right| left.2.cmp(&right.2));
+    }
     let mut workflows = store
         .load_workflows()?
         .into_iter()
         .map(|workflow| {
+            let runs = runs_by_workflow.remove(&workflow.id).unwrap_or_default();
+            let run_ids = runs.iter().map(|run| run.0.clone()).collect::<Vec<_>>();
+            let run_statuses = runs.iter().map(|run| run.1.clone()).collect::<Vec<_>>();
+            let active_run_count = run_statuses
+                .iter()
+                .filter(|status| matches!(status.as_str(), "accepted" | "resumed" | "running"))
+                .count();
             let design_surface = summarize_design_surface(&workflow);
             let tasks = workflow
                 .tasks
@@ -1641,6 +1686,9 @@ fn build_visual_workflows(store: &FoundryStore) -> Result<Vec<OpsWorkflowVisual>
                 status: workflow.status,
                 design_surface,
                 tasks,
+                run_ids,
+                run_statuses,
+                active_run_count,
             }
         })
         .collect::<Vec<_>>();
@@ -2619,6 +2667,49 @@ fn route_parsed_ops_http_request(
                 .unwrap_or("ops-web");
             let report = update_workflow_tasks_batch(store, workflow_id, &updates, origin)?;
             action_response("update_tasks_batch", &report)
+        }
+        ("POST", "/api/project/agents/upsert") => {
+            let skills = parsed
+                .params
+                .get("skills_json")
+                .map(|value| serde_json::from_str::<Vec<String>>(value))
+                .transpose()
+                .context("invalid project agent skills JSON")?
+                .unwrap_or_default();
+            let report = upsert_project_agent(
+                store,
+                ProjectAgentUpsertInput {
+                    id: parsed.params.get("agent_id").map(String::as_str),
+                    project_id: parsed.required("project_id")?,
+                    project_root: parsed.required("project_root")?,
+                    name: parsed.required("name")?,
+                    role: parsed.required("role")?,
+                    executor: parsed.required("executor")?,
+                    model: parsed.params.get("model").map(String::as_str),
+                    main_prompt: parsed.required("main_prompt")?,
+                    skills,
+                    autonomy: parsed
+                        .params
+                        .get("autonomy")
+                        .map(String::as_str)
+                        .unwrap_or("supervised"),
+                    enabled: parsed
+                        .params
+                        .get("enabled")
+                        .map(String::as_str)
+                        .unwrap_or("true")
+                        == "true",
+                },
+            )?;
+            action_response("project_agent_upsert", &report)
+        }
+        ("POST", "/api/project/agents/remove") => {
+            let report = remove_project_agent(
+                store,
+                parsed.required("project_id")?,
+                parsed.required("agent_id")?,
+            )?;
+            action_response("project_agent_remove", &report)
         }
         ("POST", "/api/visual/create-artifact") => {
             let workflow_id = parsed.required("workflow_id")?;
@@ -4252,6 +4343,20 @@ fn ops_actions() -> Vec<OpsActionSpec> {
             "POST",
             "/api/workflow/update-tasks-batch",
             "Mutate a bounded set of workflow task definitions in one audited revision.",
+            true,
+        ),
+        action(
+            "project_agent_upsert",
+            "POST",
+            "/api/project/agents/upsert",
+            "Create or update a persistent project-scoped agent policy.",
+            true,
+        ),
+        action(
+            "project_agent_remove",
+            "POST",
+            "/api/project/agents/remove",
+            "Remove a persistent project-scoped agent policy.",
             true,
         ),
         action(

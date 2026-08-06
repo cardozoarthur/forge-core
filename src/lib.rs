@@ -38,6 +38,7 @@ pub mod opencode_tui;
 pub mod ops;
 pub mod outcome;
 pub mod patch;
+pub mod project_agent;
 pub mod registry;
 pub mod request;
 pub mod request_supervisor;
