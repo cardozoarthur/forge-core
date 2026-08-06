@@ -42,6 +42,7 @@ pub mod project_agent;
 pub mod registry;
 pub mod request;
 pub mod request_supervisor;
+pub mod retrieval;
 pub mod runtime;
 pub mod schedule;
 pub mod scheduler;

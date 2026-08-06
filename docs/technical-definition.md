@@ -837,3 +837,9 @@ Foundry may work on Foundry itself only through bounded cycles:
 A workflow is only promotable when all tasks are completed and validation rules pass. Until then, `foundry validate` returns a blocked status and non-zero exit code.
 
 Self-improvement is intentionally conservative. `foundry improve` generates an experiment artifact plus a version changelog and does not auto-promote.
+
+## Conversational Context Retrieval
+
+`foundry interactive route` keeps recent chat context separate from historical retrieval. A caller can provide a bounded JSON string array through `--history-file`, repeat the target agent's declared capabilities with `--skill`, and set `--project-root`. The Core then augments the executor prompt with the best-scoring non-recent conversation messages, governed project memory, bounded project documentation and relevant `SKILL.md` content.
+
+The additive `context_retrieval` object uses schema `foundry.chat_context_retrieval.v1`. It reports candidate and selected counts plus each source's type, stable identifier, relevance score, bounded snippet, optional path and line range. Retrieved text is evidence and cannot replace the agent's primary prompt; only declared skills may guide the method of work inside the agent's existing permissions. This keeps temporal continuity, thematic RAG and skill recovery independently auditable.
