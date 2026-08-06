@@ -1265,6 +1265,32 @@ pub fn list_registered_worktrees(
     })
 }
 
+/// Returns the persisted worktree registry without invoking Git for every record.
+/// This is intended for high-frequency aggregate snapshots; explicit worktree
+/// inspection continues to refresh live branch, HEAD and dirty state.
+pub fn list_registered_worktrees_cached(
+    store: &FoundryStore,
+    workflow_id: Option<&str>,
+) -> Result<WorktreeListReport> {
+    let mut worktrees = load_all_worktree_records(store)?
+        .into_iter()
+        .filter(|record| {
+            workflow_id.is_none_or(|workflow_id| {
+                record
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.workflow_id == workflow_id)
+            })
+        })
+        .collect::<Vec<_>>();
+    worktrees.sort_by(|left, right| left.worktree_root.cmp(&right.worktree_root));
+    Ok(WorktreeListReport {
+        schema_version: WORKTREE_RECORD_SCHEMA_VERSION.to_string(),
+        count: worktrees.len(),
+        worktrees,
+    })
+}
+
 pub fn inspect_registered_worktree(store: &FoundryStore, selector: &str) -> Result<WorktreeRecord> {
     refresh_worktree_record(&load_worktree_record(store, selector)?)
 }

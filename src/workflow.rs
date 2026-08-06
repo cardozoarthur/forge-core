@@ -18,7 +18,7 @@ use crate::storage::FoundryStore;
 use crate::validation::{validate_workflow, validate_workflow_structure, ValidationReport};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use uuid::Uuid;
@@ -76,6 +76,24 @@ pub struct WorkflowTaskUpdateReport {
     pub new_expected_output: String,
     pub previous_version: u64,
     pub new_version: u64,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkflowTaskBatchUpdateItem {
+    pub task_id: String,
+    pub title: String,
+    pub goal: String,
+    pub expected_output: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowTaskBatchUpdateReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub origin: String,
+    pub updated_task_ids: Vec<String>,
+    pub unchanged_task_ids: Vec<String>,
     pub revision: u64,
 }
 
@@ -606,6 +624,100 @@ pub fn update_workflow_task_with_expected_revision(
         store.record_event(
             workflow_id,
             "workflow_task_updated",
+            &serde_json::to_value(&report)?,
+        )?;
+        Ok(report)
+    })
+}
+
+pub fn update_workflow_tasks_batch(
+    store: &FoundryStore,
+    workflow_id: &str,
+    updates: &[WorkflowTaskBatchUpdateItem],
+    origin: &str,
+) -> Result<WorkflowTaskBatchUpdateReport> {
+    if updates.is_empty() || updates.len() > 64 {
+        bail!("workflow task batch update requires between 1 and 64 tasks");
+    }
+    let mut unique_task_ids = BTreeSet::new();
+    for update in updates {
+        if update.task_id.trim().is_empty()
+            || update.title.trim().is_empty()
+            || update.goal.trim().is_empty()
+            || update.expected_output.trim().is_empty()
+        {
+            bail!("workflow task batch update fields must be non-empty");
+        }
+        if !unique_task_ids.insert(update.task_id.as_str()) {
+            bail!(
+                "workflow task batch update contains duplicate task {}",
+                update.task_id
+            );
+        }
+    }
+
+    store.with_transaction(|| {
+        ensure_workflow_policy(store, workflow_id, "workflow task batch update")?;
+        let mut workflow = store.load_workflow(workflow_id)?;
+        ensure_not_mission_bound(store, &workflow)?;
+        ensure_structural_mutation_allowed(&workflow, "batch update tasks")?;
+        ensure_core_orchestration_integrity(&workflow)?;
+
+        let mut updated_task_ids = Vec::new();
+        let mut unchanged_task_ids = Vec::new();
+        for update in updates {
+            ensure_no_task_lease(store, workflow_id, &update.task_id)?;
+            let task_index = workflow_task_index(&workflow, &update.task_id)?;
+            ensure_task_definition_mutable(&workflow.tasks[task_index], "update")?;
+            let task = &mut workflow.tasks[task_index];
+            let title = update.title.trim();
+            let goal = update.goal.trim();
+            let expected_output = update.expected_output.trim();
+            let changed =
+                task.title != title || task.goal != goal || task.expected_output != expected_output;
+            if changed {
+                task.title = title.to_string();
+                task.goal = goal.to_string();
+                task.work_item.goal_validation.goal = task.goal.clone();
+                task.expected_output = expected_output.to_string();
+                task.version = task.version.saturating_add(1);
+                updated_task_ids.push(update.task_id.clone());
+            } else {
+                unchanged_task_ids.push(update.task_id.clone());
+            }
+        }
+
+        if updated_task_ids.is_empty() {
+            return Ok(WorkflowTaskBatchUpdateReport {
+                status: "workflow_tasks_unchanged".to_string(),
+                workflow_id: workflow_id.to_string(),
+                origin: origin.to_string(),
+                updated_task_ids,
+                unchanged_task_ids,
+                revision: latest_revision(&workflow),
+            });
+        }
+
+        propagate_dependency_version_boundary(&mut workflow.tasks);
+        ensure_core_orchestration_integrity(&workflow)?;
+        let revision = push_revision(
+            &mut workflow.revisions,
+            origin,
+            "tasks_batch_updated",
+            &format!("updated {} task definitions", updated_task_ids.len()),
+        );
+        let report = WorkflowTaskBatchUpdateReport {
+            status: "workflow_tasks_batch_updated".to_string(),
+            workflow_id: workflow_id.to_string(),
+            origin: origin.to_string(),
+            updated_task_ids,
+            unchanged_task_ids,
+            revision,
+        };
+        store.save_workflow(&workflow)?;
+        store.record_event(
+            workflow_id,
+            "workflow_tasks_batch_updated",
             &serde_json::to_value(&report)?,
         )?;
         Ok(report)
