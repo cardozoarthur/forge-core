@@ -1446,14 +1446,15 @@ pub fn import_ai_limits_observations(
     if output.timed_out {
         anyhow::bail!("ai-limits timed out after {timeout_ms}ms");
     }
-    if !output.status.is_some_and(|status| status.success()) {
-        anyhow::bail!(
-            "ai-limits failed with exit code {:?}: {}",
+    let command_succeeded = output.status.is_some_and(|status| status.success());
+    let payload: Value = serde_json::from_str(&output.stdout).map_err(|error| {
+        anyhow::anyhow!(
+            "ai-limits failed with exit code {:?} and did not emit valid JSON: {}; {}",
             output.status.and_then(|status| status.code()),
+            error,
             output.stderr.trim()
-        );
-    }
-    let payload: Value = serde_json::from_str(&output.stdout)?;
+        )
+    })?;
     let generated_at = payload
         .get("generated_at")
         .and_then(Value::as_str)
@@ -1476,6 +1477,13 @@ pub fn import_ai_limits_observations(
         &generated_at,
         &mut observations,
     );
+    if observations.is_empty() && !command_succeeded {
+        anyhow::bail!(
+            "ai-limits failed with exit code {:?} without usable provider capacity: {}",
+            output.status.and_then(|status| status.code()),
+            output.stderr.trim()
+        );
+    }
 
     for observation in &observations {
         store.save_executor_quota(
@@ -1488,7 +1496,12 @@ pub fn import_ai_limits_observations(
 
     let report = ExecutorQuotaAiLimitsImportReport {
         schema_version: "foundry.executor_quota_ai_limits_import.v1".to_string(),
-        status: "ai_limits_imported".to_string(),
+        status: if command_succeeded {
+            "ai_limits_imported"
+        } else {
+            "ai_limits_imported_partial"
+        }
+        .to_string(),
         source_command: ai_limits_cmd.display().to_string(),
         generated_at,
         observation_count: observations.len(),
@@ -1513,7 +1526,7 @@ fn collect_ai_limits_provider_observations(
     generated_at: &str,
     observations: &mut Vec<ExecutorQuotaObservation>,
 ) {
-    let Some(provider_payload) = payload.get(provider_key) else {
+    let Some(provider_payload) = ai_limits_provider_payload(payload, provider_key) else {
         return;
     };
     let provider_status = provider_payload
@@ -1563,6 +1576,16 @@ fn collect_ai_limits_provider_observations(
             generated_at,
         ));
     }
+}
+
+fn ai_limits_provider_payload<'a>(payload: &'a Value, provider_key: &str) -> Option<&'a Value> {
+    payload.get(provider_key).or_else(|| {
+        payload
+            .get("providers")
+            .and_then(Value::as_array)?
+            .iter()
+            .find(|provider| provider.get("key").and_then(Value::as_str) == Some(provider_key))
+    })
 }
 
 fn ai_limits_observation(
@@ -1632,6 +1655,13 @@ fn ai_limits_percent_remaining(limit: &Value) -> Option<f64> {
         if let Some(value) = limit.get(key).and_then(Value::as_f64) {
             return Some(100.0 - value);
         }
+    }
+
+    if let Some(windows) = limit.get("windows").and_then(Value::as_array) {
+        return windows
+            .iter()
+            .filter_map(ai_limits_percent_remaining)
+            .min_by(|left, right| left.total_cmp(right));
     }
 
     None
@@ -4464,6 +4494,35 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
+
+    #[test]
+    fn current_ai_limits_provider_array_and_window_percent_are_supported() {
+        let payload = json!({
+            "providers": [{
+                "key": "codex",
+                "status": "ok",
+                "limits": [{
+                    "model": "Total",
+                    "windows": [
+                        { "remaining_percent": 23.0 },
+                        { "remaining_percent": 100.0 }
+                    ]
+                }]
+            }]
+        });
+        let mut observations = Vec::new();
+        collect_ai_limits_provider_observations(
+            &payload,
+            "codex",
+            "Codex",
+            "openai",
+            "2026-08-06T00:00:00Z",
+            &mut observations,
+        );
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].remaining_quota, "available_23_percent");
+        assert_eq!(observations[0].rate_limit_risk, "medium");
+    }
 
     #[cfg(windows)]
     #[test]
