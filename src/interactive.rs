@@ -15081,6 +15081,39 @@ pub fn route_interactive_input_with_context(
     })
 }
 
+pub fn route_direct_interactive_input_with_context(
+    store: &FoundryStore,
+    input: &str,
+    conversation_context: &[String],
+) -> Result<InteractiveRouteReport> {
+    let trimmed = input.trim();
+    if is_repl_exit_command(trimmed) {
+        return Ok(local_exit_route(trimmed));
+    }
+    if trimmed.starts_with('/') {
+        return Ok(route_slash_command(trimmed));
+    }
+    let answer = deterministic_direct_interactive_answer(store, trimmed, conversation_context)
+        .unwrap_or_else(|| direct_chat_response_with_context(trimmed, conversation_context));
+    Ok(InteractiveRouteReport {
+        status: "routed".to_string(),
+        schema_version: INTERACTIVE_ROUTE_SCHEMA_VERSION.to_string(),
+        input_kind: "chat".to_string(),
+        routing_decision: "direct_answer".to_string(),
+        routing_explanation:
+            "Explicit private-agent conversation answered without creating durable workflow state."
+                .to_string(),
+        workflow_created: false,
+        run_id: None,
+        workflow_id: None,
+        answer: Some(answer),
+        slash_command: None,
+        product_decision_id: None,
+        product_decision_revision: None,
+        retention_decision: no_retention_decision(),
+    })
+}
+
 fn deterministic_direct_interactive_answer(
     store: &FoundryStore,
     input: &str,
@@ -15098,6 +15131,11 @@ fn deterministic_direct_interactive_answer(
         return Some(format!("Status do Foundry:\n{status}"));
     }
     if is_greeting_question(&lower) {
+        if let Some(target) = conversation_target(conversation_context) {
+            return Some(format!(
+                "Olá. Sou {target}. Como posso ajudar neste contexto?"
+            ));
+        }
         return Some("Olá. Sou o Foundry, o orquestrador de workflows deste ambiente.".to_string());
     }
     if is_date_question(&lower) {
@@ -15123,6 +15161,14 @@ fn deterministic_direct_interactive_answer(
         );
     }
     None
+}
+
+fn conversation_target(conversation_context: &[String]) -> Option<String> {
+    conversation_context.iter().rev().find_map(|line| {
+        let target = line.strip_prefix("Conversation target: ")?;
+        let name = target.split(" (").next()?.trim();
+        (!name.is_empty() && name.chars().count() <= 120).then(|| name.to_string())
+    })
 }
 
 fn declared_user_name(input: &str) -> Option<String> {
@@ -21936,7 +21982,7 @@ fn route_slash_command(trimmed: &str) -> InteractiveRouteReport {
 
 fn direct_chat_response_with_context(input: &str, conversation_context: &[String]) -> String {
     let mut prompt = String::from(
-        "Você é o Foundry, o orquestrador desta interface. Responda em português, curto e direto, sem mencionar políticas internas. Use o contexto recente da conversa quando ele existir. Se a resposta exigir ação durável, explique brevemente o próximo passo que o Foundry pode executar, em vez de inventar um procedimento local.\n\n",
+        "Você responde como o agente-alvo controlado pelo Foundry. Responda em português, curto e direto, respeitando o papel, o prompt principal, as skills e o escopo presentes no contexto recente. Não mencione políticas internas. Se a resposta exigir ação durável, explique brevemente o próximo passo que o Foundry pode executar, em vez de inventar um procedimento local.\n\n",
     );
     let recent_context = conversation_context
         .iter()
@@ -25516,6 +25562,18 @@ mod tests {
         assert!(!date.workflow_created);
         assert_eq!(date.routing_decision, "direct_answer");
         assert!(!date.answer.unwrap().trim().is_empty());
+    }
+
+    #[test]
+    fn greeting_uses_the_private_conversation_agent_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
+        let context = vec!["Conversation target: Project Router (router).".to_string()];
+        let hello = route_direct_interactive_input_with_context(&store, "Olá!", &context).unwrap();
+        assert_eq!(hello.routing_decision, "direct_answer");
+        assert!(!hello.workflow_created);
+        assert!(hello.answer.unwrap().contains("Project Router"));
+        assert!(store.load_workflows().unwrap().is_empty());
     }
 
     #[test]

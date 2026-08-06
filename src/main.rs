@@ -145,9 +145,10 @@ use foundry_core::interactive::{
     render_interactive_token_usage, render_interactive_ui_composition,
     render_interactive_workflow_dag, render_interactive_workflow_mutation,
     render_interactive_workflow_sidebar, render_multimodal_runtime_evidence_smoke,
-    render_operational_tui_smoke, render_replacement_cli_evidence_smoke, route_interactive_input,
-    slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
-    InteractiveReplacementCliOptions, InteractiveSessionsOptions,
+    render_operational_tui_smoke, render_replacement_cli_evidence_smoke,
+    route_direct_interactive_input_with_context, route_interactive_input,
+    route_interactive_input_with_context, slash_command_catalog, InteractiveHarnessOptions,
+    InteractiveHomeOptions, InteractiveReplacementCliOptions, InteractiveSessionsOptions,
 };
 use foundry_core::ir::{CreativeArtifact, TokenCollection};
 use foundry_core::lease::{acquire_task_lease, release_task_lease};
@@ -4506,6 +4507,10 @@ enum InteractiveCommands {
     Route {
         #[arg(long)]
         input: String,
+        #[arg(long = "context")]
+        context: Vec<String>,
+        #[arg(long)]
+        direct: bool,
         #[arg(long, default_value = "foundry_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -11675,11 +11680,19 @@ fn run() -> Result<i32> {
             }
             InteractiveCommands::Route {
                 input,
+                context,
+                direct,
                 origin,
                 output,
             } => {
                 let store = FoundryStore::open(cli.store)?;
-                let report = route_interactive_input(&store, &input, &origin)?;
+                let report = if direct {
+                    route_direct_interactive_input_with_context(&store, &input, &context)?
+                } else if context.is_empty() {
+                    route_interactive_input(&store, &input, &origin)?
+                } else {
+                    route_interactive_input_with_context(&store, &input, &origin, &context)?
+                };
                 print_response(output, &report)?;
                 Ok(0)
             }
