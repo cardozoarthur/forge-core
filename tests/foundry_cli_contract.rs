@@ -42230,6 +42230,13 @@ views:
         .clone();
     let snapshot_json: Value = serde_json::from_slice(&snapshot).unwrap();
     assert_eq!(snapshot_json["schema_version"], "foundry.ops.snapshot.v1");
+    assert_eq!(snapshot_json["executors"]["status"], "loaded");
+    assert!(snapshot_json["executors"]["executors"].is_array());
+    assert_eq!(
+        snapshot_json["worktrees"]["schema_version"],
+        "foundry.worktree.record.v1"
+    );
+    assert!(snapshot_json["worktrees"]["worktrees"].is_array());
     assert_eq!(snapshot_json["mode"]["operational"], true);
     assert_eq!(snapshot_json["mode"]["strategic"], true);
     assert_eq!(snapshot_json["mode"]["realtime_mutation"], true);

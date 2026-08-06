@@ -4,7 +4,9 @@ use crate::context::{
     build_context_package_with_checkpoint_and_project,
     build_context_package_with_checkpoint_project_and_worktree, DEFAULT_CONTEXT_BUDGET,
 };
-use crate::executor::{canonical_executor_id, load_executors, ExecutorState};
+use crate::executor::{
+    canonical_executor_id, command_for_executable, load_executors, ExecutorState,
+};
 use crate::graph::{TaskStatus, Workflow};
 use crate::lease::{validate_task_lease_for_execution, TaskLease};
 use crate::request::{
@@ -308,7 +310,7 @@ pub fn build_codex_runtime_command(
     git_common_dir: Option<&Path>,
     _prompt: &str,
 ) -> Command {
-    let mut command = Command::new(command_path);
+    let mut command = command_for_executable(command_path);
     command
         .arg("exec")
         .arg("--json")
@@ -331,7 +333,7 @@ pub fn build_agy_runtime_command(
     prompt: &str,
     timeout_seconds: u64,
 ) -> Command {
-    let mut command = Command::new(command_path);
+    let mut command = command_for_executable(command_path);
     command
         .arg("--print")
         .arg(prompt)
