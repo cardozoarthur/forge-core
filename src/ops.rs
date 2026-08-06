@@ -3,6 +3,7 @@ use crate::addon::{
     load_addon_catalog_from_store, AddonObservabilityReport, AddonViewReport,
 };
 use crate::artifact::hex_sha256;
+use crate::executor::{load_executors, ExecutorState};
 use crate::identity::ensure_workflow_policy;
 use crate::improve::{rank_improvement_candidates, OrchestratorImprovementCandidatesReport};
 use crate::memory::{project_memory_governance_report, ProjectMemoryGovernanceReport};
@@ -14,6 +15,7 @@ use crate::request::{
     complete_ready_task, drive_request, step_request, RequestTaskCompletionInput,
 };
 use crate::storage::{FoundryStore, StoreEvent};
+use crate::worktree::{list_registered_worktrees_cached, WorktreeListReport};
 use crate::{
     graph::TaskStatus,
     ir::{
@@ -24,7 +26,8 @@ use crate::{
     workflow::{
         attach_creative_artifact, patch_workflow_token, record_creative_collaboration_event,
         set_workflow_token_collection, update_workflow_goal, update_workflow_task,
-        CreativeCollaborationEventRequest, WorkflowTaskUpdateInput,
+        update_workflow_tasks_batch, CreativeCollaborationEventRequest,
+        WorkflowTaskBatchUpdateItem, WorkflowTaskUpdateInput,
     },
 };
 use anyhow::{bail, Context, Result};
@@ -41,6 +44,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const OPS_SNAPSHOT_SCHEMA_VERSION: &str = "foundry.ops.snapshot.v1";
+const OPS_HEALTH_SCHEMA_VERSION: &str = "foundry.ops.health.v1";
 const OPS_ACTION_SCHEMA_VERSION: &str = "foundry.ops.action.v1";
 const OPS_MODIFIER_LANE_SCHEMA_VERSION: &str = "foundry.ops.modifier_lane.v1";
 const OPS_MODIFIER_PROPOSAL_SCHEMA_VERSION: &str = "foundry.ops.modifier_proposal.v1";
@@ -84,7 +88,17 @@ pub struct OpsSnapshot {
     pub addon_view_renderers: OpsAddonViewRendererReport,
     pub operational_digital_twin: OpsOperationalDigitalTwin,
     pub visual_workflows: Vec<OpsWorkflowVisual>,
+    pub executors: OpsExecutorInventory,
+    pub worktrees: WorktreeListReport,
     pub actions: Vec<OpsActionSpec>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsExecutorInventory {
+    pub status: String,
+    pub needs_human_approval: bool,
+    pub usable: Vec<String>,
+    pub executors: Vec<ExecutorState>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -590,6 +604,14 @@ pub fn build_ops_snapshot_with_addon_dirs_and_project(
     let memory_context_governance = build_memory_context_governance(store, project_root)?;
     let operational_digital_twin = build_operational_digital_twin(store, &modifier_lane)?;
     let visual_workflows = build_visual_workflows(store)?;
+    let executor_report = load_executors(store)?;
+    let executors = OpsExecutorInventory {
+        status: executor_report.status,
+        needs_human_approval: executor_report.needs_human_approval,
+        usable: executor_report.usable,
+        executors: executor_report.executors,
+    };
+    let worktrees = list_registered_worktrees_cached(store, None)?;
     Ok(OpsSnapshot {
         status: "ok".to_string(),
         schema_version: OPS_SNAPSHOT_SCHEMA_VERSION.to_string(),
@@ -615,6 +637,8 @@ pub fn build_ops_snapshot_with_addon_dirs_and_project(
         addon_view_renderers,
         operational_digital_twin,
         visual_workflows,
+        executors,
+        worktrees,
         actions: ops_actions(),
     })
 }
@@ -2494,6 +2518,10 @@ fn route_parsed_ops_http_request(
             addon_dirs,
             project_root,
         )?),
+        ("GET", "/api/health") => json_response(&serde_json::json!({
+            "schema_version": OPS_HEALTH_SCHEMA_VERSION,
+            "status": "ok",
+        })),
         ("POST", "/api/run/drive") => {
             let run_id = parsed.required("run_id")?;
             let executor = parsed
@@ -2561,6 +2589,11 @@ fn route_parsed_ops_http_request(
             let title = parsed.params.get("title").map(String::as_str);
             let goal = parsed.params.get("goal").map(String::as_str);
             let expected_output = parsed.params.get("expected_output").map(String::as_str);
+            let origin = parsed
+                .params
+                .get("origin")
+                .map(String::as_str)
+                .unwrap_or("ops-web");
             let report = update_workflow_task(
                 store,
                 workflow_id,
@@ -2569,10 +2602,23 @@ fn route_parsed_ops_http_request(
                     title,
                     goal,
                     expected_output,
-                    origin: "ops-web",
+                    origin,
                 },
             )?;
             action_response("update_task", &report)
+        }
+        ("POST", "/api/workflow/update-tasks-batch") => {
+            let workflow_id = parsed.required("workflow_id")?;
+            let updates_json = parsed.required("updates_json")?;
+            let updates = serde_json::from_str::<Vec<WorkflowTaskBatchUpdateItem>>(updates_json)
+                .context("invalid workflow task batch update JSON")?;
+            let origin = parsed
+                .params
+                .get("origin")
+                .map(String::as_str)
+                .unwrap_or("ops-web");
+            let report = update_workflow_tasks_batch(store, workflow_id, &updates, origin)?;
+            action_response("update_tasks_batch", &report)
         }
         ("POST", "/api/visual/create-artifact") => {
             let workflow_id = parsed.required("workflow_id")?;
@@ -4199,6 +4245,13 @@ fn ops_actions() -> Vec<OpsActionSpec> {
             "POST",
             "/api/workflow/update-task",
             "Mutate a workflow task/node title, goal or expected output while processing is live.",
+            true,
+        ),
+        action(
+            "update_tasks_batch",
+            "POST",
+            "/api/workflow/update-tasks-batch",
+            "Mutate a bounded set of workflow task definitions in one audited revision.",
             true,
         ),
         action(

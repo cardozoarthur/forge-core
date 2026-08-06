@@ -1005,7 +1005,8 @@ fn run_model_decider_command(
     candidates: &[ExecutorModelDecisionCandidate],
 ) -> ModelDeciderOutcome {
     let timeout = Duration::from_millis(env_u64("FOUNDRY_EXECUTOR_DECIDER_TIMEOUT_MS", 2_000));
-    let mut child = match Command::new(path)
+    let mut command = command_for_executable(path);
+    let mut child = match command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2075,7 +2076,8 @@ fn dedupe_model_names(models: Vec<String>) -> Vec<String> {
 }
 
 fn run_probe_command(path: &Path, args: &[&str], timeout: Duration) -> Result<ProbeOutput> {
-    let mut child = Command::new(path)
+    let mut command = command_for_executable(path);
+    let mut child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -2244,8 +2246,50 @@ fn executor_probe_home(states: &[ExecutorState]) -> Option<PathBuf> {
 fn find_executable(command: &str, executor_paths: &[PathBuf]) -> Option<PathBuf> {
     candidate_dirs(executor_paths)
         .into_iter()
-        .map(|directory| directory.join(command))
-        .find(|path| is_executable(path))
+        .find_map(|directory| {
+            executable_names(command)
+                .into_iter()
+                .map(|name| directory.join(name))
+                .find(|path| is_executable(path))
+        })
+}
+
+#[cfg(windows)]
+fn executable_names(command: &str) -> Vec<String> {
+    let lower = command.to_ascii_lowercase();
+    if [".exe", ".com", ".cmd", ".bat"]
+        .iter()
+        .any(|extension| lower.ends_with(extension))
+    {
+        return vec![command.to_string()];
+    }
+    // Native binaries are preferred. Batch launchers are valid Windows command
+    // entrypoints and are intentionally considered before extensionless POSIX shims.
+    [".exe", ".com", ".cmd", ".bat", ""]
+        .into_iter()
+        .map(|extension| format!("{command}{extension}"))
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn executable_names(command: &str) -> Vec<String> {
+    vec![command.to_string()]
+}
+
+pub(crate) fn command_for_executable(path: &Path) -> Command {
+    #[cfg(windows)]
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        })
+    {
+        let mut command = Command::new("cmd.exe");
+        command.arg("/D").arg("/S").arg("/C").arg(path);
+        return command;
+    }
+    Command::new(path)
 }
 
 fn candidate_dirs(executor_paths: &[PathBuf]) -> Vec<PathBuf> {
@@ -4420,6 +4464,27 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_executor_discovery_prefers_runnable_entrypoints() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("codex"), "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            temp.path().join("codex.cmd"),
+            "@echo off\r\necho codex-cli-test 1.0.0\r\n",
+        )
+        .unwrap();
+
+        let resolved = find_executable("codex", &[temp.path().to_path_buf()]).unwrap();
+        assert_eq!(
+            resolved.extension().and_then(|value| value.to_str()),
+            Some("cmd")
+        );
+        let output = run_probe_command(&resolved, &["--version"], Duration::from_secs(2)).unwrap();
+        assert!(output.status.is_some_and(|status| status.success()));
+        assert!(output.stdout.contains("codex-cli-test 1.0.0"));
+    }
 
     #[test]
     fn legacy_foundry_executor_authority_is_normalized() {
