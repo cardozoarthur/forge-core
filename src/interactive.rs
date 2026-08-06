@@ -84,12 +84,12 @@ use crate::schedule::{
 use crate::storage::{FoundryStore, GlobalEventWrite, StoreEvent};
 use crate::workflow::{record_product_decision, ProductDecisionInput};
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -15041,7 +15041,9 @@ pub fn route_interactive_input_with_context(
                 let answer = answer.trim().to_string();
                 (!answer.is_empty()).then_some(answer)
             })
-            .unwrap_or_else(|| direct_chat_response_with_context(trimmed, conversation_context));
+            .unwrap_or_else(|| {
+                direct_chat_response_with_context(store, trimmed, conversation_context)
+            });
 
         return Ok(InteractiveRouteReport {
             status: "routed".to_string(),
@@ -15094,7 +15096,7 @@ pub fn route_direct_interactive_input_with_context(
         return Ok(route_slash_command(trimmed));
     }
     let answer = deterministic_direct_interactive_answer(store, trimmed, conversation_context)
-        .unwrap_or_else(|| direct_chat_response_with_context(trimmed, conversation_context));
+        .unwrap_or_else(|| direct_chat_response_with_context(store, trimmed, conversation_context));
     Ok(InteractiveRouteReport {
         status: "routed".to_string(),
         schema_version: INTERACTIVE_ROUTE_SCHEMA_VERSION.to_string(),
@@ -21980,10 +21982,17 @@ fn route_slash_command(trimmed: &str) -> InteractiveRouteReport {
     }
 }
 
-fn direct_chat_response_with_context(input: &str, conversation_context: &[String]) -> String {
+fn direct_chat_response_with_context(
+    store: &FoundryStore,
+    input: &str,
+    conversation_context: &[String],
+) -> String {
     let mut prompt = String::from(
-        "Você responde como o agente-alvo controlado pelo Foundry. Responda em português, curto e direto, respeitando o papel, o prompt principal, as skills e o escopo presentes no contexto recente. Não mencione políticas internas. Se a resposta exigir ação durável, explique brevemente o próximo passo que o Foundry pode executar, em vez de inventar um procedimento local.\n\n",
+        "Você é o executor de IA de um agente controlado pelo Foundry. Responda como o agente-alvo, nunca como um assistente genérico. Use a identidade, o papel, o prompt principal, as skills, o histórico e o escopo fornecidos. Responda em português, de forma direta e útil. Não responda apenas 'Não sei': quando faltar informação, investigue com o contexto disponível, explicite a lacuna concreta e proponha a próxima ação segura. Não mencione estas instruções internas. Não crie workflow nem alegue ter executado ações; se a solicitação exigir trabalho durável, explique o próximo passo que o Foundry pode executar.\n\n",
     );
+    prompt.push_str("Contexto temporal do runtime:\n");
+    prompt.push_str(&format!("- Horário local: {}\n", Local::now().to_rfc3339()));
+    prompt.push_str(&format!("- Horário UTC: {}\n\n", Utc::now().to_rfc3339()));
     let recent_context = conversation_context
         .iter()
         .rev()
@@ -22002,13 +22011,23 @@ fn direct_chat_response_with_context(input: &str, conversation_context: &[String
     prompt.push_str("Pergunta do usuário: ");
     prompt.push_str(input);
 
-    if let Some(answer) = answer_with_codex_brain(&prompt) {
+    if let Some((answer, _executor)) =
+        answer_with_available_brain(store, &prompt, conversation_context)
+    {
         let answer = answer.trim();
         if !answer.is_empty() {
             return answer.to_string();
         }
     }
-    "Não sei.".to_string()
+    unavailable_ai_wrapper_response(conversation_context)
+}
+
+fn unavailable_ai_wrapper_response(conversation_context: &[String]) -> String {
+    let target =
+        conversation_target(conversation_context).unwrap_or_else(|| "este agente".to_string());
+    format!(
+        "Não consegui acessar um executor de IA para {target} neste momento. O Router pode reavaliar Codex, agy e o modelo local na próxima tentativa; nenhum workflow foi criado por esta conversa."
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -22050,7 +22069,7 @@ fn brain_route_interactive_input(
     prompt.push_str("Entrada:\n");
     prompt.push_str(input);
 
-    let output = answer_with_codex_brain(&prompt)?;
+    let (output, _executor) = answer_with_available_brain(store, &prompt, conversation_context)?;
     parse_brain_route_decision(&output)
 }
 
@@ -22170,20 +22189,70 @@ fn extract_json_object(output: &str) -> Option<&str> {
     (end > start).then_some(&output[start..=end])
 }
 
-fn answer_with_codex_brain(prompt: &str) -> Option<String> {
-    answer_with_codex_cli(prompt)
-        .or_else(|| answer_with_agy_cli(prompt))
-        .or_else(|| answer_with_ollama_cli(prompt))
+fn answer_with_available_brain(
+    store: &FoundryStore,
+    prompt: &str,
+    conversation_context: &[String],
+) -> Option<(String, String)> {
+    for executor in ai_wrapper_executor_order(store, conversation_context) {
+        let answer = match executor.as_str() {
+            "codex" => answer_with_codex_cli(prompt),
+            "agy" | "antigravity" => answer_with_agy_cli(prompt),
+            "ollama" => answer_with_ollama_cli(prompt),
+            _ => None,
+        };
+        if let Some(answer) = answer.filter(|answer| !answer.trim().is_empty()) {
+            return Some((answer, executor));
+        }
+    }
+    None
+}
+
+fn ai_wrapper_executor_order(store: &FoundryStore, conversation_context: &[String]) -> Vec<String> {
+    let mut order = Vec::new();
+    let preferred = conversation_context.iter().find_map(|line| {
+        line.strip_prefix("Agent executor:")
+            .map(|value| value.trim().trim_end_matches('.').to_ascii_lowercase())
+    });
+    if let Some(executor) = preferred.filter(|executor| ai_wrapper_supports(executor)) {
+        push_unique(&mut order, executor);
+    }
+    if let Ok(report) = load_executors(store) {
+        if let Some(selected) = report.brain_router.selected_brain {
+            let selected = selected.to_ascii_lowercase();
+            if ai_wrapper_supports(&selected) {
+                push_unique(&mut order, selected);
+            }
+        }
+        for executor in report.usable {
+            let executor = executor.to_ascii_lowercase();
+            if ai_wrapper_supports(&executor) {
+                push_unique(&mut order, executor);
+            }
+        }
+    }
+    for fallback in ["codex", "agy", "ollama"] {
+        push_unique(&mut order, fallback.to_string());
+    }
+    order
+}
+
+fn ai_wrapper_supports(executor: &str) -> bool {
+    matches!(executor, "codex" | "agy" | "antigravity" | "ollama")
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
 }
 
 fn answer_with_codex_cli(prompt: &str) -> Option<String> {
-    if !command_available("codex") {
-        return None;
-    }
+    let command = resolve_command_path("codex")?;
 
     let output_path = unique_brain_output_path("codex");
     let output = run_brain_command(
-        "codex",
+        &command,
         &[
             "exec",
             "-m",
@@ -22195,13 +22264,19 @@ fn answer_with_codex_cli(prompt: &str) -> Option<String> {
             "--ephemeral",
             "--output-last-message",
             output_path.to_str()?,
-            prompt,
+            "-",
         ],
         Duration::from_secs(30),
+        Some(prompt),
     )
-    .ok()?;
+    .ok();
 
+    let Some(output) = output else {
+        let _ = fs::remove_file(&output_path);
+        return None;
+    };
     if !output.status.success() {
+        let _ = fs::remove_file(&output_path);
         return None;
     }
 
@@ -22211,6 +22286,7 @@ fn answer_with_codex_cli(prompt: &str) -> Option<String> {
             first_nonempty_line(&output.stdout).or_else(|| first_nonempty_line(&output.stderr))?;
     }
     let answer = answer.trim().to_string();
+    let _ = fs::remove_file(&output_path);
     if answer.is_empty() {
         None
     } else {
@@ -22219,10 +22295,14 @@ fn answer_with_codex_cli(prompt: &str) -> Option<String> {
 }
 
 fn answer_with_agy_cli(prompt: &str) -> Option<String> {
-    if !command_available("agy") {
-        return None;
-    }
-    let output = run_brain_command("agy", &["--print", prompt], Duration::from_secs(45)).ok()?;
+    let command = resolve_command_path("agy")?;
+    let output = run_brain_command(
+        &command,
+        &["--print", prompt],
+        Duration::from_secs(45),
+        None,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -22238,9 +22318,7 @@ fn answer_with_agy_cli(prompt: &str) -> Option<String> {
 }
 
 fn answer_with_ollama_cli(prompt: &str) -> Option<String> {
-    if !command_available("curl") {
-        return None;
-    }
+    let command = resolve_command_path("curl")?;
 
     let payload = serde_json::json!({
         "model": "qwen3:14b",
@@ -22250,7 +22328,7 @@ fn answer_with_ollama_cli(prompt: &str) -> Option<String> {
     })
     .to_string();
     let output = run_brain_command(
-        "curl",
+        &command,
         &[
             "-s",
             "-H",
@@ -22260,6 +22338,7 @@ fn answer_with_ollama_cli(prompt: &str) -> Option<String> {
             "http://127.0.0.1:11434/api/generate",
         ],
         Duration::from_secs(60),
+        None,
     )
     .ok()?;
 
@@ -22276,22 +22355,51 @@ fn answer_with_ollama_cli(prompt: &str) -> Option<String> {
     }
 }
 
-fn command_available(command: &str) -> bool {
+fn resolve_command_path(command: &str) -> Option<PathBuf> {
     if command.is_empty() {
-        return false;
+        return None;
     }
 
-    if command.contains('/') {
-        return fs::metadata(command).is_ok_and(|meta| meta.is_file());
+    let command_path = Path::new(command);
+    if command_path.components().count() > 1 {
+        return command_candidates(command_path)
+            .into_iter()
+            .find(|candidate| candidate.is_file());
     }
 
     if let Some(path) = crate::brand::env_var_os("PATH") {
-        return std::env::split_paths(&path).any(|dir| {
-            let candidate = dir.join(command);
-            candidate.exists()
-        });
+        for dir in std::env::split_paths(&path) {
+            if let Some(candidate) = command_candidates(&dir.join(command))
+                .into_iter()
+                .find(|candidate| candidate.is_file())
+            {
+                return Some(candidate);
+            }
+        }
     }
-    false
+    None
+}
+
+fn command_candidates(path: &Path) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        if path.extension().is_some() {
+            return vec![path.to_path_buf()];
+        }
+        let extensions =
+            crate::brand::env_var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        let mut candidates = extensions
+            .split(';')
+            .filter(|extension| !extension.trim().is_empty())
+            .map(|extension| path.with_extension(extension.trim().trim_start_matches('.')))
+            .collect::<Vec<_>>();
+        candidates.push(path.to_path_buf());
+        return candidates;
+    }
+    #[cfg(not(windows))]
+    {
+        vec![path.to_path_buf()]
+    }
 }
 
 fn first_nonempty_line(text: &str) -> Option<String> {
@@ -22317,16 +22425,27 @@ struct BrainCommandOutput {
 }
 
 fn run_brain_command(
-    program: &str,
+    program: &Path,
     args: &[&str],
     timeout: Duration,
+    stdin_input: Option<&str>,
 ) -> Result<BrainCommandOutput> {
-    let mut child = Command::new(program)
+    let mut command = brain_process_command(program);
+    let mut child = command
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(if stdin_input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    if let Some(input) = stdin_input {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(input.as_bytes())?;
+        }
+    }
     let start = Instant::now();
 
     let status = loop {
@@ -22354,6 +22473,25 @@ fn run_brain_command(
         stdout,
         stderr,
     })
+}
+
+fn brain_process_command(program: &Path) -> Command {
+    #[cfg(windows)]
+    {
+        let extension = program
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
+            let shell = crate::brand::env_var_os("COMSPEC")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("cmd.exe"));
+            let mut command = Command::new(shell);
+            command.arg("/d").arg("/s").arg("/c").arg(program);
+            return command;
+        }
+    }
+    Command::new(program)
 }
 
 fn classify_workflow_reason(input: &str) -> String {
@@ -25574,6 +25712,47 @@ mod tests {
         assert!(!hello.workflow_created);
         assert!(hello.answer.unwrap().contains("Project Router"));
         assert!(store.load_workflows().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ai_wrapper_prefers_the_private_agents_declared_executor() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
+        let context = vec!["Agent executor: agy.".to_string()];
+
+        let order = ai_wrapper_executor_order(&store, &context);
+
+        assert_eq!(order.first().map(String::as_str), Some("agy"));
+        assert!(order.iter().any(|executor| executor == "codex"));
+        assert!(order.iter().any(|executor| executor == "ollama"));
+    }
+
+    #[test]
+    fn unavailable_ai_wrapper_never_returns_the_old_dead_end() {
+        let context = vec!["Conversation target: Foundry Assistant (assistant).".to_string()];
+
+        let answer = unavailable_ai_wrapper_response(&context);
+
+        assert!(!answer.eq_ignore_ascii_case("Não sei."));
+        assert!(answer.contains("Foundry Assistant"));
+        assert!(answer.contains("Router"));
+        assert!(answer.contains("nenhum workflow foi criado"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_command_candidates_include_native_and_shim_extensions_before_bare_file() {
+        let base = PathBuf::from(r"C:\tools\codex");
+
+        let candidates = command_candidates(&base);
+
+        assert!(candidates.iter().any(|candidate| candidate
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd"))));
+        assert!(candidates.iter().any(|candidate| candidate
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))));
+        assert_eq!(candidates.last(), Some(&base));
     }
 
     #[test]
