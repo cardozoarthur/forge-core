@@ -146,8 +146,9 @@ use foundry_core::interactive::{
     render_interactive_workflow_dag, render_interactive_workflow_mutation,
     render_interactive_workflow_sidebar, render_multimodal_runtime_evidence_smoke,
     render_operational_tui_smoke, render_replacement_cli_evidence_smoke,
-    route_direct_interactive_input_with_context, route_interactive_input,
-    route_interactive_input_with_context, slash_command_catalog, InteractiveHarnessOptions,
+    route_direct_interactive_input_with_context, route_direct_interactive_input_with_retrieval,
+    route_interactive_input, route_interactive_input_with_context,
+    route_interactive_input_with_retrieval, slash_command_catalog, InteractiveHarnessOptions,
     InteractiveHomeOptions, InteractiveReplacementCliOptions, InteractiveSessionsOptions,
 };
 use foundry_core::ir::{CreativeArtifact, TokenCollection};
@@ -4509,6 +4510,12 @@ enum InteractiveCommands {
         input: String,
         #[arg(long = "context")]
         context: Vec<String>,
+        #[arg(long = "history-file")]
+        history_file: Option<PathBuf>,
+        #[arg(long = "skill")]
+        skills: Vec<String>,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
         #[arg(long)]
         direct: bool,
         #[arg(long, default_value = "foundry_cli")]
@@ -11681,13 +11688,41 @@ fn run() -> Result<i32> {
             InteractiveCommands::Route {
                 input,
                 context,
+                history_file,
+                skills,
+                project_root,
                 direct,
                 origin,
                 output,
             } => {
                 let store = FoundryStore::open(cli.store)?;
-                let report = if direct {
+                let history = history_file
+                    .as_deref()
+                    .map(load_interactive_history_file)
+                    .transpose()?
+                    .unwrap_or_default();
+                let retrieval_requested = history_file.is_some() || !skills.is_empty();
+                let report = if direct && retrieval_requested {
+                    route_direct_interactive_input_with_retrieval(
+                        &store,
+                        &input,
+                        &context,
+                        &history,
+                        &skills,
+                        &project_root,
+                    )?
+                } else if direct {
                     route_direct_interactive_input_with_context(&store, &input, &context)?
+                } else if retrieval_requested {
+                    route_interactive_input_with_retrieval(
+                        &store,
+                        &input,
+                        &origin,
+                        &context,
+                        &history,
+                        &skills,
+                        &project_root,
+                    )?
                 } else if context.is_empty() {
                     route_interactive_input(&store, &input, &origin)?
                 } else {
@@ -12911,6 +12946,41 @@ fn required_cli_value(name: &str, value: String) -> Result<String> {
         anyhow::bail!("{name} must not be empty");
     }
     Ok(value)
+}
+
+fn load_interactive_history_file(path: &Path) -> Result<Vec<String>> {
+    const MAX_HISTORY_FILE_BYTES: u64 = 2 * 1024 * 1024;
+    const MAX_HISTORY_ENTRIES: usize = 500;
+    const MAX_HISTORY_ENTRY_CHARS: usize = 8_000;
+
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("failed to inspect chat history file {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("chat history path is not a file: {}", path.display());
+    }
+    if metadata.len() > MAX_HISTORY_FILE_BYTES {
+        bail!(
+            "chat history file exceeds {} bytes: {}",
+            MAX_HISTORY_FILE_BYTES,
+            path.display()
+        );
+    }
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read chat history file {}", path.display()))?;
+    let history = serde_json::from_slice::<Vec<String>>(&bytes)
+        .with_context(|| format!("invalid chat history JSON in {}", path.display()))?;
+    if history.len() > MAX_HISTORY_ENTRIES {
+        bail!(
+            "chat history contains more than {MAX_HISTORY_ENTRIES} entries: {}",
+            path.display()
+        );
+    }
+    for (index, entry) in history.iter().enumerate() {
+        if entry.chars().count() > MAX_HISTORY_ENTRY_CHARS {
+            bail!("chat history entry {index} exceeds {MAX_HISTORY_ENTRY_CHARS} characters");
+        }
+    }
+    Ok(history)
 }
 
 fn read_mcp_input(input: Option<String>, input_file: Option<PathBuf>) -> Result<serde_json::Value> {
