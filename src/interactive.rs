@@ -15081,6 +15081,39 @@ pub fn route_interactive_input_with_context(
     })
 }
 
+pub fn route_direct_interactive_input_with_context(
+    store: &FoundryStore,
+    input: &str,
+    conversation_context: &[String],
+) -> Result<InteractiveRouteReport> {
+    let trimmed = input.trim();
+    if is_repl_exit_command(trimmed) {
+        return Ok(local_exit_route(trimmed));
+    }
+    if trimmed.starts_with('/') {
+        return Ok(route_slash_command(trimmed));
+    }
+    let answer = deterministic_direct_interactive_answer(store, trimmed, conversation_context)
+        .unwrap_or_else(|| direct_chat_response_with_context(trimmed, conversation_context));
+    Ok(InteractiveRouteReport {
+        status: "routed".to_string(),
+        schema_version: INTERACTIVE_ROUTE_SCHEMA_VERSION.to_string(),
+        input_kind: "chat".to_string(),
+        routing_decision: "direct_answer".to_string(),
+        routing_explanation:
+            "Explicit private-agent conversation answered without creating durable workflow state."
+                .to_string(),
+        workflow_created: false,
+        run_id: None,
+        workflow_id: None,
+        answer: Some(answer),
+        slash_command: None,
+        product_decision_id: None,
+        product_decision_revision: None,
+        retention_decision: no_retention_decision(),
+    })
+}
+
 fn deterministic_direct_interactive_answer(
     store: &FoundryStore,
     input: &str,
@@ -25536,9 +25569,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = FoundryStore::open(temp.path().join("foundry.sqlite")).unwrap();
         let context = vec!["Conversation target: Project Router (router).".to_string()];
-        let hello = route_interactive_input_with_context(&store, "Olá!", "test", &context).unwrap();
+        let hello = route_direct_interactive_input_with_context(&store, "Olá!", &context).unwrap();
         assert_eq!(hello.routing_decision, "direct_answer");
+        assert!(!hello.workflow_created);
         assert!(hello.answer.unwrap().contains("Project Router"));
+        assert!(store.load_workflows().unwrap().is_empty());
     }
 
     #[test]
