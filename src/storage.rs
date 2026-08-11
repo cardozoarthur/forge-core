@@ -1,12 +1,18 @@
+use crate::artifact::hex_sha256;
 use crate::checkpoint::TaskCheckpoint;
 use crate::event::{build_event_observability, categorize_event, infer_severity};
-use crate::graph::Workflow;
+use crate::graph::{
+    ResearchRevision, Workflow, WORKFLOW_RESEARCH_GATE_DECISION_KIND,
+    WORKFLOW_RESEARCH_OUTCOME_CONTRACT_KIND,
+};
 use crate::intent::OperatingContextSpec;
+use crate::value::{GateDecisionReceipt, OutcomeContract};
 use anyhow::{Context, Result};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
+use chrono::{DateTime, Utc};
 use rusqlite::{
     params, params_from_iter, Connection, Error as SqliteError, ErrorCode, OptionalExtension, Row,
     Transaction, TransactionBehavior,
@@ -23,7 +29,9 @@ use zeroize::Zeroizing;
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SQLITE_RETRY_DELAY: Duration = Duration::from_millis(25);
-const STORE_SCHEMA_VERSION: i64 = 5;
+const STORE_SCHEMA_VERSION: i64 = 6;
+pub const MAX_WORKFLOW_RESEARCH_RECORDS: usize = 1_024;
+pub const MAX_WORKFLOW_RESEARCH_PAYLOAD_BYTES: usize = 64 * 1024;
 const EVENT_OBSERVABILITY_RECONCILIATION_BATCH_SIZE: usize = 64;
 const EVENT_OBSERVABILITY_RECONCILIATION_CURSOR: &str = "event_observability_schema_v3_rebuild";
 const GLOBAL_EVENTS_OBSERVABILITY_QUEUE_TRIGGER: &str = "trg_global_events_observability_queue";
@@ -45,6 +53,83 @@ const RUNTIME_SECRET_KEY_FILE_MAX_BYTES: u64 = 16 * 1024;
 const RUNTIME_SECRET_MAX_BYTES: usize = 1024 * 1024;
 const RUNTIME_SECRET_AAD_CONTEXT: &[u8] = b"foundry.runtime.secret-vault.aead.v1";
 const LEGACY_RUNTIME_SECRET_AAD_CONTEXT: &[u8] = b"forge.runtime.secret-vault.aead.v1"; // foundry-brand-allow: legacy-compat
+const WORKFLOW_RESEARCH_TABLE_SQL: &str = r#"
+CREATE TABLE workflow_research_records (
+    workflow_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    workflow_revision INTEGER NOT NULL CHECK (workflow_revision >= 0),
+    record_kind TEXT NOT NULL CHECK (
+        record_kind IN ('gate_decision', 'outcome_contract')
+    ),
+    record_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL CHECK (length(payload_sha256) = 64),
+    payload_json TEXT NOT NULL CHECK (length(CAST(payload_json AS BLOB)) <= 65536),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (workflow_id, revision),
+    UNIQUE (workflow_id, record_kind, record_id),
+    UNIQUE (workflow_id, record_kind, idempotency_key),
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE RESTRICT
+);
+"#;
+const WORKFLOW_RESEARCH_IMMUTABLE_UPDATE_TRIGGER_SQL: &str = r#"
+CREATE TRIGGER trg_workflow_research_records_immutable_update
+BEFORE UPDATE ON workflow_research_records
+BEGIN
+    SELECT RAISE(ABORT, 'workflow research records are append-only');
+END;
+"#;
+const WORKFLOW_RESEARCH_IMMUTABLE_DELETE_TRIGGER_SQL: &str = r#"
+CREATE TRIGGER trg_workflow_research_records_immutable_delete
+BEFORE DELETE ON workflow_research_records
+BEGIN
+    SELECT RAISE(ABORT, 'workflow research records are append-only');
+END;
+"#;
+const EXECUTOR_RUNTIME_DISPATCH_PERMIT_SCHEMA_VERSION: &str =
+    "foundry.executor_runtime.dispatch_permit.v1";
+const EXECUTOR_RUNTIME_DISPATCH_PERMIT_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS executor_runtime_dispatch_permits (
+    workflow_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    wave_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    lease_id TEXT NOT NULL,
+    workflow_revision INTEGER NOT NULL CHECK (workflow_revision >= 0),
+    task_version INTEGER NOT NULL CHECK (task_version >= 0),
+    context_sha256 TEXT NOT NULL CHECK (length(context_sha256) = 64),
+    workflow_protocol_sha256 TEXT NOT NULL CHECK (length(workflow_protocol_sha256) = 64),
+    task_protocol_sha256 TEXT NOT NULL CHECK (length(task_protocol_sha256) = 64),
+    executor TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    timeout_seconds INTEGER NOT NULL CHECK (timeout_seconds > 0),
+    allow_non_interactive_execution INTEGER NOT NULL CHECK (allow_non_interactive_execution IN (0, 1)),
+    approved_by TEXT NOT NULL,
+    authorization_reason TEXT NOT NULL,
+    prompt_sha256 TEXT NOT NULL CHECK (length(prompt_sha256) = 64),
+    permit_sha256 TEXT NOT NULL UNIQUE CHECK (length(permit_sha256) = 64),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (workflow_id, task_id, lease_id),
+    UNIQUE (workflow_id, wave_id, task_id),
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE RESTRICT
+);
+"#;
+const EXECUTOR_RUNTIME_DISPATCH_PERMIT_UPDATE_TRIGGER_SQL: &str = r#"
+CREATE TRIGGER IF NOT EXISTS trg_executor_runtime_dispatch_permits_immutable_update
+BEFORE UPDATE ON executor_runtime_dispatch_permits
+BEGIN
+    SELECT RAISE(ABORT, 'executor runtime dispatch permits are append-only');
+END;
+"#;
+const EXECUTOR_RUNTIME_DISPATCH_PERMIT_DELETE_TRIGGER_SQL: &str = r#"
+CREATE TRIGGER IF NOT EXISTS trg_executor_runtime_dispatch_permits_immutable_delete
+BEFORE DELETE ON executor_runtime_dispatch_permits
+BEGIN
+    SELECT RAISE(ABORT, 'executor runtime dispatch permits are append-only');
+END;
+"#;
 const LEGACY_PROJECT_DIRECTORY: &str = ".forge"; // foundry-brand-allow: legacy-compat
 const GLOBAL_EVENTS_OBSERVABILITY_QUEUE_TRIGGER_SQL: &str = r#"
 CREATE TRIGGER trg_global_events_observability_queue
@@ -100,11 +185,130 @@ type InboundEventRow = (
     String,
 );
 type RuntimeSecretStoredRecord = (String, Zeroizing<String>, String, i64);
+type WorkflowResearchStoredRecord = (
+    String,
+    i64,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
 
 pub struct FoundryStore {
     path: PathBuf,
     connection: Connection,
     runtime_secret_cipher: RuntimeSecretCipher,
+}
+
+struct WorkflowResearchRecordWrite {
+    record_kind: String,
+    record_id: String,
+    idempotency_key: String,
+    origin: String,
+    summary: String,
+    payload_json: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowSaveAuthority {
+    General,
+    ValueContractTransition,
+    ExperimentEnrollment,
+}
+
+pub(crate) struct WorkflowResearchAppendReceipt {
+    pub revision: u64,
+    pub workflow_revision: u64,
+    pub payload_sha256: String,
+}
+
+fn clear_inline_workflow_research(workflow: &mut Workflow) {
+    workflow.research_revisions.clear();
+    workflow.gate_decisions.clear();
+    workflow.outcomes.clear();
+}
+
+fn normalize_sql(sql: &str) -> String {
+    sql.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn canonical_schema_sql(sql: &str) -> String {
+    normalize_sql(sql)
+        .replace("create table if not exists", "create table")
+        .replace("create trigger if not exists", "create trigger")
+        .trim_end_matches(';')
+        .to_string()
+}
+
+fn executor_runtime_dispatch_permit_sha256(
+    permit: ExecutorRuntimeDispatchPermitWrite<'_>,
+) -> Result<String> {
+    let canonical = serde_json::json!({
+        "schema_version": EXECUTOR_RUNTIME_DISPATCH_PERMIT_SCHEMA_VERSION,
+        "workflow_id": permit.workflow_id,
+        "run_id": permit.run_id,
+        "wave_id": permit.wave_id,
+        "task_id": permit.task_id,
+        "lease_id": permit.lease_id,
+        "workflow_revision": permit.workflow_revision,
+        "task_version": permit.task_version,
+        "context_sha256": permit.context_sha256,
+        "workflow_protocol_sha256": permit.workflow_protocol_sha256,
+        "task_protocol_sha256": permit.task_protocol_sha256,
+        "executor": permit.executor,
+        "cwd": permit.cwd,
+        "timeout_seconds": permit.timeout_seconds,
+        "allow_non_interactive_execution": permit.allow_non_interactive_execution,
+        "approved_by": permit.approved_by,
+        "authorization_reason": permit.authorization_reason,
+        "prompt_sha256": permit.prompt_sha256,
+    });
+    Ok(hex_sha256(&serde_json::to_vec(&canonical)?))
+}
+
+fn validate_executor_runtime_dispatch_permit_write(
+    permit: ExecutorRuntimeDispatchPermitWrite<'_>,
+) -> Result<()> {
+    for (label, value) in [
+        ("workflow_id", permit.workflow_id),
+        ("run_id", permit.run_id),
+        ("wave_id", permit.wave_id),
+        ("task_id", permit.task_id),
+        ("lease_id", permit.lease_id),
+        ("executor", permit.executor),
+        ("cwd", permit.cwd),
+        ("approved_by", permit.approved_by),
+        ("authorization_reason", permit.authorization_reason),
+    ] {
+        if value.trim().is_empty() {
+            anyhow::bail!("executor runtime dispatch permit {label} cannot be empty");
+        }
+    }
+    for (label, value) in [
+        ("context_sha256", permit.context_sha256),
+        ("workflow_protocol_sha256", permit.workflow_protocol_sha256),
+        ("task_protocol_sha256", permit.task_protocol_sha256),
+        ("prompt_sha256", permit.prompt_sha256),
+    ] {
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            anyhow::bail!(
+                "executor runtime dispatch permit {label} must be a 64-character hex digest"
+            );
+        }
+    }
+    if permit.timeout_seconds == 0 {
+        anyhow::bail!("executor runtime dispatch permit timeout_seconds must be positive");
+    }
+    Ok(())
 }
 
 #[deprecated(since = "0.6.0", note = "use FoundryStore")]
@@ -766,7 +970,7 @@ pub struct TaskLeaseWrite<'a> {
     pub data: &'a serde_json::Value,
 }
 
-pub struct ExecutorRuntimeClaimWrite<'a> {
+pub(crate) struct ExecutorRuntimeClaimWrite<'a> {
     pub workflow_id: &'a str,
     pub task_id: &'a str,
     pub lease_id: &'a str,
@@ -775,6 +979,50 @@ pub struct ExecutorRuntimeClaimWrite<'a> {
     pub executor: &'a str,
     pub request_sha256: &'a str,
     pub claimed_at: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub(crate) struct ExecutorRuntimeDispatchPermitWrite<'a> {
+    pub workflow_id: &'a str,
+    pub run_id: &'a str,
+    pub wave_id: &'a str,
+    pub task_id: &'a str,
+    pub lease_id: &'a str,
+    pub workflow_revision: u64,
+    pub task_version: u64,
+    pub context_sha256: &'a str,
+    pub workflow_protocol_sha256: &'a str,
+    pub task_protocol_sha256: &'a str,
+    pub executor: &'a str,
+    pub cwd: &'a str,
+    pub timeout_seconds: u64,
+    pub allow_non_interactive_execution: bool,
+    pub approved_by: &'a str,
+    pub authorization_reason: &'a str,
+    pub prompt_sha256: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredExecutorRuntimeDispatchPermit {
+    pub workflow_id: String,
+    pub run_id: String,
+    pub wave_id: String,
+    pub task_id: String,
+    pub lease_id: String,
+    pub workflow_revision: u64,
+    pub task_version: u64,
+    pub context_sha256: String,
+    pub workflow_protocol_sha256: String,
+    pub task_protocol_sha256: String,
+    pub executor: String,
+    pub cwd: String,
+    pub timeout_seconds: u64,
+    pub allow_non_interactive_execution: bool,
+    pub approved_by: String,
+    pub authorization_reason: String,
+    pub prompt_sha256: String,
+    pub permit_sha256: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1525,6 +1773,13 @@ fn sqlite_is_contention(error: &SqliteError) -> bool {
     )
 }
 
+fn anyhow_is_sqlite_contention(error: &anyhow::Error) -> bool {
+    error
+        .root_cause()
+        .downcast_ref::<SqliteError>()
+        .is_some_and(sqlite_is_contention)
+}
+
 #[cfg(test)]
 fn event_observability_trigger_count(connection: &Connection) -> Result<i64> {
     connection
@@ -1844,6 +2099,59 @@ impl FoundryStore {
         }
     }
 
+    pub(crate) fn with_deferred_transaction<T>(
+        &self,
+        operation: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        if !self.connection.is_autocommit() {
+            return operation(&self.connection);
+        }
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)?;
+        match operation(&transaction) {
+            Ok(value) => {
+                transaction.commit()?;
+                Ok(value)
+            }
+            Err(error) => {
+                drop(transaction);
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn with_deferred_transaction_retry<T>(
+        &self,
+        mut operation: impl FnMut(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        if !self.connection.is_autocommit() {
+            return operation(&self.connection);
+        }
+        const MAX_ATTEMPTS: usize = 4;
+        for attempt in 1..=MAX_ATTEMPTS {
+            let transaction =
+                Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)?;
+            match operation(&transaction) {
+                Ok(value) => match transaction.commit() {
+                    Ok(()) => return Ok(value),
+                    Err(error) if sqlite_is_contention(&error) && attempt < MAX_ATTEMPTS => {
+                        thread::sleep(SQLITE_RETRY_DELAY);
+                    }
+                    Err(error) => return Err(error.into()),
+                },
+                Err(error) if anyhow_is_sqlite_contention(&error) && attempt < MAX_ATTEMPTS => {
+                    drop(transaction);
+                    thread::sleep(SQLITE_RETRY_DELAY);
+                }
+                Err(error) => {
+                    drop(transaction);
+                    return Err(error);
+                }
+            }
+        }
+        unreachable!("bounded deferred transaction retry loop must return")
+    }
+
     fn migrate_if_needed(&self) -> Result<()> {
         let version = self.store_schema_version()?;
         if version > STORE_SCHEMA_VERSION {
@@ -1890,6 +2198,15 @@ impl FoundryStore {
                 || locked_executor_runtime_repair_required
             {
                 self.migrate()?;
+                if locked_version < STORE_SCHEMA_VERSION {
+                    self.create_workflow_research_ledger()?;
+                    self.backfill_inline_workflow_research()?;
+                    if self.research_ledger_schema_repair_required()? {
+                        anyhow::bail!(
+                            "workflow research ledger schema failed post-migration validation"
+                        );
+                    }
+                }
                 if locked_version < 5 || locked_mission_runtime_repair_required {
                     self.migrate_mission_handoff_idempotency_scope()?;
                 }
@@ -1901,8 +2218,10 @@ impl FoundryStore {
                 if foreign_key_violations != 0 {
                     anyhow::bail!("SQLite store migration produced foreign key violations");
                 }
-                if locked_version < STORE_SCHEMA_VERSION {
+                if locked_version < 5 {
                     self.initialize_event_observability_reconciliation_cursor()?;
+                }
+                if locked_version < STORE_SCHEMA_VERSION {
                     transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
                 }
             }
@@ -1968,7 +2287,212 @@ impl FoundryStore {
             [],
             |row| row.get(0),
         )?;
-        Ok(table_exists == 0)
+        Ok(table_exists == 0 || self.executor_runtime_dispatch_permit_schema_invalid()?)
+    }
+
+    fn executor_runtime_dispatch_permit_schema_invalid(&self) -> Result<bool> {
+        let table_sql: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'executor_runtime_dispatch_permits'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(table_sql) = table_sql else {
+            return Ok(true);
+        };
+        if canonical_schema_sql(&table_sql)
+            != canonical_schema_sql(EXECUTOR_RUNTIME_DISPATCH_PERMIT_TABLE_SQL)
+        {
+            return Ok(true);
+        }
+
+        for (name, expected_sql) in [
+            (
+                "trg_executor_runtime_dispatch_permits_immutable_update",
+                EXECUTOR_RUNTIME_DISPATCH_PERMIT_UPDATE_TRIGGER_SQL,
+            ),
+            (
+                "trg_executor_runtime_dispatch_permits_immutable_delete",
+                EXECUTOR_RUNTIME_DISPATCH_PERMIT_DELETE_TRIGGER_SQL,
+            ),
+        ] {
+            let actual_sql: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+                    params![name],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if actual_sql.as_deref().map(canonical_schema_sql)
+                != Some(canonical_schema_sql(expected_sql))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn ensure_executor_runtime_dispatch_permit_schema(&self) -> Result<()> {
+        self.connection.execute_batch(&format!(
+            "{EXECUTOR_RUNTIME_DISPATCH_PERMIT_TABLE_SQL}\nCREATE INDEX IF NOT EXISTS idx_executor_runtime_dispatch_permits_wave ON executor_runtime_dispatch_permits(workflow_id, wave_id, task_id);\n{EXECUTOR_RUNTIME_DISPATCH_PERMIT_UPDATE_TRIGGER_SQL}\n{EXECUTOR_RUNTIME_DISPATCH_PERMIT_DELETE_TRIGGER_SQL}"
+        ))?;
+        if self.executor_runtime_dispatch_permit_schema_invalid()? {
+            anyhow::bail!(
+                "executor runtime dispatch permit schema is missing or invalid; canonical request-wave receipts cannot be trusted"
+            );
+        }
+        Ok(())
+    }
+
+    fn research_ledger_schema_repair_required(&self) -> Result<bool> {
+        let table_sql: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'workflow_research_records'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(table_sql) = table_sql else {
+            return Ok(true);
+        };
+        if canonical_schema_sql(&table_sql) != canonical_schema_sql(WORKFLOW_RESEARCH_TABLE_SQL) {
+            return Ok(true);
+        }
+
+        let columns = {
+            let mut statement = self
+                .connection
+                .prepare("PRAGMA table_info('workflow_research_records')")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let expected_columns = vec![
+            ("workflow_id".to_string(), "TEXT".to_string(), 1, 1),
+            ("revision".to_string(), "INTEGER".to_string(), 1, 2),
+            ("workflow_revision".to_string(), "INTEGER".to_string(), 1, 0),
+            ("record_kind".to_string(), "TEXT".to_string(), 1, 0),
+            ("record_id".to_string(), "TEXT".to_string(), 1, 0),
+            ("idempotency_key".to_string(), "TEXT".to_string(), 1, 0),
+            ("origin".to_string(), "TEXT".to_string(), 1, 0),
+            ("summary".to_string(), "TEXT".to_string(), 1, 0),
+            ("payload_sha256".to_string(), "TEXT".to_string(), 1, 0),
+            ("payload_json".to_string(), "TEXT".to_string(), 1, 0),
+            ("created_at".to_string(), "TEXT".to_string(), 1, 0),
+        ];
+        if columns != expected_columns {
+            return Ok(true);
+        }
+
+        let foreign_key_valid: i64 = self.connection.query_row(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM pragma_foreign_key_list('workflow_research_records')
+                WHERE "table" = 'workflows'
+                  AND "from" = 'workflow_id'
+                  AND "to" = 'id'
+                  AND upper(on_delete) = 'RESTRICT'
+            )
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+        if foreign_key_valid == 0 {
+            return Ok(true);
+        }
+
+        let mut unique_column_sets = Vec::new();
+        let unique_indexes = {
+            let mut statement = self
+                .connection
+                .prepare("PRAGMA index_list('workflow_research_records')")?;
+            let indexes = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            indexes
+        };
+        for (index, unique) in unique_indexes {
+            if unique == 0 {
+                continue;
+            }
+            let quoted_index = format!("\"{}\"", index.replace('"', "\"\""));
+            let mut statement = self
+                .connection
+                .prepare(&format!("PRAGMA index_info({quoted_index})"))?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, Option<String>>(2))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            unique_column_sets.push(columns);
+        }
+        for required in [
+            vec!["workflow_id", "revision"],
+            vec!["workflow_id", "record_kind", "record_id"],
+            vec!["workflow_id", "record_kind", "idempotency_key"],
+        ] {
+            if !unique_column_sets.iter().any(|columns| {
+                columns
+                    == &required
+                        .iter()
+                        .map(|column| (*column).to_string())
+                        .collect::<Vec<_>>()
+            }) {
+                return Ok(true);
+            }
+        }
+
+        for (name, expected_sql) in [
+            (
+                "trg_workflow_research_records_immutable_update",
+                WORKFLOW_RESEARCH_IMMUTABLE_UPDATE_TRIGGER_SQL,
+            ),
+            (
+                "trg_workflow_research_records_immutable_delete",
+                WORKFLOW_RESEARCH_IMMUTABLE_DELETE_TRIGGER_SQL,
+            ),
+        ] {
+            let sql: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+                    params![name],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(sql) = sql else {
+                return Ok(true);
+            };
+            if canonical_schema_sql(&sql) != canonical_schema_sql(expected_sql) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn ensure_workflow_research_ledger_available(&self) -> Result<()> {
+        if self.research_ledger_schema_repair_required()? {
+            anyhow::bail!(
+                "workflow research ledger is unavailable or invalid; operational workflow state remains available, but research writes and exports are disabled until the authoritative ledger is restored"
+            );
+        }
+        Ok(())
     }
 
     fn ensure_runtime_secret_vault_encryption_triggers(&self) -> Result<()> {
@@ -3015,11 +3539,65 @@ impl FoundryStore {
             );
             "#,
         )?;
+        self.ensure_executor_runtime_dispatch_permit_schema()?;
         self.ensure_event_observability_context_columns()?;
         self.ensure_event_inbox_tenant_columns()?;
         self.ensure_event_services_tenant_columns()?;
         self.ensure_memory_promotion_tenant_columns()?;
         self.ensure_operational_tenant_columns()?;
+        Ok(())
+    }
+
+    fn create_workflow_research_ledger(&self) -> Result<()> {
+        let table_exists: i64 = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workflow_research_records')",
+            [],
+            |row| row.get(0),
+        )?;
+        if table_exists != 0 {
+            anyhow::bail!(
+                "a workflow research ledger already exists before schema v6 migration; refuse to replace or reinterpret an unreleased authoritative representation"
+            );
+        }
+        self.connection.execute_batch(&format!(
+            "{WORKFLOW_RESEARCH_TABLE_SQL}\nCREATE INDEX idx_workflow_research_records_kind_created ON workflow_research_records(workflow_id, record_kind, created_at);\n{WORKFLOW_RESEARCH_IMMUTABLE_UPDATE_TRIGGER_SQL}\n{WORKFLOW_RESEARCH_IMMUTABLE_DELETE_TRIGGER_SQL}"
+        ))?;
+        Ok(())
+    }
+
+    fn backfill_inline_workflow_research(&self) -> Result<()> {
+        let snapshots = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT id, data_json FROM workflows ORDER BY id ASC")?;
+            let snapshots = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            snapshots
+        };
+        for (workflow_id, data_json) in snapshots {
+            let snapshot: serde_json::Value = serde_json::from_str(&data_json).with_context(|| {
+                format!(
+                    "failed to parse workflow snapshot {workflow_id} during research ledger migration"
+                )
+            })?;
+            let snapshot = snapshot.as_object().with_context(|| {
+                format!(
+                    "workflow snapshot {workflow_id} is not a JSON object during research ledger migration"
+                )
+            })?;
+            for field in ["gate_decisions", "outcomes", "research_revisions"] {
+                match snapshot.get(field) {
+                    None => {}
+                    Some(serde_json::Value::Array(records)) if records.is_empty() => {}
+                    Some(_) => anyhow::bail!(
+                        "workflow {workflow_id} contains unsupported inline research telemetry in {field}; this unreleased representation cannot be migrated without losing revision metadata"
+                    ),
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3464,8 +4042,424 @@ impl FoundryStore {
         Ok(false)
     }
 
+    pub(crate) fn append_workflow_gate_decision(
+        &self,
+        receipt: &GateDecisionReceipt,
+        origin: &str,
+        summary: &str,
+    ) -> Result<WorkflowResearchAppendReceipt> {
+        self.append_workflow_research_record(
+            &receipt.workflow_id,
+            WorkflowResearchRecordWrite {
+                record_kind: WORKFLOW_RESEARCH_GATE_DECISION_KIND.to_string(),
+                record_id: receipt.decision_id.clone(),
+                idempotency_key: receipt.idempotency_key.clone(),
+                origin: origin.to_string(),
+                summary: summary.to_string(),
+                payload_json: serde_json::to_string(receipt)?,
+                created_at: receipt.recorded_at,
+            },
+        )
+    }
+
+    pub(crate) fn append_workflow_outcome_contract(
+        &self,
+        outcome: &OutcomeContract,
+        origin: &str,
+        summary: &str,
+    ) -> Result<WorkflowResearchAppendReceipt> {
+        self.append_workflow_research_record(
+            &outcome.workflow_id,
+            WorkflowResearchRecordWrite {
+                record_kind: WORKFLOW_RESEARCH_OUTCOME_CONTRACT_KIND.to_string(),
+                record_id: outcome.outcome_id.clone(),
+                idempotency_key: outcome.measurement.idempotency_key.clone(),
+                origin: origin.to_string(),
+                summary: summary.to_string(),
+                payload_json: serde_json::to_string(outcome)?,
+                created_at: outcome.recorded_at,
+            },
+        )
+    }
+
+    fn append_workflow_research_record(
+        &self,
+        workflow_id: &str,
+        write: WorkflowResearchRecordWrite,
+    ) -> Result<WorkflowResearchAppendReceipt> {
+        self.ensure_workflow_research_ledger_available()?;
+        self.with_transaction(|| {
+            for (field, value) in [
+                ("workflow_id", workflow_id),
+                ("record_kind", write.record_kind.as_str()),
+                ("record_id", write.record_id.as_str()),
+                ("idempotency_key", write.idempotency_key.as_str()),
+                ("origin", write.origin.as_str()),
+            ] {
+                if value.trim().is_empty() {
+                    anyhow::bail!("workflow research record {field} cannot be empty");
+                }
+            }
+            if !matches!(
+                write.record_kind.as_str(),
+                WORKFLOW_RESEARCH_GATE_DECISION_KIND | WORKFLOW_RESEARCH_OUTCOME_CONTRACT_KIND
+            ) {
+                anyhow::bail!(
+                    "unsupported workflow research record kind {}",
+                    write.record_kind
+                );
+            }
+            if write.payload_json.len() > MAX_WORKFLOW_RESEARCH_PAYLOAD_BYTES {
+                anyhow::bail!(
+                    "workflow research payload exceeds the bounded maximum of {MAX_WORKFLOW_RESEARCH_PAYLOAD_BYTES} bytes"
+                );
+            }
+            let current_revision: i64 = self.connection.query_row(
+                "SELECT COALESCE(MAX(revision), 0) FROM workflow_research_records WHERE workflow_id = ?1",
+                params![workflow_id],
+                |row| row.get(0),
+            )?;
+            let max_records = i64::try_from(MAX_WORKFLOW_RESEARCH_RECORDS).unwrap_or(i64::MAX);
+            if current_revision >= max_records {
+                anyhow::bail!(
+                    "workflow {workflow_id} reached the bounded research ledger limit of {MAX_WORKFLOW_RESEARCH_RECORDS} records"
+                );
+            }
+            let revision = current_revision
+                .checked_add(1)
+                .context("workflow research revision overflow")?;
+            let workflow_revision = self
+                .load_workflow(workflow_id)?
+                .revisions
+                .last()
+                .map(|revision| revision.revision)
+                .unwrap_or(0);
+            let payload_sha256 = hex_sha256(write.payload_json.as_bytes());
+            self.connection.execute(
+                r#"
+                INSERT INTO workflow_research_records (
+                    workflow_id, revision, workflow_revision, record_kind, record_id,
+                    idempotency_key, origin, summary, payload_sha256, payload_json, created_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                "#,
+                params![
+                    workflow_id,
+                    revision,
+                    workflow_revision,
+                    write.record_kind,
+                    write.record_id,
+                    write.idempotency_key,
+                    write.origin,
+                    write.summary,
+                    payload_sha256,
+                    write.payload_json,
+                    write.created_at.to_rfc3339(),
+                ],
+            )?;
+            Ok(WorkflowResearchAppendReceipt {
+                revision: u64::try_from(revision)
+                    .context("workflow research revision must be positive")?,
+                workflow_revision,
+                payload_sha256,
+            })
+        })
+    }
+
+    fn ensure_workflow_research_projection_matches_ledger(
+        &self,
+        workflow: &Workflow,
+    ) -> Result<()> {
+        if workflow.research_revisions.is_empty()
+            && workflow.gate_decisions.is_empty()
+            && workflow.outcomes.is_empty()
+        {
+            return Ok(());
+        }
+        let mut authoritative = workflow.clone();
+        clear_inline_workflow_research(&mut authoritative);
+        self.hydrate_workflows_research(std::slice::from_mut(&mut authoritative))?;
+        if authoritative.research_revisions != workflow.research_revisions
+            || authoritative.gate_decisions != workflow.gate_decisions
+            || authoritative.outcomes != workflow.outcomes
+        {
+            anyhow::bail!(
+                "workflow {} research projection is not backed by the append-only ledger",
+                workflow.id
+            );
+        }
+        Ok(())
+    }
+
+    fn hydrate_workflows_research(&self, workflows: &mut [Workflow]) -> Result<()> {
+        self.ensure_workflow_research_ledger_available()?;
+        for workflow in workflows.iter_mut() {
+            clear_inline_workflow_research(workflow);
+        }
+        if workflows.is_empty() {
+            return Ok(());
+        }
+        let workflow_indexes = workflows
+            .iter()
+            .enumerate()
+            .map(|(index, workflow)| (workflow.id.clone(), index))
+            .collect::<BTreeMap<_, _>>();
+        let workflow_ids = workflow_indexes.keys().cloned().collect::<Vec<_>>();
+        let placeholders = std::iter::repeat_n("?", workflow_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"
+            SELECT workflow_id, revision, workflow_revision, record_kind, record_id,
+                   idempotency_key, origin, summary, payload_sha256, payload_json, created_at
+            FROM workflow_research_records
+            WHERE workflow_id IN ({placeholders})
+            ORDER BY workflow_id ASC, revision ASC
+            "#
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(workflow_ids.iter()), |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+            ))
+        })?;
+        let mut hydrated_counts = BTreeMap::<String, usize>::new();
+        for row in rows {
+            let (
+                workflow_id,
+                revision,
+                workflow_revision,
+                record_kind,
+                record_id,
+                idempotency_key,
+                origin,
+                summary,
+                payload_sha256,
+                payload_json,
+                created_at,
+            ): WorkflowResearchStoredRecord = row?;
+            let count = hydrated_counts.entry(workflow_id.clone()).or_default();
+            *count = count.saturating_add(1);
+            if *count > MAX_WORKFLOW_RESEARCH_RECORDS {
+                anyhow::bail!(
+                    "workflow {workflow_id} exceeds the bounded research ledger limit of {MAX_WORKFLOW_RESEARCH_RECORDS} records"
+                );
+            }
+            if payload_json.len() > MAX_WORKFLOW_RESEARCH_PAYLOAD_BYTES {
+                anyhow::bail!(
+                    "workflow {workflow_id} research record {record_kind}/{record_id} exceeds the bounded payload maximum of {MAX_WORKFLOW_RESEARCH_PAYLOAD_BYTES} bytes"
+                );
+            }
+            if hex_sha256(payload_json.as_bytes()) != payload_sha256 {
+                anyhow::bail!(
+                    "workflow {workflow_id} research record {record_kind}/{record_id} failed payload integrity validation"
+                );
+            }
+            let revision =
+                u64::try_from(revision).context("workflow research revision must be positive")?;
+            let workflow_revision = u64::try_from(workflow_revision)
+                .context("workflow research control revision cannot be negative")?;
+            let expected_revision = u64::try_from(*count).unwrap_or(u64::MAX);
+            if revision != expected_revision {
+                anyhow::bail!(
+                    "workflow {workflow_id} research ledger must be contiguous from 1: expected {expected_revision}, found {revision}"
+                );
+            }
+            let created_at = DateTime::parse_from_rfc3339(&created_at)
+                .with_context(|| {
+                    format!(
+                        "workflow {workflow_id} research record {record_kind}/{record_id} has invalid created_at"
+                    )
+                })?
+                .with_timezone(&Utc);
+            let workflow_index =
+                workflow_indexes
+                    .get(&workflow_id)
+                    .copied()
+                    .with_context(|| {
+                        format!("research ledger references unrequested workflow {workflow_id}")
+                    })?;
+            let workflow = &mut workflows[workflow_index];
+            match record_kind.as_str() {
+                WORKFLOW_RESEARCH_GATE_DECISION_KIND => {
+                    let receipt: GateDecisionReceipt = serde_json::from_str(&payload_json)?;
+                    if receipt.workflow_id != workflow_id
+                        || receipt.decision_id != record_id
+                        || receipt.idempotency_key != idempotency_key
+                        || receipt.recorded_at != created_at
+                    {
+                        anyhow::bail!(
+                            "workflow {workflow_id} gate ledger identity does not match its typed payload"
+                        );
+                    }
+                    workflow.gate_decisions.push(receipt);
+                }
+                WORKFLOW_RESEARCH_OUTCOME_CONTRACT_KIND => {
+                    let outcome: OutcomeContract = serde_json::from_str(&payload_json)?;
+                    if outcome.workflow_id != workflow_id
+                        || outcome.outcome_id != record_id
+                        || outcome.measurement.idempotency_key != idempotency_key
+                        || outcome.recorded_at != created_at
+                    {
+                        anyhow::bail!(
+                            "workflow {workflow_id} outcome ledger identity does not match its typed payload"
+                        );
+                    }
+                    workflow.outcomes.push(outcome);
+                }
+                _ => anyhow::bail!(
+                    "workflow {workflow_id} research ledger contains unsupported kind {record_kind}"
+                ),
+            }
+            workflow.research_revisions.push(ResearchRevision {
+                revision,
+                workflow_revision,
+                origin,
+                record_kind,
+                record_id,
+                summary,
+                payload_sha256,
+                created_at,
+            });
+        }
+        Ok(())
+    }
+
     pub fn save_workflow(&self, workflow: &Workflow) -> Result<()> {
-        let data_json = serde_json::to_string(workflow)?;
+        self.save_workflow_with_authority(workflow, WorkflowSaveAuthority::General)
+    }
+
+    pub(crate) fn save_workflow_value_contract_transition(
+        &self,
+        workflow: &Workflow,
+    ) -> Result<()> {
+        self.save_workflow_with_authority(workflow, WorkflowSaveAuthority::ValueContractTransition)
+    }
+
+    pub(crate) fn save_workflow_experiment_enrollment(&self, workflow: &Workflow) -> Result<()> {
+        self.save_workflow_with_authority(workflow, WorkflowSaveAuthority::ExperimentEnrollment)
+    }
+
+    fn save_workflow_with_authority(
+        &self,
+        workflow: &Workflow,
+        authority: WorkflowSaveAuthority,
+    ) -> Result<()> {
+        self.with_immediate_transaction(|_| self.save_workflow_locked(workflow, authority))
+    }
+
+    fn save_workflow_locked(
+        &self,
+        workflow: &Workflow,
+        authority: WorkflowSaveAuthority,
+    ) -> Result<()> {
+        self.ensure_workflow_research_projection_matches_ledger(workflow)?;
+        let existing_data_json: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT data_json FROM workflows WHERE id = ?1",
+                params![workflow.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing_data_json) = existing_data_json {
+            let existing: Workflow = serde_json::from_str(&existing_data_json)?;
+            match authority {
+                WorkflowSaveAuthority::General => {
+                    if existing.value_contract != workflow.value_contract {
+                        anyhow::bail!(
+                            "workflow {} value contract transitions require the dedicated workflow contract API",
+                            workflow.id
+                        );
+                    }
+                    if existing.experiment != workflow.experiment {
+                        anyhow::bail!(
+                            "workflow {} experiment transitions require the dedicated enrollment API",
+                            workflow.id
+                        );
+                    }
+                }
+                WorkflowSaveAuthority::ValueContractTransition => {
+                    if existing.experiment != workflow.experiment {
+                        anyhow::bail!(
+                            "workflow {} value contract authority cannot change experiment assignment",
+                            workflow.id
+                        );
+                    }
+                    if existing.value_contract == workflow.value_contract {
+                        anyhow::bail!(
+                            "workflow {} value contract authority requires an actual contract transition",
+                            workflow.id
+                        );
+                    }
+                    if existing.experiment.is_some() {
+                        anyhow::bail!(
+                            "workflow {} value contract is frozen after experiment enrollment",
+                            workflow.id
+                        );
+                    }
+                }
+                WorkflowSaveAuthority::ExperimentEnrollment => {
+                    if existing.value_contract != workflow.value_contract {
+                        anyhow::bail!(
+                            "workflow {} experiment enrollment authority cannot change the value contract",
+                            workflow.id
+                        );
+                    }
+                    if existing.experiment.is_some() || workflow.experiment.is_none() {
+                        anyhow::bail!(
+                            "workflow {} experiment enrollment authority permits only a single None-to-Some transition",
+                            workflow.id
+                        );
+                    }
+                }
+            }
+            if existing.experiment.is_some() && existing.experiment != workflow.experiment {
+                anyhow::bail!(
+                    "workflow {} experiment assignment is frozen and cannot be removed or replaced by a stale workflow save",
+                    workflow.id
+                );
+            }
+            if existing.experiment.is_some() && existing.value_contract != workflow.value_contract {
+                anyhow::bail!(
+                    "workflow {} value contract is frozen after experiment enrollment",
+                    workflow.id
+                );
+            }
+        } else {
+            match authority {
+                WorkflowSaveAuthority::General => {
+                    if workflow.value_contract.is_some() || workflow.experiment.is_some() {
+                        anyhow::bail!(
+                            "new workflow {} cannot bypass the dedicated value contract or experiment enrollment APIs",
+                            workflow.id
+                        );
+                    }
+                }
+                WorkflowSaveAuthority::ValueContractTransition
+                | WorkflowSaveAuthority::ExperimentEnrollment => {
+                    anyhow::bail!(
+                        "workflow {} must exist before a contract or experiment transition",
+                        workflow.id
+                    );
+                }
+            }
+        }
+        let mut persisted_workflow = workflow.clone();
+        persisted_workflow.research_revisions.clear();
+        persisted_workflow.gate_decisions.clear();
+        persisted_workflow.outcomes.clear();
+        let data_json = serde_json::to_string(&persisted_workflow)?;
         self.connection.execute(
             r#"
             INSERT INTO workflows (id, goal, status, created_at, data_json)
@@ -3497,7 +4491,17 @@ impl FoundryStore {
             )
             .optional()?;
         let data_json = data_json.with_context(|| format!("workflow not found: {id}"))?;
-        Ok(serde_json::from_str(&data_json)?)
+        let mut workflow: Workflow = serde_json::from_str(&data_json)?;
+        clear_inline_workflow_research(&mut workflow);
+        Ok(workflow)
+    }
+
+    pub fn load_workflow_with_research(&self, id: &str) -> Result<Workflow> {
+        self.with_deferred_transaction(|_| {
+            let mut workflow = self.load_workflow(id)?;
+            self.hydrate_workflows_research(std::slice::from_mut(&mut workflow))?;
+            Ok(workflow)
+        })
     }
 
     pub fn load_workflows(&self) -> Result<Vec<Workflow>> {
@@ -3507,7 +4511,9 @@ impl FoundryStore {
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         let mut workflows = Vec::new();
         for row in rows {
-            workflows.push(serde_json::from_str(&row?)?);
+            let mut workflow: Workflow = serde_json::from_str(&row?)?;
+            clear_inline_workflow_research(&mut workflow);
+            workflows.push(workflow);
         }
         Ok(workflows)
     }
@@ -3530,7 +4536,9 @@ impl FoundryStore {
         let rows = statement.query_map(params![limit], |row| row.get::<_, String>(0))?;
         let mut workflows = Vec::new();
         for row in rows {
-            workflows.push(serde_json::from_str(&row?)?);
+            let mut workflow: Workflow = serde_json::from_str(&row?)?;
+            clear_inline_workflow_research(&mut workflow);
+            workflows.push(workflow);
         }
         Ok(workflows)
     }
@@ -7445,7 +8453,10 @@ impl FoundryStore {
         Ok(leases)
     }
 
-    pub fn try_claim_executor_runtime(&self, claim: ExecutorRuntimeClaimWrite<'_>) -> Result<bool> {
+    pub(crate) fn try_claim_executor_runtime(
+        &self,
+        claim: ExecutorRuntimeClaimWrite<'_>,
+    ) -> Result<bool> {
         let changed = self.connection.execute(
             r#"
             INSERT OR IGNORE INTO executor_runtime_claims (
@@ -7474,6 +8485,269 @@ impl FoundryStore {
             ],
         )?;
         Ok(changed == 1)
+    }
+
+    pub(crate) fn ensure_executor_runtime_dispatch_permit(
+        &self,
+        permit: ExecutorRuntimeDispatchPermitWrite<'_>,
+    ) -> Result<String> {
+        if self.executor_runtime_dispatch_permit_schema_invalid()? {
+            anyhow::bail!("executor runtime dispatch permit schema is unavailable or invalid");
+        }
+        validate_executor_runtime_dispatch_permit_write(permit)?;
+        let workflow_revision = i64::try_from(permit.workflow_revision)
+            .context("executor runtime dispatch workflow revision exceeds SQLite range")?;
+        let task_version = i64::try_from(permit.task_version)
+            .context("executor runtime dispatch task version exceeds SQLite range")?;
+        let timeout_seconds = i64::try_from(permit.timeout_seconds)
+            .context("executor runtime dispatch timeout exceeds SQLite range")?;
+        let permit_sha256 = executor_runtime_dispatch_permit_sha256(permit)?;
+        let created_at = Utc::now().to_rfc3339();
+        self.connection.execute(
+            r#"
+            INSERT OR IGNORE INTO executor_runtime_dispatch_permits (
+                workflow_id,
+                run_id,
+                wave_id,
+                task_id,
+                lease_id,
+                workflow_revision,
+                task_version,
+                context_sha256,
+                workflow_protocol_sha256,
+                task_protocol_sha256,
+                executor,
+                cwd,
+                timeout_seconds,
+                allow_non_interactive_execution,
+                approved_by,
+                authorization_reason,
+                prompt_sha256,
+                permit_sha256,
+                created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+            "#,
+            params![
+                permit.workflow_id,
+                permit.run_id,
+                permit.wave_id,
+                permit.task_id,
+                permit.lease_id,
+                workflow_revision,
+                task_version,
+                permit.context_sha256,
+                permit.workflow_protocol_sha256,
+                permit.task_protocol_sha256,
+                permit.executor,
+                permit.cwd,
+                timeout_seconds,
+                permit.allow_non_interactive_execution,
+                permit.approved_by,
+                permit.authorization_reason,
+                permit.prompt_sha256,
+                permit_sha256,
+                created_at,
+            ],
+        )?;
+
+        let stored = self
+            .load_executor_runtime_dispatch_permit(
+                permit.workflow_id,
+                permit.task_id,
+                permit.lease_id,
+            )?
+            .with_context(|| {
+                format!(
+                    "executor runtime dispatch permit conflicted for workflow {} task {} lease {}",
+                    permit.workflow_id, permit.task_id, permit.lease_id
+                )
+            })?;
+        if stored.permit_sha256 != permit_sha256
+            || stored.run_id != permit.run_id
+            || stored.wave_id != permit.wave_id
+            || stored.workflow_revision != permit.workflow_revision
+            || stored.task_version != permit.task_version
+            || stored.context_sha256 != permit.context_sha256
+            || stored.workflow_protocol_sha256 != permit.workflow_protocol_sha256
+            || stored.task_protocol_sha256 != permit.task_protocol_sha256
+            || stored.executor != permit.executor
+            || stored.cwd != permit.cwd
+            || stored.timeout_seconds != permit.timeout_seconds
+            || stored.allow_non_interactive_execution != permit.allow_non_interactive_execution
+            || stored.approved_by != permit.approved_by
+            || stored.authorization_reason != permit.authorization_reason
+            || stored.prompt_sha256 != permit.prompt_sha256
+        {
+            anyhow::bail!(
+                "executor runtime dispatch permit identity conflict for workflow {} task {} lease {}",
+                permit.workflow_id,
+                permit.task_id,
+                permit.lease_id
+            );
+        }
+        Ok(permit_sha256)
+    }
+
+    pub(crate) fn load_executor_runtime_dispatch_permit(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        lease_id: &str,
+    ) -> Result<Option<StoredExecutorRuntimeDispatchPermit>> {
+        if self.executor_runtime_dispatch_permit_schema_invalid()? {
+            anyhow::bail!("executor runtime dispatch permit schema is unavailable or invalid");
+        }
+        let row = self
+            .connection
+            .query_row(
+                r#"
+                SELECT
+                    workflow_id,
+                    run_id,
+                    wave_id,
+                    task_id,
+                    lease_id,
+                    workflow_revision,
+                    task_version,
+                    context_sha256,
+                    workflow_protocol_sha256,
+                    task_protocol_sha256,
+                    executor,
+                    cwd,
+                    timeout_seconds,
+                    allow_non_interactive_execution,
+                    approved_by,
+                    authorization_reason,
+                    prompt_sha256,
+                    permit_sha256,
+                    created_at
+                FROM executor_runtime_dispatch_permits
+                WHERE workflow_id = ?1 AND task_id = ?2 AND lease_id = ?3
+                "#,
+                params![workflow_id, task_id, lease_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, String>(11)?,
+                        row.get::<_, i64>(12)?,
+                        row.get::<_, i64>(13)?,
+                        row.get::<_, String>(14)?,
+                        row.get::<_, String>(15)?,
+                        row.get::<_, String>(16)?,
+                        row.get::<_, String>(17)?,
+                        row.get::<_, String>(18)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            workflow_id,
+            run_id,
+            wave_id,
+            task_id,
+            lease_id,
+            workflow_revision,
+            task_version,
+            context_sha256,
+            workflow_protocol_sha256,
+            task_protocol_sha256,
+            executor,
+            cwd,
+            timeout_seconds,
+            allow_non_interactive_execution,
+            approved_by,
+            authorization_reason,
+            prompt_sha256,
+            permit_sha256,
+            created_at,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let workflow_revision = u64::try_from(workflow_revision)
+            .context("stored executor runtime dispatch workflow revision is negative")?;
+        let task_version = u64::try_from(task_version)
+            .context("stored executor runtime dispatch task version is negative")?;
+        let timeout_seconds = u64::try_from(timeout_seconds)
+            .context("stored executor runtime dispatch timeout is negative")?;
+        let allow_non_interactive_execution = match allow_non_interactive_execution {
+            0 => false,
+            1 => true,
+            _ => anyhow::bail!("stored executor runtime dispatch authorization flag is invalid"),
+        };
+        let stored = StoredExecutorRuntimeDispatchPermit {
+            workflow_id,
+            run_id,
+            wave_id,
+            task_id,
+            lease_id,
+            workflow_revision,
+            task_version,
+            context_sha256,
+            workflow_protocol_sha256,
+            task_protocol_sha256,
+            executor,
+            cwd,
+            timeout_seconds,
+            allow_non_interactive_execution,
+            approved_by,
+            authorization_reason,
+            prompt_sha256,
+            permit_sha256,
+            created_at,
+        };
+        let expected_sha256 =
+            executor_runtime_dispatch_permit_sha256(ExecutorRuntimeDispatchPermitWrite {
+                workflow_id: &stored.workflow_id,
+                run_id: &stored.run_id,
+                wave_id: &stored.wave_id,
+                task_id: &stored.task_id,
+                lease_id: &stored.lease_id,
+                workflow_revision: stored.workflow_revision,
+                task_version: stored.task_version,
+                context_sha256: &stored.context_sha256,
+                workflow_protocol_sha256: &stored.workflow_protocol_sha256,
+                task_protocol_sha256: &stored.task_protocol_sha256,
+                executor: &stored.executor,
+                cwd: &stored.cwd,
+                timeout_seconds: stored.timeout_seconds,
+                allow_non_interactive_execution: stored.allow_non_interactive_execution,
+                approved_by: &stored.approved_by,
+                authorization_reason: &stored.authorization_reason,
+                prompt_sha256: &stored.prompt_sha256,
+            })?;
+        if stored.permit_sha256 != expected_sha256 {
+            anyhow::bail!(
+                "executor runtime dispatch permit digest mismatch for workflow {} task {} lease {}",
+                stored.workflow_id,
+                stored.task_id,
+                stored.lease_id
+            );
+        }
+        Ok(Some(stored))
+    }
+
+    pub(crate) fn has_executor_runtime_claims_for_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Result<bool> {
+        let exists: i64 = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM executor_runtime_claims WHERE workflow_id = ?1)",
+            params![workflow_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
     }
 
     pub fn load_executor_runtime_claim(
@@ -7525,7 +8799,7 @@ impl FoundryStore {
             .map_err(Into::into)
     }
 
-    pub fn mark_executor_runtime_started(
+    pub(crate) fn mark_executor_runtime_started(
         &self,
         workflow_id: &str,
         task_id: &str,
@@ -7549,7 +8823,7 @@ impl FoundryStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn finish_executor_runtime_claim(
+    pub(crate) fn finish_executor_runtime_claim(
         &self,
         workflow_id: &str,
         task_id: &str,
@@ -7960,6 +9234,7 @@ fn checked_count_table(table: &str) -> Result<&'static str> {
         "events" => Ok("events"),
         "global_events" => Ok("global_events"),
         "artifacts" => Ok("artifacts"),
+        "workflow_research_records" => Ok("workflow_research_records"),
         "cost_ledger_index" => Ok("cost_ledger_index"),
         "task_checkpoints" => Ok("task_checkpoints"),
         "harness_headroom_blobs" => Ok("harness_headroom_blobs"),
@@ -7974,6 +9249,7 @@ fn checked_count_column(table: &str, column: &str) -> Result<&'static str> {
         ("global_events", "status") => Ok("status"),
         ("global_events", "kind") => Ok("kind"),
         ("events", "kind") => Ok("kind"),
+        ("workflow_research_records", "record_kind") => Ok("record_kind"),
         _ => anyhow::bail!("unsupported count column: {table}.{column}"),
     }
 }
@@ -8011,18 +9287,59 @@ mod tests {
     use super::{
         ensure_wal, event_observability_trigger_count, event_observability_triggers_are_valid,
         open_configured_connection, operational_tenant_columns, runtime_secret_fallback_key_path,
-        FoundryStore, GlobalEventWrite, RuntimeSecretKey, RuntimeSecretVaultAccess,
-        RuntimeSecretVaultWrite, EVENT_OBSERVABILITY_RECONCILIATION_BATCH_SIZE,
-        LEGACY_RUNTIME_SECRET_AAD_CONTEXT, LEGACY_RUNTIME_SECRET_ENVELOPE_PREFIX,
-        LEGACY_RUNTIME_SECRET_KEY_FILE_PREFIX, RUNTIME_SECRET_AAD_CONTEXT,
-        RUNTIME_SECRET_ENVELOPE_PREFIX, RUNTIME_SECRET_KEY_FILE_PREFIX, STORE_SCHEMA_VERSION,
+        ExecutorRuntimeClaimWrite, ExecutorRuntimeDispatchPermitWrite, FoundryStore,
+        GlobalEventWrite, RuntimeSecretKey, RuntimeSecretVaultAccess, RuntimeSecretVaultWrite,
+        EVENT_OBSERVABILITY_RECONCILIATION_BATCH_SIZE, LEGACY_RUNTIME_SECRET_AAD_CONTEXT,
+        LEGACY_RUNTIME_SECRET_ENVELOPE_PREFIX, LEGACY_RUNTIME_SECRET_KEY_FILE_PREFIX,
+        RUNTIME_SECRET_AAD_CONTEXT, RUNTIME_SECRET_ENVELOPE_PREFIX, RUNTIME_SECRET_KEY_FILE_PREFIX,
+        STORE_SCHEMA_VERSION,
     };
+    use chrono::Utc;
     use rusqlite::{params, Connection};
     #[cfg(unix)]
     use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Arc, Barrier};
     use std::thread;
     use std::time::Duration;
+
+    fn test_gate_receipt(
+        workflow_id: &str,
+        decision_id: &str,
+        idempotency_key: &str,
+        decision_point: &str,
+    ) -> crate::value::GateDecisionReceipt {
+        crate::value::GateDecisionReceipt::from_input(
+            decision_id.to_string(),
+            workflow_id.to_string(),
+            crate::value::GateDecisionInput {
+                idempotency_key: idempotency_key.to_string(),
+                decision_point: decision_point.to_string(),
+                task_id: None,
+                run_id: None,
+                lease_id: None,
+                input_hash: None,
+                gate: crate::value::ValueGate::Gate0ValueAdmission,
+                decision: "admit".to_string(),
+                candidates: Vec::new(),
+                selected_candidate_id: None,
+                confidence_bps: Some(8_000),
+                rationale: "bounded storage test".to_string(),
+                policy: crate::value::PolicyRef {
+                    id: "storage-test-policy".to_string(),
+                    version: "1".to_string(),
+                    source: crate::value::PolicySource::CoreBaseline,
+                },
+                cohort_id: None,
+                experiment_id: None,
+                experiment_arm: None,
+                seed: None,
+                applied: false,
+                evidence_refs: Vec::new(),
+                hard_constraint_violations: Vec::new(),
+            },
+            Utc::now(),
+        )
+    }
 
     fn save_test_runtime_secret<'a>(
         store: &FoundryStore,
@@ -8060,6 +9377,358 @@ mod tests {
             origin: "storage_test",
             tenant_context,
         })
+    }
+
+    #[test]
+    fn authoritative_dispatch_permits_are_bound_idempotent_and_immutable() {
+        let store = FoundryStore::open(":memory:").unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO workflows (id, goal, status, created_at, data_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    "wf-permit",
+                    "test canonical permit",
+                    "pending",
+                    "2026-08-11T00:00:00Z",
+                    "{}"
+                ],
+            )
+            .unwrap();
+        let context_sha256 = "a".repeat(64);
+        let workflow_protocol_sha256 = "b".repeat(64);
+        let task_protocol_sha256 = "c".repeat(64);
+        let prompt_sha256 = "d".repeat(64);
+        let permit = ExecutorRuntimeDispatchPermitWrite {
+            workflow_id: "wf-permit",
+            run_id: "run-permit",
+            wave_id: "wave-permit",
+            task_id: "task-permit",
+            lease_id: "lease-permit",
+            workflow_revision: 3,
+            task_version: 2,
+            context_sha256: &context_sha256,
+            workflow_protocol_sha256: &workflow_protocol_sha256,
+            task_protocol_sha256: &task_protocol_sha256,
+            executor: "codex",
+            cwd: "C:/worktree",
+            timeout_seconds: 300,
+            allow_non_interactive_execution: true,
+            approved_by: "operator",
+            authorization_reason: "bounded experiment execution",
+            prompt_sha256: &prompt_sha256,
+        };
+
+        let permit_sha256 = store
+            .ensure_executor_runtime_dispatch_permit(permit)
+            .unwrap();
+        assert_eq!(permit_sha256.len(), 64);
+        assert_eq!(
+            store
+                .ensure_executor_runtime_dispatch_permit(permit)
+                .unwrap(),
+            permit_sha256
+        );
+        let stored = store
+            .load_executor_runtime_dispatch_permit("wf-permit", "task-permit", "lease-permit")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.permit_sha256, permit_sha256);
+        assert_eq!(stored.executor, "codex");
+        assert_eq!(stored.cwd, "C:/worktree");
+        assert_eq!(stored.timeout_seconds, 300);
+        assert_eq!(stored.approved_by, "operator");
+
+        let conflicting = ExecutorRuntimeDispatchPermitWrite {
+            timeout_seconds: 301,
+            ..permit
+        };
+        let error = store
+            .ensure_executor_runtime_dispatch_permit(conflicting)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("identity conflict"));
+
+        let update_error = store
+            .connection
+            .execute(
+                "UPDATE executor_runtime_dispatch_permits SET timeout_seconds = 301 WHERE permit_sha256 = ?1",
+                params![permit_sha256],
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(update_error.contains("append-only"));
+        let delete_error = store
+            .connection
+            .execute(
+                "DELETE FROM executor_runtime_dispatch_permits WHERE workflow_id = 'wf-permit'",
+                [],
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(delete_error.contains("append-only"));
+
+        assert!(!store
+            .has_executor_runtime_claims_for_workflow("wf-permit")
+            .unwrap());
+        assert!(store
+            .try_claim_executor_runtime(ExecutorRuntimeClaimWrite {
+                workflow_id: "wf-permit",
+                task_id: "task-permit",
+                lease_id: "lease-permit",
+                execution_id: "execution-permit",
+                owner_token: "owner-permit",
+                executor: "codex",
+                request_sha256: &"e".repeat(64),
+                claimed_at: "2026-08-11T00:00:01Z",
+            })
+            .unwrap());
+        assert!(store
+            .has_executor_runtime_claims_for_workflow("wf-permit")
+            .unwrap());
+    }
+
+    #[test]
+    fn workflow_contract_and_experiment_transitions_require_dedicated_authority() {
+        let store = FoundryStore::open(":memory:").unwrap();
+        let mut workflow = crate::graph::create_workflow(crate::intent::parse_intent(
+            "Build a bounded research workflow",
+        ));
+        store.save_workflow(&workflow).unwrap();
+        workflow.value_contract = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": "foundry.value_contract.v1",
+                "value_class": "quality",
+                "measurement_mode": "constrained_multicriteria",
+                "severity": "medium",
+                "reversibility": "reversible",
+                "constraints": {},
+                "accounting": {},
+                "policy": {
+                    "id": "test-policy",
+                    "version": "1",
+                    "source": "core_baseline"
+                },
+                "evidence_refs": []
+            }))
+            .unwrap(),
+        );
+        let public_error = store.save_workflow(&workflow).unwrap_err().to_string();
+        assert!(public_error.contains("dedicated workflow contract API"));
+        store
+            .save_workflow_value_contract_transition(&workflow)
+            .unwrap();
+
+        workflow.experiment = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": "foundry.experiment_assignment.v1",
+                "experiment_id": "experiment-authority",
+                "arm": "treatment",
+                "cohort_id": "cohort-a",
+                "policy": {
+                    "id": "test-policy",
+                    "version": "1",
+                    "source": "core_baseline"
+                },
+                "assignment_method": "deterministic",
+                "assignment_evidence_refs": [],
+                "shadow_mode": true,
+                "holdout": false,
+                "primary_endpoint": "process_quality_bps",
+                "secondary_endpoints": [],
+                "kill_conditions": [],
+                "registered_workflow_revision": 1,
+                "workflow_protocol_fingerprint": "a".repeat(64),
+                "value_contract_sha256": "b".repeat(64),
+                "task_definition_fingerprints": {"task-a": "c".repeat(64)},
+                "registered_at": "2026-08-11T00:00:00Z"
+            }))
+            .unwrap(),
+        );
+        let public_error = store.save_workflow(&workflow).unwrap_err().to_string();
+        assert!(public_error.contains("dedicated enrollment API"));
+        store
+            .save_workflow_experiment_enrollment(&workflow)
+            .unwrap();
+
+        let mut replacement = workflow.clone();
+        replacement.experiment.as_mut().unwrap().arm = "replacement".to_string();
+        let replacement_error = store
+            .save_workflow_experiment_enrollment(&replacement)
+            .unwrap_err()
+            .to_string();
+        assert!(replacement_error.contains("single None-to-Some transition"));
+
+        let mut bypass_insert = crate::graph::create_workflow(crate::intent::parse_intent(
+            "Attempt direct contract insertion",
+        ));
+        bypass_insert.value_contract = workflow.value_contract.clone();
+        let insert_error = store.save_workflow(&bypass_insert).unwrap_err().to_string();
+        assert!(insert_error.contains("cannot bypass"));
+
+        let mut experiment_bypass = workflow.clone();
+        experiment_bypass.id = "wf-direct-experiment-bypass".to_string();
+        let experiment_insert_error = store
+            .save_workflow(&experiment_bypass)
+            .unwrap_err()
+            .to_string();
+        assert!(experiment_insert_error.contains("cannot bypass"));
+    }
+
+    #[test]
+    fn research_ledger_is_lazy_append_only_bounded_and_preserved_by_operational_saves() {
+        let store = FoundryStore::open(":memory:").unwrap();
+        let workflow = crate::graph::create_workflow(crate::intent::parse_intent(
+            "Preserve an append-only research projection",
+        ));
+        let workflow_id = workflow.id.clone();
+        store.save_workflow(&workflow).unwrap();
+
+        let receipt = test_gate_receipt(
+            &workflow_id,
+            "decision-ledger-001",
+            "ledger-idempotency-001",
+            "workflow-admission-001",
+        );
+        let append = store
+            .append_workflow_gate_decision(&receipt, "storage_test", "append first gate")
+            .unwrap();
+        assert_eq!(append.revision, 1);
+        assert_eq!(append.payload_sha256.len(), 64);
+
+        let mut operational = store.load_workflow(&workflow_id).unwrap();
+        assert!(operational.gate_decisions.is_empty());
+        assert!(operational.research_revisions.is_empty());
+        operational.goal = "Preserve research after an operational save".to_string();
+        store.save_workflow(&operational).unwrap();
+
+        let hydrated = store.load_workflow_with_research(&workflow_id).unwrap();
+        assert_eq!(hydrated.gate_decisions, vec![receipt.clone()]);
+        assert_eq!(hydrated.research_revisions.len(), 1);
+        assert_eq!(
+            hydrated.research_revisions[0].payload_sha256,
+            append.payload_sha256
+        );
+
+        let update_error = store
+            .connection
+            .execute(
+                "UPDATE workflow_research_records SET summary = 'tampered' WHERE workflow_id = ?1",
+                params![workflow_id],
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(update_error.contains("append-only"));
+        let delete_error = store
+            .connection
+            .execute(
+                "DELETE FROM workflow_research_records WHERE workflow_id = ?1",
+                params![workflow_id],
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(delete_error.contains("append-only"));
+
+        let mut oversized = test_gate_receipt(
+            &workflow_id,
+            "decision-ledger-oversized",
+            "ledger-idempotency-oversized",
+            "workflow-admission-oversized",
+        );
+        oversized.rationale = "🧪".repeat(20_000);
+        let oversized_error = store
+            .append_workflow_gate_decision(&oversized, "storage_test", "reject oversized payload")
+            .err()
+            .expect("oversized research payload must be rejected")
+            .to_string();
+        assert!(oversized_error.contains("bounded maximum"));
+    }
+
+    #[test]
+    fn research_ledger_allocates_contiguous_revisions_across_connections() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("research-concurrency.sqlite");
+        let seed_store = FoundryStore::open(&path).unwrap();
+        let workflow = crate::graph::create_workflow(crate::intent::parse_intent(
+            "Serialize concurrent research appends",
+        ));
+        let workflow_id = workflow.id.clone();
+        seed_store.save_workflow(&workflow).unwrap();
+        drop(seed_store);
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = (1..=2)
+            .map(|index| {
+                let store = FoundryStore::open(&path).unwrap();
+                let workflow_id = workflow_id.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let receipt = test_gate_receipt(
+                        &workflow_id,
+                        &format!("decision-concurrent-{index}"),
+                        &format!("idempotency-concurrent-{index}"),
+                        &format!("workflow-admission-{index}"),
+                    );
+                    barrier.wait();
+                    store
+                        .append_workflow_gate_decision(
+                            &receipt,
+                            "storage_test",
+                            "concurrent append",
+                        )
+                        .unwrap()
+                        .revision
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut revisions = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        revisions.sort_unstable();
+        assert_eq!(revisions, vec![1, 2]);
+
+        let store = FoundryStore::open(&path).unwrap();
+        let hydrated = store.load_workflow_with_research(&workflow_id).unwrap();
+        assert_eq!(hydrated.gate_decisions.len(), 2);
+        assert_eq!(
+            hydrated
+                .research_revisions
+                .iter()
+                .map(|revision| revision.revision)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn missing_research_ledger_degrades_research_without_blocking_operational_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("research-degraded.sqlite");
+        let store = FoundryStore::open(&path).unwrap();
+        let workflow = crate::graph::create_workflow(crate::intent::parse_intent(
+            "Keep operational state available",
+        ));
+        let workflow_id = workflow.id.clone();
+        store.save_workflow(&workflow).unwrap();
+        drop(store);
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TABLE workflow_research_records;")
+            .unwrap();
+        drop(connection);
+
+        let store = FoundryStore::open(&path).unwrap();
+        let mut operational = store.load_workflow(&workflow_id).unwrap();
+        operational.status = "planned".to_string();
+        store.save_workflow(&operational).unwrap();
+        assert_eq!(store.load_workflow(&workflow_id).unwrap().status, "planned");
+        let research_error = store
+            .load_workflow_with_research(&workflow_id)
+            .unwrap_err()
+            .to_string();
+        assert!(research_error.contains("operational workflow state remains available"));
     }
 
     #[test]
@@ -8323,6 +9992,20 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, STORE_SCHEMA_VERSION);
+        for table in [
+            "workflow_research_records",
+            "executor_runtime_dispatch_permits",
+        ] {
+            let exists: bool = store
+                .connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "v5 to v6 migration must materialize {table}");
+        }
         let journal_exists: bool = store
             .connection
             .query_row(
@@ -9220,6 +10903,8 @@ mod tests {
                 r#"
                 DROP TRIGGER trg_global_events_observability_queue;
                 DROP TRIGGER trg_event_observability_delete_queue;
+                DROP TABLE workflow_research_records;
+                DROP TABLE executor_runtime_dispatch_permits;
                 PRAGMA user_version = 1;
                 "#,
             )

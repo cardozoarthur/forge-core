@@ -238,18 +238,24 @@ use foundry_core::skill::install_skill;
 use foundry_core::storage::FoundryStore;
 use foundry_core::store_admin::{backup_store, check_store, restore_store};
 use foundry_core::validation::validate_workflow;
+use foundry_core::value::{
+    ExperimentAssignmentInput, GateDecisionInput, OutcomeContractInput, ValueContract,
+};
 use foundry_core::workflow::{
     add_workflow_task, add_workflow_task_dependency, attach_creative_artifact,
-    attach_workflow_artifact_with_tags, clear_workflow_task_impediment,
+    attach_workflow_artifact_with_tags, clear_workflow_task_impediment, export_workflow_research,
     get_workflow_token_collection, inspect_creative_artifact, inspect_creative_collaboration,
     list_creative_artifacts, parse_node_brain_agent_slot, patch_workflow_token,
-    record_creative_collaboration_event, remove_workflow_task_dependency, resolve_workflow_tokens,
+    record_creative_collaboration_event, record_workflow_gate_decision,
+    record_workflow_outcome_contract, remove_workflow_task_dependency, resolve_workflow_tokens,
+    set_workflow_experiment_assignment, set_workflow_task_duration_estimate,
     set_workflow_task_impediment, set_workflow_task_priority, set_workflow_token_collection,
-    update_workflow_goal_with_expected_revision, update_workflow_node_brain_routing,
-    update_workflow_task_with_expected_revision, validate_child_subflow_binding,
-    CreativeCollaborationEventRequest, ProductDecisionInput, WorkflowNodeBrainRoutingUpdateInput,
-    WorkflowTaskAddInput, WorkflowTaskDependencyInput, WorkflowTaskImpedimentClearInput,
-    WorkflowTaskImpedimentInput, WorkflowTaskPriorityInput, WorkflowTaskUpdateInput,
+    set_workflow_value_contract, update_workflow_goal_with_expected_revision,
+    update_workflow_node_brain_routing, update_workflow_task_with_expected_revision,
+    validate_child_subflow_binding, CreativeCollaborationEventRequest, ProductDecisionInput,
+    WorkflowNodeBrainRoutingUpdateInput, WorkflowTaskAddInput, WorkflowTaskDependencyInput,
+    WorkflowTaskImpedimentClearInput, WorkflowTaskImpedimentInput, WorkflowTaskPriorityInput,
+    WorkflowTaskUpdateInput,
 };
 use foundry_core::worktree::{
     approve_worktree_config, bind_worktree, bound_worktree_context, create_worktree,
@@ -3451,6 +3457,74 @@ enum WorkflowCommands {
         origin: String,
         #[arg(long = "expected-revision")]
         expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    SetValueContract {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        spec: PathBuf,
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    SetTaskDuration {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "duration-ms")]
+        duration_ms: u64,
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    SetExperiment {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        spec: PathBuf,
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    RecordGateDecision {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        spec: PathBuf,
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    RecordOutcome {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        spec: PathBuf,
+        #[arg(long, default_value = "foundry_cli")]
+        origin: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<u64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ExportResearch {
+        #[arg(long)]
+        workflow: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -9992,6 +10066,109 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
+            WorkflowCommands::SetValueContract {
+                workflow,
+                spec,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let contract: ValueContract = read_json_spec(&spec, "value contract")?;
+                let store = FoundryStore::open(cli.store)?;
+                let report = set_workflow_value_contract(
+                    &store,
+                    &workflow,
+                    contract,
+                    &origin,
+                    expected_revision,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::SetTaskDuration {
+                workflow,
+                task,
+                duration_ms,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let store = FoundryStore::open(cli.store)?;
+                let report = set_workflow_task_duration_estimate(
+                    &store,
+                    &workflow,
+                    &task,
+                    duration_ms,
+                    &origin,
+                    expected_revision,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::SetExperiment {
+                workflow,
+                spec,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let experiment: ExperimentAssignmentInput =
+                    read_json_spec(&spec, "experiment assignment")?;
+                let store = FoundryStore::open(cli.store)?;
+                let report = set_workflow_experiment_assignment(
+                    &store,
+                    &workflow,
+                    experiment,
+                    &origin,
+                    expected_revision,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::RecordGateDecision {
+                workflow,
+                spec,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let decision: GateDecisionInput = read_json_spec(&spec, "gate decision")?;
+                let store = FoundryStore::open(cli.store)?;
+                let report = record_workflow_gate_decision(
+                    &store,
+                    &workflow,
+                    decision,
+                    &origin,
+                    expected_revision,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::RecordOutcome {
+                workflow,
+                spec,
+                origin,
+                expected_revision,
+                output,
+            } => {
+                let outcome: OutcomeContractInput = read_json_spec(&spec, "outcome contract")?;
+                let store = FoundryStore::open(cli.store)?;
+                let report = record_workflow_outcome_contract(
+                    &store,
+                    &workflow,
+                    outcome,
+                    &origin,
+                    expected_revision,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::ExportResearch { workflow, output } => {
+                let store = FoundryStore::open(cli.store)?;
+                let report = export_workflow_research(&store, &workflow)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
             WorkflowCommands::AddTask {
                 workflow,
                 description,
@@ -12871,6 +13048,13 @@ fn print_response<T: Serialize>(format: OutputFormat, value: &T) -> Result<()> {
         OutputFormat::Human => println!("{}", serde_json::to_string_pretty(value)?),
     }
     Ok(())
+}
+
+fn read_json_spec<T: serde::de::DeserializeOwned>(path: &Path, label: &str) -> Result<T> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {label} spec {}", path.display()))?;
+    serde_json::from_str(&contents)
+        .with_context(|| format!("failed to parse {label} spec {}", path.display()))
 }
 
 fn harness_cli_token_headroom_input(

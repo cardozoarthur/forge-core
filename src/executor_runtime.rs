@@ -13,7 +13,8 @@ use crate::request::{
     drive_request_with_context_budget, load_run_record, DispatchFrontier, RequestDriveReport,
 };
 use crate::security::{sanitize_prompt_secrets, SecretSanitizationOptions};
-use crate::storage::{ExecutorRuntimeClaimWrite, FoundryStore};
+use crate::storage::{ExecutorRuntimeClaimWrite, ExecutorRuntimeDispatchPermitWrite, FoundryStore};
+use crate::value::{task_protocol_fingerprints, workflow_protocol_fingerprint};
 use crate::worktree::bound_worktree_context;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -65,6 +66,12 @@ pub struct ExecutorRuntimeDispatchCorrelation {
     pub workflow_revision: u64,
     pub task_version: u64,
     pub context_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_protocol_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_protocol_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_permit_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +152,8 @@ pub struct ExecutorRuntimeGitObservation {
 pub struct ExecutorRuntimeReceipt {
     pub schema_version: String,
     pub execution_id: String,
+    #[serde(default)]
+    pub receipt_sha256: String,
     pub status: String,
     pub success: bool,
     pub workflow_id: String,
@@ -725,6 +734,18 @@ pub fn execute_request_executor_wave(
             package.context_sha256, package.content
         );
         append_implementation_wave_prompt(&mut prompt, implementation_wave);
+        let workflow_protocol_sha256 = workflow_protocol_fingerprint(&workflow)
+            .context("failed to fingerprint executor workflow protocol")?;
+        let task_protocol_sha256 = task_protocol_fingerprints(&workflow)
+            .context("failed to fingerprint executor task protocol")?
+            .get(&assignment.task_id)
+            .cloned()
+            .with_context(|| {
+                format!(
+                    "task protocol fingerprint is missing for dispatch task {}",
+                    assignment.task_id
+                )
+            })?;
         requests.push(ExecutorRuntimeRequest {
             workflow_id: workflow.id.clone(),
             run_id: drive.run_id.clone(),
@@ -740,26 +761,95 @@ pub fn execute_request_executor_wave(
                 workflow_revision: frontier.wave.workflow_revision,
                 task_version: assignment.task_version,
                 context_sha256: assignment.context_sha256.clone(),
+                workflow_protocol_sha256: Some(workflow_protocol_sha256),
+                task_protocol_sha256: Some(task_protocol_sha256),
+                dispatch_permit_sha256: None,
             }),
         });
     }
 
-    store.record_event(
-        &workflow.id,
-        "request_executor_wave_started",
-        &serde_json::json!({
-            "schema_version": "foundry.request_executor_wave_event.v1",
-            "run_id": drive.run_id,
-            "wave_id": frontier.wave.wave_id,
-            "workflow_revision": frontier.wave.workflow_revision,
-            "task_ids": frontier.wave.assignments.iter().map(|assignment| assignment.task_id.as_str()).collect::<Vec<_>>(),
-            "max_parallel": max_parallel,
-            "approved_by": approved_by,
-            "authorization_reason": authorization_reason,
-            "origin": options.origin,
-            "execution_started": true,
-        }),
-    )?;
+    store.with_transaction(|| {
+        for request in &mut requests {
+            let prompt_sha256 = hex_sha256(request.prompt.as_bytes());
+            let canonical_executor = canonical_executor_id(&request.executor);
+            let canonical_cwd = fs::canonicalize(&request.cwd)
+                .with_context(|| {
+                    format!(
+                        "failed to canonicalize request-wave cwd {} before dispatch authorization",
+                        request.cwd.display()
+                    )
+                })?
+                .display()
+                .to_string();
+            let dispatch = request
+                .dispatch
+                .as_mut()
+                .context("canonical request executor wave lost dispatch correlation")?;
+            let workflow_protocol_sha256 = dispatch
+                .workflow_protocol_sha256
+                .as_deref()
+                .context("canonical request executor wave lost workflow protocol fingerprint")?;
+            let task_protocol_sha256 = dispatch
+                .task_protocol_sha256
+                .as_deref()
+                .context("canonical request executor wave lost task protocol fingerprint")?;
+            dispatch.dispatch_permit_sha256 = Some(
+                store.ensure_executor_runtime_dispatch_permit(
+                    ExecutorRuntimeDispatchPermitWrite {
+                        workflow_id: &request.workflow_id,
+                        run_id: &request.run_id,
+                        wave_id: &dispatch.wave_id,
+                        task_id: &request.task_id,
+                        lease_id: &request.lease_id,
+                        workflow_revision: dispatch.workflow_revision,
+                        task_version: dispatch.task_version,
+                        context_sha256: &dispatch.context_sha256,
+                        workflow_protocol_sha256,
+                        task_protocol_sha256,
+                        executor: &canonical_executor,
+                        cwd: &canonical_cwd,
+                        timeout_seconds: request.timeout_seconds,
+                        allow_non_interactive_execution: request
+                            .authorization
+                            .allow_non_interactive_execution,
+                        approved_by: &request.authorization.approved_by,
+                        authorization_reason: &request.authorization.reason,
+                        prompt_sha256: &prompt_sha256,
+                    },
+                )?,
+            );
+        }
+
+        let request_correlations = requests
+            .iter()
+            .map(|request| {
+                serde_json::json!({
+                    "task_id": request.task_id,
+                    "lease_id": request.lease_id,
+                    "prompt_sha256": hex_sha256(request.prompt.as_bytes()),
+                    "context_sha256": request.dispatch.as_ref().map(|dispatch| dispatch.context_sha256.as_str()),
+                    "dispatch_permit_sha256": request.dispatch.as_ref().and_then(|dispatch| dispatch.dispatch_permit_sha256.as_deref()),
+                })
+            })
+            .collect::<Vec<_>>();
+        store.record_event(
+            &workflow.id,
+            "request_executor_wave_started",
+            &serde_json::json!({
+                "schema_version": "foundry.request_executor_wave_event.v1",
+                "run_id": drive.run_id,
+                "wave_id": frontier.wave.wave_id,
+                "workflow_revision": frontier.wave.workflow_revision,
+                "task_ids": frontier.wave.assignments.iter().map(|assignment| assignment.task_id.as_str()).collect::<Vec<_>>(),
+                "request_correlations": request_correlations,
+                "max_parallel": max_parallel,
+                "approved_by": approved_by,
+                "authorization_reason": authorization_reason,
+                "origin": options.origin,
+                "execution_started": true,
+            }),
+        )
+    })?;
     let wave = execute_executor_wave(store, requests, max_parallel)?;
     store.record_event(
         &workflow.id,
@@ -947,8 +1037,9 @@ pub fn execute_executor_runtime(
             None,
             empty_stream_evidence(),
             stream_evidence_from_text(&error),
-        );
+        )?;
         receipt.status = "executor_runtime_preflight_failed".to_string();
+        receipt.receipt_sha256 = executor_runtime_receipt_sha256(&receipt)?;
         finalize_executor_runtime(store, &owner_token, &receipt)?;
         return Ok(receipt);
     }
@@ -1061,7 +1152,7 @@ pub fn execute_executor_runtime(
                 None,
                 empty_stream_evidence(),
                 stream_evidence_from_text(&error),
-            );
+            )?;
             finalize_executor_runtime(store, &owner_token, &receipt)?;
             return Ok(receipt);
         }
@@ -1116,7 +1207,7 @@ pub fn execute_executor_runtime(
         stdout_capture.token_usage,
         stdout_capture.evidence,
         stderr_capture.evidence,
-    );
+    )?;
     finalize_executor_runtime(store, &owner_token, &receipt)?;
     Ok(receipt)
 }
@@ -1156,6 +1247,11 @@ fn wait_for_idempotent_executor_receipt(
                 })?;
                 let mut receipt = serde_json::from_str::<ExecutorRuntimeReceipt>(&receipt_json)
                     .context("persisted executor runtime receipt is invalid")?;
+                if receipt.receipt_sha256.is_empty()
+                    || executor_runtime_receipt_sha256(&receipt)? != receipt.receipt_sha256
+                {
+                    bail!("persisted executor runtime receipt failed its SHA-256 integrity check");
+                }
                 if receipt.request_sha256 != request_sha256
                     || receipt.workflow_id != request.workflow_id
                     || receipt.task_id != request.task_id
@@ -1190,6 +1286,11 @@ fn finalize_executor_runtime(
     owner_token: &str,
     receipt: &ExecutorRuntimeReceipt,
 ) -> Result<()> {
+    if receipt.receipt_sha256.is_empty()
+        || executor_runtime_receipt_sha256(receipt)? != receipt.receipt_sha256
+    {
+        bail!("executor runtime receipt failed its SHA-256 integrity check before persistence");
+    }
     let receipt_value = serde_json::to_value(receipt)?;
     let finished_at = receipt.finished_at.to_rfc3339();
     store.with_transaction(|| {
@@ -1292,6 +1393,7 @@ fn prepare_executor_runtime(
     }
     validate_runtime_task_and_dependencies(&workflow, &request.task_id)?;
     validate_executor_runtime_dispatch(&workflow, &request.task_id, request.dispatch.as_ref())?;
+    validate_executor_runtime_dispatch_permit(store, request, &executor, &cwd)?;
     let run = load_run_record(store, &request.run_id)?;
     if run.workflow_id != request.workflow_id {
         bail!(
@@ -1430,6 +1532,17 @@ fn validate_executor_runtime_dispatch(
     {
         bail!("executor runtime dispatch context_sha256 must be a 64-character hex digest");
     }
+    if dispatch
+        .dispatch_permit_sha256
+        .as_ref()
+        .is_some_and(|digest| {
+            digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        bail!(
+            "executor runtime dispatch permit_sha256 must be a 64-character hex digest when present"
+        );
+    }
     let workflow_revision = workflow
         .revisions
         .last()
@@ -1440,6 +1553,21 @@ fn validate_executor_runtime_dispatch(
         .iter()
         .find(|task| task.id == task_id)
         .with_context(|| format!("task {task_id} is missing from workflow {}", workflow.id))?;
+    let current_workflow_protocol = workflow_protocol_fingerprint(workflow)
+        .context("failed to fingerprint current executor workflow protocol")?;
+    let current_task_protocol = task_protocol_fingerprints(workflow)
+        .context("failed to fingerprint current executor task protocol")?
+        .remove(task_id)
+        .with_context(|| format!("task protocol fingerprint is missing for task {task_id}"))?;
+    if dispatch.workflow_protocol_sha256.as_deref() != Some(&current_workflow_protocol)
+        || dispatch.task_protocol_sha256.as_deref() != Some(&current_task_protocol)
+    {
+        bail!(
+            "executor runtime dispatch protocol fingerprint drifted for workflow {} task {}",
+            workflow.id,
+            task_id
+        );
+    }
     if dispatch.workflow_revision != workflow_revision || dispatch.task_version != task.version {
         bail!(
             "executor runtime dispatch drifted for workflow {} task {}: wave={} dispatched_revision={} current_revision={} dispatched_task_version={} current_task_version={}",
@@ -1450,6 +1578,64 @@ fn validate_executor_runtime_dispatch(
             workflow_revision,
             dispatch.task_version,
             task.version
+        );
+    }
+    Ok(())
+}
+
+fn validate_executor_runtime_dispatch_permit(
+    store: &FoundryStore,
+    request: &ExecutorRuntimeRequest,
+    canonical_executor: &str,
+    canonical_cwd: &Path,
+) -> Result<()> {
+    let Some(dispatch) = request.dispatch.as_ref() else {
+        return Ok(());
+    };
+    let Some(dispatch_permit_sha256) = dispatch.dispatch_permit_sha256.as_deref() else {
+        // The low-level runtime remains usable without a canonical permit, but
+        // such a receipt is intentionally ineligible for research evidence.
+        return Ok(());
+    };
+    let stored = store
+        .load_executor_runtime_dispatch_permit(
+            &request.workflow_id,
+            &request.task_id,
+            &request.lease_id,
+        )?
+        .with_context(|| {
+            format!(
+                "executor runtime dispatch permit is missing for workflow {} task {} lease {}",
+                request.workflow_id, request.task_id, request.lease_id
+            )
+        })?;
+    let prompt_sha256 = hex_sha256(request.prompt.as_bytes());
+    let matched = stored.workflow_id == request.workflow_id
+        && stored.run_id == request.run_id
+        && stored.wave_id == dispatch.wave_id
+        && stored.task_id == request.task_id
+        && stored.lease_id == request.lease_id
+        && stored.workflow_revision == dispatch.workflow_revision
+        && stored.task_version == dispatch.task_version
+        && stored.context_sha256 == dispatch.context_sha256
+        && dispatch.workflow_protocol_sha256.as_deref()
+            == Some(stored.workflow_protocol_sha256.as_str())
+        && dispatch.task_protocol_sha256.as_deref() == Some(stored.task_protocol_sha256.as_str())
+        && stored.executor == canonical_executor
+        && stored.cwd == canonical_cwd.display().to_string()
+        && stored.timeout_seconds == request.timeout_seconds
+        && stored.allow_non_interactive_execution
+            == request.authorization.allow_non_interactive_execution
+        && stored.approved_by == request.authorization.approved_by
+        && stored.authorization_reason == request.authorization.reason
+        && stored.prompt_sha256 == prompt_sha256
+        && stored.permit_sha256 == dispatch_permit_sha256;
+    if !matched {
+        bail!(
+            "executor runtime request does not match authoritative dispatch permit for workflow {} task {} lease {}",
+            request.workflow_id,
+            request.task_id,
+            request.lease_id
         );
     }
     Ok(())
@@ -2380,7 +2566,7 @@ fn build_receipt(
     token_usage: Option<ExecutorTokenUsage>,
     stdout: ExecutorRuntimeStreamEvidence,
     stderr: ExecutorRuntimeStreamEvidence,
-) -> ExecutorRuntimeReceipt {
+) -> Result<ExecutorRuntimeReceipt> {
     let workspace_claim = prepared
         .lease
         .workspace_claim
@@ -2400,9 +2586,10 @@ fn build_receipt(
     } else {
         "executor_runtime_exit_failed"
     };
-    ExecutorRuntimeReceipt {
+    let mut receipt = ExecutorRuntimeReceipt {
         schema_version: EXECUTOR_RUNTIME_RECEIPT_SCHEMA_VERSION.to_string(),
         execution_id,
+        receipt_sha256: String::new(),
         status: status.to_string(),
         success,
         workflow_id: request.workflow_id.clone(),
@@ -2442,7 +2629,87 @@ fn build_receipt(
         stderr,
         task_completion_attempted: false,
         output_accepted_as_validation: false,
+    };
+    receipt.receipt_sha256 = executor_runtime_receipt_sha256(&receipt)?;
+    Ok(receipt)
+}
+
+pub(crate) fn executor_runtime_receipt_sha256(receipt: &ExecutorRuntimeReceipt) -> Result<String> {
+    let mut canonical = receipt.clone();
+    canonical.receipt_sha256.clear();
+    canonical.idempotent_replay = false;
+    Ok(hex_sha256(&serde_json::to_vec(&canonical)?))
+}
+
+pub(crate) fn ensure_canonical_request_wave_receipt(
+    store: &FoundryStore,
+    receipt: &ExecutorRuntimeReceipt,
+) -> Result<()> {
+    let dispatch = receipt
+        .dispatch
+        .as_ref()
+        .context("executor receipt has no canonical dispatch correlation")?;
+    let dispatch_permit_sha256 = dispatch
+        .dispatch_permit_sha256
+        .as_deref()
+        .context("executor receipt has no authoritative dispatch permit digest")?;
+    let stored = store
+        .load_executor_runtime_dispatch_permit(
+            &receipt.workflow_id,
+            &receipt.task_id,
+            &receipt.lease_id,
+        )?
+        .with_context(|| {
+            format!(
+                "executor receipt {} has no authoritative request-wave dispatch permit",
+                receipt.execution_id
+            )
+        })?;
+    let permit_created_at = DateTime::parse_from_rfc3339(&stored.created_at)
+        .context("authoritative request-wave dispatch permit has an invalid created_at")?
+        .with_timezone(&Utc);
+    let claim = store
+        .load_executor_runtime_claim(&receipt.workflow_id, &receipt.task_id, &receipt.lease_id)?
+        .with_context(|| {
+            format!(
+                "executor receipt {} has no persisted runtime claim",
+                receipt.execution_id
+            )
+        })?;
+    let claimed_at = DateTime::parse_from_rfc3339(&claim.claimed_at)
+        .context("executor runtime claim has an invalid claimed_at")?
+        .with_timezone(&Utc);
+    let matched = stored.workflow_id == receipt.workflow_id
+        && stored.run_id == receipt.run_id
+        && stored.wave_id == dispatch.wave_id
+        && stored.task_id == receipt.task_id
+        && stored.lease_id == receipt.lease_id
+        && stored.workflow_revision == dispatch.workflow_revision
+        && stored.task_version == dispatch.task_version
+        && stored.context_sha256 == dispatch.context_sha256
+        && dispatch.workflow_protocol_sha256.as_deref()
+            == Some(stored.workflow_protocol_sha256.as_str())
+        && dispatch.task_protocol_sha256.as_deref() == Some(stored.task_protocol_sha256.as_str())
+        && stored.executor == receipt.executor
+        && stored.cwd == receipt.cwd
+        && stored.timeout_seconds == receipt.timeout_seconds
+        && stored.allow_non_interactive_execution == receipt.authorization_opt_in
+        && stored.approved_by == receipt.approved_by
+        && stored.authorization_reason == receipt.authorization_reason
+        && stored.prompt_sha256 == receipt.prompt_sha256
+        && stored.permit_sha256 == dispatch_permit_sha256
+        && claim.execution_id == receipt.execution_id
+        && claim.request_sha256 == receipt.request_sha256
+        && claim.state == "finished"
+        && permit_created_at <= claimed_at
+        && claimed_at <= receipt.started_at;
+    if !matched {
+        bail!(
+            "executor receipt {} does not match its authoritative request-wave dispatch permit",
+            receipt.execution_id
+        );
     }
+    Ok(())
 }
 
 fn record_executor_runtime_finished(
@@ -2644,6 +2911,173 @@ trailing noise"#;
             serde_json::from_value(legacy).expect("legacy receipt remains compatible");
 
         assert_eq!(receipt.token_usage, None);
+        assert!(receipt.receipt_sha256.is_empty());
+
+        let mut sealed = receipt;
+        sealed.receipt_sha256 = executor_runtime_receipt_sha256(&sealed).unwrap();
+        let persisted_digest = sealed.receipt_sha256.clone();
+        assert_eq!(
+            executor_runtime_receipt_sha256(&sealed).unwrap(),
+            persisted_digest
+        );
+        sealed.idempotent_replay = true;
+        assert_eq!(
+            executor_runtime_receipt_sha256(&sealed).unwrap(),
+            persisted_digest
+        );
+    }
+
+    #[test]
+    fn canonical_dispatch_permit_and_finished_claim_verify_receipt() {
+        let store = FoundryStore::open(":memory:").unwrap();
+        let workflow = crate::graph::create_workflow(crate::intent::parse_intent(
+            "Verify canonical runtime evidence",
+        ));
+        let workflow_id = workflow.id.clone();
+        let task = workflow.tasks.first().unwrap();
+        let task_id = task.id.clone();
+        store.save_workflow(&workflow).unwrap();
+
+        let run_id = "run-canonical";
+        let wave_id = "wave-canonical";
+        let lease_id = "lease-canonical";
+        let execution_id = "execution-canonical";
+        let owner_token = "owner-canonical";
+        let context_sha256 = "a".repeat(64);
+        let workflow_protocol_sha256 = "b".repeat(64);
+        let task_protocol_sha256 = "c".repeat(64);
+        let prompt_sha256 = "d".repeat(64);
+        let request_sha256 = "e".repeat(64);
+        let cwd = "C:/canonical-worktree";
+        let approved_by = "operator";
+        let authorization_reason = "bounded canonical test";
+        let workflow_revision = workflow
+            .revisions
+            .last()
+            .map(|revision| revision.revision)
+            .unwrap_or(0);
+        let permit_sha256 = store
+            .ensure_executor_runtime_dispatch_permit(ExecutorRuntimeDispatchPermitWrite {
+                workflow_id: &workflow_id,
+                run_id,
+                wave_id,
+                task_id: &task_id,
+                lease_id,
+                workflow_revision,
+                task_version: task.version,
+                context_sha256: &context_sha256,
+                workflow_protocol_sha256: &workflow_protocol_sha256,
+                task_protocol_sha256: &task_protocol_sha256,
+                executor: "codex",
+                cwd,
+                timeout_seconds: 60,
+                allow_non_interactive_execution: true,
+                approved_by,
+                authorization_reason,
+                prompt_sha256: &prompt_sha256,
+            })
+            .unwrap();
+        let permit = store
+            .load_executor_runtime_dispatch_permit(&workflow_id, &task_id, lease_id)
+            .unwrap()
+            .unwrap();
+        let permit_created_at = DateTime::parse_from_rfc3339(&permit.created_at)
+            .unwrap()
+            .with_timezone(&Utc);
+        let claimed_at = permit_created_at + ChronoDuration::milliseconds(1);
+        let claimed_at_text = claimed_at.to_rfc3339();
+        assert!(store
+            .try_claim_executor_runtime(ExecutorRuntimeClaimWrite {
+                workflow_id: &workflow_id,
+                task_id: &task_id,
+                lease_id,
+                execution_id,
+                owner_token,
+                executor: "codex",
+                request_sha256: &request_sha256,
+                claimed_at: &claimed_at_text,
+            })
+            .unwrap());
+
+        let started_at = claimed_at + ChronoDuration::milliseconds(1);
+        let finished_at = started_at + ChronoDuration::milliseconds(1);
+        let stdout = b"verified-output";
+        let mut receipt = ExecutorRuntimeReceipt {
+            schema_version: EXECUTOR_RUNTIME_RECEIPT_SCHEMA_VERSION.to_string(),
+            execution_id: execution_id.to_string(),
+            receipt_sha256: String::new(),
+            status: "executor_runtime_succeeded".to_string(),
+            success: true,
+            workflow_id: workflow_id.clone(),
+            run_id: run_id.to_string(),
+            task_id: task_id.clone(),
+            lease_id: lease_id.to_string(),
+            executor: "codex".to_string(),
+            command_path: "C:/bin/codex.exe".to_string(),
+            command_argument_shape: vec!["exec".to_string(), "-".to_string()],
+            cwd: cwd.to_string(),
+            prompt_transport: "stdin".to_string(),
+            prompt_sha256,
+            prompt_bytes: 7,
+            request_sha256: request_sha256.clone(),
+            idempotent_replay: false,
+            authorization_opt_in: true,
+            approved_by: approved_by.to_string(),
+            authorization_reason: authorization_reason.to_string(),
+            timeout_seconds: 60,
+            lease_expires_at: finished_at + ChronoDuration::minutes(5),
+            lease_grace_seconds: EXECUTOR_RUNTIME_LEASE_GRACE_SECONDS,
+            lease_extended_for_runtime: false,
+            lease_preserved_for_validation: true,
+            worktree_id: "worktree-canonical".to_string(),
+            workspace_binding_scope: "task".to_string(),
+            dispatch: Some(ExecutorRuntimeDispatchCorrelation {
+                wave_id: wave_id.to_string(),
+                workflow_revision,
+                task_version: task.version,
+                context_sha256,
+                workflow_protocol_sha256: Some(workflow_protocol_sha256),
+                task_protocol_sha256: Some(task_protocol_sha256),
+                dispatch_permit_sha256: Some(permit_sha256),
+            }),
+            git: None,
+            token_usage: None,
+            started_at,
+            finished_at,
+            duration_ms: 1,
+            process_id: None,
+            exit_code: Some(0),
+            timed_out: false,
+            runtime_error: None,
+            stdout: ExecutorRuntimeStreamEvidence {
+                sha256: hex_sha256(stdout),
+                total_bytes: stdout.len(),
+                excerpt_bytes: stdout.len(),
+                excerpt_truncated: false,
+                excerpt_redaction_count: 0,
+                excerpt: String::from_utf8_lossy(stdout).into_owned(),
+            },
+            stderr: empty_stream_evidence(),
+            task_completion_attempted: false,
+            output_accepted_as_validation: false,
+        };
+        receipt.receipt_sha256 = executor_runtime_receipt_sha256(&receipt).unwrap();
+        let finished_at_text = finished_at.to_rfc3339();
+        assert!(store
+            .finish_executor_runtime_claim(
+                &workflow_id,
+                &task_id,
+                lease_id,
+                owner_token,
+                &serde_json::to_value(&receipt).unwrap(),
+                &finished_at_text,
+            )
+            .unwrap());
+
+        ensure_canonical_request_wave_receipt(&store, &receipt).unwrap();
+        let mut tampered = receipt;
+        tampered.timeout_seconds = 61;
+        assert!(ensure_canonical_request_wave_receipt(&store, &tampered).is_err());
     }
 
     #[test]

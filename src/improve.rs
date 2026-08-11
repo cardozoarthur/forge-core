@@ -129,7 +129,7 @@ pub struct ParallelizationOpportunityReport {
     pub total_waves: usize,
     pub parallel_wave_count: usize,
     pub max_parallel_width: usize,
-    pub latency_reduction_bps: u32,
+    pub latency_reduction_bps: Option<u32>,
     pub recommended_max_parallelism: usize,
     pub policy: String,
 }
@@ -899,7 +899,7 @@ fn build_parallelization_report(
     };
 
     ParallelizationOpportunityReport {
-        schema_version: "foundry.improve.parallelization_opportunity.v1".to_string(),
+        schema_version: "foundry.improve.parallelization_opportunity.v2".to_string(),
         parallel_opportunity,
         ready_parallel_task_count,
         ready_parallel_task_ids,

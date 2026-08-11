@@ -54,6 +54,7 @@ pub mod store_admin;
 pub mod teamwork;
 pub mod teamwork_fan_in;
 pub mod validation;
+pub mod value;
 pub mod worker;
 pub mod workflow;
 pub mod worktree;

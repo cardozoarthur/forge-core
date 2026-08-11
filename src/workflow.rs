@@ -1,9 +1,13 @@
 use crate::addon::{default_addon_dirs, load_addon_catalog_from_store};
 use crate::artifact::copy_artifact;
+use crate::executor_runtime::{
+    ensure_canonical_request_wave_receipt, executor_runtime_receipt_sha256, ExecutorRuntimeReceipt,
+};
 use crate::graph::{
     node_brain_routing_for_executor, task as build_task, ArtifactRecord, ExecutorKind,
-    NodeBrainAgentSlotSpec, NodeBrainRoutingSpec, TaskImpediment, TaskStatus, Workflow,
-    WorkflowRevision,
+    NodeBrainAgentSlotSpec, NodeBrainRoutingSpec, ResearchRevision, TaskImpediment, TaskStatus,
+    Workflow, WorkflowRevision, WORKFLOW_RESEARCH_GATE_DECISION_KIND,
+    WORKFLOW_RESEARCH_OUTCOME_CONTRACT_KIND,
 };
 use crate::identity::ensure_workflow_policy;
 use crate::intent::parse_intent_with_catalog_and_context;
@@ -14,8 +18,19 @@ use crate::ir::{
     CreativeCollaborationState, CreativeCollaborationSummary, PatchByIntent, PatchRecord,
     TokenCollection, TokenImpactPreview, TokenResolutionReport,
 };
+use crate::request::load_run_record;
 use crate::storage::FoundryStore;
 use crate::validation::{validate_workflow, validate_workflow_structure, ValidationReport};
+use crate::value::{
+    build_research_export, task_protocol_fingerprints, validate_experiment_input,
+    validate_gate_decision_against_value_contract, validate_gate_decision_input,
+    validate_outcome_against_value_contract, validate_outcome_endpoints,
+    validate_outcome_execution_policy, validate_outcome_input, validate_value_contract,
+    value_contract_fingerprint, workflow_protocol_fingerprint, ExperimentAssignment,
+    ExperimentAssignmentInput, GateDecisionInput, GateDecisionReceipt, OutcomeContract,
+    OutcomeContractInput, OutcomeMeasurementStatus, PolicyRef, ResearchExport, ValueContract,
+    ValueGate,
+};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -260,6 +275,877 @@ pub struct ProductDecisionInput {
     pub affected_tasks: Vec<String>,
     pub affected_artifacts: Vec<String>,
     pub origin: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ValueContractUpdateReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub origin: String,
+    pub changed: bool,
+    pub revision: u64,
+    pub contract: ValueContract,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExperimentAssignmentUpdateReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub origin: String,
+    pub changed: bool,
+    pub revision: u64,
+    pub experiment: ExperimentAssignment,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskDurationEstimateUpdateReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub origin: String,
+    pub changed: bool,
+    pub previous_duration_ms: Option<u64>,
+    pub estimated_duration_ms: u64,
+    pub previous_task_version: u64,
+    pub new_task_version: u64,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GateDecisionRecordReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub origin: String,
+    pub changed: bool,
+    pub workflow_revision: u64,
+    pub research_revision: u64,
+    pub receipt: GateDecisionReceipt,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OutcomeContractRecordReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub origin: String,
+    pub changed: bool,
+    pub workflow_revision: u64,
+    pub research_revision: u64,
+    pub outcome: OutcomeContract,
+}
+
+pub fn set_workflow_value_contract(
+    store: &FoundryStore,
+    workflow_id: &str,
+    contract: ValueContract,
+    origin: &str,
+    expected_revision: Option<u64>,
+) -> Result<ValueContractUpdateReport> {
+    let violations = validate_value_contract(&contract);
+    if !violations.is_empty() {
+        bail!("invalid value contract: {}", violations.join("; "));
+    }
+    store.with_transaction(|| {
+        ensure_workflow_policy(store, workflow_id, "set workflow value contract")?;
+        let mut workflow = store.load_workflow_with_research(workflow_id)?;
+        ensure_not_mission_bound(store, &workflow)?;
+        ensure_core_orchestration_integrity(&workflow)?;
+        if workflow.value_contract.as_ref() == Some(&contract) {
+            return Ok(ValueContractUpdateReport {
+                status: "workflow_value_contract_unchanged".to_string(),
+                workflow_id: workflow_id.to_string(),
+                origin: origin.to_string(),
+                changed: false,
+                revision: latest_revision(&workflow),
+                contract,
+            });
+        }
+        ensure_expected_revision(&workflow, expected_revision)?;
+        ensure_structural_mutation_allowed(&workflow, "set value contract")?;
+        if workflow.experiment.is_some()
+            || !workflow.gate_decisions.is_empty()
+            || !workflow.outcomes.is_empty()
+        {
+            bail!(
+                "value contract is frozen after experiment assignment or telemetry; create a new workflow for a different contract"
+            );
+        }
+        if !matches!(
+            workflow.status.trim().to_ascii_lowercase().as_str(),
+            "pending" | "planned"
+        ) {
+            bail!(
+                "value contract must be registered before workflow execution; status is {}",
+                workflow.status
+            );
+        }
+        let non_pending_task_ids = workflow
+            .tasks
+            .iter()
+            .filter(|task| task.status != TaskStatus::Pending)
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>();
+        if !non_pending_task_ids.is_empty() {
+            bail!(
+                "value contract requires every task to be pending before registration: {}",
+                non_pending_task_ids.join(", ")
+            );
+        }
+        for task in &workflow.tasks {
+            ensure_no_task_lease(store, workflow_id, &task.id)?;
+        }
+        if store.has_executor_runtime_claims_for_workflow(workflow_id)? {
+            bail!(
+                "value contract must be registered before any executor-runtime exposure; create a new workflow for a post-execution research protocol"
+            );
+        }
+        workflow.value_contract = Some(contract.clone());
+        let revision = push_revision(
+            &mut workflow.revisions,
+            origin,
+            "value_contract_set",
+            "set the workflow value, time, quality and risk boundary contract",
+        );
+        let report = ValueContractUpdateReport {
+            status: "workflow_value_contract_set".to_string(),
+            workflow_id: workflow_id.to_string(),
+            origin: origin.to_string(),
+            changed: true,
+            revision,
+            contract,
+        };
+        ensure_core_orchestration_integrity(&workflow)?;
+        store.save_workflow_value_contract_transition(&workflow)?;
+        store.record_event(
+            workflow_id,
+            "workflow_value_contract_set",
+            &serde_json::to_value(&report)?,
+        )?;
+        Ok(report)
+    })
+}
+
+pub fn set_workflow_experiment_assignment(
+    store: &FoundryStore,
+    workflow_id: &str,
+    input: ExperimentAssignmentInput,
+    origin: &str,
+    expected_revision: Option<u64>,
+) -> Result<ExperimentAssignmentUpdateReport> {
+    let violations = validate_experiment_input(&input);
+    if !violations.is_empty() {
+        bail!("invalid experiment assignment: {}", violations.join("; "));
+    }
+    store.with_transaction(|| {
+        ensure_workflow_policy(store, workflow_id, "set workflow experiment assignment")?;
+        let mut workflow = store.load_workflow_with_research(workflow_id)?;
+        ensure_not_mission_bound(store, &workflow)?;
+        ensure_expected_revision(&workflow, expected_revision)?;
+        ensure_structural_mutation_allowed(&workflow, "set experiment assignment")?;
+        ensure_core_orchestration_integrity(&workflow)?;
+        if workflow
+            .experiment
+            .as_ref()
+            .is_some_and(|current| experiment_matches_input(current, &input))
+        {
+            return Ok(ExperimentAssignmentUpdateReport {
+                status: "workflow_experiment_assignment_unchanged".to_string(),
+                workflow_id: workflow_id.to_string(),
+                origin: origin.to_string(),
+                changed: false,
+                revision: latest_revision(&workflow),
+                experiment: workflow.experiment.clone().expect("checked above"),
+            });
+        }
+        if workflow.experiment.is_some() {
+            bail!(
+                "experiment assignment is frozen after registration; create a new workflow for a different experiment or arm"
+            );
+        }
+        if !workflow.gate_decisions.is_empty() || !workflow.outcomes.is_empty() {
+            bail!(
+                "experiment assignment must be registered before gate or outcome telemetry"
+            );
+        }
+        if workflow.value_contract.is_none() {
+            bail!("value contract must be set before experiment assignment");
+        }
+        if (input.primary_endpoint.is_monetary()
+            || input
+                .secondary_endpoints
+                .iter()
+                .any(|endpoint| endpoint.is_monetary()))
+            && workflow
+                .value_contract
+                .as_ref()
+                .and_then(|contract| contract.currency.as_deref())
+                .is_none_or(|currency| currency.trim().is_empty())
+        {
+            bail!(
+                "experiment monetary endpoints require a currency in the workflow value contract"
+            );
+        }
+        let missing_duration_task_ids = workflow
+            .tasks
+            .iter()
+            .filter(|task| task.cost.estimated_duration_ms.is_none())
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>();
+        if !missing_duration_task_ids.is_empty() {
+            bail!(
+                "task duration estimates must be set before experiment assignment: {}",
+                missing_duration_task_ids.join(", ")
+            );
+        }
+        if !matches!(
+            workflow.status.trim().to_ascii_lowercase().as_str(),
+            "pending" | "planned"
+        ) {
+            bail!(
+                "experiment assignment must be registered before workflow execution; status is {}",
+                workflow.status
+            );
+        }
+        let non_pending_task_ids = workflow
+            .tasks
+            .iter()
+            .filter(|task| task.status != TaskStatus::Pending)
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>();
+        if !non_pending_task_ids.is_empty() {
+            bail!(
+                "experiment assignment requires every task to be pending before enrollment: {}",
+                non_pending_task_ids.join(", ")
+            );
+        }
+        for task in &workflow.tasks {
+            ensure_no_task_lease(store, workflow_id, &task.id)?;
+        }
+        if store.has_executor_runtime_claims_for_workflow(workflow_id)? {
+            bail!(
+                "experiment assignment must precede every executor-runtime exposure; create a new workflow instead of enrolling retrospectively"
+            );
+        }
+        let task_definition_fingerprints = task_protocol_fingerprints(&workflow)
+            .context("failed to fingerprint experiment task definitions")?;
+        let workflow_protocol_fingerprint = workflow_protocol_fingerprint(&workflow)
+            .context("failed to fingerprint experiment workflow protocol")?;
+        let value_contract_sha256 = value_contract_fingerprint(
+            workflow
+                .value_contract
+                .as_ref()
+                .expect("value contract presence checked above"),
+        )
+        .context("failed to fingerprint experiment value contract")?;
+        let registered_workflow_revision = latest_revision(&workflow).saturating_add(1);
+        let revision = push_revision(
+            &mut workflow.revisions,
+            origin,
+            "experiment_assignment_set",
+            &format!(
+                "assigned workflow to experiment {} arm {}",
+                input.experiment_id, input.arm
+            ),
+        );
+        if revision != registered_workflow_revision {
+            bail!(
+                "experiment assignment revision {registered_workflow_revision} does not match persisted revision {revision}"
+            );
+        }
+        let registered_at = workflow
+            .revisions
+            .last()
+            .map(|revision| revision.created_at)
+            .context("experiment assignment revision timestamp is missing")?;
+        let experiment = ExperimentAssignment::from_input(
+            input,
+            registered_workflow_revision,
+            workflow_protocol_fingerprint,
+            value_contract_sha256,
+            task_definition_fingerprints,
+            registered_at,
+        );
+        workflow.experiment = Some(experiment.clone());
+        let report = ExperimentAssignmentUpdateReport {
+            status: "workflow_experiment_assignment_set".to_string(),
+            workflow_id: workflow_id.to_string(),
+            origin: origin.to_string(),
+            changed: true,
+            revision,
+            experiment,
+        };
+        ensure_core_orchestration_integrity(&workflow)?;
+        store.save_workflow_experiment_enrollment(&workflow)?;
+        store.record_event(
+            workflow_id,
+            "workflow_experiment_assignment_set",
+            &serde_json::to_value(&report)?,
+        )?;
+        Ok(report)
+    })
+}
+
+pub fn set_workflow_task_duration_estimate(
+    store: &FoundryStore,
+    workflow_id: &str,
+    task_id: &str,
+    estimated_duration_ms: u64,
+    origin: &str,
+    expected_revision: Option<u64>,
+) -> Result<TaskDurationEstimateUpdateReport> {
+    store.with_transaction(|| {
+        ensure_workflow_policy(store, workflow_id, "set workflow task duration estimate")?;
+        let mut workflow = store.load_workflow_with_research(workflow_id)?;
+        ensure_not_mission_bound(store, &workflow)?;
+        ensure_core_orchestration_integrity(&workflow)?;
+        let task_index = workflow_task_index(&workflow, task_id)?;
+        let previous_duration_ms = workflow.tasks[task_index].cost.estimated_duration_ms;
+        let previous_task_version = workflow.tasks[task_index].version;
+        if previous_duration_ms == Some(estimated_duration_ms) {
+            return Ok(TaskDurationEstimateUpdateReport {
+                status: "workflow_task_duration_estimate_unchanged".to_string(),
+                workflow_id: workflow_id.to_string(),
+                task_id: task_id.to_string(),
+                origin: origin.to_string(),
+                changed: false,
+                previous_duration_ms,
+                estimated_duration_ms,
+                previous_task_version,
+                new_task_version: previous_task_version,
+                revision: latest_revision(&workflow),
+            });
+        }
+        ensure_expected_revision(&workflow, expected_revision)?;
+        ensure_structural_mutation_allowed(&workflow, "set task duration estimate")?;
+        if workflow.experiment.is_some()
+            || !workflow.gate_decisions.is_empty()
+            || !workflow.outcomes.is_empty()
+        {
+            bail!("task duration estimates are frozen after experiment assignment or telemetry");
+        }
+        ensure_no_task_lease(store, workflow_id, task_id)?;
+        ensure_task_definition_mutable(&workflow.tasks[task_index], "set duration estimate")?;
+        workflow.tasks[task_index].cost.estimated_duration_ms = Some(estimated_duration_ms);
+        workflow.tasks[task_index].version = previous_task_version.saturating_add(1);
+        propagate_dependency_version_boundary(&mut workflow.tasks);
+        ensure_core_orchestration_integrity(&workflow)?;
+        let new_task_version = workflow.tasks[task_index].version;
+        let revision = push_revision(
+            &mut workflow.revisions,
+            origin,
+            "task_duration_estimate_set",
+            &format!("set task {task_id} estimated duration to {estimated_duration_ms} ms"),
+        );
+        let report = TaskDurationEstimateUpdateReport {
+            status: "workflow_task_duration_estimate_set".to_string(),
+            workflow_id: workflow_id.to_string(),
+            task_id: task_id.to_string(),
+            origin: origin.to_string(),
+            changed: true,
+            previous_duration_ms,
+            estimated_duration_ms,
+            previous_task_version,
+            new_task_version,
+            revision,
+        };
+        store.save_workflow(&workflow)?;
+        store.record_event(
+            workflow_id,
+            "workflow_task_duration_estimate_set",
+            &serde_json::to_value(&report)?,
+        )?;
+        Ok(report)
+    })
+}
+
+pub fn record_workflow_gate_decision(
+    store: &FoundryStore,
+    workflow_id: &str,
+    input: GateDecisionInput,
+    origin: &str,
+    expected_revision: Option<u64>,
+) -> Result<GateDecisionRecordReport> {
+    let violations = validate_gate_decision_input(&input);
+    if !violations.is_empty() {
+        bail!("invalid gate decision: {}", violations.join("; "));
+    }
+    store.with_deferred_transaction_retry(|_| {
+        ensure_workflow_policy(store, workflow_id, "record workflow value gate decision")?;
+        let mut workflow = store.load_workflow_with_research(workflow_id)?;
+        ensure_not_mission_bound(store, &workflow)?;
+        ensure_core_orchestration_integrity(&workflow)?;
+        if let Some(existing) = workflow
+            .gate_decisions
+            .iter()
+            .find(|receipt| receipt.idempotency_key == input.idempotency_key)
+        {
+            if !existing.matches_input(&input) {
+                bail!(
+                    "gate decision idempotency_key {} conflicts with an existing receipt",
+                    input.idempotency_key
+                );
+            }
+            let research_revision = research_revision_for_record(
+                &workflow,
+                WORKFLOW_RESEARCH_GATE_DECISION_KIND,
+                &existing.decision_id,
+            )?;
+            return Ok(GateDecisionRecordReport {
+                status: "workflow_value_gate_decision_unchanged".to_string(),
+                workflow_id: workflow_id.to_string(),
+                origin: origin.to_string(),
+                changed: false,
+                workflow_revision: latest_revision(&workflow),
+                research_revision,
+                receipt: existing.clone(),
+            });
+        }
+        if let Some(existing) = workflow
+            .gate_decisions
+            .iter()
+            .find(|existing| same_gate_observation(existing, &input))
+        {
+            bail!(
+                "gate decision duplicates observation {} under a different idempotency_key; iterative or superseding decisions require a distinct decision_point",
+                existing.decision_id
+            );
+        }
+        ensure_expected_revision(&workflow, expected_revision)?;
+        if let Some(contract) = workflow.value_contract.as_ref() {
+            let violations = validate_gate_decision_against_value_contract(&input, contract);
+            if !violations.is_empty() {
+                bail!(
+                    "gate decision conflicts with value contract: {}",
+                    violations.join("; ")
+                );
+            }
+        }
+        if let Some(task_id) = &input.task_id {
+            workflow_task_index(&workflow, task_id)?;
+        }
+        validate_experiment_link(
+            workflow.experiment.as_ref(),
+            input.experiment_id.as_deref(),
+            input.experiment_arm.as_deref(),
+            input.cohort_id.as_deref(),
+            input.seed,
+            Some(&input.policy),
+            false,
+        )?;
+        let decision_id = format!("gdec_{}", Uuid::new_v4().to_string().replace('-', ""));
+        let receipt = GateDecisionReceipt::from_input(
+            decision_id,
+            workflow_id.to_string(),
+            input.clone(),
+            Utc::now(),
+        );
+        let research_summary = format!(
+            "recorded {:?} decision {} at {} (applied={})",
+            receipt.gate, receipt.decision, receipt.decision_point, receipt.applied
+        );
+        let research_append =
+            store.append_workflow_gate_decision(&receipt, origin, &research_summary)?;
+        let research_revision = research_append.revision;
+        workflow.gate_decisions.push(receipt.clone());
+        workflow.research_revisions.push(ResearchRevision {
+            revision: research_revision,
+            workflow_revision: research_append.workflow_revision,
+            origin: origin.to_string(),
+            record_kind: WORKFLOW_RESEARCH_GATE_DECISION_KIND.to_string(),
+            record_id: receipt.decision_id.clone(),
+            summary: research_summary,
+            payload_sha256: research_append.payload_sha256,
+            created_at: receipt.recorded_at,
+        });
+        let workflow_revision = research_append.workflow_revision;
+        let report = GateDecisionRecordReport {
+            status: "workflow_value_gate_decision_recorded".to_string(),
+            workflow_id: workflow_id.to_string(),
+            origin: origin.to_string(),
+            changed: true,
+            workflow_revision,
+            research_revision,
+            receipt,
+        };
+        ensure_core_orchestration_integrity(&workflow)?;
+        Ok(report)
+    })
+}
+
+pub fn record_workflow_outcome_contract(
+    store: &FoundryStore,
+    workflow_id: &str,
+    input: OutcomeContractInput,
+    origin: &str,
+    expected_revision: Option<u64>,
+) -> Result<OutcomeContractRecordReport> {
+    let violations = validate_outcome_input(&input);
+    if !violations.is_empty() {
+        bail!("invalid outcome contract: {}", violations.join("; "));
+    }
+    store.with_deferred_transaction_retry(|_| {
+        ensure_workflow_policy(store, workflow_id, "record workflow outcome contract")?;
+        let mut workflow = store.load_workflow_with_research(workflow_id)?;
+        ensure_not_mission_bound(store, &workflow)?;
+        ensure_core_orchestration_integrity(&workflow)?;
+        if let Some(existing) = workflow
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.measurement.idempotency_key == input.idempotency_key)
+        {
+            if existing.measurement != input {
+                bail!(
+                    "outcome idempotency_key {} conflicts with an existing contract",
+                    input.idempotency_key
+                );
+            }
+            let research_revision = research_revision_for_record(
+                &workflow,
+                WORKFLOW_RESEARCH_OUTCOME_CONTRACT_KIND,
+                &existing.outcome_id,
+            )?;
+            return Ok(OutcomeContractRecordReport {
+                status: "workflow_outcome_contract_unchanged".to_string(),
+                workflow_id: workflow_id.to_string(),
+                origin: origin.to_string(),
+                changed: false,
+                workflow_revision: latest_revision(&workflow),
+                research_revision,
+                outcome: existing.clone(),
+            });
+        }
+        if let Some(existing) = workflow
+            .outcomes
+            .iter()
+            .find(|existing| same_outcome_observation(existing, &input))
+        {
+            bail!(
+                "outcome duplicates observation {} under a different idempotency_key; one execution/cohort observation must be represented by one outcome contract",
+                existing.outcome_id
+            );
+        }
+        ensure_expected_revision(&workflow, expected_revision)?;
+        if let Some(contract) = workflow.value_contract.as_ref() {
+            let violations = validate_outcome_against_value_contract(&input, contract);
+            if !violations.is_empty() {
+                bail!(
+                    "outcome conflicts with value contract: {}",
+                    violations.join("; ")
+                );
+            }
+        }
+        if let Some(task_id) = &input.task_id {
+            workflow_task_index(&workflow, task_id)?;
+        }
+        if workflow.experiment.is_some() && input.task_id.is_none() {
+            bail!("experiment-linked outcomes require task_id");
+        }
+        validate_experiment_link(
+            workflow.experiment.as_ref(),
+            input.experiment_id.as_deref(),
+            input.experiment_arm.as_deref(),
+            input.cohort_id.as_deref(),
+            input.seed,
+            input.evaluated_policy.as_ref(),
+            false,
+        )?;
+        if let Some(experiment) = workflow.experiment.as_ref() {
+            let mut violations = validate_outcome_endpoints(
+                &input,
+                experiment.primary_endpoint,
+                &experiment.secondary_endpoints,
+            );
+            violations.extend(validate_outcome_execution_policy(
+                &input,
+                &experiment.policy,
+                experiment.shadow_mode || experiment.holdout,
+            ));
+            if !violations.is_empty() {
+                bail!(
+                    "outcome conflicts with experiment protocol: {}",
+                    violations.join("; ")
+                );
+            }
+        }
+        let known_decisions = workflow
+            .gate_decisions
+            .iter()
+            .map(|decision| decision.decision_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let unknown_decisions = input
+            .gate_decision_ids
+            .iter()
+            .filter(|decision_id| !known_decisions.contains(decision_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unknown_decisions.is_empty() {
+            bail!(
+                "outcome references unknown gate decisions: {}",
+                unknown_decisions.join(", ")
+            );
+        }
+        for decision in workflow.gate_decisions.iter().filter(|decision| {
+            input
+                .gate_decision_ids
+                .iter()
+                .any(|decision_id| decision_id == &decision.decision_id)
+        }) {
+            validate_experiment_link(
+                workflow.experiment.as_ref(),
+                decision.experiment_id.as_deref(),
+                decision.experiment_arm.as_deref(),
+                decision.cohort_id.as_deref(),
+                decision.seed,
+                Some(&decision.policy),
+                decision.applied,
+            )?;
+            if decision.gate != ValueGate::Gate0ValueAdmission
+                && input.task_id.is_some()
+                && decision.task_id != input.task_id
+            {
+                bail!(
+                    "outcome task {:?} cannot reference {:?} receipt {} for task {:?}",
+                    input.task_id,
+                    decision.gate,
+                    decision.decision_id,
+                    decision.task_id
+                );
+            }
+            if decision.gate != ValueGate::Gate0ValueAdmission
+                && (decision.run_id != input.run_id
+                    || decision.lease_id != input.lease_id
+                    || decision.input_hash != input.input_hash)
+            {
+                bail!(
+                    "outcome cohort run/lease/input cannot reference {:?} receipt {} from a different execution identity",
+                    decision.gate,
+                    decision.decision_id
+                );
+            }
+        }
+        validate_observed_outcome_runtime(store, &workflow, &input)?;
+        let outcome = OutcomeContract {
+            schema_version: crate::value::OUTCOME_CONTRACT_SCHEMA_VERSION.to_string(),
+            outcome_id: format!("out_{}", Uuid::new_v4().to_string().replace('-', "")),
+            workflow_id: workflow_id.to_string(),
+            measurement: input.clone(),
+            recorded_at: Utc::now(),
+        };
+        let research_summary = format!("recorded outcome contract {}", outcome.outcome_id);
+        let research_append =
+            store.append_workflow_outcome_contract(&outcome, origin, &research_summary)?;
+        let research_revision = research_append.revision;
+        workflow.outcomes.push(outcome.clone());
+        workflow.research_revisions.push(ResearchRevision {
+            revision: research_revision,
+            workflow_revision: research_append.workflow_revision,
+            origin: origin.to_string(),
+            record_kind: WORKFLOW_RESEARCH_OUTCOME_CONTRACT_KIND.to_string(),
+            record_id: outcome.outcome_id.clone(),
+            summary: research_summary,
+            payload_sha256: research_append.payload_sha256,
+            created_at: outcome.recorded_at,
+        });
+        let report = OutcomeContractRecordReport {
+            status: "workflow_outcome_contract_recorded".to_string(),
+            workflow_id: workflow_id.to_string(),
+            origin: origin.to_string(),
+            changed: true,
+            workflow_revision: research_append.workflow_revision,
+            research_revision,
+            outcome,
+        };
+        ensure_core_orchestration_integrity(&workflow)?;
+        Ok(report)
+    })
+}
+
+fn validate_observed_outcome_runtime(
+    store: &FoundryStore,
+    workflow: &Workflow,
+    input: &OutcomeContractInput,
+) -> Result<()> {
+    for artifact_id in &input.artifact_ids {
+        if !workflow
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.id == *artifact_id)
+        {
+            bail!("outcome references unknown artifact {artifact_id}");
+        }
+    }
+    if input.measurement_status != OutcomeMeasurementStatus::Observed {
+        return Ok(());
+    }
+
+    let task_id = input
+        .task_id
+        .as_deref()
+        .context("observed outcome requires task_id")?;
+    let run_id = input
+        .run_id
+        .as_deref()
+        .context("observed outcome requires run_id")?;
+    let lease_id = input
+        .lease_id
+        .as_deref()
+        .context("observed outcome requires lease_id")?;
+    let input_hash = input
+        .input_hash
+        .as_deref()
+        .context("observed outcome requires input_hash")?;
+    let output_hash = input
+        .output_hash
+        .as_deref()
+        .context("observed outcome requires output_hash")?;
+    let expected_receipt_sha256 = input
+        .execution_receipt_sha256
+        .as_deref()
+        .context("observed outcome requires execution_receipt_sha256")?;
+
+    let run = load_run_record(store, run_id)
+        .with_context(|| format!("observed outcome run {run_id} is not persisted"))?;
+    if run.workflow_id != workflow.id {
+        bail!(
+            "observed outcome run {run_id} belongs to workflow {}, not {}",
+            run.workflow_id,
+            workflow.id
+        );
+    }
+    let claim = store
+        .load_executor_runtime_claim(&workflow.id, task_id, lease_id)?
+        .with_context(|| {
+            format!(
+                "observed outcome has no executor runtime claim for task {task_id} lease {lease_id}"
+            )
+        })?;
+    if claim.state != "finished" {
+        bail!(
+            "observed outcome executor runtime claim {} is {}, not finished",
+            claim.execution_id,
+            claim.state
+        );
+    }
+    let receipt_json = claim.receipt_json.as_deref().with_context(|| {
+        format!(
+            "observed outcome executor runtime claim {} has no persisted receipt",
+            claim.execution_id
+        )
+    })?;
+    let receipt: ExecutorRuntimeReceipt = serde_json::from_str(receipt_json)
+        .context("persisted executor runtime receipt is invalid")?;
+    let actual_receipt_sha256 = executor_runtime_receipt_sha256(&receipt)?;
+    if receipt.receipt_sha256.is_empty()
+        || receipt.receipt_sha256 != actual_receipt_sha256
+        || actual_receipt_sha256 != expected_receipt_sha256
+    {
+        bail!(
+            "observed outcome execution_receipt_sha256 does not match the persisted runtime receipt"
+        );
+    }
+    if !receipt.success || receipt.status != "executor_runtime_succeeded" {
+        bail!(
+            "observed outcome requires a successful executor receipt; receipt {} is {}",
+            receipt.execution_id,
+            receipt.status
+        );
+    }
+    ensure_canonical_request_wave_receipt(store, &receipt)?;
+    if receipt.workflow_id != workflow.id
+        || receipt.run_id != run_id
+        || receipt.task_id != task_id
+        || receipt.lease_id != lease_id
+        || receipt.execution_id != claim.execution_id
+    {
+        bail!("observed outcome runtime receipt identity does not match workflow/run/task/lease");
+    }
+    if let Some(experiment) = workflow.experiment.as_ref() {
+        let dispatch = receipt.dispatch.as_ref().context(
+            "observed experiment outcome requires runtime dispatch protocol correlation",
+        )?;
+        let expected_task_protocol = experiment
+            .task_definition_fingerprints
+            .get(task_id)
+            .with_context(|| {
+                format!("experiment assignment has no task protocol fingerprint for {task_id}")
+            })?;
+        if dispatch.workflow_protocol_sha256.as_deref()
+            != Some(experiment.workflow_protocol_fingerprint.as_str())
+            || dispatch.task_protocol_sha256.as_deref() != Some(expected_task_protocol.as_str())
+        {
+            bail!(
+                "observed outcome runtime receipt was executed under a protocol different from the registered experiment"
+            );
+        }
+        if dispatch.workflow_revision < experiment.registered_workflow_revision
+            || receipt.started_at < experiment.registered_at
+        {
+            bail!(
+                "observed outcome runtime receipt predates experiment enrollment and cannot be attributed to the registered arm"
+            );
+        }
+    }
+    if claim.request_sha256 != input_hash || receipt.request_sha256 != input_hash {
+        bail!("observed outcome input_hash does not match the persisted runtime request");
+    }
+    if receipt.stdout.sha256 != output_hash {
+        bail!(
+            "observed outcome output_hash does not match the executor stdout; artifact-only runtime verification requires authoritative run/task/lease lineage and is not supported in v1"
+        );
+    }
+    Ok(())
+}
+
+fn same_outcome_observation(existing: &OutcomeContract, input: &OutcomeContractInput) -> bool {
+    if input.measurement_status == OutcomeMeasurementStatus::Observed {
+        return existing.measurement.measurement_status == OutcomeMeasurementStatus::Observed
+            && input.execution_receipt_sha256.is_some()
+            && existing.measurement.execution_receipt_sha256 == input.execution_receipt_sha256;
+    }
+    input.experiment_id.is_some()
+        && existing.measurement.measurement_status == input.measurement_status
+        && existing.measurement.experiment_id == input.experiment_id
+        && existing.measurement.experiment_arm == input.experiment_arm
+        && existing.measurement.cohort_id == input.cohort_id
+        && existing.measurement.task_id == input.task_id
+        && existing.measurement.run_id == input.run_id
+        && existing.measurement.lease_id == input.lease_id
+        && existing.measurement.input_hash == input.input_hash
+        && existing.measurement.output_hash == input.output_hash
+}
+
+fn same_gate_observation(existing: &GateDecisionReceipt, input: &GateDecisionInput) -> bool {
+    existing.gate == input.gate
+        && existing.decision_point == input.decision_point
+        && existing.experiment_id == input.experiment_id
+        && existing.experiment_arm == input.experiment_arm
+        && existing.cohort_id == input.cohort_id
+        && existing.seed == input.seed
+        && existing.task_id == input.task_id
+        && existing.run_id == input.run_id
+        && existing.lease_id == input.lease_id
+        && existing.input_hash == input.input_hash
+}
+
+pub fn export_workflow_research(store: &FoundryStore, workflow_id: &str) -> Result<ResearchExport> {
+    ensure_workflow_policy(store, workflow_id, "export workflow research telemetry")?;
+    let workflow = store.load_workflow_with_research(workflow_id)?;
+    ensure_core_orchestration_integrity(&workflow)?;
+    let observed_evidence_verification_failures = workflow
+        .outcomes
+        .iter()
+        .filter(|outcome| {
+            outcome.measurement.measurement_status == OutcomeMeasurementStatus::Observed
+        })
+        .filter_map(|outcome| {
+            validate_observed_outcome_runtime(store, &workflow, &outcome.measurement)
+                .err()
+                .map(|error| (outcome.outcome_id.clone(), format!("{error:#}")))
+        })
+        .collect::<BTreeMap<_, _>>();
+    Ok(build_research_export(
+        &workflow,
+        observed_evidence_verification_failures,
+    ))
 }
 
 pub fn record_product_decision(
@@ -1287,7 +2173,7 @@ fn ensure_core_orchestration_integrity(workflow: &Workflow) -> Result<()> {
 
 fn ensure_structural_mutation_allowed(workflow: &Workflow, action: &str) -> Result<()> {
     match workflow.status.trim().to_ascii_lowercase().as_str() {
-        "completed" | "complete" | "cancelled" | "failed" => bail!(
+        "completed" | "complete" | "cancelled" | "canceled" | "failed" => bail!(
             "cannot {action} on terminal workflow {} while status is {}; create a new workflow before changing its task graph",
             workflow.id,
             workflow.status
@@ -1301,6 +2187,90 @@ fn ensure_not_mission_bound(store: &FoundryStore, workflow: &Workflow) -> Result
         bail!(
             "workflow {} is mission-bound; generic workflow mutations require a mission-aware adapter",
             workflow.id
+        );
+    }
+    Ok(())
+}
+
+fn experiment_matches_input(
+    current: &ExperimentAssignment,
+    input: &ExperimentAssignmentInput,
+) -> bool {
+    current.experiment_id == input.experiment_id
+        && current.arm == input.arm
+        && current.cohort_id == input.cohort_id
+        && current.policy == input.policy
+        && current.assignment_method == input.assignment_method
+        && current.assignment_evidence_refs == input.assignment_evidence_refs
+        && current.seed == input.seed
+        && current.shadow_mode == input.shadow_mode
+        && current.holdout == input.holdout
+        && current.primary_endpoint == input.primary_endpoint
+        && current.secondary_endpoints == input.secondary_endpoints
+        && current.kill_conditions == input.kill_conditions
+}
+
+fn validate_experiment_link(
+    current: Option<&ExperimentAssignment>,
+    experiment_id: Option<&str>,
+    experiment_arm: Option<&str>,
+    cohort_id: Option<&str>,
+    seed: Option<u64>,
+    policy: Option<&PolicyRef>,
+    applied: bool,
+) -> Result<()> {
+    let (Some(experiment_id), Some(experiment_arm)) = (experiment_id, experiment_arm) else {
+        if experiment_id.is_some() || experiment_arm.is_some() {
+            bail!("experiment_id and experiment_arm must be provided together");
+        }
+        if seed.is_some() {
+            bail!("seed requires experiment_id and experiment_arm");
+        }
+        if cohort_id.is_some() {
+            bail!("cohort_id requires experiment_id and experiment_arm");
+        }
+        if current.is_some() {
+            bail!("workflow experiment telemetry must include experiment_id and experiment_arm");
+        }
+        return Ok(());
+    };
+    let current = current.with_context(|| {
+        format!("workflow has no experiment assignment matching {experiment_id}/{experiment_arm}")
+    })?;
+    if current.experiment_id != experiment_id || current.arm != experiment_arm {
+        bail!(
+            "experiment link {experiment_id}/{experiment_arm} does not match workflow assignment {}/{}",
+            current.experiment_id,
+            current.arm
+        );
+    }
+    if cohort_id != Some(current.cohort_id.as_str()) {
+        bail!(
+            "cohort {:?} does not match workflow experiment cohort {}",
+            cohort_id,
+            current.cohort_id
+        );
+    }
+    if current.seed != seed {
+        bail!(
+            "experiment seed {:?} does not match workflow assignment seed {:?}",
+            seed,
+            current.seed
+        );
+    }
+    let policy = policy.context(
+        "evaluated policy is required when telemetry is linked to an experiment assignment",
+    )?;
+    if current.policy != *policy {
+        bail!(
+            "evaluated policy {:?} does not match experiment assignment policy {:?}",
+            policy,
+            current.policy
+        );
+    }
+    if (current.shadow_mode || current.holdout) && applied {
+        bail!(
+            "experiment {experiment_id} arm {experiment_arm} is shadow-only or holdout-only; its decision cannot be marked applied"
         );
     }
     Ok(())
@@ -1459,6 +2429,21 @@ fn latest_revision(workflow: &Workflow) -> u64 {
         .last()
         .map(|revision| revision.revision)
         .unwrap_or(0)
+}
+
+fn research_revision_for_record(
+    workflow: &Workflow,
+    record_kind: &str,
+    record_id: &str,
+) -> Result<u64> {
+    workflow
+        .research_revisions
+        .iter()
+        .find(|revision| revision.record_kind == record_kind && revision.record_id == record_id)
+        .map(|revision| revision.revision)
+        .with_context(|| {
+            format!("research record {record_kind}/{record_id} is missing its append-only revision")
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2523,4 +3508,121 @@ pub fn patch_workflow_token(
         impact_preview,
         creative_artifacts_rewritten: false,
     })
+}
+
+#[cfg(test)]
+mod value_research_tests {
+    use super::*;
+    use crate::graph::create_workflow;
+    use crate::intent::parse_intent;
+    use crate::storage::ExecutorRuntimeClaimWrite;
+
+    fn test_value_contract() -> ValueContract {
+        serde_json::from_value(serde_json::json!({
+            "value_class": "quality",
+            "measurement_mode": "constrained_multicriteria",
+            "severity": "medium",
+            "reversibility": "reversible",
+            "constraints": {},
+            "accounting": {},
+            "policy": {
+                "id": "research-test-policy",
+                "version": "1",
+                "source": "core_baseline"
+            },
+            "evidence_refs": []
+        }))
+        .unwrap()
+    }
+
+    fn seed_runtime_claim(store: &FoundryStore, workflow_id: &str, task_id: &str) {
+        store
+            .try_claim_executor_runtime(ExecutorRuntimeClaimWrite {
+                workflow_id,
+                task_id,
+                lease_id: "lease-before-enrollment",
+                execution_id: "execution-before-enrollment",
+                owner_token: "owner-before-enrollment",
+                executor: "codex",
+                request_sha256: &"a".repeat(64),
+                claimed_at: "2026-08-11T00:00:00Z",
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn value_contract_and_experiment_reject_retrospective_runtime_enrollment() {
+        let store = FoundryStore::open(":memory:").unwrap();
+        let exposed = create_workflow(parse_intent("Reject a retrospective value contract"));
+        let exposed_workflow_id = exposed.id.clone();
+        let exposed_task_id = exposed.tasks[0].id.clone();
+        store.save_workflow(&exposed).unwrap();
+        seed_runtime_claim(&store, &exposed_workflow_id, &exposed_task_id);
+
+        let contract_error = set_workflow_value_contract(
+            &store,
+            &exposed_workflow_id,
+            test_value_contract(),
+            "workflow_test",
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(contract_error.contains("before any executor-runtime exposure"));
+
+        let enrolled = create_workflow(parse_intent("Reject retrospective experiment enrollment"));
+        let enrolled_workflow_id = enrolled.id.clone();
+        let task_ids = enrolled
+            .tasks
+            .iter()
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>();
+        store.save_workflow(&enrolled).unwrap();
+        set_workflow_value_contract(
+            &store,
+            &enrolled_workflow_id,
+            test_value_contract(),
+            "workflow_test",
+            None,
+        )
+        .unwrap();
+        for task_id in &task_ids {
+            set_workflow_task_duration_estimate(
+                &store,
+                &enrolled_workflow_id,
+                task_id,
+                10,
+                "workflow_test",
+                None,
+            )
+            .unwrap();
+        }
+        seed_runtime_claim(&store, &enrolled_workflow_id, &task_ids[0]);
+        let experiment: ExperimentAssignmentInput = serde_json::from_value(serde_json::json!({
+            "experiment_id": "experiment-retrospective",
+            "arm": "candidate",
+            "cohort_id": "cohort-a",
+            "policy": {
+                "id": "research-test-policy",
+                "version": "1",
+                "source": "core_baseline"
+            },
+            "assignment_method": "deterministic",
+            "assignment_evidence_refs": [],
+            "shadow_mode": true,
+            "holdout": false,
+            "primary_endpoint": "accepted"
+        }))
+        .unwrap();
+        let experiment_error = set_workflow_experiment_assignment(
+            &store,
+            &enrolled_workflow_id,
+            experiment,
+            "workflow_test",
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(experiment_error.contains("must precede every executor-runtime exposure"));
+    }
 }

@@ -401,6 +401,7 @@ fn create_interaction(
     store: &FoundryStore,
     request: CreateInteractionRequest<'_>,
 ) -> Result<HumanInteractionReport> {
+    store.with_transaction(|| {
     let mut workflow = store.load_workflow(request.workflow_id)?;
     let current_revision = workflow
         .revisions
@@ -477,6 +478,7 @@ fn create_interaction(
         interaction,
         decision: None,
         summary,
+    })
     })
 }
 

@@ -110,6 +110,7 @@ This release includes:
 - runtime workflow mutation for goals and artifacts with origin trace from `codex`, `opencode`, `foundry_cli` or skills
 - local assisted operations console with workflow visibility, run controls and a strategic modifier lane for live goal/node proposals
 - outcome status that separates support artifacts from user-facing final deliverables and requires final audit evidence before closing deliverable-driven workflows
+- observational value-aware research contracts for frozen value boundaries and experiment assignments, append-only SQLite G0-G4/outcome telemetry, canonical request-wave dispatch permits, sealed runtime-receipt lineage and analysis exports that distinguish declared trace, runtime evidence, prospective capture, executed-policy and causal readiness without changing live executor selection
 - final delivery package generation for async runs, attaching user-facing Markdown plus machine-readable JSON summaries of readiness, deliverables, evidence, tasks and remaining gaps
 - visual workflow surface for tasks, subtasks, whiteboards, screens, wireframes, flows, components, documents, design tokens and human+AI collaboration actions in the ops console
 - orchestrator improvement candidate ranking using workflow events, run heartbeats, outcome evidence, parallel-ready tasks and avoidable AI-cost metrics for repetitive/deterministic work
@@ -132,6 +133,7 @@ This release includes:
 - Foundry 0.6 milestone status, promotion manifest, release-gates panel, evidence-plan, collect-evidence, collect-ready-evidence and attached-evidence ledger surfaces for release inspection, including project-root-aware secret-free `manifest_templates` for missing project evidence manifests such as `.foundry/connected-brain-runtimes.json`, `.foundry/multimodal.json` and `.foundry/multimodal-runtimes.json`; replacement-grade evidence plans also preflight the selected connected-brain provider adapter executable path before reporting provider evidence as collectible
 - native daily Goal research workflow planning and smoke execution for `hackathon` reports with Markdown/PDF artifacts and redacted Telegram delivery records
 - scheduler worker status includes a deterministic assignment plan that shows which due scheduled workflows fit the current bounded worker pool and which remain queued under backpressure
+- dimensional scheduler reports that keep estimated cost in USD and estimated duration in milliseconds, preserving unavailable latency as unknown instead of using cost as a time proxy
 - bounded parallel schedule scanning reports `foundry.worker_pool.v1` execution evidence and still reconciles idle scheduled workflows into persisted scale-to-zero state
 - persisted task leases so two executors cannot acquire the same workflow task concurrently
 - executor handoff packets that combine strict context readiness, lease metadata, routing cache keys, checksums and validation gates
@@ -1037,6 +1039,8 @@ foundry workflow attach-artifact --workflow <workflow-id> --path ./report.md --k
 
 This is how Codex/OpenCode act as the human interface for Foundry: the CLI session can update goals, attach artifacts and keep a revision trail without bypassing Foundry's persistent runtime state.
 Goal updates reprocess the workflow intent while preserving the workflow's operating context, returning the added/removed deliverables and capability ids so operators can verify that outcome gates changed with the goal.
+
+Value-aware research instrumentation is strictly observational in v1: `workflow set-value-contract`, `workflow set-task-duration` and `workflow set-experiment` revise the operational workflow, while `workflow record-gate-decision` and `workflow record-outcome` append immutable, independently revisioned records to a bounded SQLite research ledger. Normal workflow loading omits this telemetry; `workflow export-research` hydrates it explicitly and separates declared-trace completeness from verified runtime evidence, prospective gate capture, executed-policy verification and causal readiness. Gate inputs with `applied=true` are rejected. See [Value-aware research contracts](docs/value-aware-research.md) for schemas, lineage rules and the current research limits.
 
 Run Foundry self-evolution:
 
