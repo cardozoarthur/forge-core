@@ -3635,7 +3635,12 @@ mod tests {
             creative_artifacts: vec![],
             token_collection: None,
             revisions: vec![],
+            research_revisions: vec![],
             product_decisions: vec![],
+            value_contract: None,
+            experiment: None,
+            gate_decisions: vec![],
+            outcomes: vec![],
         };
         assert!(is_self_evolution_workflow(&wf_evolution));
 
@@ -3660,7 +3665,12 @@ mod tests {
             creative_artifacts: vec![],
             token_collection: None,
             revisions: vec![],
+            research_revisions: vec![],
             product_decisions: vec![],
+            value_contract: None,
+            experiment: None,
+            gate_decisions: vec![],
+            outcomes: vec![],
         };
         assert!(!is_self_evolution_workflow(&wf_other));
     }

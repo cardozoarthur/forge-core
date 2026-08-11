@@ -13,6 +13,7 @@ use foundry_core::intent::parse_intent;
 use foundry_core::lease::acquire_task_lease;
 use foundry_core::request::{create_run_record, save_run_record};
 use foundry_core::storage::FoundryStore;
+use foundry_core::value::{task_protocol_fingerprints, workflow_protocol_fingerprint};
 use foundry_core::worktree::{bind_worktree, create_worktree, WorktreeCreateOptions};
 use std::collections::BTreeSet;
 use std::fs;
@@ -661,6 +662,8 @@ fn seed_parallel_executions(
         .last()
         .map(|revision| revision.revision)
         .unwrap_or(0);
+    let workflow_protocol_sha256 = workflow_protocol_fingerprint(&workflow).unwrap();
+    let task_protocol_sha256 = task_protocol_fingerprints(&workflow).unwrap();
     let run = create_run_record(&workflow, "executor_runtime_test", "accepted");
     save_run_record(store, &run).unwrap();
     task_ids
@@ -691,6 +694,9 @@ fn seed_parallel_executions(
                     context_sha256: hex_sha256(
                         format!("{workflow_id}:{task_id}:bounded-context").as_bytes(),
                     ),
+                    workflow_protocol_sha256: Some(workflow_protocol_sha256.clone()),
+                    task_protocol_sha256: Some(task_protocol_sha256[&task_id].clone()),
+                    dispatch_permit_sha256: None,
                 }),
             }
         })

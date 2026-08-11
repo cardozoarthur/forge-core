@@ -12986,8 +12986,15 @@ fn simulated_run_generates_cost_report_and_email_notification_payload() {
     assert!(run["parallel_plan"].is_object());
     assert_eq!(
         run["parallel_plan"]["schema_version"],
-        "foundry.scheduler.parallel_plan.v1"
+        "foundry.scheduler.parallel_plan.v2"
     );
+    assert_eq!(
+        run["parallel_plan"]["duration_estimate_status"],
+        "unavailable_missing_task_duration"
+    );
+    assert!(run["parallel_plan"]["sequential_duration_ms"].is_null());
+    assert!(run["parallel_plan"]["parallel_duration_ms"].is_null());
+    assert!(run["parallel_plan"]["latency_reduction_bps"].is_null());
     assert!(run["parallel_plan"]["total_waves"].as_u64().unwrap() >= 1);
     assert!(!run["parallel_plan"]["waves"].as_array().unwrap().is_empty());
     assert!(run["parallel_plan"]["total_tasks"].as_u64().unwrap() >= 1);
@@ -49493,8 +49500,13 @@ fn simulated_run_includes_parallel_dag_schedule_plan() {
     assert!(run["parallel_plan"].is_object());
     assert_eq!(
         run["parallel_plan"]["schema_version"],
-        "foundry.scheduler.parallel_plan.v1"
+        "foundry.scheduler.parallel_plan.v2"
     );
+    assert_eq!(
+        run["parallel_plan"]["duration_estimate_status"],
+        "unavailable_missing_task_duration"
+    );
+    assert!(run["parallel_plan"]["latency_reduction_bps"].is_null());
     let waves = run["parallel_plan"]["waves"].as_array().unwrap();
     assert!(!waves.is_empty());
     assert!(run["parallel_plan"]["total_waves"].as_u64().unwrap() >= 1);

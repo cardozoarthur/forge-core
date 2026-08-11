@@ -4,6 +4,7 @@ use crate::addon::{
 };
 use crate::intent::IntentSpec;
 use crate::ir;
+use crate::value::{ExperimentAssignment, GateDecisionReceipt, OutcomeContract, ValueContract};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -108,6 +109,8 @@ pub struct SubflowLineageSpec {
 pub struct CostEstimate {
     pub estimated_cost_usd: f64,
     pub cost_model: String,
+    #[serde(default)]
+    pub estimated_duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -527,6 +530,21 @@ pub struct WorkflowRevision {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResearchRevision {
+    pub revision: u64,
+    pub workflow_revision: u64,
+    pub origin: String,
+    pub record_kind: String,
+    pub record_id: String,
+    pub summary: String,
+    pub payload_sha256: String,
+    pub created_at: DateTime<Utc>,
+}
+
+pub const WORKFLOW_RESEARCH_GATE_DECISION_KIND: &str = "gate_decision";
+pub const WORKFLOW_RESEARCH_OUTCOME_CONTRACT_KIND: &str = "outcome_contract";
+
 pub const CORE_PARALLEL_TEAM_SCHEMA_VERSION: &str = "foundry.core.parallel_team.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -706,7 +724,17 @@ pub struct Workflow {
     #[serde(default)]
     pub revisions: Vec<WorkflowRevision>,
     #[serde(default)]
+    pub research_revisions: Vec<ResearchRevision>,
+    #[serde(default)]
     pub product_decisions: Vec<ProductDecision>,
+    #[serde(default)]
+    pub value_contract: Option<ValueContract>,
+    #[serde(default)]
+    pub experiment: Option<ExperimentAssignment>,
+    #[serde(default)]
+    pub gate_decisions: Vec<GateDecisionReceipt>,
+    #[serde(default)]
+    pub outcomes: Vec<OutcomeContract>,
 }
 
 pub fn create_workflow(intent: IntentSpec) -> Workflow {
@@ -726,7 +754,12 @@ pub fn create_workflow(intent: IntentSpec) -> Workflow {
         creative_artifacts: Vec::new(),
         token_collection: None,
         revisions: Vec::new(),
+        research_revisions: Vec::new(),
         product_decisions: Vec::new(),
+        value_contract: None,
+        experiment: None,
+        gate_decisions: Vec::new(),
+        outcomes: Vec::new(),
     }
 }
 
@@ -903,6 +936,7 @@ pub fn task(
         cost: CostEstimate {
             estimated_cost_usd,
             cost_model: "static_v0_estimate".to_string(),
+            estimated_duration_ms: None,
         },
         notification: None,
         persona: None,

@@ -1,5 +1,12 @@
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutorKind, PersonaRoutingSpec, TaskStatus, Workflow,
+    WORKFLOW_RESEARCH_GATE_DECISION_KIND, WORKFLOW_RESEARCH_OUTCOME_CONTRACT_KIND,
+};
+use crate::value::{
+    validate_experiment_assignment, validate_gate_decision_against_value_contract,
+    validate_gate_decision_receipt, validate_outcome_against_value_contract,
+    validate_outcome_contract, validate_outcome_endpoints, validate_outcome_execution_policy,
+    validate_value_contract, PolicyRef, ValueGate,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -110,6 +117,156 @@ pub fn validate_workflow_structure(workflow: &Workflow) -> Vec<FailedRule> {
         }
     }
 
+    let mut research_violations = Vec::new();
+    let mut expected_research_records = BTreeMap::new();
+    let mut idempotency_keys = BTreeSet::new();
+    for receipt in &workflow.gate_decisions {
+        let key = (
+            WORKFLOW_RESEARCH_GATE_DECISION_KIND.to_string(),
+            receipt.decision_id.clone(),
+        );
+        if expected_research_records
+            .insert(key, receipt.recorded_at)
+            .is_some()
+        {
+            research_violations.push(format!(
+                "duplicate gate decision id {}",
+                receipt.decision_id
+            ));
+        }
+        if !idempotency_keys.insert((
+            WORKFLOW_RESEARCH_GATE_DECISION_KIND,
+            receipt.idempotency_key.as_str(),
+        )) {
+            research_violations.push(format!(
+                "duplicate gate decision idempotency key {}",
+                receipt.idempotency_key
+            ));
+        }
+    }
+    for outcome in &workflow.outcomes {
+        let key = (
+            WORKFLOW_RESEARCH_OUTCOME_CONTRACT_KIND.to_string(),
+            outcome.outcome_id.clone(),
+        );
+        if expected_research_records
+            .insert(key, outcome.recorded_at)
+            .is_some()
+        {
+            research_violations.push(format!("duplicate outcome id {}", outcome.outcome_id));
+        }
+        if !idempotency_keys.insert((
+            WORKFLOW_RESEARCH_OUTCOME_CONTRACT_KIND,
+            outcome.measurement.idempotency_key.as_str(),
+        )) {
+            research_violations.push(format!(
+                "duplicate outcome idempotency key {}",
+                outcome.measurement.idempotency_key
+            ));
+        }
+    }
+    let mut recorded_research_records = BTreeSet::new();
+    let latest_control_revision = workflow
+        .revisions
+        .last()
+        .map(|revision| revision.revision)
+        .unwrap_or(0);
+    let mut previous_research_workflow_revision = 0;
+    for (index, revision) in workflow.research_revisions.iter().enumerate() {
+        let expected_revision = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+        if revision.revision != expected_revision {
+            research_violations.push(format!(
+                "research revision history must be contiguous from 1: expected {expected_revision}, found {}",
+                revision.revision
+            ));
+        }
+        if revision.workflow_revision > latest_control_revision {
+            research_violations.push(format!(
+                "research revision {} references future workflow revision {} (latest is {latest_control_revision})",
+                revision.revision, revision.workflow_revision
+            ));
+        }
+        if revision.workflow_revision < previous_research_workflow_revision {
+            research_violations.push(format!(
+                "research revision {} regresses workflow revision from {} to {}",
+                revision.revision, previous_research_workflow_revision, revision.workflow_revision
+            ));
+        }
+        if workflow.experiment.as_ref().is_some_and(|experiment| {
+            revision.workflow_revision < experiment.registered_workflow_revision
+        }) {
+            research_violations.push(format!(
+                "research revision {} predates experiment enrollment",
+                revision.revision
+            ));
+        }
+        previous_research_workflow_revision = revision.workflow_revision;
+        if !matches!(
+            revision.record_kind.as_str(),
+            WORKFLOW_RESEARCH_GATE_DECISION_KIND | WORKFLOW_RESEARCH_OUTCOME_CONTRACT_KIND
+        ) {
+            research_violations.push(format!(
+                "research revision {} has unsupported kind {}",
+                revision.revision, revision.record_kind
+            ));
+        }
+        if revision.origin.trim().is_empty()
+            || revision.record_id.trim().is_empty()
+            || revision.summary.trim().is_empty()
+        {
+            research_violations.push(format!(
+                "research revision {} requires non-empty origin, record_id and summary",
+                revision.revision
+            ));
+        }
+        if revision.payload_sha256.len() != 64
+            || !revision
+                .payload_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            research_violations.push(format!(
+                "research revision {} payload_sha256 must be a 64-character hex digest",
+                revision.revision
+            ));
+        }
+        let key = (revision.record_kind.clone(), revision.record_id.clone());
+        if !recorded_research_records.insert(key.clone()) {
+            research_violations.push(format!(
+                "research ledger repeats record {}/{}",
+                revision.record_kind, revision.record_id
+            ));
+        }
+        match expected_research_records.get(&key) {
+            Some(recorded_at) => {
+                if recorded_at != &revision.created_at {
+                    research_violations.push(format!(
+                        "research revision {} timestamp does not match record {}/{}",
+                        revision.revision, revision.record_kind, revision.record_id
+                    ));
+                }
+            }
+            None => research_violations.push(format!(
+                "research revision {} references unknown record {}/{}",
+                revision.revision, revision.record_kind, revision.record_id
+            )),
+        }
+    }
+    for (record_kind, record_id) in expected_research_records.keys() {
+        if !recorded_research_records.contains(&(record_kind.clone(), record_id.clone())) {
+            research_violations.push(format!(
+                "research record {record_kind}/{record_id} has no append-only revision"
+            ));
+        }
+    }
+    if !research_violations.is_empty() {
+        failed_rules.push(FailedRule {
+            task_id: "_workflow".to_string(),
+            kind: "research_ledger".to_string(),
+            message: research_violations.join("; "),
+        });
+    }
+
     let mut counts = BTreeMap::<String, usize>::new();
     for task in &workflow.tasks {
         *counts.entry(task.id.clone()).or_default() += 1;
@@ -198,7 +355,393 @@ pub fn validate_workflow_structure(workflow: &Workflow) -> Vec<FailedRule> {
         });
     }
 
+    if let Some(contract) = &workflow.value_contract {
+        let violations = validate_value_contract(contract);
+        if !violations.is_empty() {
+            failed_rules.push(FailedRule {
+                task_id: "_workflow".to_string(),
+                kind: "value_contract".to_string(),
+                message: violations.join("; "),
+            });
+        }
+    }
+    if let Some(experiment) = &workflow.experiment {
+        let mut violations = validate_experiment_assignment(experiment);
+        if workflow.value_contract.is_none() {
+            violations.push("experiment assignment requires a workflow value contract".to_string());
+        } else if (experiment.primary_endpoint.is_monetary()
+            || experiment
+                .secondary_endpoints
+                .iter()
+                .any(|endpoint| endpoint.is_monetary()))
+            && workflow
+                .value_contract
+                .as_ref()
+                .and_then(|contract| contract.currency.as_deref())
+                .is_none_or(|currency| currency.trim().is_empty())
+        {
+            violations.push(
+                "experiment monetary endpoints require a currency in the workflow value contract"
+                    .to_string(),
+            );
+        }
+        let missing_duration_task_ids = workflow
+            .tasks
+            .iter()
+            .filter(|task| task.cost.estimated_duration_ms.is_none())
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>();
+        if !missing_duration_task_ids.is_empty() {
+            violations.push(format!(
+                "experiment assignment requires task duration estimates: {}",
+                missing_duration_task_ids.join(", ")
+            ));
+        }
+        let latest_revision = workflow
+            .revisions
+            .last()
+            .map(|revision| revision.revision)
+            .unwrap_or(0);
+        if experiment.registered_workflow_revision > latest_revision {
+            violations.push(format!(
+                "registered_workflow_revision {} is newer than workflow revision {latest_revision}",
+                experiment.registered_workflow_revision
+            ));
+        }
+        match workflow
+            .revisions
+            .iter()
+            .find(|revision| revision.revision == experiment.registered_workflow_revision)
+        {
+            Some(revision)
+                if revision.change_type == "experiment_assignment_set"
+                    && revision.summary.contains(&experiment.experiment_id)
+                    && revision.summary.contains(&experiment.arm) =>
+            {
+                if revision.created_at != experiment.registered_at {
+                    violations.push(
+                        "experiment registered_at must equal the authoritative assignment revision timestamp"
+                            .to_string(),
+                    );
+                }
+            }
+            Some(_) => violations.push(
+                "registered_workflow_revision must reference the matching experiment_assignment_set revision"
+                    .to_string(),
+            ),
+            None => violations.push(
+                "registered_workflow_revision is missing from workflow revision history"
+                    .to_string(),
+            ),
+        }
+        if !violations.is_empty() {
+            failed_rules.push(FailedRule {
+                task_id: "_workflow".to_string(),
+                kind: "experiment_assignment".to_string(),
+                message: violations.join("; "),
+            });
+        }
+    }
+
+    let mut decision_ids = BTreeSet::new();
+    let mut decision_observation_keys = BTreeSet::new();
+    for receipt in &workflow.gate_decisions {
+        let mut violations = validate_gate_decision_receipt(receipt);
+        if let Some(contract) = workflow.value_contract.as_ref() {
+            violations.extend(validate_gate_decision_against_value_contract(
+                &crate::value::GateDecisionInput {
+                    idempotency_key: receipt.idempotency_key.clone(),
+                    decision_point: receipt.decision_point.clone(),
+                    task_id: receipt.task_id.clone(),
+                    run_id: receipt.run_id.clone(),
+                    lease_id: receipt.lease_id.clone(),
+                    input_hash: receipt.input_hash.clone(),
+                    gate: receipt.gate,
+                    decision: receipt.decision.clone(),
+                    candidates: receipt.candidates.clone(),
+                    selected_candidate_id: receipt.selected_candidate_id.clone(),
+                    confidence_bps: receipt.confidence_bps,
+                    rationale: receipt.rationale.clone(),
+                    policy: receipt.policy.clone(),
+                    cohort_id: receipt.cohort_id.clone(),
+                    experiment_id: receipt.experiment_id.clone(),
+                    experiment_arm: receipt.experiment_arm.clone(),
+                    seed: receipt.seed,
+                    applied: receipt.applied,
+                    evidence_refs: receipt.evidence_refs.clone(),
+                    hard_constraint_violations: receipt.hard_constraint_violations.clone(),
+                },
+                contract,
+            ));
+        }
+        if receipt.workflow_id != workflow.id {
+            violations.push(format!(
+                "workflow_id {} does not match {}",
+                receipt.workflow_id, workflow.id
+            ));
+        }
+        if let Some(task_id) = &receipt.task_id {
+            if !task_ids.contains(task_id) {
+                violations.push(format!("task_id {task_id} does not exist in workflow"));
+            }
+        }
+        if !decision_ids.insert(receipt.decision_id.as_str()) {
+            violations.push(format!(
+                "decision_id {} appears more than once",
+                receipt.decision_id
+            ));
+        }
+        if !decision_observation_keys.insert((
+            receipt.gate,
+            receipt.decision_point.as_str(),
+            receipt.experiment_id.as_deref(),
+            receipt.experiment_arm.as_deref(),
+            receipt.cohort_id.as_deref(),
+            receipt.seed,
+            receipt.task_id.as_deref(),
+            receipt.run_id.as_deref(),
+            receipt.lease_id.as_deref(),
+            receipt.input_hash.as_deref(),
+        )) {
+            violations.push(
+                "gate observation identity appears more than once; iterative or superseding decisions require a distinct decision_point"
+                    .to_string(),
+            );
+        }
+        validate_recorded_experiment_link(
+            workflow,
+            RecordedExperimentLink {
+                experiment_id: receipt.experiment_id.as_deref(),
+                experiment_arm: receipt.experiment_arm.as_deref(),
+                cohort_id: receipt.cohort_id.as_deref(),
+                seed: receipt.seed,
+                policy: Some(&receipt.policy),
+                applied: receipt.applied,
+            },
+            &mut violations,
+        );
+        if !violations.is_empty() {
+            failed_rules.push(FailedRule {
+                task_id: receipt
+                    .task_id
+                    .clone()
+                    .unwrap_or_else(|| "_workflow".to_string()),
+                kind: "value_gate_decision".to_string(),
+                message: format!("{}: {}", receipt.decision_id, violations.join("; ")),
+            });
+        }
+    }
+
+    let decisions_by_id = workflow
+        .gate_decisions
+        .iter()
+        .map(|decision| (decision.decision_id.as_str(), decision))
+        .collect::<BTreeMap<_, _>>();
+    let mut outcome_ids = BTreeSet::new();
+    let mut observed_receipt_keys = BTreeSet::new();
+    let mut modeled_observation_keys = BTreeSet::new();
+    for outcome in &workflow.outcomes {
+        let mut violations = validate_outcome_contract(outcome);
+        if workflow.experiment.is_some() && outcome.measurement.task_id.is_none() {
+            violations.push("experiment-linked outcomes require task_id".to_string());
+        }
+        if let Some(contract) = workflow.value_contract.as_ref() {
+            violations.extend(validate_outcome_against_value_contract(
+                &outcome.measurement,
+                contract,
+            ));
+        }
+        if outcome.workflow_id != workflow.id {
+            violations.push(format!(
+                "workflow_id {} does not match {}",
+                outcome.workflow_id, workflow.id
+            ));
+        }
+        if let Some(task_id) = &outcome.measurement.task_id {
+            if !task_ids.contains(task_id) {
+                violations.push(format!("task_id {task_id} does not exist in workflow"));
+            }
+        }
+        if !outcome_ids.insert(outcome.outcome_id.as_str()) {
+            violations.push(format!(
+                "outcome_id {} appears more than once",
+                outcome.outcome_id
+            ));
+        }
+        if outcome.measurement.measurement_status
+            == crate::value::OutcomeMeasurementStatus::Observed
+        {
+            if outcome
+                .measurement
+                .execution_receipt_sha256
+                .as_deref()
+                .is_some_and(|receipt| !observed_receipt_keys.insert(receipt))
+            {
+                violations.push(
+                    "observed execution receipt appears in more than one outcome contract"
+                        .to_string(),
+                );
+            }
+        } else if outcome.measurement.experiment_id.is_some()
+            && !modeled_observation_keys.insert((
+                outcome.measurement.measurement_status,
+                outcome.measurement.experiment_id.as_deref(),
+                outcome.measurement.experiment_arm.as_deref(),
+                outcome.measurement.cohort_id.as_deref(),
+                outcome.measurement.task_id.as_deref(),
+                outcome.measurement.run_id.as_deref(),
+                outcome.measurement.lease_id.as_deref(),
+                outcome.measurement.input_hash.as_deref(),
+                outcome.measurement.output_hash.as_deref(),
+            ))
+        {
+            violations
+                .push("modeled experiment observation identity appears more than once".to_string());
+        }
+        for decision_id in &outcome.measurement.gate_decision_ids {
+            if !decision_ids.contains(decision_id.as_str()) {
+                violations.push(format!(
+                    "gate_decision_id {decision_id} does not exist in workflow"
+                ));
+            } else if let Some(decision) = decisions_by_id.get(decision_id.as_str()) {
+                if decision.gate != ValueGate::Gate0ValueAdmission
+                    && outcome.measurement.task_id.is_some()
+                    && decision.task_id != outcome.measurement.task_id
+                {
+                    violations.push(format!(
+                        "outcome task {:?} cannot reference {:?} receipt {decision_id} for task {:?}",
+                        outcome.measurement.task_id, decision.gate, decision.task_id
+                    ));
+                }
+                if decision.gate != ValueGate::Gate0ValueAdmission
+                    && (decision.run_id != outcome.measurement.run_id
+                        || decision.lease_id != outcome.measurement.lease_id
+                        || decision.input_hash != outcome.measurement.input_hash)
+                {
+                    violations.push(format!(
+                        "outcome cohort run/lease/input cannot reference {:?} receipt {decision_id} from a different execution identity",
+                        decision.gate
+                    ));
+                }
+            }
+        }
+        validate_recorded_experiment_link(
+            workflow,
+            RecordedExperimentLink {
+                experiment_id: outcome.measurement.experiment_id.as_deref(),
+                experiment_arm: outcome.measurement.experiment_arm.as_deref(),
+                cohort_id: outcome.measurement.cohort_id.as_deref(),
+                seed: outcome.measurement.seed,
+                policy: outcome.measurement.evaluated_policy.as_ref(),
+                applied: false,
+            },
+            &mut violations,
+        );
+        if let Some(experiment) = workflow.experiment.as_ref() {
+            violations.extend(validate_outcome_endpoints(
+                &outcome.measurement,
+                experiment.primary_endpoint,
+                &experiment.secondary_endpoints,
+            ));
+            violations.extend(validate_outcome_execution_policy(
+                &outcome.measurement,
+                &experiment.policy,
+                experiment.shadow_mode || experiment.holdout,
+            ));
+        }
+        if !violations.is_empty() {
+            failed_rules.push(FailedRule {
+                task_id: outcome
+                    .measurement
+                    .task_id
+                    .clone()
+                    .unwrap_or_else(|| "_workflow".to_string()),
+                kind: "outcome_contract".to_string(),
+                message: format!("{}: {}", outcome.outcome_id, violations.join("; ")),
+            });
+        }
+    }
+
     failed_rules
+}
+
+struct RecordedExperimentLink<'a> {
+    experiment_id: Option<&'a str>,
+    experiment_arm: Option<&'a str>,
+    cohort_id: Option<&'a str>,
+    seed: Option<u64>,
+    policy: Option<&'a PolicyRef>,
+    applied: bool,
+}
+
+fn validate_recorded_experiment_link(
+    workflow: &Workflow,
+    link: RecordedExperimentLink<'_>,
+    violations: &mut Vec<String>,
+) {
+    let RecordedExperimentLink {
+        experiment_id,
+        experiment_arm,
+        cohort_id,
+        seed,
+        policy,
+        applied,
+    } = link;
+    let (Some(experiment_id), Some(experiment_arm)) = (experiment_id, experiment_arm) else {
+        if experiment_id.is_some() || experiment_arm.is_some() {
+            violations.push(
+                "experiment_id and experiment_arm must either both be set or both be omitted"
+                    .to_string(),
+            );
+        }
+        if seed.is_some() {
+            violations.push("seed requires experiment_id and experiment_arm".to_string());
+        }
+        if cohort_id.is_some() {
+            violations.push("cohort_id requires experiment_id and experiment_arm".to_string());
+        }
+        if workflow.experiment.is_some() {
+            violations.push(
+                "workflow experiment telemetry must include experiment_id and experiment_arm"
+                    .to_string(),
+            );
+        }
+        return;
+    };
+    let Some(experiment) = &workflow.experiment else {
+        violations
+            .push("telemetry references an experiment without a workflow assignment".to_string());
+        return;
+    };
+    if experiment.experiment_id != experiment_id || experiment.arm != experiment_arm {
+        violations.push(format!(
+            "experiment link {experiment_id}/{experiment_arm} does not match assignment {}/{}",
+            experiment.experiment_id, experiment.arm
+        ));
+    }
+    if cohort_id != Some(experiment.cohort_id.as_str()) {
+        violations.push(format!(
+            "cohort {:?} does not match assignment {}",
+            cohort_id, experiment.cohort_id
+        ));
+    }
+    if experiment.seed != seed {
+        violations.push(format!(
+            "experiment seed {:?} does not match assignment {:?}",
+            seed, experiment.seed
+        ));
+    }
+    if policy != Some(&experiment.policy) {
+        violations.push(format!(
+            "evaluated policy {:?} does not match assignment {:?}",
+            policy, experiment.policy
+        ));
+    }
+    if (experiment.shadow_mode || experiment.holdout) && applied {
+        violations.push(
+            "shadow-only or holdout-only experiment decision cannot be marked applied".to_string(),
+        );
+    }
 }
 
 pub fn validate_workflow(workflow: &Workflow) -> ValidationReport {
@@ -658,6 +1201,7 @@ mod tests {
             cost: CostEstimate {
                 estimated_cost_usd: 0.0,
                 cost_model: "test".to_string(),
+                estimated_duration_ms: None,
             },
             notification: None,
             persona: None,

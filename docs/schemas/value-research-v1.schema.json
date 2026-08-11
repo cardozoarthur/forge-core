@@ -1,0 +1,751 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://foundry.local/schemas/value-research-v1.schema.json",
+  "title": "Foundry value-aware research CLI inputs v1",
+  "description": "Observational-only CLI inputs. Cross-record, ledger and runtime-receipt invariants are enforced by Rust.",
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{64}$"
+    },
+    "bps": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "nonEmptyStringArray": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/nonEmptyString"}
+    },
+    "policyRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "source"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "version": {"$ref": "#/$defs/nonEmptyString"},
+        "source": {
+          "type": "string",
+          "enum": ["addon", "human", "external", "core_baseline"]
+        }
+      }
+    },
+    "outcomeMetric": {
+      "type": "string",
+      "enum": [
+        "process_quality_bps",
+        "artifact_quality_bps",
+        "quality_in_use_bps",
+        "direct_cost",
+        "process_cost",
+        "assurance_cost",
+        "internal_failure_cost",
+        "external_failure_cost",
+        "delay_cost",
+        "opportunity_cost",
+        "realized_value",
+        "service_time_ms",
+        "queue_time_ms",
+        "wait_time_ms",
+        "human_time_ms",
+        "capacity_units",
+        "escaped_defect",
+        "accepted"
+      ]
+    },
+    "valueContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value_class",
+        "measurement_mode",
+        "severity",
+        "reversibility",
+        "policy"
+      ],
+      "properties": {
+        "schema_version": {"const": "foundry.value_contract.v1"},
+        "value_class": {"$ref": "#/$defs/nonEmptyString"},
+        "measurement_mode": {
+          "type": "string",
+          "enum": [
+            "terminal_value",
+            "gross_value_with_separate_losses",
+            "constrained_multicriteria"
+          ]
+        },
+        "expected_value": {"type": "number", "minimum": 0},
+        "currency": {"$ref": "#/$defs/nonEmptyString"},
+        "deadline": {"type": "string", "format": "date-time"},
+        "delay_cost": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "version"],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["linear", "deadline_linear", "convex", "step", "external"]
+            },
+            "version": {"$ref": "#/$defs/nonEmptyString"},
+            "threshold_at": {"type": "string", "format": "date-time"},
+            "rate_per_second": {"type": "number", "minimum": 0},
+            "quadratic_rate_per_second_squared": {"type": "number", "minimum": 0},
+            "fixed_penalty": {"type": "number", "minimum": 0},
+            "external_model_ref": {"$ref": "#/$defs/nonEmptyString"}
+          },
+          "allOf": [
+            {
+              "if": {"properties": {"kind": {"const": "linear"}}},
+              "then": {
+                "required": ["rate_per_second"],
+                "not": {
+                  "anyOf": [
+                    {"required": ["threshold_at"]},
+                    {"required": ["quadratic_rate_per_second_squared"]},
+                    {"required": ["fixed_penalty"]},
+                    {"required": ["external_model_ref"]}
+                  ]
+                }
+              }
+            },
+            {
+              "if": {"properties": {"kind": {"const": "deadline_linear"}}},
+              "then": {
+                "required": ["rate_per_second"],
+                "not": {
+                  "anyOf": [
+                    {"required": ["quadratic_rate_per_second_squared"]},
+                    {"required": ["fixed_penalty"]},
+                    {"required": ["external_model_ref"]}
+                  ]
+                }
+              }
+            },
+            {
+              "if": {"properties": {"kind": {"const": "convex"}}},
+              "then": {
+                "required": ["quadratic_rate_per_second_squared"],
+                "not": {
+                  "anyOf": [
+                    {"required": ["fixed_penalty"]},
+                    {"required": ["external_model_ref"]}
+                  ]
+                }
+              }
+            },
+            {
+              "if": {"properties": {"kind": {"const": "step"}}},
+              "then": {
+                "required": ["fixed_penalty"],
+                "not": {
+                  "anyOf": [
+                    {"required": ["rate_per_second"]},
+                    {"required": ["quadratic_rate_per_second_squared"]},
+                    {"required": ["external_model_ref"]}
+                  ]
+                }
+              }
+            },
+            {
+              "if": {"properties": {"kind": {"const": "external"}}},
+              "then": {
+                "required": ["external_model_ref"],
+                "not": {
+                  "anyOf": [
+                    {"required": ["threshold_at"]},
+                    {"required": ["rate_per_second"]},
+                    {"required": ["quadratic_rate_per_second_squared"]},
+                    {"required": ["fixed_penalty"]}
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "opportunity_cost": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["counterfactual", "method_version", "evidence_refs"],
+          "properties": {
+            "counterfactual": {"$ref": "#/$defs/nonEmptyString"},
+            "method_version": {"$ref": "#/$defs/nonEmptyString"},
+            "estimated_loss": {"type": "number", "minimum": 0},
+            "evidence_refs": {
+              "$ref": "#/$defs/nonEmptyStringArray",
+              "minItems": 1
+            }
+          }
+        },
+        "failure_cost": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["method_version"],
+          "properties": {
+            "method_version": {"$ref": "#/$defs/nonEmptyString"},
+            "probability_bps": {"$ref": "#/$defs/bps"},
+            "severe_probability_bps": {"$ref": "#/$defs/bps"},
+            "estimated_loss": {"type": "number", "minimum": 0},
+            "evidence_refs": {"$ref": "#/$defs/nonEmptyStringArray"}
+          }
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "critical"]
+        },
+        "reversibility": {
+          "type": "string",
+          "enum": ["reversible", "partially_reversible", "irreversible"]
+        },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_direct_cost": {"type": "number", "minimum": 0},
+            "max_total_cost": {"type": "number", "minimum": 0},
+            "max_human_seconds": {"type": "integer", "minimum": 0},
+            "min_success_probability_bps": {"$ref": "#/$defs/bps"},
+            "min_quality_bps": {"$ref": "#/$defs/bps"},
+            "max_severe_failure_probability_bps": {"$ref": "#/$defs/bps"},
+            "hard_constraints": {"$ref": "#/$defs/nonEmptyStringArray"}
+          }
+        },
+        "accounting": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "terminal_value_includes_delay": {"type": "boolean"},
+            "terminal_value_includes_failure": {"type": "boolean"},
+            "terminal_value_includes_opportunity": {"type": "boolean"}
+          }
+        },
+        "policy": {"$ref": "#/$defs/policyRef"},
+        "evidence_refs": {"$ref": "#/$defs/nonEmptyStringArray"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "measurement_mode": {
+                "enum": ["terminal_value", "gross_value_with_separate_losses"]
+              }
+            }
+          },
+          "then": {"required": ["expected_value"]}
+        },
+        {
+          "if": {
+            "anyOf": [
+              {"required": ["expected_value"]},
+              {
+                "required": ["delay_cost"],
+                "properties": {
+                  "delay_cost": {
+                    "anyOf": [
+                      {"required": ["rate_per_second"]},
+                      {"required": ["quadratic_rate_per_second_squared"]},
+                      {"required": ["fixed_penalty"]}
+                    ]
+                  }
+                }
+              },
+              {
+                "required": ["opportunity_cost"],
+                "properties": {
+                  "opportunity_cost": {"required": ["estimated_loss"]}
+                }
+              },
+              {
+                "required": ["failure_cost"],
+                "properties": {
+                  "failure_cost": {"required": ["estimated_loss"]}
+                }
+              },
+              {
+                "required": ["constraints"],
+                "properties": {
+                  "constraints": {
+                    "anyOf": [
+                      {"required": ["max_direct_cost"]},
+                      {"required": ["max_total_cost"]}
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "then": {"required": ["currency"]}
+        },
+        {
+          "if": {
+            "required": ["delay_cost"],
+            "properties": {
+              "delay_cost": {
+                "properties": {
+                  "kind": {"enum": ["deadline_linear", "convex", "step"]}
+                }
+              }
+            }
+          },
+          "then": {
+            "anyOf": [
+              {"required": ["deadline"]},
+              {
+                "properties": {
+                  "delay_cost": {"required": ["threshold_at"]}
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "experimentAssignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "experiment_id",
+        "arm",
+        "cohort_id",
+        "policy",
+        "assignment_method",
+        "primary_endpoint"
+      ],
+      "properties": {
+        "experiment_id": {"$ref": "#/$defs/nonEmptyString"},
+        "arm": {"$ref": "#/$defs/nonEmptyString"},
+        "cohort_id": {"$ref": "#/$defs/nonEmptyString"},
+        "policy": {"$ref": "#/$defs/policyRef"},
+        "assignment_method": {
+          "type": "string",
+          "enum": ["deterministic", "randomized", "paired", "stratified"]
+        },
+        "assignment_evidence_refs": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "seed": {"type": "integer", "minimum": 0},
+        "shadow_mode": {"type": "boolean"},
+        "holdout": {"type": "boolean"},
+        "primary_endpoint": {"$ref": "#/$defs/outcomeMetric"},
+        "secondary_endpoints": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/outcomeMetric"}
+        },
+        "kill_conditions": {"$ref": "#/$defs/nonEmptyStringArray"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "assignment_method": {
+                "enum": ["randomized", "paired", "stratified"]
+              }
+            }
+          },
+          "then": {
+            "required": ["seed", "assignment_evidence_refs"],
+            "properties": {
+              "assignment_evidence_refs": {"minItems": 1}
+            }
+          }
+        }
+      ]
+    },
+    "candidatePrediction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_id", "resource_type"],
+      "properties": {
+        "candidate_id": {"$ref": "#/$defs/nonEmptyString"},
+        "resource_type": {"$ref": "#/$defs/nonEmptyString"},
+        "predicted_success_bps": {"$ref": "#/$defs/bps"},
+        "predicted_duration_ms": {"type": "integer", "minimum": 0},
+        "predicted_direct_cost": {"type": "number", "minimum": 0},
+        "predicted_risk_bps": {"$ref": "#/$defs/bps"},
+        "predicted_incremental_value": {"type": "number"},
+        "currency": {"$ref": "#/$defs/nonEmptyString"},
+        "uncertainty_bps": {"$ref": "#/$defs/bps"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              {"required": ["predicted_direct_cost"]},
+              {"required": ["predicted_incremental_value"]}
+            ]
+          },
+          "then": {"required": ["currency"]}
+        }
+      ]
+    },
+    "gateDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "idempotency_key",
+        "decision_point",
+        "gate",
+        "decision",
+        "rationale",
+        "policy"
+      ],
+      "properties": {
+        "idempotency_key": {"$ref": "#/$defs/nonEmptyString"},
+        "decision_point": {"$ref": "#/$defs/nonEmptyString"},
+        "task_id": {"$ref": "#/$defs/nonEmptyString"},
+        "run_id": {"$ref": "#/$defs/nonEmptyString"},
+        "lease_id": {"$ref": "#/$defs/nonEmptyString"},
+        "input_hash": {"$ref": "#/$defs/sha256"},
+        "gate": {
+          "type": "string",
+          "enum": [
+            "gate0_value_admission",
+            "gate1_inference_need",
+            "gate2_resource_selection",
+            "gate3_assurance",
+            "gate4_stopping"
+          ]
+        },
+        "decision": {"$ref": "#/$defs/nonEmptyString"},
+        "candidates": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/candidatePrediction"}
+        },
+        "selected_candidate_id": {"$ref": "#/$defs/nonEmptyString"},
+        "confidence_bps": {"$ref": "#/$defs/bps"},
+        "rationale": {"$ref": "#/$defs/nonEmptyString"},
+        "policy": {"$ref": "#/$defs/policyRef"},
+        "cohort_id": {"$ref": "#/$defs/nonEmptyString"},
+        "experiment_id": {"$ref": "#/$defs/nonEmptyString"},
+        "experiment_arm": {"$ref": "#/$defs/nonEmptyString"},
+        "seed": {"type": "integer", "minimum": 0},
+        "applied": {"const": false},
+        "evidence_refs": {"$ref": "#/$defs/nonEmptyStringArray"},
+        "hard_constraint_violations": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        }
+      },
+      "dependentRequired": {
+        "experiment_id": ["experiment_arm", "cohort_id"],
+        "experiment_arm": ["experiment_id", "cohort_id"],
+        "seed": ["experiment_id", "experiment_arm"]
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"gate": {"const": "gate0_value_admission"}}},
+          "then": {
+            "properties": {
+              "decision": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "admit",
+                      "defer",
+                      "negotiate",
+                      "reject",
+                      "abstained_missing_contract"
+                    ]
+                  },
+                  {"type": "string", "pattern": "^custom:.+"}
+                ]
+              }
+            },
+            "not": {
+              "anyOf": [
+                {"required": ["task_id"]},
+                {"required": ["run_id"]},
+                {"required": ["lease_id"]},
+                {"required": ["input_hash"]}
+              ]
+            }
+          },
+          "else": {"required": ["task_id"]}
+        },
+        {
+          "if": {"properties": {"gate": {"const": "gate1_inference_need"}}},
+          "then": {
+            "properties": {
+              "decision": {
+                "anyOf": [
+                  {"enum": ["deterministic", "generative", "mixed", "abstain"]},
+                  {"type": "string", "pattern": "^custom:.+"}
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"gate": {"const": "gate2_resource_selection"}}},
+          "then": {
+            "properties": {
+              "decision": {
+                "anyOf": [
+                  {"enum": ["select", "abstain", "fallback"]},
+                  {"type": "string", "pattern": "^custom:.+"}
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"gate": {"const": "gate3_assurance"}}},
+          "then": {
+            "properties": {
+              "decision": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "a0",
+                      "a1",
+                      "a2",
+                      "a3",
+                      "abstain",
+                      "abstained_missing_contract"
+                    ]
+                  },
+                  {"type": "string", "pattern": "^custom:.+"}
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"gate": {"const": "gate4_stopping"}}},
+          "then": {
+            "properties": {
+              "decision": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "continue",
+                      "stop",
+                      "escalate",
+                      "abstained_missing_contract"
+                    ]
+                  },
+                  {"type": "string", "pattern": "^custom:.+"}
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "gate": {"const": "gate2_resource_selection"},
+              "decision": {"const": "select"}
+            }
+          },
+          "then": {"required": ["selected_candidate_id"]}
+        },
+        {
+          "if": {
+            "required": ["experiment_id"],
+            "not": {
+              "properties": {
+                "gate": {"const": "gate0_value_admission"}
+              }
+            }
+          },
+          "then": {"required": ["run_id", "lease_id", "input_hash"]}
+        },
+        {
+          "if": {
+            "properties": {
+              "decision": {"type": "string", "pattern": "^custom:"}
+            }
+          },
+          "then": {
+            "required": ["evidence_refs"],
+            "properties": {
+              "evidence_refs": {"minItems": 1},
+              "policy": {
+                "properties": {"source": {"const": "addon"}}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "outcomeContractInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["idempotency_key", "measurement_status", "status"],
+      "properties": {
+        "idempotency_key": {"$ref": "#/$defs/nonEmptyString"},
+        "task_id": {"$ref": "#/$defs/nonEmptyString"},
+        "run_id": {"$ref": "#/$defs/nonEmptyString"},
+        "lease_id": {"$ref": "#/$defs/nonEmptyString"},
+        "input_hash": {"$ref": "#/$defs/sha256"},
+        "output_hash": {"$ref": "#/$defs/sha256"},
+        "execution_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "measurement_status": {
+          "type": "string",
+          "enum": ["observed", "simulated", "estimated"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["accepted", "rejected", "partial", "modeled", "inconclusive"]
+        },
+        "process_quality_bps": {"$ref": "#/$defs/bps"},
+        "artifact_quality_bps": {"$ref": "#/$defs/bps"},
+        "quality_in_use_bps": {"$ref": "#/$defs/bps"},
+        "direct_cost": {"type": "number", "minimum": 0},
+        "process_cost": {"type": "number", "minimum": 0},
+        "assurance_cost": {"type": "number", "minimum": 0},
+        "internal_failure_cost": {"type": "number", "minimum": 0},
+        "external_failure_cost": {"type": "number", "minimum": 0},
+        "delay_cost": {"type": "number", "minimum": 0},
+        "opportunity_cost": {"type": "number", "minimum": 0},
+        "opportunity_cost_counterfactual": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "opportunity_cost_method_version": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "opportunity_cost_evidence_refs": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "realized_value": {"type": "number"},
+        "realized_value_method_version": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "currency": {"$ref": "#/$defs/nonEmptyString"},
+        "service_time_ms": {"type": "integer", "minimum": 0},
+        "queue_time_ms": {"type": "integer", "minimum": 0},
+        "wait_time_ms": {"type": "integer", "minimum": 0},
+        "human_time_ms": {"type": "integer", "minimum": 0},
+        "capacity_units": {"type": "number", "minimum": 0},
+        "escaped_defect": {"type": "boolean"},
+        "accepted": {"type": "boolean"},
+        "evaluator": {"$ref": "#/$defs/nonEmptyString"},
+        "oracle": {"$ref": "#/$defs/nonEmptyString"},
+        "gate_decision_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/nonEmptyString"}
+        },
+        "evidence_refs": {"$ref": "#/$defs/nonEmptyStringArray"},
+        "artifact_ids": {"$ref": "#/$defs/nonEmptyStringArray"},
+        "metric_provenance": {
+          "type": "object",
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {"type": "string", "minLength": 1}
+        },
+        "evaluated_policy": {"$ref": "#/$defs/policyRef"},
+        "reported_executed_policy": {"$ref": "#/$defs/policyRef"},
+        "cohort_id": {"$ref": "#/$defs/nonEmptyString"},
+        "experiment_id": {"$ref": "#/$defs/nonEmptyString"},
+        "experiment_arm": {"$ref": "#/$defs/nonEmptyString"},
+        "seed": {"type": "integer", "minimum": 0}
+      },
+      "dependentRequired": {
+        "experiment_id": [
+          "experiment_arm",
+          "cohort_id",
+          "task_id",
+          "run_id",
+          "lease_id",
+          "input_hash",
+          "evaluated_policy"
+        ],
+        "experiment_arm": ["experiment_id", "cohort_id"],
+        "seed": ["experiment_id", "experiment_arm"]
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "measurement_status": {"const": "observed"}
+            }
+          },
+          "then": {
+            "required": [
+              "task_id",
+              "run_id",
+              "lease_id",
+              "input_hash",
+              "output_hash",
+              "execution_receipt_sha256",
+              "reported_executed_policy",
+              "evidence_refs"
+            ],
+            "properties": {
+              "evidence_refs": {"minItems": 1}
+            }
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {"required": ["execution_receipt_sha256"]},
+                {"required": ["reported_executed_policy"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {"required": ["direct_cost"]},
+              {"required": ["process_cost"]},
+              {"required": ["assurance_cost"]},
+              {"required": ["internal_failure_cost"]},
+              {"required": ["external_failure_cost"]},
+              {"required": ["delay_cost"]},
+              {"required": ["opportunity_cost"]},
+              {"required": ["realized_value"]}
+            ]
+          },
+          "then": {"required": ["currency"]}
+        },
+        {
+          "if": {"required": ["realized_value"]},
+          "then": {"required": ["realized_value_method_version"]}
+        },
+        {
+          "if": {"required": ["opportunity_cost"]},
+          "then": {
+            "required": [
+              "opportunity_cost_counterfactual",
+              "opportunity_cost_method_version",
+              "opportunity_cost_evidence_refs"
+            ],
+            "properties": {
+              "opportunity_cost_evidence_refs": {"minItems": 1}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {"const": "accepted"},
+              "accepted": {"const": false}
+            },
+            "required": ["accepted"]
+          },
+          "then": false
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {"const": "rejected"},
+              "accepted": {"const": true}
+            },
+            "required": ["accepted"]
+          },
+          "then": false
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {"$ref": "#/$defs/valueContract"},
+    {"$ref": "#/$defs/experimentAssignment"},
+    {"$ref": "#/$defs/gateDecision"},
+    {"$ref": "#/$defs/outcomeContractInput"}
+  ]
+}
